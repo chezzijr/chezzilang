@@ -139,7 +139,7 @@ fn turbofish_empty_ctor_ok() {
 
 #[test]
 fn turbofish_empty_ctor_from_list_ok() {
-    ok("fn main():\n b := List[int]([])\n print(b)\nmain()");
+    ok("fn main():\n b := List[int].from_iter([])\n print(b)\nmain()");
 }
 
 #[test]

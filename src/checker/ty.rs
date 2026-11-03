@@ -1352,6 +1352,10 @@ pub enum Resolution {
     /// `Pt.getx`); `Op::MakeMethodFunc`. An instance method takes its receiver as the first
     /// argument.
     MethodFn { type_key: String, method: String },
+    /// A builtin type's static method through its type path (`List.from_iter`), declared in its
+    /// `native struct`: called, `Op::CallNativeStatic`; read as a value, a synthesized fn that
+    /// makes the same call.
+    NativeStatic(crate::base::builtin_method::NativeStatic),
     /// A payload variant, called (`E.V(1)`, `Op::NewEnum`). A read as a value is a type error
     /// (U10), so the compiler never lowers it as one.
     VariantFn { enum_key: String, variant: String },

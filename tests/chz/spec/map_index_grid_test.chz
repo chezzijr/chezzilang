@@ -97,7 +97,7 @@ test fn map_seven_hash_keys():
     a := {M(i): i for i in 0..n}
     assert a == m
 
-# ---- Set: Set(list), literal, insert, contains, remove, algebra, comprehension, unique ----
+# ---- Set: Set.from_iter(list), literal, insert, contains, remove, algebra, comprehension, unique ----
 
 test fn set_int_keys():
     n := 1000
@@ -105,9 +105,9 @@ test fn set_int_keys():
     for i in 0..n:
         xs.push(ik(i))
         xs.push(ik(i))
-    s := Set(xs)
-    assert s.len() == n, "Set(list) dedupes"
-    t: Set[int] = Set([])
+    s := Set.from_iter(xs)
+    assert s.len() == n, "Set.from_iter(list) dedupes"
+    t: Set[int] = Set.from_iter([])
     for i in 0..n:
         t.insert(ik(i))
         t.insert(ik(i))
@@ -130,7 +130,7 @@ test fn set_int_keys():
     assert t == s - odd
     assert xs.unique().len() == n, "unique keeps each first occurrence"
     assert xs.unique()[1] == ik(1)
-    assert {1, 2, 2, 3} == Set([3, 2, 1])
+    assert {1, 2, 2, 3} == Set.from_iter([3, 2, 1])
 
 test fn set_str_keys():
     n := 1000
@@ -145,7 +145,7 @@ test fn set_str_keys():
 
 test fn set_constant_hash_keys():
     n := 150
-    s: Set[C] = Set([])
+    s: Set[C] = Set.from_iter([])
     for i in 0..n:
         s.insert(C(i))
         s.insert(C(i))
@@ -153,7 +153,7 @@ test fn set_constant_hash_keys():
     for i in 0..n:
         assert C(i) in s
     assert not (C(n) in s)
-    half: Set[C] = Set([])
+    half: Set[C] = Set.from_iter([])
     for i in 0..n / 2:
         half.insert(C(i))
     assert (s - half).len() == n - n / 2
@@ -164,7 +164,7 @@ test fn set_seven_hash_keys():
     xs: List[M] = []
     for i in 0..n:
         xs.push(M(i))
-    s := Set(xs)
+    s := Set.from_iter(xs)
     assert s.len() == n
     for i in 0..n:
         assert M(i) in s

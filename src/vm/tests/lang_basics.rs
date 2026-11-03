@@ -871,19 +871,25 @@ fn bytes_len_method() {
 
 #[test]
 fn range_values_up_down_and_empty_vm() {
-    assert_eq!(run("print(List(0..3))"), "[0, 1, 2]\n");
-    assert_eq!(run("print(List(2..5))"), "[2, 3, 4]\n");
-    assert_eq!(run("print(List(Range(0, 10, 2)))"), "[0, 2, 4, 6, 8]\n");
-    assert_eq!(run("print(List(Range(1, 7, 3)))"), "[1, 4]\n");
+    assert_eq!(run("print(List.from_iter(0..3))"), "[0, 1, 2]\n");
+    assert_eq!(run("print(List.from_iter(2..5))"), "[2, 3, 4]\n");
     assert_eq!(
-        run("print(List(Range(10, 0, -1)))"),
+        run("print(List.from_iter(Range(0, 10, 2)))"),
+        "[0, 2, 4, 6, 8]\n"
+    );
+    assert_eq!(run("print(List.from_iter(Range(1, 7, 3)))"), "[1, 4]\n");
+    assert_eq!(
+        run("print(List.from_iter(Range(10, 0, -1)))"),
         "[10, 9, 8, 7, 6, 5, 4, 3, 2, 1]\n"
     );
-    assert_eq!(run("print(List(Range(10, 2, -3)))"), "[10, 7, 4]\n");
-    assert_eq!(run("print(List(Range(5, 5, 1)))"), "[]\n");
-    assert_eq!(run("print(List(Range(5, 5, -1)))"), "[]\n");
-    assert_eq!(run("print(List(Range(0, 10, -1)))"), "[]\n");
-    assert_eq!(run("print(List(Range(10, 0, 1)))"), "[]\n");
+    assert_eq!(
+        run("print(List.from_iter(Range(10, 2, -3)))"),
+        "[10, 7, 4]\n"
+    );
+    assert_eq!(run("print(List.from_iter(Range(5, 5, 1)))"), "[]\n");
+    assert_eq!(run("print(List.from_iter(Range(5, 5, -1)))"), "[]\n");
+    assert_eq!(run("print(List.from_iter(Range(0, 10, -1)))"), "[]\n");
+    assert_eq!(run("print(List.from_iter(Range(10, 0, 1)))"), "[]\n");
 }
 
 #[test]
@@ -895,11 +901,17 @@ fn range_step_zero_faults_at_construction_vm() {
 #[test]
 fn range_slice_of_a_list_with_a_step_vm() {
     assert_eq!(
-        run("print(List(0..10)[Range(None, None, 2)])"),
+        run("print(List.from_iter(0..10)[Range(None, None, 2)])"),
         "[0, 2, 4, 6, 8]\n"
     );
-    assert_eq!(run("print(List(0..10)[Range(1, 8, 3)])"), "[1, 4, 7]\n");
-    assert_eq!(run("print(List(0..5).reversed())"), "[4, 3, 2, 1, 0]\n");
+    assert_eq!(
+        run("print(List.from_iter(0..10)[Range(1, 8, 3)])"),
+        "[1, 4, 7]\n"
+    );
+    assert_eq!(
+        run("print(List.from_iter(0..5).reversed())"),
+        "[4, 3, 2, 1, 0]\n"
+    );
 }
 
 #[test]

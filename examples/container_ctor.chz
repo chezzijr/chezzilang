@@ -14,7 +14,7 @@ b.push(9)
 print(b.len())
 
 # Turbofish with an iterable argument (elements checked against the type arg):
-c := List[int]([1, 2, 3])
+c := List[int].from_iter([1, 2, 3])
 print(c.len())
 
 # Map[K, V]() turbofish, empty:

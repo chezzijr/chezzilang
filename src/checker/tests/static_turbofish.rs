@@ -474,7 +474,7 @@ fn lowercase_containers_rejected() {
 #[test]
 fn pascal_ctor_calls() {
     ok(
-        "fn main():\n    a := List([1, 2])\n    b := Set([1, 2, 3])\n    c := Map([(\"a\", 1)])\n    d: Set[int] = Set()\n    print(a.len())\n    print(b.len())\n    print(c.len())\n    print(d.len())\nmain()\n",
+        "fn main():\n    a := List.from_iter([1, 2])\n    b := Set.from_iter([1, 2, 3])\n    c := Map.from_iter([(\"a\", 1)])\n    d: Set[int] = Set()\n    print(a.len())\n    print(b.len())\n    print(c.len())\n    print(d.len())\nmain()\n",
     );
 }
 
@@ -1051,8 +1051,8 @@ fn prelude_table_is_single_source_of_truth() {
         ("int", vec![Ty::Unknown], Ty::Int),
         ("float", vec![Ty::Unknown], Ty::Float),
         ("str", vec![Ty::Unknown], Ty::Str),
-        ("bytes", vec![Ty::Unknown], Ty::Bytes),
-        ("bytearray", vec![Ty::Unknown], Ty::ByteArray),
+        ("bytes", vec![], Ty::Bytes),
+        ("bytearray", vec![], Ty::ByteArray),
     ];
     for (name, params, ret) in hist {
         let sig = sc
@@ -1224,8 +1224,8 @@ fn nested_width_reads_as_its_scalar() {
         "o: int8? = ?1\nmatch o:\n    ?1: print(1)\n    ?2..5: print(2)\n    _: print(3)\n",
         "r: int8!str = ?1\nmatch r:\n    ?1: print(1)\n    ?_: print(2)\n    !e: print(e)\n",
         "t: (int8, int) = (1, 2)\nmatch t:\n    (1, _): print(1)\n    _: print(2)\n",
-        "l: List[uint8] = [1, 2]\nb := bytes(l)\n",
-        "l: List[uint8] = [1, 2]\nba := bytearray(l)\nba.extend(l)\n",
+        "l: List[uint8] = [1, 2]\nb := bytes.from_iter(l)\n",
+        "l: List[uint8] = [1, 2]\nba := bytearray.from_iter(l)\nba.extend(l)\n",
     ] {
         rejects_entry(&format!("{prefix}{body}"), "describes the C boundary only");
     }
@@ -1239,15 +1239,15 @@ fn nested_width_reads_as_its_scalar() {
         "range pattern cannot match a value of type str",
     );
     rejects_entry(
-        &format!("{prefix}l: List[str] = [\"a\"]\nb := bytes(l)\n"),
-        "bytes() expects an int size, a bytes, a bytearray, or a List[int], got List[str]",
+        &format!("{prefix}l: List[str] = [\"a\"]\nb := bytes.from_iter(l)\n"),
+        "iterator element type str does not match the declared element type int",
     );
     rejects_entry(
-        &format!("{prefix}l: List[float] = [1.0]\nba := bytearray(l)\n"),
-        "got List[float]",
+        &format!("{prefix}l: List[float] = [1.0]\nba := bytearray.from_iter(l)\n"),
+        "iterator element type float does not match the declared element type int",
     );
     rejects_entry(
-        &format!("{prefix}ba := bytearray(1)\nl: List[str] = [\"a\"]\nba.extend(l)\n"),
+        &format!("{prefix}ba := bytearray.zeroed(1)\nl: List[str] = [\"a\"]\nba.extend(l)\n"),
         "extend() expects a bytes, a bytearray, or a List[int], got List[str]",
     );
 }
@@ -1294,15 +1294,15 @@ fn ffi_width_constant_grid() {
         "o: {w}? = ?({k})\n",
         "r: {w}!str = ?({k})\n",
         "struct Box[T]:\n    v: T\nb := Box[{w}]({k})\n",
-        "l := List[{w}]([{k}])\n",
-        "m := Map[str, {w}]([(\"a\", {k})])\n",
+        "l := List[{w}].from_iter([{k}])\n",
+        "m := Map[str, {w}].from_iter([(\"a\", {k})])\n",
         "c := true\nx: {w} = if c: {k} else: 0\n",
         "c := true\nx: {w} = if c: 0 else: {k}\n",
         "n := 1\nx: {w} = match n:\n    1: {k}\n    _: 0\n",
         "o: int? = None\nx: {w} = o ?? {k}\n",
     ];
     // Integer-only: `Set` (a float is not Hashable). A compound operand meets no slot (TICKET-258).
-    let int_sites: &[&str] = &["s := Set[{w}]([{k}])\n"];
+    let int_sites: &[&str] = &["s := Set[{w}].from_iter([{k}])\n"];
     let mut red: Vec<String> = Vec::new();
     for d in crate::native::ffi::declared_types() {
         if d.scalar.is_none() {
@@ -1862,8 +1862,10 @@ fn receiver_write_table_matches_observed_behavior() {
             .get(kind)
             .unwrap_or_else(|| panic!("seeded {kind} struct"))
             .methods
-            .keys()
-            .cloned()
+            .iter()
+            // A static method (`List.from_iter`) has no receiver to write.
+            .filter(|(_, sig)| !sig.is_static)
+            .map(|(m, _)| m.clone())
             .collect();
         harvested.sort();
         harvested.dedup();

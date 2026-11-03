@@ -39,7 +39,7 @@ test fn str_bool_tuple_is_a_key():
     assert m[("a", true)] == 1
 
 test fn equal_tuples_dedupe_in_a_set():
-    assert Set([(1, 2), (1, 2), (2, 1)]).len() == 2
+    assert Set.from_iter([(1, 2), (1, 2), (2, 1)]).len() == 2
 
 test fn a_stored_tuple_key_does_not_alias_its_struct():
     p := P(1)

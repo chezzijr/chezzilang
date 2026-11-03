@@ -901,10 +901,10 @@ fn rwshared_at_over_an_aliased_store_stays_under_its_ceiling() {
 import RwShared from std.concurrency
 import ConcurrentList, ConcurrentMap, ConcurrentSet from std.concurrency.collection
 fn main():
-    inner := List(0..5000)
+    inner := List.from_iter(0..5000)
     outer: List[List[int]] = [inner, inner]
     for k in 0..8:
-        outer.push(List(0..5000))
+        outer.push(List.from_iter(0..5000))
     s := ConcurrentList(RwShared(outer))
     total := 0
     for k in 0..5:
@@ -1600,10 +1600,10 @@ fn nested_set_equality_parity() {
     let src = "\
 struct W:
     s: Set[int]
-a := W(Set([1, 2, 3]))
-b := W(Set([3, 2, 1]))
+a := W(Set.from_iter([1, 2, 3]))
+b := W(Set.from_iter([3, 2, 1]))
 print(a == b)
-print([Set([1, 2])] == [Set([2, 1])])
+print([Set.from_iter([1, 2])] == [Set.from_iter([2, 1])])
 ";
     let vm = run_capture(src).expect("vm");
     assert_eq!(vm, "true\ntrue\n");

@@ -1359,7 +1359,7 @@ fn container_where_bound_is_head_constructor_constraint() {
     // (element/key/value types free). The surface form of the RwShared read-view gate.
     ok("fn f[T: List](a: T) -> T:\n    return a\nfn main():\n    print(f([1, 2, 3]))\n");
     ok("fn f[T: Map](a: T) -> T:\n    return a\nfn main():\n    print(f({\"a\": 1}))\n");
-    ok("fn f[T: Set](a: T) -> T:\n    return a\nfn main():\n    print(f(Set([1, 2])))\n");
+    ok("fn f[T: Set](a: T) -> T:\n    return a\nfn main():\n    print(f(Set.from_iter([1, 2])))\n");
     rejects(
         "fn f[T: List](a: T) -> T:\n    return a\nfn main():\n    print(f(5))\n",
         "expected List[...], found int",
@@ -1690,7 +1690,7 @@ fn tuple_key_rejection_names_a_nested_element() {
 #[test]
 fn tuple_key_rejection_names_a_set_element() {
     rejects(
-        "m := {(1, Set([2])): \"a\"}\n",
+        "m := {(1, Set.from_iter([2])): \"a\"}\n",
         "element Set[int] is not Hashable",
     );
 }
@@ -1722,7 +1722,7 @@ fn tuple_key_of_hashable_elements_checks_ok() {
     ok("m := {(\"a\", true): 1}\n");
     ok("m := {((1, 2), 3): \"a\"}\n");
     ok("s: Set[(int, str)] = Set()\n");
-    ok("s := Set([(1, 2)])\n");
+    ok("s := Set.from_iter([(1, 2)])\n");
     ok("m := {(i, i): i for i in 0..3}\n");
     rejects(
         "struct Z:\n    pass\nm := {(1, Z()): \"a\"}\n",
@@ -2347,7 +2347,7 @@ fn hashable_is_one_verdict_per_kind_at_every_site() {
     type Site = (&'static str, fn(&str) -> String);
     let sites: [Site; 3] = [
         ("map key", |v| format!("m := {{{v}: 1}}\n")),
-        ("set element", |v| format!("s := Set([{v}])\n")),
+        ("set element", |v| format!("s := Set.from_iter([{v}])\n")),
         ("Hashable bound", |v| format!("print(k({v}))\n")),
     ];
     let mut wrong = Vec::new();

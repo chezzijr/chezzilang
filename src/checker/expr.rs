@@ -393,13 +393,15 @@ impl Checker {
             Some(
                 r @ (Resolution::Variant { .. }
                 | Resolution::VariantFn { .. }
-                | Resolution::MethodFn { .. }),
+                | Resolution::MethodFn { .. }
+                | Resolution::NativeStatic(_)),
             ) => {
                 let Some((th, head_args)) = self.peel_type_path(obj) else {
                     self.infer_all(args);
                     return Ty::Unknown;
                 };
-                let variant = !matches!(r, Resolution::MethodFn { .. });
+                let variant =
+                    matches!(r, Resolution::Variant { .. } | Resolution::VariantFn { .. });
                 self.infer_type_member_call(
                     obj, &th, head_args, name, variant, name_span, args, targs, span, expected,
                 )
@@ -659,6 +661,7 @@ impl Checker {
             | Resolution::IndexCall
             | Resolution::Variant { .. }
             | Resolution::MethodFn { .. }
+            | Resolution::NativeStatic(_)
             | Resolution::VariantFn { .. }
             | Resolution::WitnessStatic(_)
             | Resolution::ModuleMember { .. }

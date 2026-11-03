@@ -120,8 +120,8 @@ fn hooks() -> Vec<Hook> {
             ],
             op: "for q in x:\n    print(q)\n",
             slot: "for q in v:\n        print(q)",
-            intr: "print(List(x.iter()))\n",
-            call: "print(List(v.iter()))",
+            intr: "print(List.from_iter(x.iter()))\n",
+            call: "print(List.from_iter(v.iter()))",
         },
         Hook {
             name: "next",
@@ -266,7 +266,7 @@ fn hooks() -> Vec<Hook> {
                 m("hash(self, z: int) -> int", "return 1") + &eq,
                 m("hash[U](self) -> int", "return 1") + &eq,
             ],
-            op: "s := Set([x, y])\nprint(s.len())\n",
+            op: "s := Set.from_iter([x, y])\nprint(s.len())\n",
             slot: "print(\"slot\")",
             intr: "print(x.hash())\n",
             call: "print(v.hash())",
@@ -589,7 +589,7 @@ fn iter_run_failures() -> Vec<String> {
     );
     let through = |elem: &str| {
         format!(
-            "fn g(s: Iterable[{elem}]) -> List[{elem}]:\n    return List(s.iter())\nfn b[S: Iterable[{elem}]](s: S) -> List[{elem}]:\n    return List(s.iter())\nprint(g(c))\nprint(b(c))\n"
+            "fn g(s: Iterable[{elem}]) -> List[{elem}]:\n    return List.from_iter(s.iter())\nfn b[S: Iterable[{elem}]](s: S) -> List[{elem}]:\n    return List.from_iter(s.iter())\nprint(g(c))\nprint(b(c))\n"
         )
     };
     let iterable = "import Iterable from std.iter\n";
@@ -631,7 +631,7 @@ fn iter_run_failures() -> Vec<String> {
                 "concrete_both",
                 ITERATOR_IMPORT,
                 next.clone() + &str_iter,
-                "print(List(c.iter()))\n".to_string(),
+                "print(List.from_iter(c.iter()))\n".to_string(),
                 Some("['a', 'b']\nEND\n"),
             ),
         ] {
@@ -653,7 +653,7 @@ fn iter_run_failures() -> Vec<String> {
             }
         }
     }
-    let slot = "import Iterable from std.iter\nfn g(s: Iterable[int]) -> List[int]:\n    return List(s.iter())\nprint(g([1, 2]))\nprint(g(Set([3])))\n";
+    let slot = "import Iterable from std.iter\nfn g(s: Iterable[int]) -> List[int]:\n    return List.from_iter(s.iter())\nprint(g([1, 2]))\nprint(g(Set.from_iter([3])))\n";
     let got = run("iter_slot_builtin", slot, &mut bad);
     if got.stdout != "[1, 2]\n[3]\nEND\n" {
         bad.push(format!(
@@ -713,7 +713,7 @@ fn iter_call_failures() -> Vec<String> {
             }
         }
     }
-    let slot = "import Iterable from std.iter\nfn g(s: Iterable[int]) -> List[int]:\n    return List(s.iter())\nprint(g([1, 2]))\nprint(g(Set([3])))\n";
+    let slot = "import Iterable from std.iter\nfn g(s: Iterable[int]) -> List[int]:\n    return List.from_iter(s.iter())\nprint(g([1, 2]))\nprint(g(Set.from_iter([3])))\n";
     let (ok, text) = check("slot_builtin", slot);
     if !ok {
         bad.push(format!("s.iter() on an Iterable[int] slot: {text}"));
@@ -883,17 +883,17 @@ fn conditional_failures() -> Vec<String> {
             "import Comparable from std.cmp\nimport Iterator, Iterable from std.iter\n";
         for (consumer, imports, tail) in [
             ("for", plain_imports, "for q in x:\n    print(q)\n"),
-            ("list", plain_imports, "print(List(x))\n"),
+            ("list", plain_imports, "print(List.from_iter(x))\n"),
             ("comp", plain_imports, "print([q for q in x])\n"),
             (
                 "bbody",
                 iterable_imports,
-                "fn w[S: Iterable[str]](s: S):\n    print(List(s.iter()))\nw(x)\n",
+                "fn w[S: Iterable[str]](s: S):\n    print(List.from_iter(s.iter()))\nw(x)\n",
             ),
             (
                 "bbody_int",
                 iterable_imports,
-                "fn w[S: Iterable[int]](s: S):\n    print(List(s.iter()))\nw(x)\n",
+                "fn w[S: Iterable[int]](s: S):\n    print(List.from_iter(s.iter()))\nw(x)\n",
             ),
             (
                 "iterator_bound",
@@ -1179,7 +1179,7 @@ fn iterator_bound_failures() -> Vec<String> {
                         (
                             "list",
                             format!(
-                                "fn f{params}(s: S) -> List[{e}]:\n    return List(s)\nprint(f({value}))\n"
+                                "fn f{params}(s: S) -> List[{e}]:\n    return List.from_iter(s)\nprint(f({value}))\n"
                             ),
                         ),
                     ];
@@ -1229,7 +1229,7 @@ fn iterator_bound_failures() -> Vec<String> {
         (
             "N0",
             "import Iterator, Iterable from std.iter\n",
-            "for q in Both(2):\n    print(q)\nprint(List(Both(2)))\nfn g[S: Iterable[T], T](s: S) -> List[T]:\n    return List(s)\nprint(g(Both(2)))\n",
+            "for q in Both(2):\n    print(q)\nprint(List.from_iter(Both(2)))\nfn g[S: Iterable[T], T](s: S) -> List[T]:\n    return List.from_iter(s)\nprint(g(Both(2)))\n",
             Ok("a\nb\n['a', 'b']\n['a', 'b']\nEND\n"),
         ),
         (
@@ -1405,9 +1405,17 @@ fn every_iterand_source_feeds_every_consumer() {
             "print([q for q in SRC])\n".to_string(),
             list,
         ),
-        ("List()", "print(List(SRC))\n".to_string(), list),
-        ("Set()", "print(Set(SRC).len())\n".to_string(), "2\n"),
-        ("Map()", "print(Map(SRC))\n".to_string(), "{1: 10, 2: 20}\n"),
+        ("List()", "print(List.from_iter(SRC))\n".to_string(), list),
+        (
+            "Set()",
+            "print(Set.from_iter(SRC).len())\n".to_string(),
+            "2\n",
+        ),
+        (
+            "Map()",
+            "print(Map.from_iter(SRC))\n".to_string(),
+            "{1: 10, 2: 20}\n",
+        ),
         ("generic inference", "print(drain(SRC))\n".to_string(), list),
     ];
     let mut bad = Vec::new();
@@ -1470,7 +1478,7 @@ fn every_hook_consumer_gives_the_same_failure_path() {
     // The consumers of each hook. `V` is the cell's receiver value.
     let consumers: [(&str, &str, &str); 8] = [
         ("next", "for", "for x in V: print(x)"),
-        ("next", "list", "for x in List(V): print(x)"),
+        ("next", "list", "for x in List.from_iter(V): print(x)"),
         ("next", "comp", "for x in [q for q in V]: print(x)"),
         ("next", "call", "print(V.next())"),
         ("eq", "op", "print(V == V)"),

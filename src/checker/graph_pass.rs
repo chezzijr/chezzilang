@@ -325,24 +325,18 @@ impl Checker {
                     .into_iter()
                     .collect();
             }
-            // Phase 5a-containers — capture the always-linked prelude's `List`/`Map`/`Set`/`Channel`
-            // native-struct METHOD tables so `seed_stdlib_structs` can re-seed them (bare, method-table
-            // only) into `self.structs` for every subsequent module, letting `xs.push(...)`/`m.get(...)`/
-            // `s.insert(...)`/`ch.send(...)` resolve via the normal method path (the retired bespoke
-            // `list_method_sig`/`map_method_sig`/`set_method_sig`/`channel_method_sig` arms' replacement).
-            // Harvested here (NOT from `sig.struct_defs` — the prelude
-            // is a normal AST module whose `check_module` no-ops native structs) by resolving the decls
-            // over `lm.ast` while still in the prelude's stdlib module context (type params + `Hashable`
-            // in scope). The prelude is order[0] (always-linked, no deps), so this is populated before
-            // entry/all others. The `List`/`Map`/`Set` names still resolve
-            // to the RESERVED `Ty::List`/`Ty::Map`/`Ty::Set` via `resolve_type`'s reserved arms; the
-            // ctors/literals stay compiler-wired.
+            // Capture the always-linked prelude's native struct METHOD tables (every `native struct`
+            // it declares) so `seed_stdlib_structs` can re-seed them (bare, method-table only) into
+            // `self.structs` for every later module: `xs.push(...)` resolves through the normal method
+            // path and `List.from_iter(...)` through the static path. Harvested from `lm.ast` while
+            // still in the prelude's stdlib context (type params and `Hashable` in scope); the prelude
+            // is order[0], so this runs before every other module. The names still resolve to the
+            // reserved `Ty::List`/`Ty::Map`/... in `resolve_type`.
             if c.container_seeds.is_empty() && lm.dotted == ["std", "prelude"] {
-                for tn in ["List", "Map", "Set", "Channel", "str", "bytes", "bytearray"] {
-                    if let Some(info) = c.harvest_native_struct_table(&lm.ast, tn) {
-                        c.container_seeds.insert(tn.to_string(), info);
-                    }
-                }
+                c.container_seeds = c
+                    .harvest_native_struct_tables(&lm.ast)
+                    .into_iter()
+                    .collect();
             }
             // M24 — the manifest's `[project] entrypoint = "mod:fn"` names a function the runtime
             // invokes BY NAME at a fixed arity of ZERO, exactly like a `test fn`. A hidden witness

@@ -27,8 +27,8 @@ test fn bytes_satisfies_pathlike_intrinsically():
     assert raw_val(b"a\xffb") == b"a\xffb"
 
 test fn bytearray_satisfies_pathlike_intrinsically():
-    assert raw(bytearray(b"a\xffb")) == b"a\xffb"
-    assert raw_val(bytearray(b"a\xffb")) == b"a\xffb"
+    assert raw(bytearray.from_iter(b"a\xffb")) == b"a\xffb"
+    assert raw_val(bytearray.from_iter(b"a\xffb")) == b"a\xffb"
 
 test fn path_satisfies_pathlike_structurally():
     p := path.Path(b"a\xffb")

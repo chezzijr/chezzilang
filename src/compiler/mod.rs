@@ -291,6 +291,8 @@ enum SynthFn {
     ParamMethod { method: String, arity: usize },
     /// `json.decode[T]` read as a value (TICKET-214), keyed by the target's shape.
     Decode(crate::base::json_desc::TypeDescriptor<()>),
+    /// A builtin type's static method read as a value (`List.from_iter`).
+    NativeStatic(crate::base::builtin_method::NativeStatic),
 }
 
 /// The provider-table name of a `json.decode[T]` value proto. Unspellable (`$`), so no user decl

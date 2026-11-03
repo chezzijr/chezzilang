@@ -241,20 +241,6 @@ const SLOTS: &[Slot] = &[
         tail: false,
     },
     Slot {
-        name: "list_conversion",
-        decls: "",
-        body: "xs := List[{C}]([{v}])\nshow(xs[0])",
-        reject: "list element",
-        tail: false,
-    },
-    Slot {
-        name: "map_conversion",
-        decls: "",
-        body: "m := Map[str, {C}]([(\"k\", {v})])\nshow(m[\"k\"])",
-        reject: "list element",
-        tail: false,
-    },
-    Slot {
         name: "list_comprehension",
         decls: "",
         body: "xs: List[{C}] = [{v} for i in [0]]\nshow(xs[0])",
@@ -533,17 +519,151 @@ fn wait_recv_assign_cells(cells: &mut Vec<Cell>) {
     }
 }
 
+/// `T[C].from_iter([v])` is no typed slot: the argument's elements keep their own type, which must
+/// be `C` itself, so a plain `5` never wraps into `int?` (Rust E0271 on the same program). A value
+/// of type `C` reaches the conversion and runs. One row per carrier, in the order of
+/// [`Carrier::values`] and then, for a carrier with branch shapes, `ELIF`, `NEST_ELSE`, `NEST_THEN`
+/// (the last three outcomes of a carrier without shapes are unused).
+fn conversion_cells(cells: &mut Vec<Cell>) {
+    const ELEM: Out = Out::Rejects("iterator element type");
+    const NEEDS_ANNOTATION: Out = Out::Rejects("a `!` value needs its type from an annotation");
+    let rows: [(&str, [Out; 9]); 4] = [
+        (
+            "int?",
+            [
+                ELEM,
+                Out::Prints("none"),
+                Out::Prints("some 5"),
+                ELEM,
+                Out::Prints("some 5"),
+                Out::Prints("some 5"),
+                BR_INCOMPATIBLE,
+                BR_INCOMPATIBLE,
+                BR_INCOMPATIBLE,
+            ],
+        ),
+        (
+            "int!str",
+            [
+                ELEM,
+                ELEM,
+                Out::Prints("ok 5"),
+                Out::Prints("err E"),
+                Out::Prints("ok 5"),
+                NEEDS_ANNOTATION,
+                BR_INCOMPATIBLE,
+                BR_INCOMPATIBLE,
+                NEEDS_ANNOTATION,
+            ],
+        ),
+        (
+            "None!str",
+            [
+                ELEM,
+                ELEM,
+                Out::Rejects("'?' value: expected"),
+                Out::Prints("err E"),
+                Out::Prints("ok"),
+                NEEDS_ANNOTATION,
+                ELEM,
+                ELEM,
+                ELEM,
+            ],
+        ),
+        (
+            "int??",
+            [
+                ELEM,
+                Out::Prints("none"),
+                Out::Rejects("'?' value: expected int?, found int"),
+                ELEM,
+                ELEM,
+                ELEM,
+                ELEM,
+                ELEM,
+                ELEM,
+            ],
+        ),
+    ];
+    let forms = [
+        (
+            "list_conversion",
+            "xs := List[{C}].from_iter([{v}])\nshow(xs[0])",
+        ),
+        (
+            "map_conversion",
+            "m := Map[str, {C}].from_iter([(\"k\", {v})])\nshow(m[\"k\"])",
+        ),
+    ];
+    for (name, body) in forms {
+        let slot = Slot {
+            name,
+            decls: "",
+            body,
+            reject: "iterator element type",
+            tail: false,
+        };
+        for (ty, outs) in rows {
+            let c = CARRIERS.iter().find(|c| c.ty == ty).expect("a carrier row");
+            let mut srcs: Vec<(String, String, (bool, bool))> = c
+                .values
+                .iter()
+                .map(|(v, _)| match *v {
+                    "BR" => (
+                        v.to_string(),
+                        format!("(if c: 5 else: {})", c.alt),
+                        (true, false),
+                    ),
+                    v => (v.to_string(), format!("({v})"), (true, false)),
+                })
+                .collect();
+            if let Some((fit6, _)) = c.shapes {
+                srcs.push((
+                    "ELIF".into(),
+                    format!("(if c: {fit6} elif d: 5 else: 7)"),
+                    (false, true),
+                ));
+                srcs.push((
+                    "NEST_ELSE".into(),
+                    format!("(if c: {fit6} else: (if c: 7 else: 5))"),
+                    (false, false),
+                ));
+                srcs.push((
+                    "NEST_THEN".into(),
+                    format!("(if c: (if c: 5 else: {}) else: 6)", c.alt),
+                    (true, false),
+                ));
+            }
+            for ((v, src, flags), out) in srcs.into_iter().zip(outs) {
+                cells.push(main_only(
+                    format!("{name}/{ty}/{v}"),
+                    program(&slot, c, &src, flags),
+                    expect(out, &slot),
+                ));
+            }
+        }
+    }
+}
+
 /// No carrier is `Hashable`: set elements and map keys reject before a wrap matters.
 fn hashable_cells(cells: &mut Vec<Cell>) {
+    // `Set.from_iter` rejects through its decl's `T: Hashable` bound; the typed slots through the
+    // key check.
     let shapes = [
-        "s := Set[{C}]([{v}])",
-        "s: Set[{C}] = {{v}}",
-        "m: Map[{C}, str] = {{v}: \"a\"}",
-        "s: Set[{C}] = {{v} for i in [0]}",
+        (
+            "s := Set[{C}].from_iter([{v}])",
+            "does not satisfy Hashable",
+        ),
+        ("s: Set[{C}] = {{v}}", "must implement Hashable"),
+        ("m: Map[{C}, str] = {{v}: \"a\"}", "must implement Hashable"),
+        (
+            "s: Set[{C}] = {{v} for i in [0]}",
+            "must implement Hashable",
+        ),
     ];
     for c in &CARRIERS[..2] {
         for v in ["5", "?5"] {
-            for (i, shape) in shapes.iter().enumerate() {
+            for (i, (shape, needle)) in shapes.iter().enumerate() {
                 let body = shape
                     .replace("{{v}", &format!("{{{v}"))
                     .replace("{C}", c.ty)
@@ -551,7 +671,7 @@ fn hashable_cells(cells: &mut Vec<Cell>) {
                 cells.push(main_only(
                     format!("hashable{i}/{}/{v}", c.ty),
                     format!("fn main():\n    {body}\nmain()\n"),
-                    Expect::Rejects("must implement Hashable"),
+                    Expect::Rejects(needle),
                 ));
             }
         }
@@ -624,6 +744,7 @@ fn extra_cells(cells: &mut Vec<Cell>) {
 fn carrier_slot_grid() {
     let mut cells = Vec::new();
     slot_cells(&mut cells);
+    conversion_cells(&mut cells);
     wait_recv_assign_cells(&mut cells);
     hashable_cells(&mut cells);
     extra_cells(&mut cells);

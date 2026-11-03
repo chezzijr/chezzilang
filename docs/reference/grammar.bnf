@@ -355,8 +355,9 @@
 <nativeStructMembers> ::= <nativeStructMember> | <nativeStructMember> <nativeStructMembers>
 <nativeStructMember> ::= <nativeFieldDecl> | <nativeMethodDecl>
 <nativeFieldDecl>  ::= "IDENT" "COLON" <type> "NEWLINE"
-# A native instance method: `<params>` must begin with the bare receiver `self` (checker/parser rule,
-# not expressible in the grammar); harvest drops it so the recorded sig is the call-arg shape.
+# A native method: an instance method when `<params>` begins with the bare receiver `self` (harvest
+# drops it, so the recorded sig is the call-arg shape), else a static method (`native fn from_iter(xs)`),
+# called through the type (`List.from_iter(xs)`).
 # A native method may declare its OWN generic params after the name (`native fn map[U](self, …)`);
 # these are the method's own `[U]`, distinct from the enclosing native struct's `[T]`, and the harvest
 # routes the sig through the generic-method inference path (e.g. `List.map`/`fold`/`sort_by_key`).
@@ -384,6 +385,7 @@
 <nativeEnumMembers> ::= <nativeVariants> | <nativeVariants> <nativeEnumMethods>
 <nativeVariants> ::= <nativeVariant> | <nativeVariant> <nativeVariants>
 <nativeVariant> ::= <variant> | "NONEKW" "NEWLINE"
+# A native enum method must take `self` (parser rule): a native enum has no static methods.
 <nativeEnumMethods> ::= <nativeMethodDecl> | <nativeMethodDecl> <nativeEnumMethods>
 
 # A `native type` decl (TICKET-218) — a bodyless type export of a std module. PRELUDE/STD-ONLY (the

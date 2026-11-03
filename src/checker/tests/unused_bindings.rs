@@ -14,7 +14,7 @@ use super::*;
 fn a_write_to_a_box_read_is_not_warned() {
     for src in [
         "import Shared from std.concurrency\nfn main():\n    s := Shared[List[int]]([])\n    s.get().push(1)\nmain()\n",
-        "import Shared from std.concurrency\nfn main():\n    s := Shared(bytearray(b\"a\"))\n    s.get().extend(b\"b\")\nmain()\n",
+        "import Shared from std.concurrency\nfn main():\n    s := Shared(bytearray.from_iter(b\"a\"))\n    s.get().extend(b\"b\")\nmain()\n",
         "import RwShared from std.concurrency\nfn main():\n    r := RwShared[List[int]]([])\n    r.get().push(1)\nmain()\n",
         "import Atomic from std.concurrency\nfn main():\n    a := Atomic[List[int]]([])\n    a.load().push(1)\nmain()\n",
         "import Shared from std.concurrency\nstruct P:\n    v: int\nfn main():\n    b := Shared(P(0))\n    b.get().v = 9\nmain()\n",
@@ -1030,7 +1030,7 @@ fn bind_call_reports_each_named_argument_error() {
 #[test]
 fn builtin_and_native_callees_refuse_named_arguments() {
     for (src, head) in [
-        ("s := Set([1, 2])\ns.insert(x=3)\n", "insert"),
+        ("s := Set.from_iter([1, 2])\ns.insert(x=3)\n", "insert"),
         (
             "import std.net\nfn f(sk: net.Socket) -> str:\n    r := sk.read(10, timeout_ms=5)\n    return \"{r}\"\n",
             "read",
@@ -1040,12 +1040,16 @@ fn builtin_and_native_callees_refuse_named_arguments() {
             "get",
         ),
         ("print(chr(65, n=66))\n", "chr"),
-        ("s: Set[int] = Set(xs=[1])\nprint(s.len())\n", "Set"),
+        ("s := Set[int](xs=[1])\nprint(s.len())\n", "Set"),
+        (
+            "s: Set[int] = Set.from_iter(xs=[1])\nprint(s.len())\n",
+            "from_iter",
+        ),
     ] {
         entry_rejects(src, &format!("'{head}' takes no named arguments"));
     }
     // A user struct that declares a same-named method changes nothing for a builtin receiver.
-    let src = "struct Counter:\n    n: int\n    fn insert(self, amount: int = 1) -> int:\n        return self.n + amount\ns := Set([1, 2])\ns.insert(x=3)\n";
+    let src = "struct Counter:\n    n: int\n    fn insert(self, amount: int = 1) -> int:\n        return self.n + amount\ns := Set.from_iter([1, 2])\ns.insert(x=3)\n";
     let errs = check_entry(src);
     assert!(
         errs.iter()

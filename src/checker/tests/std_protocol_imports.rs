@@ -224,7 +224,7 @@ fn hashable_bound_licenses_eq() {
         "import Hashable from std.cmp\nfn same[T: Hashable](a: T, b: T) -> bool:\n    return a == b\nprint(same(1, 1))\n",
     );
     ok(
-        "import Hashable from std.cmp\nfn uniq[T: Hashable](xs: List[T]) -> int:\n    return Set(xs).len()\nprint(uniq([1, 1, 2]))\n",
+        "import Hashable from std.cmp\nfn uniq[T: Hashable](xs: List[T]) -> int:\n    return Set.from_iter(xs).len()\nprint(uniq([1, 1, 2]))\n",
     );
     ok(
         "import Hashable from std.cmp\nfn tally[T: Hashable](x: T) -> int:\n    m := {x: 1}\n    return m.len()\nprint(tally(\"a\"))\n",
@@ -235,14 +235,14 @@ fn hashable_bound_licenses_eq() {
         "T is not bounded by Eq",
     );
     rejects(
-        "fn uniq[T](xs: List[T]) -> int:\n    return Set(xs).len()\n",
-        "Set element type must implement Hashable",
+        "fn uniq[T](xs: List[T]) -> int:\n    return Set.from_iter(xs).len()\n",
+        "type T does not satisfy Hashable",
     );
     // Must still fail: `hash` alone does not make `Box[Tag]` a key when its `eq` needs `compare`.
     // The message names the `Eq` half, which is the half that fails.
     rejects(
-        "import Comparable from std.cmp\nstruct Tag:\n    n: int\nstruct Box[T]:\n    val: T\n    fn hash(self) -> int:\n        return 0\n    fn eq(self, other: Box[T]) -> bool where T: Comparable:\n        return self.val.compare(other.val) == 0\nprint(Set([Box(Tag(1))]).len())\n",
-        "Set element type Box[Tag]'s `eq` requires Tag: Comparable",
+        "import Comparable from std.cmp\nstruct Tag:\n    n: int\nstruct Box[T]:\n    val: T\n    fn hash(self) -> int:\n        return 0\n    fn eq(self, other: Box[T]) -> bool where T: Comparable:\n        return self.val.compare(other.val) == 0\nprint(Set.from_iter([Box(Tag(1))]).len())\n",
+        "type Box[Tag] does not satisfy Hashable (Box[Tag]'s `eq` requires Tag: Comparable)",
     );
 }
 

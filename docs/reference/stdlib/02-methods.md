@@ -109,7 +109,7 @@ Keep callbacks pure; if you need both, sort a copy and merge after.
 | `get` | `(key: K) -> V?` | |
 | `keys` | `() -> List[K]` | Insertion order. |
 | `values` | `() -> List[V]` | Insertion order. |
-| `items` | `() -> List[(K, V)]` | Insertion order, the same order as `keys()`, so `Map(m.items()) == m`. Returns a fresh list (a snapshot, like `keys()`; CPython returns a live view). |
+| `items` | `() -> List[(K, V)]` | Insertion order, the same order as `keys()`, so `Map.from_iter(m.items()) == m`. Returns a fresh list (a snapshot, like `keys()`; CPython returns a live view). |
 | `insert` | `(key: K, val: V) -> V?` | *mutates*: sets `m[key] = val` and returns the value it replaced, or `None` for a new key (Rust `HashMap::insert`). A bare `m.insert(k, v)` statement warns, like every dropped `V?`; write `m[k] = v`, or `_ := m.insert(k, v)`. |
 | `remove` | `(key: K) -> V?` | *mutates*: returns the removed value, or `None`. |
 | `merge` | `(other: Map[K, V]) -> Map[K, V]` | Returns a **new** map (`other` wins on key clash). |
@@ -183,6 +183,6 @@ slice** (`b[1..3]`, byte offsets), and a slice keeps the receiver's type: `bytes
   (latin1/utf16).
 
 A `bytearray` is **not** assignable to a `bytes` slot (it is mutable, so an alias under an immutable
-`bytes` type would change under you). Convert with **`bytes(ba)`** (an explicit copy, like CPython's
-`bytes(ba)`); `bytearray(b)` copies the other way. That is how a built-up buffer reaches the binary
+`bytes` type would change under you). Convert with **`bytes.from_iter(ba)`** (an explicit copy, like CPython's
+`bytes(ba)`); `bytearray.from_iter(b)` copies the other way. That is how a built-up buffer reaches the binary
 APIs (`io.write_bytes`, `crypto.sha256_bytes`, `encoding.base64_encode_bytes`, `Socket.write_bytes`).

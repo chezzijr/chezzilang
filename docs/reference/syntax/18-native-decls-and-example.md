@@ -8,7 +8,7 @@ body the engine implements, bound by name. The universe builtins are declared th
 native fn ord(c: str) -> int      # first-class universe FUNCTION
 native fn panic(msg: str)         # no `-> ret` → native-controlled/never
 native ctor int(x) -> int         # non-first-class scalar CONSTRUCTOR; `x` unannotated → dynamic
-native ctor bytearray(x) -> bytearray
+native ctor bytearray() -> bytearray
 ```
 
 - **`native fn`** declares a first-class function (`f := ord` works). **`native ctor`** declares a
@@ -40,10 +40,17 @@ native struct Match:              # regex.Match's SIGNATURE (fields-only)
 native fn find(pat: str, s: str) -> Match?!   # a native MODULE MEMBER
 ```
 
-- **Methods.** A bodyless `native fn` in the body is an instance method and must take `self` first
-  (`native fn read(self, n: int) -> str!`), else `native instance method must declare 'self' as its first
-  parameter`. A module-level `native fn` may not take `self`. This is how `std.net`'s
-  `Socket`/`Listener` declare `read`/`write`/`accept`/`close`.
+- **Methods.** A bodyless `native fn` in the body that takes `self` first is an instance method
+  (`native fn read(self, n: int) -> str!`). One with no `self` is a static method, called through the
+  type as a user struct's static is (`native fn from_iter[S: Iterable[T]](xs: S) -> List[T]` gives
+  `List.from_iter(xs)`); called on a value it is `'from_iter' is a static method of 'List'; call it
+  as \`List.from_iter(...)\``. A module-level `native fn` may not take `self`. A `native enum` method
+  must take `self` (a native enum has no static methods). This is how `std.net`'s
+  `Socket`/`Listener` declare `read`/`write`/`accept`/`close`, and the prelude declares
+  `List`/`Set`/`Map.from_iter` and `bytes`/`bytearray.from_iter` / `.zeroed`. The build script
+  `src/base/build_methods.rs` generates the `NativeStatic` enum from the static decls; the VM runs
+  each variant (`Op::CallNativeStatic`), and the static read as a value (`f: fn(List[int]) ->
+  List[int] = List.from_iter`) is a synthesized fn that makes the same call.
 - A plain `fn` method with a body is allowed and type-checked, so a native struct can mix native
   methods with Chezzi methods (`std.io`'s `Reader.lines()`, a generator over `read_line()`). A std
   module's top level may mix bodyless `native fn`s and bodied `fn`s too (`std.math`'s `divmod` beside
@@ -57,7 +64,7 @@ native fn find(pat: str, s: str) -> Match?!   # a native MODULE MEMBER
   unannotated closure param and re-typed by the checker.
 - **A `native struct` adds methods to an existing reserved type**, never a new nominal type. The
   prelude declares `native struct List[T]` / `Map[K: Hashable, V]` / `Set[T: Hashable]`, whose method
-  sigs land on the built-in containers; literals and the turbofish ctor (`List[int]()`) stay built in.
+  sigs land on the built-in containers; literals and the empty turbofish ctor (`List[int]()`) stay built in.
   `map`/`filter`/`fold`/`sort_by`/`sort_by_key` are file-backed generics
   (`native fn map[U](self, f: fn(T) -> U) -> List[U]`); the solver recovers a return-position type param
   from a closure argument's body, for user methods too (`Box(3).apply(fn(x): x + 1)` on
@@ -101,7 +108,7 @@ The library reference (every builtin, type method, runtime type and `std.*` modu
 [`stdlib.md`](../stdlib/01-builtins.md).
 
 - Always available: `print`, `Range`, `int()`/`float()`/`str()`, `ord(s)→int` (a 1-character `s`;
-  longer or empty faults), `chr(n)→str`, `Set()`/`Set(list)`, `panic(msg)`, and the core-type methods.
+  longer or empty faults), `chr(n)→str`, `Set()`/`Set.from_iter(list)`, `panic(msg)`, and the core-type methods.
 - Modules: `import std.X`, then `X.func(...)`.
 - `Match` (`std.regex`), `Response` (`std.request`) and `ProcResult` (`std.process`) belong to their
   modules. Reading fields of a returned value needs no import; naming or constructing the type does. A

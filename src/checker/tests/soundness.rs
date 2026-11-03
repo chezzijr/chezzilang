@@ -1167,7 +1167,7 @@ fn index_set_coherent_still_ok() {
 fn range_in_value_position_is_a_value() {
     entry_ok("fn main():\n    x := 0..3\n    print(x)\nmain()\n");
     entry_ok(
-        "fn main():\n    y := List(0..3)\n    z := Set(0..3)\n    print(y)\n    print(z)\nmain()\n",
+        "fn main():\n    y := List.from_iter(0..3)\n    z := Set.from_iter(0..3)\n    print(y)\n    print(z)\nmain()\n",
     );
     entry_ok("fn main():\n    n := (0..5).len()\n    print(n)\nmain()\n");
     entry_ok(
@@ -1237,7 +1237,7 @@ fn range_sanctioned_positions_still_check() {
     );
     // the documented escape hatch: `range(a, b)` really does materialize a `List[int]`.
     entry_ok(
-        "fn main():\n    xs: List[int] = List(0..3)\n    print(Set(0..3).len() + xs.len())\nmain()\n",
+        "fn main():\n    xs: List[int] = List.from_iter(0..3)\n    print(Set.from_iter(0..3).len() + xs.len())\nmain()\n",
     );
 }
 
@@ -1254,7 +1254,7 @@ fn bytes_native_seam_takes_bytes_only_bytearray_needs_an_explicit_convert() {
         ("io.write_bytes(\"/dev/null\", ba)", "write_bytes"),
     ] {
         let errs = check_entry(&format!(
-            "import std.crypto\nimport std.encoding\nimport std.io\n\nfn main():\n    ba := bytearray(b\"hi\")\n    print({call})\nmain()\n"
+            "import std.crypto\nimport std.encoding\nimport std.io\n\nfn main():\n    ba := bytearray.from_iter(b\"hi\")\n    print({call})\nmain()\n"
         ));
         assert!(
             errs.iter()
@@ -1264,7 +1264,7 @@ fn bytes_native_seam_takes_bytes_only_bytearray_needs_an_explicit_convert() {
     }
     // Socket.write_bytes too (the same rule on the VM-intercepted method sig).
     let errs = check_entry(
-        "import std.net\n\nfn go(sock: net.Socket) -> int!:\n    ba := bytearray(b\"hi\")\n    n := sock.write_bytes(ba)?\n    return ?n\n\nfn main():\n    pass\nmain()\n",
+        "import std.net\n\nfn go(sock: net.Socket) -> int!:\n    ba := bytearray.from_iter(b\"hi\")\n    n := sock.write_bytes(ba)?\n    return ?n\n\nfn main():\n    pass\nmain()\n",
     );
     assert!(
         errs.iter()
@@ -1273,10 +1273,10 @@ fn bytes_native_seam_takes_bytes_only_bytearray_needs_an_explicit_convert() {
     );
     // …and `bytes(ba)` is the documented convert — it type-checks everywhere the seam takes bytes.
     entry_ok(
-        "import std.crypto\nimport std.encoding\nimport std.io\n\nfn main():\n    ba := bytearray(b\"hi\")\n    print(crypto.sha256_bytes(bytes(ba)))\n    print(encoding.base64_encode_bytes(bytes(ba)))\n    match io.write_bytes(\"/dev/null\", bytes(ba)):\n        ?_: pass\n        !e: print(e.message())\nmain()\n",
+        "import std.crypto\nimport std.encoding\nimport std.io\n\nfn main():\n    ba := bytearray.from_iter(b\"hi\")\n    print(crypto.sha256_bytes(bytes.from_iter(ba)))\n    print(encoding.base64_encode_bytes(bytes.from_iter(ba)))\n    match io.write_bytes(\"/dev/null\", bytes.from_iter(ba)):\n        ?_: pass\n        !e: print(e.message())\nmain()\n",
     );
     entry_ok(
-        "import std.net\n\nfn go(sock: net.Socket) -> int!:\n    ba := bytearray(b\"hi\")\n    n := sock.write_bytes(bytes(ba))?\n    return ?n\n\nfn main():\n    pass\nmain()\n",
+        "import std.net\n\nfn go(sock: net.Socket) -> int!:\n    ba := bytearray.from_iter(b\"hi\")\n    n := sock.write_bytes(bytes.from_iter(ba))?\n    return ?n\n\nfn main():\n    pass\nmain()\n",
     );
 }
 

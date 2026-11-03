@@ -103,7 +103,8 @@ impl Checker {
             Some(
                 Resolution::Variant { .. }
                 | Resolution::VariantFn { .. }
-                | Resolution::MethodFn { .. },
+                | Resolution::MethodFn { .. }
+                | Resolution::NativeStatic(_),
             )
             | None => {
                 if let Some(t) = self.type_member_value(obj, name, name_span, res.as_ref()) {

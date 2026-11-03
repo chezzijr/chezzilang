@@ -245,7 +245,7 @@ impl Checker {
         sub: &mut HashMap<String, Ty>,
         span: Span,
     ) {
-        let mut binds: Vec<(Ty, Ty)> = Vec::new();
+        let mut binds: Vec<(&str, Ty, Ty)> = Vec::new();
         for tp in tps {
             if let Some(concrete) = sub.get(&tp.name).cloned() {
                 for b in &tp.bounds {
@@ -259,18 +259,30 @@ impl Checker {
                     if let Some(arg) = b.args.first()
                         && let Some(elem) = elem
                     {
-                        binds.push((arg.clone(), elem));
+                        binds.push((&tp.name, arg.clone(), elem));
                     }
                 }
             }
         }
-        for (arg_ty, elem) in &binds {
+        for (tp, arg_ty, elem) in &binds {
             if let Some(pinned) = self.bind_recovered(arg_ty, elem, sub) {
-                self.error(
+                // This message is the bound's failure: the parameter's binding becomes a hole, so
+                // the bound check that follows does not report the same fault a second time.
+                sub.insert(tp.to_string(), Ty::Unknown);
+                // A plain element never wraps into a declared carrier element: `?x` builds one.
+                let help = pinned
+                    .carrier_parts()
+                    .is_some_and(|c| c.1 == elem)
+                    .then(|| {
+                        format!("write each element as `?x`: the declared element type is {pinned}")
+                    });
+                let note = self.protocol_note(&pinned, elem);
+                self.error_help(
                     span,
                     format!(
-                        "iterator element type {elem} does not match the declared element type {pinned}"
+                        "iterator element type {elem} does not match the declared element type {pinned}{note}"
                     ),
+                    help,
                 );
             }
         }

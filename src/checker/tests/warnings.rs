@@ -613,7 +613,7 @@ fn d4_rule1_every_task_body_write_form_checks_clean() {
             "x",
         ),
         (
-            "fn f():\n    ba := bytearray(b\"a\")\n    parallel:\n        spawn:\n            ba.extend(b\"xy\")\nf()\n",
+            "fn f():\n    ba := bytearray.from_iter(b\"a\")\n    parallel:\n        spawn:\n            ba.extend(b\"xy\")\nf()\n",
             "ba",
         ),
     ];

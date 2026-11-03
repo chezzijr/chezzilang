@@ -1,6 +1,7 @@
 //! Build script of chezzi-base: reads every `native struct` / `native enum` with methods in `std/**/*.chz`
-//! with the real parser and writes `$OUT_DIR/builtin_methods.rs` — one `<Type>Method` enum per type and
-//! the `DECLARED_METHODS` table. `std/*.chz` is the one owner of a builtin type's method set.
+//! with the real parser and writes `$OUT_DIR/builtin_methods.rs` — one `<Type>Method` enum per type
+//! (its instance methods), the `NativeStatic` enum (every static method, one variant per type and
+//! method) and the `DECLARED_METHODS` table. `std/*.chz` is the one owner of a builtin type's method set.
 
 use chezzi_syntax::ast::{FnDecl, NativeDecl, StmtKind};
 use chezzi_syntax::{lexer, parser};
@@ -46,7 +47,13 @@ fn enum_name(ty: &str) -> String {
 
 struct Row {
     ty: String,
+    /// Every bodyless method, instance and static, in declaration order.
     bodyless: Vec<String>,
+    /// The bodyless methods that take `self`.
+    instance: Vec<String>,
+    /// The bodyless methods that take no `self`, reached through the type (`List.from_iter`), with
+    /// their parameter count.
+    statics: Vec<(String, usize)>,
     bodied: Vec<String>,
 }
 
@@ -54,9 +61,20 @@ fn row(ty: &str, methods: &[NativeDecl], bodied: &[FnDecl]) -> Option<Row> {
     if methods.is_empty() && bodied.is_empty() {
         return None;
     }
+    let takes_self = |m: &&NativeDecl| m.params.first().is_some_and(|p| p.is_self());
     Some(Row {
         ty: ty.to_string(),
         bodyless: methods.iter().map(|m| m.name.clone()).collect(),
+        instance: methods
+            .iter()
+            .filter(takes_self)
+            .map(|m| m.name.clone())
+            .collect(),
+        statics: methods
+            .iter()
+            .filter(|m| !takes_self(m))
+            .map(|m| (m.name.clone(), m.params.len()))
+            .collect(),
         bodied: bodied.iter().map(|m| m.name.clone()).collect(),
     })
 }
@@ -126,11 +144,11 @@ fn main() {
     for r in &rows {
         let en = enum_name(&r.ty);
         // A bodied method compiles to bytecode, so only the bodyless names have a VM arm.
-        if r.bodyless.is_empty() {
+        if r.instance.is_empty() {
             continue;
         }
         let mut variants: Vec<(String, &String)> = Vec::new();
-        for n in &r.bodyless {
+        for n in &r.instance {
             let v = variant_name(n);
             assert!(
                 !variants.iter().any(|(o, _)| *o == v),
@@ -173,6 +191,65 @@ fn main() {
         let _ = writeln!(out, "    }}");
         let _ = writeln!(out, "}}");
     }
+    // The static methods: one variant per (type, method), `List.from_iter` -> `ListFromIter`.
+    let mut statics: Vec<(String, &String, &String, usize)> = Vec::new();
+    for r in &rows {
+        for (n, arity) in &r.statics {
+            let v = format!("{}{}", variant_name(&r.ty), variant_name(n));
+            assert!(
+                !statics.iter().any(|(o, ..)| *o == v),
+                "two static methods map to variant `{v}`"
+            );
+            statics.push((v, &r.ty, n, *arity));
+        }
+    }
+    let _ = writeln!(
+        out,
+        "/// The static methods of the builtin types, one variant per bodyless `native fn` with no `self`."
+    );
+    let _ = writeln!(out, "#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]");
+    let _ = writeln!(out, "pub enum NativeStatic {{");
+    for (v, ..) in &statics {
+        let _ = writeln!(out, "    {v},");
+    }
+    let _ = writeln!(out, "}}");
+    let _ = writeln!(out, "impl NativeStatic {{");
+    let _ = writeln!(out, "    pub const ALL: &'static [Self] = &[");
+    for (v, ..) in &statics {
+        let _ = writeln!(out, "        Self::{v},");
+    }
+    let _ = writeln!(out, "    ];");
+    let _ = writeln!(
+        out,
+        "    pub fn from_key(ty: &str, method: &str) -> Option<Self> {{"
+    );
+    let _ = writeln!(out, "        match (ty, method) {{");
+    for (v, t, n, _) in &statics {
+        let _ = writeln!(out, "            ({t:?}, {n:?}) => Some(Self::{v}),");
+    }
+    let _ = writeln!(out, "            _ => None,");
+    let _ = writeln!(out, "        }}");
+    let _ = writeln!(out, "    }}");
+    let _ = writeln!(out, "    /// The declaring type and the method name.");
+    let _ = writeln!(
+        out,
+        "    pub fn key(self) -> (&'static str, &'static str) {{"
+    );
+    let _ = writeln!(out, "        match self {{");
+    for (v, t, n, _) in &statics {
+        let _ = writeln!(out, "            Self::{v} => ({t:?}, {n:?}),");
+    }
+    let _ = writeln!(out, "        }}");
+    let _ = writeln!(out, "    }}");
+    let _ = writeln!(out, "    /// The number of parameters the decl declares.");
+    let _ = writeln!(out, "    pub fn arity(self) -> usize {{");
+    let _ = writeln!(out, "        match self {{");
+    for (v, _, _, a) in &statics {
+        let _ = writeln!(out, "            Self::{v} => {a},");
+    }
+    let _ = writeln!(out, "        }}");
+    let _ = writeln!(out, "    }}");
+    let _ = writeln!(out, "}}");
     let _ = writeln!(
         out,
         "/// One row per builtin type with methods: (type name, bodyless method names, bodied method names), in declaration order."

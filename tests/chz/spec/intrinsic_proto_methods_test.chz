@@ -187,7 +187,7 @@ test fn hash_method_agrees_with_container_hashing():
     m[5] = 1
     assert m.contains(5)
     assert hash_m(5) == hash_m(5)
-    s := Set(["k"])
+    s := Set.from_iter(["k"])
     assert s.contains("k")
     assert hash_m("k") == hash_m("k")
 
@@ -287,7 +287,7 @@ test fn bytes_and_bytearray_index_slice_methods():
     bs := b"abc"
     assert ix_li(bs, 0) == bs[0]
     assert ix_li(bs, -1) == bs[-1]
-    ba := bytearray(b"abc")
+    ba := bytearray.from_iter(b"abc")
     assert ix_li(ba, 1) == ba[1]
     si_li(ba, 0, 122)
     assert ba[0] == 122
@@ -499,7 +499,7 @@ fn doubled(xs: Iterable[int]) -> List[int]:
     return [v * 2 for v in xs]
 
 fn copied(xs: Iterable[int]) -> List[int]:
-    return List(xs)
+    return List.from_iter(xs)
 
 fn to_cursor(xs: Iterable[int]) -> Iterator[int]:
     return xs.iter()
@@ -548,10 +548,10 @@ struct Pairs:
         return self.xs.iter()
 
 fn as_set(xs: Iterable[int]) -> Set[int]:
-    return Set(xs)
+    return Set.from_iter(xs)
 
 fn as_map(xs: Iterable[(str, int)]) -> Map[str, int]:
-    return Map(xs)
+    return Map.from_iter(xs)
 
 fn cursor_of(xs: Iterable[int]) -> Iterator[int]:
     return xs.iter()

@@ -38,7 +38,7 @@ protocol PathLike:
 #   p.bytes()  the raw OS bytes                                 (never faults)
 # `as_path` makes it satisfy `PathLike` STRUCTURALLY, so `fs.exists(p)` takes it directly — which is
 # what keeps the natural spelling off the lossy `fs.exists(p.str())` route.
-# There is no `bytearray` conversion method: `bytearray(p.bytes())` already works.
+# There is no `bytearray` conversion method: `bytearray.from_iter(p.bytes())` already works.
 struct Path:
     raw: bytes
 
@@ -118,9 +118,9 @@ SEP := 47    # '/'
 DOT := 46    # '.'
 
 fn _cat(a: bytes, b: bytes) -> bytes:
-    ba := bytearray(a)
+    ba := bytearray.from_iter(a)
     ba.extend(b)
-    return bytes(ba)
+    return bytes.from_iter(ba)
 
 # `str.split` semantics: n separators yield n+1 (possibly empty) pieces.
 fn _split(b: bytes, sep: int) -> List[bytes]:
@@ -158,14 +158,14 @@ fn _all_slashes(b: bytes) -> bool:
 
 # `sep.join(parts)` semantics: no leading/trailing separator, one between each pair.
 fn _join(parts: List[bytes], sep: int) -> bytes:
-    ba := bytearray(b"")
+    ba := bytearray.from_iter(b"")
     first := true
     for p in parts:
         if not first:
             ba.push(sep)
         first = false
         ba.extend(p)
-    return bytes(ba)
+    return bytes.from_iter(ba)
 
 # --- the lexical surface ------------------------------------------------------------------
 

@@ -79,6 +79,17 @@ impl Checker {
                 return Ty::Bool;
             }
         }
+        // A builtin type's static method (`List.from_iter`) is reached only through the type.
+        if let Some(key) = super::fn_writes::native_receiver(&obj_ty)
+            && self
+                .structs
+                .get(key)
+                .and_then(|info| info.methods.get(method))
+                .is_some_and(|sig| sig.is_static)
+        {
+            self.static_on_value(key, method, args, span);
+            return Ty::Unknown;
+        }
         match &obj_ty {
             // `module.fn(args)` is a plain call on the member — no `self`.
             Ty::Module(mname) => {
@@ -341,12 +352,7 @@ impl Checker {
                     // A STATIC method (no `self`) is NOT callable on a value — it is reached only as
                     // `Type.method(...)`. Reject the instance call with a pointer at the right form.
                     if is_static {
-                        self.infer_all(args);
-                        let disp = crate::base::words::bare_display(sname);
-                        self.error(
-                            span,
-                            format!("'{method}' is a static method of '{disp}'; call it as `{disp}.{method}(...)`"),
-                        );
+                        self.static_on_value(sname, method, args, span);
                         return ret;
                     }
                     // Conditional method: enforce any receiver-param `where` bound against the
@@ -508,15 +514,9 @@ impl Checker {
                     rmap,
                 )) = resolved
                 {
-                    // A STATIC enum method is reached only as `Enum.method(...)`; reject the call on a
-                    // value with a pointer at the right form (mirrors the struct arm).
+                    // A STATIC enum method is reached only as `Enum.method(...)`.
                     if is_static {
-                        self.infer_all(args);
-                        let disp = crate::base::words::bare_display(ename);
-                        self.error(
-                            span,
-                            format!("'{method}' is a static method of '{disp}'; call it as `{disp}.{method}(...)`"),
-                        );
+                        self.static_on_value(ename, method, args, span);
                         return ret;
                     }
                     // Conditional method: enforce any receiver-param `where` bound against the enum's
@@ -1280,4 +1280,17 @@ impl Checker {
     }
 
     // ===== small helpers =====
+}
+
+impl Checker {
+    /// A static method called on a value: it is reached only as `Type.method(...)`. `owner` is the
+    /// type's key.
+    fn static_on_value(&mut self, owner: &str, method: &str, args: &[Expr], span: Span) {
+        self.infer_all(args);
+        let disp = crate::base::words::bare_display(owner);
+        self.error(
+            span,
+            format!("'{method}' is a static method of '{disp}'; call it as `{disp}.{method}(...)`"),
+        );
+    }
 }

@@ -56,7 +56,7 @@ pub(super) fn mutates_receiver(recv: &Ty, method: &str) -> bool {
 // `native struct str` / `bytes` / `bytearray` in `std/prelude.chz`, harvested into that reserved scalar's
 // method table (re-seeded by `seed_stdlib_structs`) and looked up via `native_handle_method` with NO type
 // args (the scalars are non-generic — the identity path returns the stored sig verbatim). The
-// `str(x)`/`bytes(x)`/`bytearray(x)` CTORS stay the `native ctor` decls, and runtime dispatch stays
+// `str(x)`/`bytes()`/`bytearray()` CTORS stay the `native ctor` decls, and runtime dispatch stays
 // Rust-inline (`vm/mod.rs core_method` / `bytes_method`). The `bytearray.extend` special-case (its arg may
 // be any of bytes|bytearray|List[int], not a flat `FnSig`) stays an explicit branch in `infer_method_call`
 // BEFORE the table lookup.
@@ -109,11 +109,11 @@ pub(super) fn builtin_container_sig(name: &str) -> Option<FnSig> {
     // fallback) — the last synthetic Rust sig, retired. Only the generic container/runtime ctors, whose
     // type-arg-driven identity is not a flat `FnSig`, remain here.
     let (params, ret) = match name {
-        // Container constructors --------------------------------------------------------------
-        // Element/key/value types are inferred from the argument → `?` slots.
-        "List" => (vec![Ty::Unknown], Ty::list(Ty::Unknown)),
-        "Set" => (vec![Ty::Unknown], Ty::set(Ty::Unknown)),
-        "Map" => (vec![Ty::Unknown], Ty::map(Ty::Unknown, Ty::Unknown)),
+        // Container constructors: an empty value, typed by the turbofish (`List[int]()`). A value
+        // built from an iterable is the decl's static `from_iter`, whose hover is its decl sig.
+        "List" => (vec![], Ty::list(Ty::Unknown)),
+        "Set" => (vec![], Ty::set(Ty::Unknown)),
+        "Map" => (vec![], Ty::map(Ty::Unknown, Ty::Unknown)),
         // Runtime constructors ----------------------------------------------------------------
         // `Channel[T]()` is type-arg-driven, no value arg → no params.
         "Channel" => (vec![], Ty::channel(Ty::Unknown)),
@@ -145,8 +145,12 @@ pub(super) fn builtin_type_doc(name: &str) -> Option<String> {
         "Map" => "key→value hash map — Map[K, V](); index with m[k], iterate with `for k, v in m:`",
         "Set" => "unordered collection of unique elements — Set[T](); operators | & - ^",
         "str" => "immutable UTF-8 text; index/slice by codepoint, concatenate with +",
-        "bytes" => "immutable byte sequence — bytes(x); index with b[i] (byte as int)",
-        "bytearray" => "mutable byte buffer — bytearray(x); index/assign b[i], push/pop bytes",
+        "bytes" => {
+            "immutable byte sequence — b\"...\", bytes.from_iter(xs), bytes.zeroed(n); index with b[i] (byte as int)"
+        }
+        "bytearray" => {
+            "mutable byte buffer — bytearray(), bytearray.from_iter(xs), bytearray.zeroed(n); index/assign b[i], push/pop bytes"
+        }
         // Concurrency / runtime types (own a method table) ---------------------------------------
         "Channel" => {
             "FIFO mailbox between tasks — Channel[T](); iterate received values with `for v in ch:`"

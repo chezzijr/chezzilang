@@ -272,6 +272,8 @@ pub enum Op {
         argc: usize,
     },
     CallBuiltin(crate::base::builtin::Builtin, usize),
+    /// A builtin type's static method (`List.from_iter(xs)`): pops `argc` args, pushes the result.
+    CallNativeStatic(crate::base::builtin_method::NativeStatic, usize),
     CallPrint(usize),
     /// `print(..., sep=, end=)` — stack `[arg0, …, argN-1, sep, end]`: the positional args, then the
     /// `sep` and `end` strings (user exprs or their `" "` / `"\n"` defaults), pushed last. Pops

@@ -239,13 +239,13 @@ call the matching `std.string` free fns (no import needed). A character is a 1-c
 with `compare`; stable, in place).
 
 **Map methods:** `m.get(k)→V?` `m.contains(k)` `m.keys()` `m.values()` `m.remove(k)` `m.len()`,
-`m.items()→List[(K, V)]` (insertion order, so `Map(m.items()) == m`), `m.copy()→map` (shallow),
+`m.items()→List[(K, V)]` (insertion order, so `Map.from_iter(m.items()) == m`), `m.copy()→map` (shallow),
 `m.merge(n)→map` (new map, `n` wins on a clash), `m.update(n)` (in place, → None). `m[k]` reads
 (errors on a missing key); `m[k] = v` inserts or updates. A Map iterates `(key, value)` pairs
-(`for k, v in m`, `[kv for kv in m]`, `List(m)`, `Iterable[(K, V)]`); `k in m` tests a key.
+(`for k, v in m`, `[kv for kv in m]`, `List.from_iter(m)`, `Iterable[(K, V)]`); `k in m` tests a key.
 
 **Sets:** `{a, b, c}` is a set literal (deduped, insertion-ordered). `{}` is the empty *map*; the
-empty set is `Set()`; `Set(list)` builds one. Elements are any `Hashable` type (int/str/bool, a struct
+empty set is `Set()`; `Set.from_iter(list)` builds one. Elements are any `Hashable` type (int/str/bool, a struct
 or enum with `hash(self) -> int` and `eq`, or a tuple of those). Methods: `s.insert(x)→bool` `s.remove(x)→bool` `s.contains(x)`
 `s.len()` `s.union(t)` `s.intersection(t)` `s.difference(t)` `s.copy()→set` (shallow). Iterate with
 `for x in s`. `==` ignores order.

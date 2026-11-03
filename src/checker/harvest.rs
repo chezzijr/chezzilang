@@ -288,8 +288,8 @@ impl Checker {
             }
         }
         // PASS 1b — native METHODS (phase 4c; self added 4c-followup). A `native fn` inside a `native
-        // struct` body is an INSTANCE method declaring a leading bare `self` (mirroring user structs);
-        // `harvest_native_fn_sig(_, true)` STRIPS that `self` so the harvested method-table sig is
+        // struct` body is an INSTANCE method when it declares a leading bare `self`, else a static one;
+        // `harvest_native_method_sig` STRIPS that `self` so the harvested method-table sig is
         // byte-identical to the pre-`self` spelling, checked via the NORMAL method-resolution path
         // (retiring the bespoke `socket_method_sig`/`listener_method_sig` arms). Runs
         // after PASS 1 so every native struct name is transiently visible (a method return type can
@@ -308,7 +308,7 @@ impl Checker {
                 let saved = self.enter_type_params(type_params);
                 let mut table: HashMap<String, FnSig> = methods
                     .iter()
-                    .map(|m| (m.name.clone(), self.harvest_native_fn_sig(m, true)))
+                    .map(|m| (m.name.clone(), self.harvest_native_method_sig(m)))
                     .collect();
                 // Phase 4c-followup — a BODIED method (`fn lines(self) -> …: <body>`) is checked via
                 // the same method-resolution path as a bodyless `native fn`, so its sig must land in the
@@ -489,47 +489,54 @@ impl Checker {
         sig
     }
 
-    /// Phase 5a-containers — harvest the METHOD table of one `native struct` (by bare name) from a parsed
-    /// module AST into a `StructInfo`. Mirrors [`harvest_native_module`]'s PASS 1b, used for the always-
-    /// linked `std/prelude.chz`'s reserved UNIVERSE containers (`List`/`Map`/`Set`): their identity is the
-    /// reserved `Ty::List`/`Ty::Map`/`Ty::Set` (NOT a nominal struct), so `fields` are empty and only the
-    /// method table is kept. The leading bare `self` is STRIPPED by `harvest_native_fn_sig(_, true)`, so
-    /// the harvested sigs BYTE-MATCH the retired bespoke `list_method_sig`/`map_method_sig`/
-    /// `set_method_sig` arms. Type params (incl. `Map`/`Set`'s `Hashable`-bounded key/elem) are in scope
-    /// while resolving each method sig so the internal `Map[K, V]`/`List[T]`/`Set[T]` return types resolve
-    /// past the hashable gate. Returns `None` if the named native struct is not present in the AST.
-    pub(super) fn harvest_native_struct_table(
+    /// The sig of a `native fn` in a `native struct` body: an instance method (a leading bare
+    /// `self`, which the sig drops) or a static one (no `self`, reached through the type).
+    pub(super) fn harvest_native_method_sig(&mut self, decl: &NativeDecl) -> FnSig {
+        let instance = decl.params.first().is_some_and(crate::ast::Param::is_self);
+        let mut sig = self.harvest_native_fn_sig(decl, instance);
+        sig.is_static = !instance;
+        sig
+    }
+
+    /// Harvest the METHOD table of every `native struct` of a parsed module AST, by bare name. The
+    /// always-linked `std/prelude.chz` declares the reserved universe types this way (`List`, `Map`,
+    /// `Set`, `Channel`, `str`, `bytes`, `bytearray`): their identity is the reserved `Ty` (not a
+    /// nominal struct), so `fields` are empty and only the method table is kept. Type params (incl.
+    /// `Map`/`Set`'s `Hashable`-bounded key/elem) are in scope while each method sig resolves.
+    pub(super) fn harvest_native_struct_tables(
         &mut self,
         ast: &crate::ast::Module,
-        name: &str,
-    ) -> Option<StructInfo> {
+    ) -> Vec<(String, StructInfo)> {
+        let mut out = Vec::new();
         for s in &ast.stmts {
             if let StmtKind::NativeStruct {
-                name: sn,
+                name,
                 type_params,
                 methods,
                 ..
             } = &s.kind
-                && sn == name
             {
                 let saved = self.enter_type_params(type_params);
                 let table: HashMap<String, FnSig> = methods
                     .iter()
-                    .map(|m| (m.name.clone(), self.harvest_native_fn_sig(m, true)))
+                    .map(|m| (m.name.clone(), self.harvest_native_method_sig(m)))
                     .collect();
                 self.exit_type_params(saved);
-                return Some(StructInfo {
-                    type_params: self.resolve_bounds(type_params, s.span),
-                    fields: Vec::new(),
-                    methods: table,
-                    origin: StructOrigin::Builtin,
-                    doc: None,
-                    defaulted_fields: Vec::new(),
-                    field_slots: None,
-                });
+                out.push((
+                    name.clone(),
+                    StructInfo {
+                        type_params: self.resolve_bounds(type_params, s.span),
+                        fields: Vec::new(),
+                        methods: table,
+                        origin: StructOrigin::Builtin,
+                        doc: None,
+                        defaulted_fields: Vec::new(),
+                        field_slots: None,
+                    },
+                ));
             }
         }
-        None
+        out
     }
 
     /// Harvest every `native enum` of a parsed module (the prelude's `Option[T]` / `Result[T, E]`):

@@ -130,8 +130,8 @@ c := bch.cap()             # capacity: 2 here; 0 for a rendezvous Channel[T](0);
 - **`send` after close → faults** `"send on a closed channel"`; **`recv` on closed-and-empty →
   faults** `"receive on a closed channel"` (drains buffered first).
 - `try_recv` reads a closed channel as `None`; `try_send` returns `false`.
-- A `Channel[T]` is an `Iterable[T]`: `for v in ch`, a comprehension and `List(ch)` / `Set(ch)` drain
-  it until it is closed and empty (Rust `rx.iter().collect()`, Go `for v := range ch`), so `List(ch)`
+- A `Channel[T]` is an `Iterable[T]`: `for v in ch`, a comprehension and `List.from_iter(ch)` / `Set.from_iter(ch)` drain
+  it until it is closed and empty (Rust `rx.iter().collect()`, Go `for v := range ch`), so `List.from_iter(ch)`
   blocks until a sender closes it.
 
 ### 5a. `std.concurrency.pmap` — scoped parallel map (the ergonomic wrapper)

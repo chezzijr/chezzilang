@@ -30,8 +30,8 @@ native ctor int(x) -> int
 native ctor float(x) -> float
 native ctor bool(x) -> bool
 native ctor str(x) -> str
-native ctor bytes(x) -> bytes
-native ctor bytearray(x) -> bytearray
+native ctor bytes() -> bytes
+native ctor bytearray() -> bytearray
 
 # The three builtin container types' METHOD surface (phase 5a-containers). List/Map/Set are RESERVED
 # UNIVERSE types (`Ty::List`/`Ty::Map`/`Ty::Set` — always in scope, not import-gated), and their LITERAL
@@ -53,7 +53,13 @@ native ctor bytearray(x) -> bytearray
 # arm (a struct with a structural `add` still errors at CHECK time). `Map`/`Set`'s key/element type params
 # carry a `Hashable` bound so the internal `Map[K, V]`/`Set[T]` return types resolve at harvest.
 
+# A builtin type builds a value from an iterable with its static `from_iter` (Rust
+# `FromIterator::from_iter`, Python `list(xs)`): `T(...)` makes only an empty value (`List[int]()`).
+# `from_iter` takes any iterable whose elements are the type's elements: a list, a `Range`, a
+# generator, `m.items()`, a Map (its `(k, v)` pairs), a str (its chars), bytes (its ints).
+
 native struct List[T]:
+    native fn from_iter[S: Iterable[T]](xs: S) -> List[T]
     native fn len(self) -> int
     native fn push(self, v: T) -> None
     native fn pop(self) -> Option[T]
@@ -108,6 +114,8 @@ native struct List[T]:
     native fn copy(self) -> List[T]
 
 native struct Map[K: Hashable, V]:
+    # Last wins on a repeated key, as in the `{k: v}` literal; `Map.from_iter(m)` copies `m`.
+    native fn from_iter[S: Iterable[(K, V)]](pairs: S) -> Map[K, V]
     native fn len(self) -> int
     native fn contains(self, k: K) -> bool
     native fn get(self, k: K) -> Option[V]
@@ -118,11 +126,12 @@ native struct Map[K: Hashable, V]:
     native fn insert(self, k: K, v: V) -> Option[V]
     native fn merge(self, other: Map[K, V]) -> Map[K, V]
     native fn update(self, other: Map[K, V]) -> None
-    # TICKET-160 — insertion order, identical to keys(); Map(m.items()) == m.
+    # TICKET-160 — insertion order, identical to keys(); Map.from_iter(m.items()) == m.
     native fn items(self) -> List[(K, V)]
     native fn copy(self) -> Map[K, V]
 
 native struct Set[T: Hashable]:
+    native fn from_iter[S: Iterable[T]](xs: S) -> Set[T]
     native fn len(self) -> int
     native fn contains(self, v: T) -> bool
     # TICKET-278 — `true` when `v` was new (Rust `HashSet::insert`).
@@ -167,7 +176,7 @@ native struct Channel[T]:
     native fn cap(self) -> int
 
 # The reserved scalar METHOD tables (`str`/`bytes`/`bytearray`). Identity stays the reserved
-# `Ty::Str`/`Ty::Bytes`/`Ty::ByteArray` (`resolve_type`) and the `str(x)`/`bytes(x)`/`bytearray(x)`
+# `Ty::Str`/`Ty::Bytes`/`Ty::ByteArray` (`resolve_type`) and the `str(x)`/`bytes()`/`bytearray()`
 # CTORS stay the `native ctor` decls above; runtime dispatch stays Rust-inline (`vm/mod.rs core_method` /
 # `bytes_method`). Only the METHOD-TABLE sigs are file-backed here — harvested into each scalar's method
 # table (re-seeded by `seed_stdlib_structs`), looked up via `native_handle_method` with no type args (the
@@ -222,6 +231,10 @@ native struct str:
 # `bytes` (immutable byte sequence): `decode() -> str` (UTF-8, recoverable fault on invalid UTF-8) and
 # `len()` (byte count). `extend` is NOT a bytes method (bytes is immutable).
 native struct bytes:
+    # Each element is one byte, an int in 0..=255 (a fault names any other).
+    native fn from_iter[S: Iterable[int]](xs: S) -> bytes
+    # `n` zero bytes (Python `bytes(n)`); a negative `n` faults.
+    native fn zeroed(n: int) -> bytes
     native fn decode(self) -> str
     # W7-8 — the DISPLAY twin of `decode()`: each maximal invalid UTF-8 subsequence becomes one U+FFFD
     # (Python `b.decode(errors="replace")`), so it NEVER faults. `path.Path.str()` is built on it.
@@ -233,6 +246,8 @@ native struct bytes:
 # `pop() -> int?` (removes the last), `decode() -> str` (UTF-8, recoverable fault on invalid
 # UTF-8), `copy() -> bytearray` (a new buffer), `extend(bytes|bytearray|List[int])`.
 native struct bytearray:
+    native fn from_iter[S: Iterable[int]](xs: S) -> bytearray
+    native fn zeroed(n: int) -> bytearray
     native fn len(self) -> int
     native fn push(self, b: int) -> None
     # Takes any byte-sequence shape (bytes|bytearray|List[int]); the checker types the argument before the table lookup.

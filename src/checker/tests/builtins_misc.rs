@@ -292,10 +292,10 @@ fn bytes_key_in_map_ok() {
 
 #[test]
 fn bytearray_constructor_and_ty() {
-    // `bytearray([..])` infers `bytearray`; ba[i] -> int; ba[i] = int ok; ba[a:b] -> bytearray;
+    // `bytearray.from_iter([..])` infers `bytearray`; ba[i] -> int; ba[i] = int ok; ba[a:b] -> bytearray;
     // for x in ba -> int; len ok.
     ok(
-        "fn main():\n    ba := bytearray([1, 2, 3])\n    x: int = ba[0]\n    ba[0] = 5\n    s: bytearray = ba[0..1]\n    for c in ba:\n        print(c)\n    n: int = ba.len()\n    print(x + n)\nmain()\n",
+        "fn main():\n    ba := bytearray.from_iter([1, 2, 3])\n    x: int = ba[0]\n    ba[0] = 5\n    s: bytearray = ba[0..1]\n    for c in ba:\n        print(c)\n    n: int = ba.len()\n    print(x + n)\nmain()\n",
     );
 }
 
@@ -303,27 +303,32 @@ fn bytearray_constructor_and_ty() {
 fn bytearray_constructor_overloads_infer_bytearray() {
     // All four constructor forms infer `bytearray`.
     ok(
-        "fn main():\n    a: bytearray = bytearray()\n    b: bytearray = bytearray(4)\n    c: bytearray = bytearray(b\"x\")\n    d: bytearray = bytearray([1, 2])\n    print(a.len() + b.len() + c.len() + d.len())\nmain()\n",
+        "fn main():\n    a: bytearray = bytearray()\n    b: bytearray = bytearray.zeroed(4)\n    c: bytearray = bytearray.from_iter(b\"x\")\n    d: bytearray = bytearray.from_iter([1, 2])\n    print(a.len() + b.len() + c.len() + d.len())\nmain()\n",
     );
 }
 
 #[test]
 fn bytearray_conversion_bridge_typechecks() {
-    // bytes(ba) -> bytes; bytearray(b) -> bytearray.
+    // bytes.from_iter(ba) -> bytes; bytearray.from_iter(b) -> bytearray.
     ok(
-        "fn main():\n    ba := bytearray([1, 2])\n    b: bytes = bytes(ba)\n    ba2: bytearray = bytearray(b)\n    print(b.len() + ba2.len())\nmain()\n",
+        "fn main():\n    ba := bytearray.from_iter([1, 2])\n    b: bytes = bytes.from_iter(ba)\n    ba2: bytearray = bytearray.from_iter(b)\n    print(b.len() + ba2.len())\nmain()\n",
     );
 }
 
 #[test]
 fn bytearray_index_set_typechecks() {
     // The NEW capability bytes lacks: `ba[i] = x` is a valid IndexSet assignment.
-    ok("fn main():\n    ba := bytearray([1, 2])\n    ba[0] = 200\n    print(ba[0])\nmain()\n");
+    ok(
+        "fn main():\n    ba := bytearray.from_iter([1, 2])\n    ba[0] = 200\n    print(ba[0])\nmain()\n",
+    );
 }
 
 #[test]
 fn bytearray_constructor_rejects_str_arg() {
-    rejects("fn main():\n    ba := bytearray(\"s\")\nmain()\n", "");
+    rejects(
+        "fn main():\n    ba := bytearray.from_iter(\"s\")\nmain()\n",
+        "",
+    );
 }
 
 #[test]
@@ -338,7 +343,7 @@ fn bytearray_not_hashable_map_key_rejected() {
 #[test]
 fn bytearray_not_assignable_to_bytes() {
     rejects(
-        "fn main():\n    ba := bytearray([1])\n    b: bytes = ba\nmain()\n",
+        "fn main():\n    ba := bytearray.from_iter([1])\n    b: bytes = ba\nmain()\n",
         "",
     );
 }
@@ -349,7 +354,7 @@ fn bytearray_not_assignable_to_bytes() {
 fn encode_decode_types() {
     // str.encode() -> bytes; bytes.decode() -> str; bytearray.decode() -> str.
     ok(
-        "fn main():\n    b: bytes = \"x\".encode()\n    s1: str = b\"x\".decode()\n    s2: str = bytearray([120]).decode()\n    print(s1 + s2 + str(b.len()))\nmain()\n",
+        "fn main():\n    b: bytes = \"x\".encode()\n    s1: str = b\"x\".decode()\n    s2: str = bytearray.from_iter([120]).decode()\n    print(s1 + s2 + str(b.len()))\nmain()\n",
     );
 }
 
@@ -357,7 +362,10 @@ fn encode_decode_types() {
 fn encode_only_on_str_decode_only_on_bytes() {
     // encode is str-only: bytes/bytearray have no encode.
     rejects("fn main():\n    x := b\"x\".encode()\nmain()\n", "");
-    rejects("fn main():\n    x := bytearray([1]).encode()\nmain()\n", "");
+    rejects(
+        "fn main():\n    x := bytearray.from_iter([1]).encode()\nmain()\n",
+        "",
+    );
     // decode is bytes/bytearray-only: str has no decode.
     rejects("fn main():\n    x := \"x\".decode()\nmain()\n", "");
 }
@@ -367,19 +375,23 @@ fn encode_only_on_str_decode_only_on_bytes() {
 #[test]
 fn constructor_iter_types() {
     // List() over every for-iterable shape; element type flows through iterable_elem.
-    ok("fn main():\n    a: List[int] = List([1, 2])\n    print(a.len())\nmain()\n");
-    ok("fn main():\n    s := {1, 2}\n    a: List[int] = List(s)\n    print(a.len())\nmain()\n");
-    ok("fn main():\n    a: List[int] = List(b\"hi\")\n    print(a.len())\nmain()\n");
-    ok("fn main():\n    a: List[str] = List(\"ab\")\n    print(a.len())\nmain()\n");
-    ok("fn main():\n    a: List[int] = List(0..3)\n    print(a.len())\nmain()\n");
-    ok("fn main():\n    a: List[int] = List(bytearray([1, 2]))\n    print(a.len())\nmain()\n");
+    ok("fn main():\n    a: List[int] = List.from_iter([1, 2])\n    print(a.len())\nmain()\n");
+    ok(
+        "fn main():\n    s := {1, 2}\n    a: List[int] = List.from_iter(s)\n    print(a.len())\nmain()\n",
+    );
+    ok("fn main():\n    a: List[int] = List.from_iter(b\"hi\")\n    print(a.len())\nmain()\n");
+    ok("fn main():\n    a: List[str] = List.from_iter(\"ab\")\n    print(a.len())\nmain()\n");
+    ok("fn main():\n    a: List[int] = List.from_iter(0..3)\n    print(a.len())\nmain()\n");
+    ok(
+        "fn main():\n    a: List[int] = List.from_iter(bytearray.from_iter([1, 2]))\n    print(a.len())\nmain()\n",
+    );
     // Set() broadened from list-only to any for-iterable.
-    ok("fn main():\n    s: Set[str] = Set(\"abc\")\n    print(s.len())\nmain()\n");
-    ok("fn main():\n    s: Set[int] = Set(0..3)\n    print(s.len())\nmain()\n");
-    ok("fn main():\n    s: Set[int] = Set([1, 1, 2])\n    print(s.len())\nmain()\n");
+    ok("fn main():\n    s: Set[str] = Set.from_iter(\"abc\")\n    print(s.len())\nmain()\n");
+    ok("fn main():\n    s: Set[int] = Set.from_iter(0..3)\n    print(s.len())\nmain()\n");
+    ok("fn main():\n    s: Set[int] = Set.from_iter([1, 1, 2])\n    print(s.len())\nmain()\n");
     // Map() from a list of 2-tuples.
     ok(
-        "fn main():\n    m: Map[int, str] = Map([(1, \"a\"), (2, \"b\")])\n    print(m.len())\nmain()\n",
+        "fn main():\n    m: Map[int, str] = Map.from_iter([(1, \"a\"), (2, \"b\")])\n    print(m.len())\nmain()\n",
     );
 }
 
@@ -398,13 +410,22 @@ fn container_ctor_turbofish_binds_elem_type() {
 
 #[test]
 fn container_ctor_turbofish_checks_elements() {
-    // `List[int]([1, 2])` checks supplied elements against the turbofish elem type.
-    ok("x := List[int]([1, 2])\n");
-    ok("x := Set[int]([1, 2])\n");
-    ok("x := Map[str, int]([(\"a\", 1)])\n");
-    rejects("x := List[int]([\"a\"])\n", "expected");
-    rejects("x := Set[int]([\"a\"])\n", "expected");
-    rejects("x := Map[str, int]([(\"a\", \"b\")])\n", "expected");
+    // `List[int].from_iter([1, 2])` checks supplied elements against the turbofish elem type.
+    ok("x := List[int].from_iter([1, 2])\n");
+    ok("x := Set[int].from_iter([1, 2])\n");
+    ok("x := Map[str, int].from_iter([(\"a\", 1)])\n");
+    rejects(
+        "x := List[int].from_iter([\"a\"])\n",
+        "does not match the declared element type",
+    );
+    rejects(
+        "x := Set[int].from_iter([\"a\"])\n",
+        "does not match the declared element type",
+    );
+    rejects(
+        "x := Map[str, int].from_iter([(\"a\", \"b\")])\n",
+        "does not match the declared element type",
+    );
 }
 
 #[test]
@@ -538,24 +559,30 @@ fn uninferable_closure_param_qualified_ctor_emits_clear_error() {
 #[test]
 fn map_requires_two_tuple() {
     // element not a 2-tuple is a static error.
-    rejects("fn main():\n    m := Map([1, 2])\nmain()\n", "");
-    // a map's element is its `(key, value)` pair, so `Map(m)` checks (owner U9).
-    ok("fn main():\n    src := {1: \"a\"}\n    m := Map(src)\nmain()\n");
+    rejects("fn main():\n    m := Map.from_iter([1, 2])\nmain()\n", "");
+    // a map's element is its `(key, value)` pair, so `Map.from_iter(m)` checks (owner U9).
+    ok("fn main():\n    src := {1: \"a\"}\n    m := Map.from_iter(src)\nmain()\n");
     // a list of keys is not a list of pairs -> static error.
     rejects(
-        "fn main():\n    src := {1: \"a\"}\n    m := Map(src.keys())\nmain()\n",
+        "fn main():\n    src := {1: \"a\"}\n    m := Map.from_iter(src.keys())\nmain()\n",
         "",
     );
     // a 3-tuple is not a 2-tuple.
-    rejects("fn main():\n    m := Map([(1, 2, 3)])\nmain()\n", "");
+    rejects(
+        "fn main():\n    m := Map.from_iter([(1, 2, 3)])\nmain()\n",
+        "",
+    );
 }
 
 #[test]
 fn set_map_hashable_key_gate_preserved() {
     // float is not Hashable -> set/map key must reject it.
-    rejects("fn main():\n    s := Set([3.0])\nmain()\n", "Hashable");
     rejects(
-        "fn main():\n    m := Map([(3.0, \"a\")])\nmain()\n",
+        "fn main():\n    s := Set.from_iter([3.0])\nmain()\n",
+        "Hashable",
+    );
+    rejects(
+        "fn main():\n    m := Map.from_iter([(3.0, \"a\")])\nmain()\n",
         "Hashable",
     );
 }
@@ -576,7 +603,7 @@ fn iter_method_on_collections_types_as_iterator() {
     ok("fn main():\n    it := \"ab\".iter()\n    c: str? = it.next()\n    print(c)\nmain()\n");
     ok("fn main():\n    it := b\"hi\".iter()\n    b: int? = it.next()\n    print(b)\nmain()\n");
     ok(
-        "fn main():\n    it := bytearray([1, 2]).iter()\n    b: int? = it.next()\n    print(b)\nmain()\n",
+        "fn main():\n    it := bytearray.from_iter([1, 2]).iter()\n    b: int? = it.next()\n    print(b)\nmain()\n",
     );
 }
 
@@ -666,12 +693,12 @@ fn iterable_in_type_position_is_for_iterable() {
     ok(
         "import Iterable, Iterator from std.iter\nfn gen() -> Iterator[int]:\n    yield 1\n    yield 2\nfn f(xs: Iterable[int]) -> int:\n    n := 0\n    for v in xs:\n        n += v\n    return n\nfn main():\n    print(str(f(gen())))\nmain()\n",
     );
-    // a comprehension over an `Iterable[T]` param, and `List(xs)` — the other `iterable_elem` consumers.
+    // a comprehension over an `Iterable[T]` param, and `List.from_iter(xs)` — the other `iterable_elem` consumers.
     ok(
         "import Iterable from std.iter\nfn f(xs: Iterable[int]) -> int:\n    ys := [v * 2 for v in xs]\n    return ys[0]\nfn main():\n    print(str(f([1, 2])))\nmain()\n",
     );
     ok(
-        "import Iterable from std.iter\nfn f(xs: Iterable[int]) -> int:\n    return List(xs)[0]\nfn main():\n    print(str(f([1, 2])))\nmain()\n",
+        "import Iterable from std.iter\nfn f(xs: Iterable[int]) -> int:\n    return List.from_iter(xs)[0]\nfn main():\n    print(str(f([1, 2])))\nmain()\n",
     );
     // The pre-fix workaround (`xs.iter()` first) must keep working identically — it now takes the
     // `iterable_elem` fast path instead of the Protocol method arm; both yield `Iterator[int]`.
@@ -802,7 +829,7 @@ fn a_nonconforming_next_is_an_ordinary_method() {
     // (a) extra param on `next` + a conforming `iter`: `next` is an ordinary method, `iter` is the hook.
     let odd = "import Iterator from std.iter\nstruct Odd:\n    xs: List[int]\n    n: int\n    fn next(self, k: int) -> int?:\n        self.n += 1\n        if self.n > 3:\n            return None\n        return ?self.n\n    fn iter(self) -> Iterator[int]:\n        return self.xs.iter()\n";
     ok(&format!(
-        "import Iterable from std.iter\n{odd}fn viaList(xs: Iterable[int]) -> List[int]:\n    return List(xs)\nfn main():\n    print(str(viaList(Odd([9, 9], 0))))\nmain()\n"
+        "import Iterable from std.iter\n{odd}fn viaList(xs: Iterable[int]) -> List[int]:\n    return List.from_iter(xs)\nfn main():\n    print(str(viaList(Odd([9, 9], 0))))\nmain()\n"
     ));
     ok(&format!(
         "{odd}fn main():\n    for v in Odd([9, 9], 0):\n        print(str(v))\nmain()\n"
@@ -812,7 +839,7 @@ fn a_nonconforming_next_is_an_ordinary_method() {
     ));
     // (b) a non-`Option` return on `next` is the same class.
     ok(
-        "import Iterable, Iterator from std.iter\nstruct Bad:\n    xs: List[int]\n    fn next(self) -> int:\n        return 1\n    fn iter(self) -> Iterator[int]:\n        return self.xs.iter()\nfn f(xs: Iterable[int]) -> List[int]:\n    return List(xs)\nfn main():\n    print(str(f(Bad([1, 2]))))\nmain()\n",
+        "import Iterable, Iterator from std.iter\nstruct Bad:\n    xs: List[int]\n    fn next(self) -> int:\n        return 1\n    fn iter(self) -> Iterator[int]:\n        return self.xs.iter()\nfn f(xs: Iterable[int]) -> List[int]:\n    return List.from_iter(xs)\nfn main():\n    print(str(f(Bad([1, 2]))))\nmain()\n",
     );
     // (c) a conforming `next` alongside `iter`: `iter` is the hook `for` drives.
     ok(
@@ -1365,7 +1392,7 @@ fn scalar_cast_rejects_option_result_bytes_bytearray_shared_arg() {
         "int() cannot convert bytes",
     );
     rejects(
-        "fn main():\n    print(int(bytearray([1, 2])))\nmain()\n",
+        "fn main():\n    print(int(bytearray.from_iter([1, 2])))\nmain()\n",
         "int() cannot convert bytearray",
     );
     // `Shared` is import-gated, so only `entry_rejects` (which goes through `build_graph`)
@@ -1433,7 +1460,7 @@ fn scalar_cast_still_accepts_the_payload_of_a_rejected_kind() {
     );
     ok("fn main():\n    print(int(b\"ab\"[0]))\n    print(str(b\"ab\"))\nmain()\n");
     ok(
-        "fn main():\n    ba := bytearray([1, 2])\n    print(int(ba[0]))\n    print(str(ba))\nmain()\n",
+        "fn main():\n    ba := bytearray.from_iter([1, 2])\n    print(int(ba[0]))\n    print(str(ba))\nmain()\n",
     );
     entry_ok(
         "import Shared from std.concurrency\nfn main():\n    s := Shared(1)\n    print(int(s.get()))\n    print(str(s))\nmain()\n",

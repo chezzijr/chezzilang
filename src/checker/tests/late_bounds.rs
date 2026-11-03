@@ -542,7 +542,7 @@ fn a_type_may_ask_conformance_of_a_type_declared_later() {
     // A method returns a `Set` of its own type.
     let own_set = |h: &str| {
         format!(
-            "struct Node:\n    id: int\n{h}    fn peers(self) -> Set[Node]:\n        return Set([self, self])\nprint(Node(1).peers().len())\n"
+            "struct Node:\n    id: int\n{h}    fn peers(self) -> Set[Node]:\n        return Set.from_iter([self, self])\nprint(Node(1).peers().len())\n"
         )
     };
     // A field is a `Map` keyed by a struct declared later.
@@ -857,7 +857,7 @@ fn len_of_a_literal_range_with_a_missing_bound_is_a_check_error() {
 fn a_list_built_from_an_endless_literal_range_type_checks() {
     // No collector tests for a missing end (owner answer A): `List(5..)` runs until memory ends, as
     // `List(g())` does for an endless generator.
-    ok("xs := List(5..)\n");
+    ok("xs := List.from_iter(5..)\n");
 }
 
 #[test]

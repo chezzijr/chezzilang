@@ -31,12 +31,12 @@ import std.os
 import Atomic, AtomicInt from std.concurrency
 
 test fn range_faults():
-    r1 := recover: List(Range(0, 5, 0))
+    r1 := recover: List.from_iter(Range(0, 5, 0))
     match r1:
         ?_: assert false, "step 0 must fault"
         !e: assert e.message() == "Range() step cannot be zero"
     # A range with no start cannot be iterated; `len` needs both bounds.
-    r2 := recover: List(..5)
+    r2 := recover: List.from_iter(..5)
     match r2:
         ?_: assert false, "no start must fault"
         !e: assert e.message() == "a range with no start cannot be iterated"

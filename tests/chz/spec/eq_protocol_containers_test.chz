@@ -104,8 +104,8 @@ test fn ci_map_literal_and_ctor_dedup_on_eq():
     assert m[CI("Ab")] == 2
     s := {CI("ab"), CI("AB")}
     assert s.len() == 1, "a set literal dedups on an EQUAL element"
-    assert Set([CI("ab"), CI("AB")]).len() == 1, "…and so does the Set() ctor"
-    assert Map([(CI("ab"), 1), (CI("AB"), 2)]).len() == 1
+    assert Set.from_iter([CI("ab"), CI("AB")]).len() == 1, "…and so does the Set() ctor"
+    assert Map.from_iter([(CI("ab"), 1), (CI("AB"), 2)]).len() == 1
 
 test fn ci_map_merge_and_update_dedup_on_eq():
     a: Map[CI, int] = {CI("ab"): 1}
@@ -124,7 +124,7 @@ test fn a_user_eq_recurses_through_containers():
     assert (K(1, "x"), 9) == (K(1, "y"), 9), "tuple elements"
     assert {"k": K(1, "x")} == {"k": K(1, "y")}, "map VALUES"
     assert {K(1, "x"): 1} == {K(1, "y"): 1}, "map keys"
-    assert Set([K(1, "x")]) == Set([K(1, "y")]), "set elements"
+    assert Set.from_iter([K(1, "x")]) == Set.from_iter([K(1, "y")]), "set elements"
     assert [[K(1, "x")]] == [[K(1, "y")]], "nested two deep"
     # and a genuine difference is still unequal at every depth
     assert ([K(1, "x")] == [K(2, "x")]) == false
@@ -201,7 +201,7 @@ test fn an_allocating_eq_survives_the_probe():
         m[Alloc(i % 7)] = i
     assert m.len() == 7
     assert m[Alloc(3)] == 199 - ((199 - 3) % 7)
-    s := Set[Alloc]([])
+    s := Set[Alloc].from_iter([])
     for i in 0..200:
         s.insert(Alloc(i % 7))
     assert s.len() == 7
@@ -222,7 +222,7 @@ test fn an_allocating_eq_survives_the_probe():
 # Colliding hashes (`hash` is constant) force multi-candidate probes, which is where this lives.
 
 mut_map: Map[Mut, int] = {}
-mut_set: Set[Mut] = Set([])
+mut_set: Set[Mut] = Set.from_iter([])
 mut_armed: List[int] = []
 
 struct Mut:
@@ -240,7 +240,7 @@ struct Mut:
 
 fn mut_reset(n: int):
     mut_map = {}
-    mut_set = Set([])
+    mut_set = Set.from_iter([])
     while mut_armed.len() > 0:
         mut_armed.remove(0)
     for i in 0..n:
@@ -324,7 +324,7 @@ test fn a_satisfied_conditional_eq_dispatches_from_the_list_builtins():
 
 test fn a_satisfied_conditional_eq_dispatches_from_set_and_map_on_a_collision():
     # every element collides (`hash` is 7), so the container MUST ask `eq` to tell them apart
-    s := Set([cond(1), cond(2), cond(1)])
+    s := Set.from_iter([cond(1), cond(2), cond(1)])
     assert s.len() == 2, "eq is what deduped the colliding elements"
     assert s.contains(cond(2)) == true
     assert (cond(3) in s) == false

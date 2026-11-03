@@ -3,6 +3,7 @@
 
 use super::*;
 use crate::base::builtin::Builtin;
+use crate::base::builtin_method::NativeStatic;
 use crate::base::hooks::Hook;
 
 impl Vm {
@@ -87,11 +88,13 @@ impl Vm {
             Builtin::Str => self.builtin_str(&args, span)?,
             Builtin::Ord => self.builtin_ord(&args, span)?,
             Builtin::Chr => self.builtin_chr(&args, span)?,
-            Builtin::Set => self.builtin_set(&args, span)?,
-            Builtin::List => self.builtin_list(&args, span)?,
-            Builtin::Map => self.builtin_map(&args, span)?,
-            Builtin::ByteArray => self.builtin_bytearray(&args, span)?,
-            Builtin::Bytes => self.builtin_bytes(&args, span)?,
+            // A call on a builtin type's name makes an empty value; the checker admits no argument.
+            Builtin::Set => Value::obj(self.heap.alloc(Obj::Set(SetData::default()))),
+            Builtin::List => Value::obj(self.heap.alloc(Obj::List(Vec::new().into()))),
+            Builtin::Map => Value::obj(self.heap.alloc(Obj::Map(MapData::default()))),
+            Builtin::ByteArray => Value::obj(self.heap.alloc(Obj::ByteArray(RVec::new()))),
+            // The checker rejects every `bytes(...)` call.
+            Builtin::Bytes => unreachable!("bytes() reached the VM"),
             // `Lowering::Print` and `Lowering::Opcode` builtins have opcodes of their own.
             Builtin::Print
             | Builtin::Channel
@@ -370,22 +373,58 @@ impl Vm {
         Ok(out)
     }
 
-    /// `Set()` → empty set; `Set(it)` → a deduped hash set drained from ANY for-iterable.
-    pub(super) fn builtin_set(
+    /// Run a builtin type's static method (`List.from_iter(xs)`) on the `argc` args on the stack
+    /// top, which the checker matched to the decl. Pushes the result.
+    pub(super) fn do_native_static(
         &mut self,
-        args: &[Value],
+        which: NativeStatic,
+        argc: usize,
         span: Span,
-    ) -> Result<Value, RuntimeError> {
-        let src: Vec<Value> = match args {
-            [] => Vec::new(),
-            [one] => self.drain_iterable(*one, span)?,
-            _ => {
-                return Err(self.err(
-                    format!("Set() expects 0 or 1 argument(s), got {}", args.len()),
-                    span,
-                ));
+    ) -> Result<(), RuntimeError> {
+        let at = self.stack.len() - argc;
+        let args: Vec<Value> = self.stack.split_off(at);
+        let (ty, method) = which.key();
+        // A fault names the call that faulted (`bytes.zeroed() size -1 must be non-negative`).
+        let what = format!("{ty}.{method}");
+        let [arg] = args[..] else {
+            return Err(self.err(
+                format!("{ty}.{method}() expects 1 argument, got {}", args.len()),
+                span,
+            ));
+        };
+        let result = match which {
+            NativeStatic::ListFromIter => {
+                let items = self.drain_iterable(arg, span)?;
+                Value::obj(self.heap.alloc(Obj::List(items.into())))
+            }
+            NativeStatic::SetFromIter => self.set_from_iter(arg, span)?,
+            NativeStatic::MapFromIter => self.map_from_iter(arg, span)?,
+            NativeStatic::BytesFromIter => {
+                let bytes = self.bytes_from_iter(&what, arg, span)?;
+                Value::obj(self.heap.alloc(Obj::Bytes(bytes.into_boxed_slice())))
+            }
+            NativeStatic::BytearrayFromIter => {
+                let bytes = self.bytes_from_iter(&what, arg, span)?;
+                Value::obj(self.heap.alloc(Obj::ByteArray(bytes.into())))
+            }
+            NativeStatic::BytesZeroed => {
+                let n = self.int_val(arg).unwrap_or_default();
+                let bytes = self.zero_filled(&what, n, span, super::rvec::try_zeroed_bytes)?;
+                Value::obj(self.heap.alloc(Obj::Bytes(bytes)))
+            }
+            NativeStatic::BytearrayZeroed => {
+                let n = self.int_val(arg).unwrap_or_default();
+                let bytes = self.zero_filled(&what, n, span, RVec::try_zeroed)?;
+                Value::obj(self.heap.alloc(Obj::ByteArray(bytes)))
             }
         };
+        self.push(result);
+        Ok(())
+    }
+
+    /// `Set.from_iter(xs)` → a deduped hash set drained from ANY for-iterable.
+    fn set_from_iter(&mut self, it: Value, span: Span) -> Result<Value, RuntimeError> {
+        let src: Vec<Value> = self.drain_iterable(it, span)?;
         // Root the source elements (as a fresh PRIVATE heap list) so they survive a struct
         // element's re-entrant hash() GC. Phase 0 snapshots each struct/enum element IN
         // PLACE in that rooted list (Go value-key model — a later mutation of the caller's original
@@ -439,47 +478,11 @@ impl Vm {
         Ok(Value::obj(self.heap.alloc(Obj::Set(built?))))
     }
 
-    /// `List()` → a fresh empty list (the `List[T]()` turbofish form; mirrors `Set()`); `List(it)` →
-    /// a list drained from ANY for-iterable.
-    pub(super) fn builtin_list(
-        &mut self,
-        args: &[Value],
-        span: Span,
-    ) -> Result<Value, RuntimeError> {
-        let items = match args {
-            [] => Vec::new(),
-            [one] => self.drain_iterable(*one, span)?,
-            _ => {
-                return Err(self.err(
-                    format!("List() expects 0 or 1 argument(s), got {}", args.len()),
-                    span,
-                ));
-            }
-        };
-        Ok(Value::obj(self.heap.alloc(Obj::List(items.into()))))
-    }
-
-    /// `Map(it)` → a map from an iterable of 2-tuples `(k, v)` (last-wins on dup keys, like the
-    /// `{k: v}` literal). A struct key's `hash()` re-enters the
-    /// VM, so the in-flight key/value are rooted via `hash_key_rooted` while the building map is rooted.
-    pub(super) fn builtin_map(
-        &mut self,
-        args: &[Value],
-        span: Span,
-    ) -> Result<Value, RuntimeError> {
-        let one = match args {
-            // `Map()` → a fresh empty map (the `Map[K, V]()` turbofish form; mirrors `Set()`).
-            [] => return Ok(Value::obj(self.heap.alloc(Obj::Map(MapData::default())))),
-            [one] => one,
-            _ => {
-                return Err(self.err(
-                    format!("Map() expects 0 or 1 argument(s), got {}", args.len()),
-                    span,
-                ));
-            }
-        };
-        let it = *one;
-        // `Map(m)` over a map yields a COPY of it (a map iterates (K, V) pairs, but the copy
+    /// `Map.from_iter(it)` → a map from an iterable of 2-tuples `(k, v)` (last-wins on dup keys,
+    /// like the `{k: v}` literal). A struct key's `hash()` re-enters the VM, so the in-flight
+    /// key/value are rooted via `hash_key_rooted` while the building map is rooted.
+    fn map_from_iter(&mut self, it: Value, span: Span) -> Result<Value, RuntimeError> {
+        // `Map.from_iter(m)` over a map yields a COPY of it (a map iterates (K, V) pairs, but the copy
         // does not rebuild from them).
         if let Some(h) = it.as_obj()
             && let Obj::Map(inner) = self.heap.get(h)
@@ -503,7 +506,7 @@ impl Vm {
                     _ => {
                         return Err(self.err(
                             format!(
-                                "Map() expects an iterable of (key, value) 2-tuples, got {}",
+                                "Map.from_iter() expects an iterable of (key, value) 2-tuples, got {}",
                                 self.type_name(*elem)
                             ),
                             span,
@@ -530,9 +533,9 @@ impl Vm {
         Ok(Value::obj(self.heap.alloc(Obj::Map(built?))))
     }
 
-    /// Collect raw bytes from a byte-sequence-shaped argument for the `bytes`/`bytearray`
-    /// constructors: a `bytes`, a `bytearray` (copy), or a `List[int]` (each element 0..=255, else a
-    /// recoverable fault). The `what` label names the constructor in error messages.
+    /// Collect raw bytes from a byte-sequence-shaped argument: a `bytes`, a `bytearray` (copy), or a
+    /// `List[int]` (each element 0..=255, else a recoverable fault). The `what` label names the call
+    /// in error messages (`bytes.from_iter`, `extend`, `write_bytes`).
     pub(super) fn collect_bytes_arg(
         &self,
         what: &str,
@@ -549,7 +552,7 @@ impl Vm {
                         Some(n) if (0..=255).contains(&n) => out.push(n as u8),
                         Some(n) => {
                             return Err(self.err(
-                                format!("{what}() list element {n} out of range (must be 0..=255)"),
+                                format!("{what}() element {n} out of range (must be 0..=255)"),
                                 span,
                             ));
                         }
@@ -576,55 +579,26 @@ impl Vm {
         }
     }
 
-    /// `bytearray()` → empty; `bytearray(N)` → N zero bytes (Python); `bytearray(b)` → mutable copy of
-    /// a `bytes`; `bytearray(ba)` → copy of another `bytearray`; `bytearray([ints])` → from a list of
-    /// ints (each 0..=255). The MUTABLE buffer (`Obj::ByteArray`, in-place-mutated via the heap slot).
-    pub(super) fn builtin_bytearray(
+    /// The bytes of `bytes.from_iter(xs)` / `bytearray.from_iter(xs)`: a byte sequence or a list
+    /// is read in place, any other iterable is drained to a list first. `what` names the type in
+    /// a fault.
+    fn bytes_from_iter(
         &mut self,
-        args: &[Value],
+        what: &str,
+        it: Value,
         span: Span,
-    ) -> Result<Value, RuntimeError> {
-        let bytes: RVec<u8> = match args {
-            [] => RVec::new(),
-            [one] if let Some(n) = self.int_val(*one) => {
-                self.zero_filled("bytearray", n, span, RVec::try_zeroed)?
-            }
-            [one] => self.collect_bytes_arg("bytearray", *one, span)?.into(),
+    ) -> Result<Vec<u8>, RuntimeError> {
+        let src = match it.as_obj().map(|h| self.heap.get(h)) {
+            Some(Obj::Bytes(_) | Obj::ByteArray(_) | Obj::List(_)) => it,
             _ => {
-                return Err(self.err(
-                    format!("bytearray() expects 0 or 1 argument(s), got {}", args.len()),
-                    span,
-                ));
+                let items = self.drain_iterable(it, span)?;
+                Value::obj(self.heap.alloc(Obj::List(items.into())))
             }
         };
-        Ok(Value::obj(self.heap.alloc(Obj::ByteArray(bytes))))
+        self.collect_bytes_arg(what, src, span)
     }
 
-    /// `bytes(N)` → N zero bytes (Python); `bytes(b)` → copy; `bytes(ba)` → immutable SNAPSHOT of a
-    /// `bytearray`; `bytes([ints])` → from a list of ints. The conversion bridge to the IMMUTABLE form (the other being the `b"..."` literal).
-    pub(super) fn builtin_bytes(
-        &mut self,
-        args: &[Value],
-        span: Span,
-    ) -> Result<Value, RuntimeError> {
-        let bytes: Box<[u8]> = match args {
-            [one] if let Some(n) = self.int_val(*one) => {
-                self.zero_filled("bytes", n, span, super::rvec::try_zeroed_bytes)?
-            }
-            [one] => self
-                .collect_bytes_arg("bytes", *one, span)?
-                .into_boxed_slice(),
-            _ => {
-                return Err(self.err(
-                    format!("bytes() expects 1 argument, got {}", args.len()),
-                    span,
-                ));
-            }
-        };
-        Ok(Value::obj(self.heap.alloc(Obj::Bytes(bytes))))
-    }
-
-    /// The `n` zero bytes of `bytes(n)` and `bytearray(n)` (CPython's rule for both). A negative `n`
+    /// The `n` zero bytes of `bytes.zeroed(n)` and `bytearray.zeroed(n)` (CPython's `bytes(n)` rule). A negative `n`
     /// faults. A block that cannot be allocated is a recoverable fault, not an abort, with no hard
     /// cap, so a large buffer still works; `alloc` zeroes the block, so no page is touched here.
     fn zero_filled<B>(

@@ -322,7 +322,7 @@ fn sum_shard(xs: ConcurrentList[int]) -> int:
 fn sum_values(m: ConcurrentMap[str, int]) -> int:
     return m.fold_entries(0, fn(a: int, k: str, v: int) -> int: a + v)   # per-entry reduce over a shared map
 
-big := ConcurrentList(RwShared(List(0..1000000)))   # wrap existing data; `big.inner` is the box
+big := ConcurrentList(RwShared(List.from_iter(0..1000000)))   # wrap existing data; `big.inner` is the box
 ```
 
 Reduce into a **different** box — an `AtomicInt` counter or a local accumulator — which is the

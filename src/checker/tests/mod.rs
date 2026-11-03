@@ -455,7 +455,7 @@ fn grid_samples(k: super::proto::RecvKind) -> Vec<GridSample> {
             items: &[
                 ("98", "int"),
                 (r#"b"b""#, "bytes"),
-                (r#"bytearray(b"b")"#, "bytearray"),
+                (r#"bytearray.from_iter(b"b")"#, "bytearray"),
             ],
             bad_item: Some((r#""b""#, "str")),
             elem: Some("int"),
@@ -464,11 +464,11 @@ fn grid_samples(k: super::proto::RecvKind) -> Vec<GridSample> {
             ..GRID_BARE
         }],
         RecvKind::ByteArray => vec![GridSample {
-            lit: r#"bytearray(b"abc")"#,
+            lit: r#"bytearray.from_iter(b"abc")"#,
             items: &[
                 ("98", "int"),
                 (r#"b"bc""#, "bytes"),
-                (r#"bytearray(b"b")"#, "bytearray"),
+                (r#"bytearray.from_iter(b"b")"#, "bytearray"),
             ],
             bad_item: Some((r#""b""#, "str")),
             elem: Some("int"),
@@ -628,6 +628,7 @@ mod empty_collections;
 mod ffi;
 mod fn_values;
 mod generics;
+mod hashable_keys;
 mod late_bounds;
 mod names;
 mod none_carriers;

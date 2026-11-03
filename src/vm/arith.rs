@@ -419,6 +419,7 @@ impl Vm {
             | Op::CallStatic { .. }
             | Op::CallStaticDyn { .. }
             | Op::CallBuiltin(..)
+            | Op::CallNativeStatic(..)
             | Op::CallPrint(_)
             | Op::CallPrintSep { .. }
             | Op::Return
@@ -545,6 +546,7 @@ impl Vm {
                 | Op::CallStatic { .. }
                 | Op::CallStaticDyn { .. }
                 | Op::CallBuiltin(..)
+                | Op::CallNativeStatic(..)
                 | Op::CallPrint(_)
                 | Op::CallPrintSep { .. }
                 | Op::Return
@@ -866,6 +868,7 @@ impl Vm {
             | Op::CallStatic { .. }
             | Op::CallStaticDyn { .. }
             | Op::CallBuiltin(..)
+            | Op::CallNativeStatic(..)
             | Op::CallPrint(_)
             | Op::CallPrintSep { .. }
             | Op::Return
@@ -993,6 +996,7 @@ impl Vm {
             | Op::CallStatic { .. }
             | Op::CallStaticDyn { .. }
             | Op::CallBuiltin(..)
+            | Op::CallNativeStatic(..)
             | Op::CallPrint(_)
             | Op::CallPrintSep { .. }
             | Op::Return
@@ -1134,6 +1138,7 @@ impl Vm {
                         | Op::CallStatic { .. }
                         | Op::CallStaticDyn { .. }
                         | Op::CallBuiltin(..)
+                        | Op::CallNativeStatic(..)
                         | Op::CallPrint(_)
                         | Op::CallPrintSep { .. }
                         | Op::Return

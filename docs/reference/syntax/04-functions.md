@@ -293,7 +293,7 @@ Rules:
   `missing required argument 'a'`, ...).
 - A builtin, native or `extern` callee takes no named arguments: `s.insert(x=3)` on a `Set` is
   `'insert' takes no named arguments; pass its arguments positionally`, and so are `chr(65, n=66)` and
-  `Set(xs=[1])`. The exception is `print`: `sep=` (default `" "`) and `end=` (default `"\n"`), both
+  `Set.from_iter(xs=[1])`. The exception is `print`: `sep=` (default `" "`) and `end=` (default `"\n"`), both
   `str` (see [`stdlib.md`](../stdlib/01-builtins.md)). `print("a", end="")` writes `a` with no newline;
   `print("a","b", sep="-", end="!")` writes `a-b!`. Its decl is
   `native fn print(...args: Any, sep: str = " ", end: str = "\n") -> None`.

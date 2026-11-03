@@ -4,6 +4,7 @@
 
 use super::*;
 use crate::ast::{Chunk, Expr, ExprKind, Span, Stmt, StmtKind};
+use crate::base::builtin_method::NativeStatic;
 use crate::base::op::{CapEntry, Op, ProtoId};
 use crate::checker::Resolution;
 use std::collections::HashSet;
@@ -268,6 +269,11 @@ impl Compiler {
                 | Resolution::VariantFn {
                     enum_key, variant, ..
                 } => return self.compile_variant_call(fc, &enum_key, &variant, args, span),
+                Resolution::NativeStatic(which) => {
+                    let argc = self.compile_call_args(fc, call_id, callee, args, named, span)?;
+                    fc.emit(Op::CallNativeStatic(which, argc), span);
+                    return Ok(());
+                }
                 Resolution::MethodFn { type_key, method } => {
                     self.emit_call_static(
                         fc,
@@ -442,6 +448,7 @@ impl Compiler {
                 | Resolution::ParamMethodFn { .. }
                 | Resolution::IndexCall
                 | Resolution::MethodFn { .. }
+                | Resolution::NativeStatic(_)
                 | Resolution::WitnessStatic(_)
                 | Resolution::ModuleMember { .. }
                 | Resolution::Module(_)
@@ -477,7 +484,7 @@ impl Compiler {
     /// type args, and the runtime is generic-ERASED — the value IS the underlying function, method
     /// or variant constructor — so drop the type args and lower only the head. The head is an
     /// `Ident` or a non-tuple `Field` (`m.f[int]`, `Bx[int].put[str]`), and the checker's `Fn`,
-    /// `MethodFn` or `VariantFn` on it is the one fact this erase reads (TICKET-197/204). `false`
+    /// `MethodFn`, `NativeStatic` or `VariantFn` on it is the one fact this erase reads (TICKET-197/204). `false`
     /// when `e` is no such value (a real index), which then compiles as an index.
     pub(super) fn compile_type_applied_fn_value(
         &mut self,
@@ -500,7 +507,10 @@ impl Compiler {
         }
         if !matches!(
             res,
-            Resolution::Fn { .. } | Resolution::MethodFn { .. } | Resolution::VariantFn { .. }
+            Resolution::Fn { .. }
+                | Resolution::MethodFn { .. }
+                | Resolution::NativeStatic(_)
+                | Resolution::VariantFn { .. }
         ) {
             return Ok(false);
         }
@@ -541,6 +551,21 @@ impl Compiler {
             },
             Span::RUNTIME,
         );
+        vf.emit(Op::Return, Span::RUNTIME);
+        self.finish(vf)
+    }
+
+    /// The proto of a builtin type's static method as a value (`List.from_iter`): a fn of the
+    /// decl's arity that makes the call. Memoised by [`Compiler::synth_fn_proto`].
+    pub(super) fn build_native_static_fn(&mut self, which: NativeStatic) -> ProtoId {
+        let (_, method) = which.key();
+        let arity = which.arity();
+        let mut vf = FnComp::new(method.to_string(), arity, false);
+        for i in 0..arity {
+            let slot = vf.add_local(format!("$v{i}"));
+            vf.emit_get_local_raw(slot, Span::RUNTIME);
+        }
+        vf.emit(Op::CallNativeStatic(which, arity), Span::RUNTIME);
         vf.emit(Op::Return, Span::RUNTIME);
         self.finish(vf)
     }

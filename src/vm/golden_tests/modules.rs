@@ -13,7 +13,7 @@ use super::*;
 fn container_ctor_parity() {
     let src = r#"
 fn main():
-    print(List(0..5).len())
+    print(List.from_iter(0..5).len())
     for i in Range(1, 10, 2):
         print(i)
     xs := List[int]()
@@ -31,7 +31,7 @@ fn main():
     print(m["k"])
     m2 := Map[str, int]()
     print(m2.len())
-    s := Set([1, 1, 2, 3, 3])
+    s := Set.from_iter([1, 1, 2, 3, 3])
     print(s.len())
     s2 := Set[int]()
     print(s2.len())

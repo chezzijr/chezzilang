@@ -45,7 +45,7 @@ rs: List[int!str] = [1, !"disk", 3]   # [1, !disk, 3]
   and works at any typed slot.
 - **Implicit wrap at every typed slot** (the full list is "Success-coercion" in §3): a plain `T`
   becomes `?v` at `T?` and at `T!E`. Assignment targets include `x = 5`, `s.f = 5`, `xs[i] = 5`,
-  `x, y = 5, 0`; elements include `List[T](...)` / `Map[K, V](...)` / `Shared[T](...)`. Each branch of
+  `x, y = 5, 0`; elements include `List[T].from_iter(...)` / `Map[K, V].from_iter(...)` / `Shared[T](...)`. Each branch of
   an `if`/`match` value wraps on its own (`x: int? = if c: 5 else: None`).
   - A carrier is never re-wrapped (`x: int?? = ?5` is an error).
   - No int→float step (`fn f() -> float?: return 1` is an error).

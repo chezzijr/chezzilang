@@ -341,3 +341,47 @@ fn a_protocol_method_name_is_read_from_its_std_decl() {
         );
     }
 }
+
+/// A builtin type with a static `from_iter` (its `native struct` decl in `std/prelude.chz`) builds a
+/// value from an iterable only there: a call on the type's name with an argument is a type error that
+/// names the static. The type list is `NativeStatic::ALL`, generated from the decls, so a new
+/// `from_iter` decl joins the rule, and a ctor arm that starts to accept an argument again fails it.
+#[test]
+fn a_builtin_type_with_from_iter_has_no_ctor_with_an_argument() {
+    use chezzi::base::builtin::Builtin;
+    use chezzi::base::builtin_method::NativeStatic;
+    let mut seen = 0;
+    for s in NativeStatic::ALL {
+        let (ty, method) = s.key();
+        if method != "from_iter" {
+            continue;
+        }
+        assert!(
+            Builtin::from_name(ty).is_some(),
+            "`{ty}` declares from_iter but is no builtin ctor"
+        );
+        seen += 1;
+        let dir = std::env::temp_dir().join(format!("chezzi-ctor-arg-{ty}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("main.chz"), format!("x := {ty}([1])\n")).unwrap();
+        let out = std::process::Command::new(env!("CARGO_BIN_EXE_chezzi"))
+            .args(["check", "main.chz"])
+            .current_dir(&dir)
+            .output()
+            .expect("run chezzi");
+        let _ = fs::remove_dir_all(&dir);
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(
+            !out.status.success()
+                && text.contains(&format!("{ty}() takes no argument"))
+                && text.contains(&format!("{ty}.from_iter(xs)")),
+            "`{ty}([1])` must reject and name `{ty}.from_iter`:\n{text}"
+        );
+    }
+    assert!(seen > 0, "no builtin type declares from_iter");
+}

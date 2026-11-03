@@ -63,7 +63,7 @@ test fn list_of_a_channel_holds_the_handle():
     ch.send(m)
     ch.close()
     m["b"] = 2
-    xs := List(ch)
+    xs := List.from_iter(ch)
     assert xs[0].len() == 2
 
 fn m32_take(rv: Channel[Map[str, int]], done: Channel[bool]):

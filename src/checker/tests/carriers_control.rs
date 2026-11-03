@@ -510,8 +510,12 @@ fn range_pattern_ok() {
 #[test]
 fn range_three_arg_typechecks() {
     // `Range(a, b, step)` of ints type-checks and iterates; the removed `range()` call is a parse error.
-    ok("fn main():\n    a: List[int] = List(Range(0, 10, 2))\n    print(a.len())\nmain()\n");
-    ok("fn main():\n    a: List[int] = List(Range(10, 0, -1))\n    print(a.len())\nmain()\n");
+    ok(
+        "fn main():\n    a: List[int] = List.from_iter(Range(0, 10, 2))\n    print(a.len())\nmain()\n",
+    );
+    ok(
+        "fn main():\n    a: List[int] = List.from_iter(Range(10, 0, -1))\n    print(a.len())\nmain()\n",
+    );
     ok("fn main():\n    for i in Range(0, 10, 2):\n        print(i)\nmain()\n");
 }
 
@@ -621,11 +625,11 @@ fn raw_collection_does_not_satisfy_iterator() {
     // error is the grant refusal, not an element-recovery mismatch.
     for (elem, recv) in [
         ("int", "[1, 2, 3]"),
-        ("int", "Set([1, 2])"),
-        ("str", "{\"a\": 1}"), // a map's element is its KEY
+        ("int", "Set.from_iter([1, 2])"),
+        ("(str, int)", "{\"a\": 1}"), // a map's element is its `(key, value)` pair (owner U9)
         ("str", "\"abc\""),
         ("int", "b\"abc\""),
-        ("int", "bytearray(b\"abc\")"),
+        ("int", "bytearray.from_iter(b\"abc\")"),
     ] {
         rejects(
             &format!(

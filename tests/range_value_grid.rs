@@ -310,8 +310,8 @@ impl Use {
             Use::ListComp => "    xs := [i * 2 for i in r]\n    return \"{xs}\"\n",
             Use::SetComp => "    s := {i for i in r}\n    return \"{s.len()}\"\n",
             Use::MapComp => "    m := {i: i * 2 for i in r}\n    return \"{m}\"\n",
-            Use::ListCtor => "    return \"{List(r)}\"\n",
-            Use::SetCtor => "    return \"{Set(r).len()}\"\n",
+            Use::ListCtor => "    return \"{List.from_iter(r)}\"\n",
+            Use::SetCtor => "    return \"{Set.from_iter(r).len()}\"\n",
             Use::Bound => "    return \"{head_sum(r)}\"\n",
             Use::IterParam => "    return \"{head_sum_dyn(r)}\"\n",
             Use::In => "    return \"{[3 in r, 7 in r, 0 in r]}\"\n",
@@ -699,7 +699,7 @@ fn every_slice_row_selects_the_same_elements_in_all_six_sliceable_types() {
         let nums: Vec<i64> = idx.iter().map(|i| [10, 20, 30][*i as usize]).collect();
         let chars: String = idx.iter().map(|i| ['A', 'B', 'C'][*i as usize]).collect();
         body.push_str(&format!(
-            "    print(xs[{src}])\n    print(\"ABC\"[{src}])\n    print(b\"ABC\"[{src}])\n    print(bytearray(b\"ABC\")[{src}])\n    print(cl[{src}])\n    print(bx[{src}])\n"
+            "    print(xs[{src}])\n    print(\"ABC\"[{src}])\n    print(b\"ABC\"[{src}])\n    print(bytearray.from_iter(b\"ABC\")[{src}])\n    print(cl[{src}])\n    print(bx[{src}])\n"
         ));
         want.push_str(&format!(
             "{nums:?}\n{chars}\nb'{chars}'\nbytearray(b'{chars}')\n{nums:?}\n{nums:?}\n"

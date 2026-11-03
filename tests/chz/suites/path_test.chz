@@ -138,7 +138,7 @@ test fn t_byte_exact():
 test fn t_pathlike_inputs_and_chaining():
     assert path.basename("a/b.txt").str() == "b.txt"
     assert path.basename(b"a/b.txt").str() == "b.txt"
-    assert path.basename(bytearray(b"a/b.txt")).str() == "b.txt"
+    assert path.basename(bytearray.from_iter(b"a/b.txt")).str() == "b.txt"
     assert path.basename(path.Path(b"a/b.txt")).str() == "b.txt"
     assert path.with_ext(path.join(["d", "sub", "f"]), "txt").str() == "d/sub/f.txt"
     assert path.stem(path.basename(path.normalize("x/./y/z.tar.gz"))).str() == "z.tar"

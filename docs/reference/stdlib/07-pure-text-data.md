@@ -97,7 +97,7 @@ structurally, so `fs.exists(p)` takes it directly.
 `Display`). The static `Path.new` takes any `PathLike` (`str`, `bytes`, `bytearray`, another `Path`):
 `path.Path.new("/a/b")` and `path.Path.new(b"/a/b")` build the same value; `Path(raw)` only sets the
 `raw: bytes` field. Convert to a mutable buffer with
-`bytearray(p.bytes())` (there is no `bytearray` method).
+`bytearray.from_iter(p.bytes())` (there is no `bytearray` method).
 
 > **Hazard:** `fs.exists(p.str())` on a non-UTF-8 path names a *different* (usually nonexistent) file,
 > because the display is lossy. `PathLike` accepts a `Path` **directly**, so write `fs.exists(p)`. Use

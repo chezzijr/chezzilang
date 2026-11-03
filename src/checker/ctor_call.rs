@@ -461,6 +461,7 @@ impl Checker {
             | Resolution::IndexCall
             | Resolution::Variant { .. }
             | Resolution::MethodFn { .. }
+            | Resolution::NativeStatic(_)
             | Resolution::VariantFn { .. }
             | Resolution::WitnessStatic(_)
             | Resolution::Module(_)

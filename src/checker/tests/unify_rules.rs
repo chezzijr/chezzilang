@@ -199,7 +199,7 @@ fn builtin_operator_and_bound_agree_grid() {
 #[test]
 fn builtin_add_sub_accept_and_reject_boundaries() {
     ok(
-        "a := b\"a\" + bytearray(b\"b\")\nb := bytearray(b\"a\") + b\"b\"\nc := [] + [1]\nd := {1, 2} - {1}\ne := \"a\" + \"b\"\n",
+        "a := b\"a\" + bytearray.from_iter(b\"b\")\nb := bytearray.from_iter(b\"a\") + b\"b\"\nc := [] + [1]\nd := {1, 2} - {1}\ne := \"a\" + \"b\"\n",
     );
     rejects("x := [1] + [\"a\"]\n", "cannot apply + to");
     rejects("x := {1} + {2}\n", "cannot apply + to");
@@ -233,10 +233,10 @@ fn bit_operator_protocols_accept_and_reject_boundaries() {
 #[test]
 fn bytes_order_and_handles_compare_through_protocols() {
     ok(
-        "a := b\"a\" < b\"b\"\nb := bytearray(b\"a\") < bytearray(b\"b\")\nc := b\"a\" < bytearray(b\"b\")\n",
+        "a := b\"a\" < b\"b\"\nb := bytearray.from_iter(b\"a\") < bytearray.from_iter(b\"b\")\nc := b\"a\" < bytearray.from_iter(b\"b\")\n",
     );
     ok(
-        "import Comparable from std.cmp\nfn lt[T: Comparable](a: T, b: T) -> bool:\n    return a < b\nx := lt(b\"a\", b\"b\")\ny := lt(bytearray(b\"a\"), bytearray(b\"b\"))\n",
+        "import Comparable from std.cmp\nfn lt[T: Comparable](a: T, b: T) -> bool:\n    return a < b\nx := lt(b\"a\", b\"b\")\ny := lt(bytearray.from_iter(b\"a\"), bytearray.from_iter(b\"b\"))\n",
     );
     rejects("x := b\"a\" < \"b\"\n", "cannot compare");
     rejects("x := b\"a\" < 1\n", "cannot compare");

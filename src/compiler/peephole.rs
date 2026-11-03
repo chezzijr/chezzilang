@@ -75,6 +75,7 @@ fn bin_kind(op: &Op) -> Option<BinKind> {
         | Op::CallStatic { .. }
         | Op::CallStaticDyn { .. }
         | Op::CallBuiltin(..)
+        | Op::CallNativeStatic(..)
         | Op::CallPrint(_)
         | Op::CallPrintSep { .. }
         | Op::Return
@@ -199,6 +200,7 @@ fn jump_target(op: &Op) -> Option<usize> {
         | Op::CallStatic { .. }
         | Op::CallStaticDyn { .. }
         | Op::CallBuiltin(..)
+        | Op::CallNativeStatic(..)
         | Op::CallPrint(_)
         | Op::CallPrintSep { .. }
         | Op::Return
@@ -320,6 +322,7 @@ fn jump_target_mut(op: &mut Op) -> Option<&mut usize> {
         | Op::CallStatic { .. }
         | Op::CallStaticDyn { .. }
         | Op::CallBuiltin(..)
+        | Op::CallNativeStatic(..)
         | Op::CallPrint(_)
         | Op::CallPrintSep { .. }
         | Op::Return
@@ -450,6 +453,7 @@ fn try_fold_tail(out: &[Op]) -> Option<Fold> {
             | Op::CallStatic { .. }
             | Op::CallStaticDyn { .. }
             | Op::CallBuiltin(..)
+            | Op::CallNativeStatic(..)
             | Op::CallPrint(_)
             | Op::CallPrintSep { .. }
             | Op::Return

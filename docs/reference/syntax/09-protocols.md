@@ -7,7 +7,7 @@ qualified `shapes.Drawable`.
 
 A built-in `List`/`Map`/`Set`/`str`/`bytes`/`bytearray` satisfies a user protocol the same way, from
 its own methods: `protocol Sized: fn len(self) -> int` is satisfied by `[1,2,3]`, `{"a": 1}`,
-`{1, 2}`, `"abc"`, `b"ab"` and `bytearray(b"ab")`. `int`/`float`/`bool` have no methods, so they
+`{1, 2}`, `"abc"`, `b"ab"` and `bytearray.from_iter(b"ab")`. `int`/`float`/`bool` have no methods, so they
 satisfy only an empty protocol. The handles (`Channel`, `Shared`, `RwShared`, `Atomic`, `Executor`,
 `Socket`, `Listener`, `Writer`, `Reader`) do not witness a user protocol.
 

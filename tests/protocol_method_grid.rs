@@ -153,12 +153,12 @@ fn spec(protocol: &str, owner: Owner) -> Spec {
             methods: method(&format!("{m}(self) -> Iterator[int]"), "yield self.n"),
             op: Some(("for q in S(5):\n    print(q)".into(), "5".into())),
             struct_call: (
-                p(&format!("List(a.{m}())")),
+                p(&format!("List.from_iter(a.{m}())")),
                 "S(5), S(6)".into(),
                 "[5]".into(),
             ),
             builtin_call: (
-                p(&format!("List(a.{m}())")),
+                p(&format!("List.from_iter(a.{m}())")),
                 "[5], [6]".into(),
                 "[5]".into(),
             ),

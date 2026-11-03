@@ -15,7 +15,7 @@ for i in 0..=10:       # inclusive: 0 through 10
 r := 0..3              # a value: bind it, pass it, return it, store it, send it across a spawn
 print(r)               # 0..3       — display is the source form (`0..=3`, `..3`, `3..`, `Range(0, 10, 3)`)
 print(3 in r, r.len()) # false 3    — `Contains[int]`; `len` needs a start and an end
-print(List(r), Set(r)) # [0, 1, 2] {0, 1, 2}  — `Iterable[int]` (NOT an `Iterator`: iterate it twice)
+print(List.from_iter(r), Set.from_iter(r)) # [0, 1, 2] {0, 1, 2}  — `Iterable[int]` (NOT an `Iterator`: iterate it twice)
 print(r == Range(0, 3))  # true      — Eq and Hashable on the four fields; a `Range` is a map key
 for i in Range(10, 0, -1):   # 10, 9, 8, … , 1
     print(i)
@@ -52,7 +52,7 @@ A range is a value of type `Range` (the struct of `std/prelude.chz`, in scope in
 
 - Readable fields: `start: int?`, `end: int?`, `step: int = 1`, `inclusive: bool = false`.
 - `for i in 5..:` runs until a `break` (at the top of `int` it faults with `integer overflow in Add`).
-  `3 in 5..` and `xs[5..]` work. `List(5..)` runs until memory ends.
+  `3 in 5..` and `xs[5..]` work. `List.from_iter(5..)` runs until memory ends.
 - A range with no start (`..5`, `..`) cannot be iterated: `a range with no start cannot be iterated`
   (a check error for a literal, a fault for a value).
 - `a()..b()` runs `a()` first, in every position.
@@ -147,13 +147,13 @@ fn total[S: Iterable[int]](src: S) -> int:
         sum = sum + x
     return sum
 total([1, 2, 3])           # 6   (a list)  — also accepts a generator or a `next`-struct
-List([5, 6, 7].iter())     # [5, 6, 7]   (a cursor IS an Iterator[T], so List()/Set() drain it)
+List.from_iter([5, 6, 7].iter())     # [5, 6, 7]   (a cursor IS an Iterator[T], so List()/Set() drain it)
 ```
 
 - A cursor snapshots the collection at `.iter()`.
 - Each `.iter()` is a fresh cursor, but an exhausted cursor yields nothing on a second pass (there is
   no compile-time multi-pass check).
-- `for`, `List(it)` or `Set(it)` on a named cursor consumes it in place, so a partial `for … break`
+- `for`, `List.from_iter(it)` or `Set.from_iter(it)` on a named cursor consumes it in place, so a partial `for … break`
   leaves the rest for a later `next()`/`List()`.
 - A task gets a cursor by handle, like a `list` (M3.4): a `next()` in the task advances the parent's cursor. `Iterable` and `Iterator` are members of `std.iter`.
 

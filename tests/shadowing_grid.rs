@@ -39,6 +39,13 @@ const CELLS: &[(&str, &str, &str)] = &[
         "struct List:\n    n: int\nl: List = List(3)\nprint(l.n)\n",
         "3\n",
     ),
+    // A struct named after a builtin type, with a static method the builtin also declares: the
+    // call through the name reaches the user's static.
+    (
+        "struct-List-from_iter",
+        "struct List:\n    n: int\n    fn from_iter(n: int) -> List:\n        return List(n * 2)\nprint(List.from_iter(4).n)\n",
+        "8\n",
+    ),
     // A struct named after a scalar type. Inside this module `int` IS the struct, as in Go, so its
     // own field takes another type.
     (

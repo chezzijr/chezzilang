@@ -273,6 +273,7 @@ impl FnComp {
             | other @ Op::CallStatic { .. }
             | other @ Op::CallStaticDyn { .. }
             | other @ Op::CallBuiltin(..)
+            | other @ Op::CallNativeStatic(..)
             | other @ Op::CallPrint(_)
             | other @ Op::CallPrintSep { .. }
             | other @ Op::Return
@@ -417,6 +418,7 @@ impl FnComp {
             | other @ Op::CallStatic { .. }
             | other @ Op::CallStaticDyn { .. }
             | other @ Op::CallBuiltin(..)
+            | other @ Op::CallNativeStatic(..)
             | other @ Op::CallPrint(_)
             | other @ Op::CallPrintSep { .. }
             | other @ Op::Return

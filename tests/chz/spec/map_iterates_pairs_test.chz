@@ -12,7 +12,7 @@ test fn a_comprehension_over_a_map_gives_pairs():
     assert [kv for kv in {"a": 1}] == [("a", 1)]
 
 test fn list_of_a_map_gives_pairs():
-    assert List({"a": 1}) == [("a", 1)]
+    assert List.from_iter({"a": 1}) == [("a", 1)]
 
 test fn two_names_unpack_each_pair():
     m := {"a": 1, "b": 2}
@@ -28,7 +28,7 @@ test fn one_name_binds_the_pair():
 
 test fn map_of_a_map_round_trips():
     m := {"a": 1, "b": 2}
-    assert Map(m) == m
+    assert Map.from_iter(m) == m
 
 test fn a_tuple_key_stays_one_value():
     m := {(1, 2): "x"}

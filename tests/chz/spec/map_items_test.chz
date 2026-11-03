@@ -2,7 +2,7 @@
 
 test fn items_round_trips_through_the_map_ctor():
     m := {"a": 1, "b": 2}
-    assert Map(m.items()) == m, "Map(m.items()) round-trips"
+    assert Map.from_iter(m.items()) == m, "Map.from_iter(m.items()) round-trips"
     assert m.items() == [("a", 1), ("b", 2)], "items() is insertion-ordered pairs"
 
 test fn items_follows_keys_order_after_remove_and_reinsert():

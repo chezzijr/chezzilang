@@ -899,7 +899,7 @@ fn generator_fault_trace_includes_driver_frames() {
 /// the faulting one; CPython's traceback names line 11.
 #[test]
 fn generator_fault_trace_names_the_faulting_drain_site() {
-    let src = "fn inner() -> Iterator[int]:\n    yield 1\n    xs := [1]\n    yield xs[5]\nfn outer() -> Iterator[int]:\n    for v in inner():\n        yield v * 2\nfn main():\n    g := outer()\n    print(g.next())\n    print(List(g))\nmain()\n";
+    let src = "fn inner() -> Iterator[int]:\n    yield 1\n    xs := [1]\n    yield xs[5]\nfn outer() -> Iterator[int]:\n    for v in inner():\n        yield v * 2\nfn main():\n    g := outer()\n    print(g.next())\n    print(List.from_iter(g))\nmain()\n";
     let dir = std::env::temp_dir().join("chezzi_gen_trace_test");
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("gf2.chz");
@@ -918,7 +918,7 @@ fn generator_fault_trace_names_the_faulting_drain_site() {
     assert_eq!(
         line_of("outer"),
         11,
-        "outer is called at the faulting List(g)"
+        "outer is called at the faulting List.from_iter(g)"
     );
     assert_eq!(line_of("inner"), 6, "inner is driven by outer's for loop");
 }

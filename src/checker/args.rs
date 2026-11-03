@@ -94,20 +94,6 @@ impl Checker {
         }
     }
 
-    /// TICKET-225 / TICKET-227: the iterable of a type-applied conversion (`List[int8]([300])`,
-    /// `List[int?]([5])`). The turbofish element is the expected type of each element of a list
-    /// literal argument: a constant meets its C width, a plain value wraps into a carrier element
-    /// (`Map[K, V]` elements are `(K, V)` tuples, split per part). Anything else infers bottom-up,
-    /// and the conversion's own element check reports a mismatch.
-    pub(super) fn infer_conv_arg(&mut self, arg: &Expr, elem: Option<Ty>) -> Ty {
-        match elem {
-            Some(e) if matches!(arg.kind, ExprKind::List(..)) && ty_fully_concrete(&e) => {
-                self.infer_arg(arg, Some(&Ty::list(e)))
-            }
-            _ => self.infer_value(arg),
-        }
-    }
-
     /// Infer a single call argument in *checking mode*: the argument owns `expected` as its slot
     /// (a closure literal binds its unannotated params from it, a generic call pre-seeds its type
     /// params, a plain `T` wraps into a `T?`/`T!E`); with no expected type it is the ordinary

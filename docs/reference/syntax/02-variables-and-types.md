@@ -361,7 +361,7 @@ main()
 | `bool` | `true` | |
 | `str` | `"hi"` | UTF-8 |
 | `bytes` | `b"\x01AB"` | immutable byte sequence; `b[i]`→int, `b[a..b]`→bytes, iterates int; `Hashable` |
-| `bytearray` | `bytearray([1,2])` | MUTABLE byte buffer (constructor-only); `ba[i]`→int, `ba[i]=x`, slice→bytearray, `push`/`pop`/`extend`; NOT `Hashable` |
+| `bytearray` | `bytearray.from_iter([1,2])` | MUTABLE byte buffer (no literal); `ba[i]`→int, `ba[i]=x`, slice→bytearray, `push`/`pop`/`extend`; NOT `Hashable` |
 | `List[T]` | `[1, 2]` | growable |
 | `Map[K, V]` | `{"a": 1}` | insertion-ordered hash map; `K` is any `Hashable` type |
 | `Set[T]` | `{1, 2, 3}` | deduped, insertion-ordered hash set; `T` any `Hashable` type; empty is `Set()` |
@@ -377,7 +377,7 @@ main()
   `fn() -> None`) and as the success side of `None!E`. Every value position (`List[None]`, `x: None`,
   `int!None`) is `'None' is not a value type`.
 - The containers spell type and constructor in PascalCase: `List`/`Map`/`Set` (`List[int]`,
-  `Set(xs)`). `tuple` stays lowercase.
+  `Set.from_iter(xs)`). `tuple` stays lowercase.
 
 **`T!= v` is `T! = v`.** The lexer reads an adjacent `!=` as one token. After a type it is the type's
 `!` and then `=`: `y: int!= 6`, `y: const int!= 6`, a parameter `a: int!=5` and a field `a: int!= 5`

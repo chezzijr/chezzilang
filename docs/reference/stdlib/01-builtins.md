@@ -19,7 +19,7 @@ Conventions:
 | Function | Signature | Notes |
 |----------|-----------|-------|
 | `print` | `print(...args: Any, sep: str = " ", end: str = "\n") -> None` | Write each argument (any type) to stdout. Variadic: declared as `native fn print(...args: Any, sep, end)` in `std/prelude.chz`; `Any` is the top type, so every value is accepted. The args are joined by `sep` (default `" "`) and `end` (default `"\n"`) is appended. Both are `str` and keyword-only (the only builtin that takes named arguments). `print("a", end="")` emits `a` with no newline; `print("a","b", sep="-", end="!")` emits `a-b!`. As a value, `print` has the type `fn(...Any, str = …, str = …) -> None` and fits a `fn(...Any) -> None` slot: `p := print; p(1, 2, sep="-")` emits `1-2`, and `fs := [print]; fs[0](1, 2)` emits `1 2`. Only a certain binding (`p := print`) takes `sep=`/`end=`; any other value call uses the defaults. A `fn(Any) -> None` slot does not accept `print` (Go rejects `fmt.Println` as a `func(any)` too). |
-| `Range` | `a..b` / `a..=b` / `..b` / `a..` / `..` / `Range(start, end, step = 1, inclusive = false)` | A range of ints as a VALUE (`std/prelude.chz`, in scope everywhere). Fields `start: int?`, `end: int?`, `step: int`, `inclusive: bool`. `Iterable[int]` (iterate it any number of times), `Contains[int]` (`x in r`), `len()` (needs both bounds), Eq and Hashable. A negative `step` counts down (`Range(10, 0, -1)` yields `10,9,…,1`); `step == 0` faults at construction. There is no `range()`: `range(n)` is `0..n`, `range(a, b)` is `a..b`, `range(a, b, c)` is `Range(a, b, c)`, a list is `List(0..n)`. |
+| `Range` | `a..b` / `a..=b` / `..b` / `a..` / `..` / `Range(start, end, step = 1, inclusive = false)` | A range of ints as a VALUE (`std/prelude.chz`, in scope everywhere). Fields `start: int?`, `end: int?`, `step: int`, `inclusive: bool`. `Iterable[int]` (iterate it any number of times), `Contains[int]` (`x in r`), `len()` (needs both bounds), Eq and Hashable. A negative `step` counts down (`Range(10, 0, -1)` yields `10,9,…,1`); `step == 0` faults at construction. There is no `range()`: `range(n)` is `0..n`, `range(a, b)` is `a..b`, `range(a, b, c)` is `Range(a, b, c)`, a list is `List.from_iter(0..n)`. |
 | `int` | `int(x) -> int` | Convert from `int`/`float`/`bool`/`str` (parses a string; truncates a float). A string parse accepts PEP-515 single underscores between digits (`"1_000"` → `1000`), like the lexer's numeric literals. ASCII digits only: `int("١٢")`/`int("１２")` raise (Go/Rust semantics; CPython's `int()` accepts Unicode decimal digits). A bad string raises (recoverable); for `None` on failure use `s.to_int() -> int?`. |
 | `float` | `float(x) -> float` | Convert from `float`/`int`/`str`. A string parse accepts PEP-515 single underscores between digits (`"1_0.5"` → `10.5`). A bad string raises; for `None` on failure use `s.to_float() -> float?`. |
 | `bool` | `bool(x) -> bool` | Truthiness cast (never faults on a scalar). `int`: `0` → `false`, else `true`. `float`: `0.0`/`-0.0` → `false`, `NaN` → `true` (as Python), else `true`. `bool`: identity. `str`: `""` → `false`, else `true` (not a parse, so `bool(" ")` is `true`). |
@@ -37,19 +37,28 @@ int byte, or a bytes/bytearray subsequence: `Contains[int]` and `Contains[bytes]
 
 The universe builtins `ord`/`chr`/`panic` (first-class `native fn`) and `int`/`float`/`str`/`bytes`/
 `bytearray` (`native ctor`, not first-class) declare their signatures in Chezzi, in the always-linked
-`std/prelude.chz`; the engine binds their bodies by name. `print` (variadic) and the `List`/`Map`/`Set`
-constructors are engine-synthetic. A `native fn`/`native ctor` declaration is legal only in the prelude
+`std/prelude.chz`; the engine binds their bodies by name. `print` (variadic) and the empty `List`/`Map`/`Set`
+constructors are engine-synthetic. The static methods below (`List.from_iter`, `bytes.zeroed`) are
+`native fn` decls with no `self` inside each type's `native struct` in the prelude. A `native fn`/`native ctor` declaration is legal only in the prelude
 and std, never in user code (see `syntax.md` §12c).
 
 ### Container constructors
 
+A call on a builtin type's name makes only an empty value. A value built from an iterable comes from
+the type's static method `T.from_iter(xs)` (Rust `FromIterator::from_iter`, Python `list(xs)`). A call
+on the name with an argument is a type error whose help names the static: `List([1])` reports
+`List() takes no argument` with `help: build a List from an iterable with \`List.from_iter(xs)\``.
+`from_iter` takes any for-iterable whose elements are the type's elements. The elements keep their
+own type: `List[int?].from_iter([5])` is a type error (Rust rejects the same program, E0271), and
+`List[int?].from_iter([?5])` checks.
+
 | Form | Gives | Notes |
 |------|--------|-------|
-| `List[T]()` / `List()` / `List(xs)` | `List[T]` | Empty list (`List[T]()` pins the element type; bare `List()` takes its type from the expected type on the same statement, like `Set()`; an untyped `xs := List()` is an error on that line) / convert an iterable to a list. List literal: `[a, b, c]`. `List[T](xs)` checks `xs`'s elements against `T`. |
-| `Map[K, V]()` / `Map()` / `{}` | `Map[K, V]` | Empty map (`Map[K, V]()` pins the key/value types; bare `Map()` takes its type from the expected type on the same statement; an untyped `m := Map()` is an error on that line). Map literal: `{k: v, ...}`. |
-| `Set[T]()` / `Set()` / `Set(xs)` | `Set[T]` | Empty set (`Set[T]()` pins the element type; `{}` is the empty **map**, not a set; bare `Set()` takes its type from the expected type on the same statement; an untyped `s := Set()` is an error on that line) / set from an iterable. `Set[T](xs)` checks elements against `T`. |
-| `bytes(n)` / `bytes(x)` | `bytes` | `n` zero bytes (the same negative-`n` fault and capacity fault as `bytearray(n)`) / convert a `bytes` / `bytearray` / `List[int]` to `bytes`. To UTF-8 encode a `str`, use `s.encode()` (Python's `bytes(str)` also errors without an encoding). Literal: `b"..."`. |
-| `bytearray()` / `bytearray(n)` / `bytearray(x)` | `bytearray` | Empty growable byte buffer / `n` zero bytes / a mutable copy of a `bytes` or `List[int]`. There is no `bytearray` literal. |
+| `List[T]()` / `List()` / `List.from_iter(xs)` | `List[T]` | Empty list (`List[T]()` pins the element type; bare `List()` takes its type from the expected type on the same statement, like `Set()`; an untyped `xs := List()` is an error on that line) / convert an iterable to a list. List literal: `[a, b, c]`. `List[T].from_iter(xs)` checks `xs`'s elements against `T`. |
+| `Map[K, V]()` / `Map()` / `{}` / `Map.from_iter(pairs)` | `Map[K, V]` | Empty map (`Map[K, V]()` pins the key/value types; bare `Map()` takes its type from the expected type on the same statement; an untyped `m := Map()` is an error on that line) / a map from an iterable of `(K, V)` pairs, last wins on a repeated key; a `Map` iterates its pairs, so `Map.from_iter(m)` copies `m`. Map literal: `{k: v, ...}`. |
+| `Set[T]()` / `Set()` / `Set.from_iter(xs)` | `Set[T]` | Empty set (`Set[T]()` pins the element type; `{}` is the empty **map**, not a set; bare `Set()` takes its type from the expected type on the same statement; an untyped `s := Set()` is an error on that line) / set from an iterable. `Set[T].from_iter(xs)` checks elements against `T`. |
+| `bytes.zeroed(n)` / `bytes.from_iter(xs)` | `bytes` | `n` zero bytes (Python `bytes(n)`; a negative `n` faults `bytes.zeroed() size -1 must be non-negative`, a size that cannot be allocated faults `bytes.zeroed() size ... is too large to allocate`) / the bytes of any iterable of `int` (a `bytes`, a `bytearray`, a `List[int]`, a `Range`, a generator; each element 0–255, else the fault `bytes.from_iter() element 300 out of range (must be 0..=255)`, as Python `bytes(it)`). To UTF-8 encode a `str`, use `s.encode()` (Python's `bytes(str)` also errors without an encoding). Literal: `b"..."`. `bytes()` is a type error. |
+| `bytearray()` / `bytearray.zeroed(n)` / `bytearray.from_iter(xs)` | `bytearray` | Empty growable byte buffer / `n` zero bytes / a mutable buffer of any iterable of `int` (a copy of a `bytes` or `bytearray`). There is no `bytearray` literal. |
 
 ### Which failures fault, and why they are not `T!E`s
 

@@ -1082,7 +1082,7 @@ fn main():
     c["x"] = 1
     c["x"] = c["x"] + 1
     print(c["x"])
-    print(Set([3, 1, 3, 2]).len())
+    print(Set.from_iter([3, 1, 3, 2]).len())
 main()
 "#;
     assert_golden_out(src, "b\n2\n3\n");
@@ -1129,14 +1129,14 @@ fn main():
     sa.insert(c)
     c.x = 9
     print(sa.difference({K(3)}).len())
-    # Map(iterable)
+    # Map.from_iter(iterable)
     d := K(4)
-    mi := Map([(d, "v")])
+    mi := Map.from_iter([(d, "v")])
     d.x = 9
     print(mi.keys()[0].x)
-    # Set(iterable)
+    # Set.from_iter(iterable)
     e := K(5)
-    si := Set([e])
+    si := Set.from_iter([e])
     e.x = 9
     print(si.difference({K(5)}).len())
     # map index-set (general struct-key path)
@@ -1452,14 +1452,14 @@ fn main():
     print(total)
     print([i for i in 0..3])
     print([i for i in 0..10 if i % 2 == 0])
-    print(List(0..10)[Range(None, None, 2)])
-    print(List(0..10)[Range(1, 8, 3)])
-    print(List(0..5).reversed())
+    print(List.from_iter(0..10)[Range(None, None, 2)])
+    print(List.from_iter(0..10)[Range(1, 8, 3)])
+    print(List.from_iter(0..5).reversed())
     match 3:
         1..5: print(\"in\")
         _: print(\"out\")
-    print(List(0..3))
-    print(Set(0..3).len())
+    print(List.from_iter(0..3))
+    print(Set.from_iter(0..3).len())
 main()
 ";
     assert_golden_out(
@@ -1507,7 +1507,7 @@ import std.net
 
 fn client() -> int!:
     sock := net.connect(\"{addr}\")?
-    payload := bytes([0, 255, 128, 10])
+    payload := bytes.from_iter([0, 255, 128, 10])
     n := sock.write_bytes(payload)?
     print(\"WROTE:{{n}}\")
     got := sock.read_bytes(16, 5000)?

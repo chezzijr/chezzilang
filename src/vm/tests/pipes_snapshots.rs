@@ -162,7 +162,7 @@ import std.encoding
 
 fn main():
     print(crypto.sha256_bytes(b\"abc\"))
-    print(crypto.sha256_bytes(bytes(bytearray(b\"abc\"))))
+    print(crypto.sha256_bytes(bytes.from_iter(bytearray.from_iter(b\"abc\"))))
     print(encoding.base64_encode_bytes(b\"\\x00\\xff\"))
 main()
 ";
@@ -243,7 +243,7 @@ fn io_bytes_round_trips_a_binary_file() {
 import std.io
 
 fn go() -> int!:
-    b := bytes([0, 255, 254, 128])
+    b := bytes.from_iter([0, 255, 254, 128])
     io.write_bytes(\"{p}\", b)?
     back := io.read_bytes(\"{p}\")?
     print(back.len())
@@ -282,7 +282,7 @@ fn main():
     print(got.len())
     print(got[0])
     print(got[2])
-    ba := bytearray(b\"\\x01\")
+    ba := bytearray.from_iter(b\"\\x01\")
     parallel:
         spawn print(ba.len())
 main()
@@ -394,7 +394,7 @@ fn intrinsic_grants_all_have_vm_arms() {
         r(
             RecvKind::ByteArray,
             "",
-            "bytearray(b\"abc\")",
+            "bytearray.from_iter(b\"abc\")",
             "0",
             "1",
             "int",
@@ -416,7 +416,7 @@ fn intrinsic_grants_all_have_vm_arms() {
         r(
             RecvKind::Set,
             "",
-            "Set([1, 2])",
+            "Set.from_iter([1, 2])",
             "-",
             "-",
             "int",

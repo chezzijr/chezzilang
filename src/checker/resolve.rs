@@ -202,8 +202,12 @@ impl Checker {
                 return None;
             }
             if th.native_handle {
-                // A native handle's method has no proto, so it is no path value; called, it is a
-                // static call on the type.
+                // A native type's static method (`List.from_iter`) is a member of the path.
+                if let Some(pf) = self.type_member_fn(&th, None, name) {
+                    return pf.res;
+                }
+                // A native handle's instance method has no proto, so it is no path value; called,
+                // it is a static call on the type, which reports it.
                 return self
                     .structs
                     .get(&th.key)

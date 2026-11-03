@@ -17,15 +17,15 @@ test fn huge_negative_step_still_works():
 test fn huge_step_on_str_and_bytes():
     assert "abc"[Range(1, 2, 9223372036854775807)] == "b"
     assert b"abc"[Range(1, 2, 9223372036854775807)] == b"b"
-    ba := bytearray(b"abc")
-    assert ba[Range(1, 2, 9223372036854775807)] == bytearray(b"b")
+    ba := bytearray.from_iter(b"abc")
+    assert ba[Range(1, 2, 9223372036854775807)] == bytearray.from_iter(b"b")
 
 test fn huge_step_under_recover_is_a_value_not_a_crash():
     r := recover: [0, 1, 2, 3][Range(1, None, 9223372036854775807)]
     assert r == ?[1]
 
 test fn huge_step_on_a_range_value():
-    r := List(0..10)
+    r := List.from_iter(0..10)
     assert r[Range(1, 2, 9223372036854775807)] == [1]
     assert r[Range(None, None, 9223372036854775807)] == [0]
     assert r[Range(None, None, -9223372036854775807)] == [9]

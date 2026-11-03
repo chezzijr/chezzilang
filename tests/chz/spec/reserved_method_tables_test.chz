@@ -119,6 +119,6 @@ test fn bytearray_extend_shapes():
     # extend accepts bytes, bytearray, or List[int] — the special-case branch preserved in the checker.
     ba := bytearray()
     ba.extend("ab".encode())          # bytes
-    ba.extend(bytearray("cd".encode()))  # bytearray
+    ba.extend(bytearray.from_iter("cd".encode()))  # bytearray
     ba.extend([101, 102])             # List[int]
     assert ba.decode() == "abcdef"

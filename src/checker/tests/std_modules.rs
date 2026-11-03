@@ -291,8 +291,10 @@ fn harvest_native_method_own_type_params() {
     let src = "native struct Foo[T]:\n    native fn map[U](self, f: fn(T) -> U) -> List[U]\n";
     let module = parser::parse(lexer::tokenize(src).unwrap()).unwrap();
     let mut c = Checker::new();
-    let info = c
-        .harvest_native_struct_table(&module, "Foo")
+    let (_, info) = c
+        .harvest_native_struct_tables(&module)
+        .into_iter()
+        .find(|(n, _)| n == "Foo")
         .expect("harvest Foo");
     let sig = info.methods.get("map").expect("Foo.map harvested");
     assert_eq!(sig.type_params.len(), 1, "method own [U] on the sig");
@@ -1696,7 +1698,9 @@ fn set_methods_typecheck() {
 
 #[test]
 fn set_builtin_empty_and_from_list() {
-    ok("e: Set[str] = Set()\ne.insert(\"x\")\nf: Set[int] = Set([1, 1, 2])\nprint(f.len())\n");
+    ok(
+        "e: Set[str] = Set()\ne.insert(\"x\")\nf: Set[int] = Set.from_iter([1, 1, 2])\nprint(f.len())\n",
+    );
 }
 
 #[test]
@@ -1797,7 +1801,12 @@ fn builtin_iterable_rows() -> Vec<IterRow> {
             ),
             RecvKind::Str => row("str", "v := 'ab'", "str", "['a', 'b']"),
             RecvKind::Bytes => row("bytes", "v := b'AB'", "int", "[65, 66]"),
-            RecvKind::ByteArray => row("bytearray", "v := bytearray(b'AB')", "int", "[65, 66]"),
+            RecvKind::ByteArray => row(
+                "bytearray",
+                "v := bytearray.from_iter(b'AB')",
+                "int",
+                "[65, 66]",
+            ),
             RecvKind::Channel => row(
                 "Channel",
                 "v := Channel[int](2)\n    v.send(4)\n    v.send(5)\n    v.close()",
@@ -1902,7 +1911,7 @@ const USER_ROWS: &[IterRow] = &[IterRow {
 }];
 
 /// TICKET-279: one answer to "what does `for x in v` yield", for every Iterable type x every
-/// position (`for`, comprehension, `List(...)`, `v.iter()`, a tuple target). A cell is red when
+/// position (`for`, comprehension, `List.from_iter(...)`, `v.iter()`, a tuple target). A cell is red when
 /// the checker rejects it, or when its run prints other than the ancestor's elements.
 #[test]
 fn iterable_yields_grid() {
@@ -1930,8 +1939,11 @@ fn iterable_yields_grid() {
                 format!("    got: List[{elem}] = []\n    for x in v:\n        got.push(x)\n"),
             ),
             ("comprehension", "    got := [x for x in v]\n".to_string()),
-            ("List()", "    got := List(v)\n".to_string()),
-            ("v.iter()", "    got := List(v.iter())\n".to_string()),
+            ("List()", "    got := List.from_iter(v)\n".to_string()),
+            (
+                "v.iter()",
+                "    got := List.from_iter(v.iter())\n".to_string(),
+            ),
         ];
         if elem.starts_with('(') {
             cells.push((

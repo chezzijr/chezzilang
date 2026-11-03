@@ -1155,15 +1155,14 @@ fn native_struct_parses_native_methods() {
 }
 
 #[test]
-fn native_struct_method_requires_self() {
-    // Phase 4c-followup — a self-less native instance method is now a reserved-static error.
-    let e = parse_err("native struct S:\n    native fn read(n: int)\n");
-    assert!(
-        e.message
-            .contains("must declare `self` as its first parameter"),
-        "unexpected error: {}",
-        e.message
-    );
+fn native_struct_method_without_self_is_static() {
+    // A `native fn` with no `self` in a native struct is a static method, as in a user struct.
+    let m = parse_ok("native struct S:\n    native fn read(n: int)\n");
+    let StmtKind::NativeStruct { methods, .. } = &m.stmts[0].kind else {
+        panic!("expected a native struct, got {:?}", m.stmts[0].kind);
+    };
+    assert_eq!(methods[0].name, "read");
+    assert!(!methods[0].params.first().is_some_and(|p| p.is_self()));
 }
 
 #[test]
@@ -1279,12 +1278,11 @@ fn native_enum_parses_self_methods() {
 
 #[test]
 fn native_enum_method_requires_self() {
-    // A self-less native instance method inside a native enum is rejected (reserved-static error),
-    // exactly like native structs.
+    // A native enum has no static methods: a self-less method inside one is rejected.
     let e = parse_err("native enum E[T]:\n    A(T)\n    native fn foo() -> int\n");
     assert!(
         e.message
-            .contains("must declare `self` as its first parameter"),
+            .contains("a native enum method must declare `self` as its first parameter"),
         "unexpected error: {}",
         e.message
     );

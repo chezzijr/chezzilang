@@ -35,13 +35,13 @@ test fn float_repr_breaks_an_exact_tie_to_even():
     assert str(5.960464477539063e-8) == "5.960464477539063e-08"
 
 test fn bytes_ctor():
-    b := bytes([104, 105])
+    b := bytes.from_iter([104, 105])
     assert b.len() == 2
     assert b[0] == 104
     assert b[1] == 105
 
 test fn bytearray_ctor_and_push():
-    ba := bytearray([65, 66])
+    ba := bytearray.from_iter([65, 66])
     assert ba.len() == 2
     assert ba[0] == 65
     ba.push(67)

@@ -43,7 +43,7 @@ const ROOTS: [(&str, &str, &str, &str, &str); 6] = [
     (
         "bytearray",
         "bytearray",
-        "bytearray([0])",
+        "bytearray.from_iter([0])",
         "buf.push(1)",
         "",
     ),

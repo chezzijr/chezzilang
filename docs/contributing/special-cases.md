@@ -44,10 +44,10 @@ day's binary.
 | # | Rule | Removes | Status | Decision needed |
 |---|---|---|---|---|
 | U1 | A dedent ends a block expression; an `else` belongs to the statement whose header starts at its column | Family A of wave 23, S1-1, S1-2 | TICKET-249 (landed) | no (owner: indentation decides) |
-| U2 | A hook is the method that satisfies the builtin protocol; a declared type with methods is one kind (struct and enum alike) | Family D of wave 23, enum half-hooks, `List(s)` for a bounded parameter | TICKET-250 (done) | no |
+| U2 | A hook is the method that satisfies the builtin protocol; a declared type with methods is one kind (struct and enum alike) | Family D of wave 23, enum half-hooks, `List.from_iter(s)` for a bounded parameter | TICKET-250 (done) | no |
 | U3 | A receiver is the first parameter of a method and nothing else | the `self` universal cast (P0) | TICKET-250 (note added) | no (owner: `self` is the special word) |
 | U4 | An un-hinted `?x` is a carrier from creation; a wrapper holds its operand | Families B and C of wave 23 | TICKET-248, TICKET-247 (landed) | no |
-| U5 | An operator accepts a type exactly when the type satisfies the operator's protocol; builtin types declare their protocols like user types | `in`/`Contains`, `+`/`Add`, `==`/`Eq`, display/`Stringable`, sibling-type holes | TICKET-257 (landed); re-run 2026-10-16; `false < true`, `bytes(2)`, `"ab" * 3` (now `.repeat`) and `match 1.5:` landed 2026-11-03; still open: enum `.copy()` (waits on the Copy protocol), `{1, 2}.map(f)` | decided, see below |
+| U5 | An operator accepts a type exactly when the type satisfies the operator's protocol; builtin types declare their protocols like user types | `in`/`Contains`, `+`/`Add`, `==`/`Eq`, display/`Stringable`, sibling-type holes | TICKET-257 (landed); re-run 2026-10-16; `false < true`, `bytes.zeroed(2)`, `"ab" * 3` (now `.repeat`) and `match 1.5:` landed 2026-11-03; still open: enum `.copy()` (waits on the Copy protocol), `{1, 2}.map(f)` | decided, see below |
 | U6 | One iteration source: `for`, comprehensions, `List()`/`Set()`/`Map()`, destructuring and `Iterable` ask one function | range, channel, Set of tuples, std containers, `std.iter` | TICKET-253 (ranges), TICKET-257 (channels) | decided, see below |
 | U7 | A range is a value | every "a range is only valid as" site, `range()`, slice spelling | TICKET-253, TICKET-254 (landed) | decided, see below |
 | U8 | A block expression is an expression wherever layout exists, and layout exists inside brackets and interpolation holes | `match`/`recover:` rejected inside brackets, parameter default against field default, inline fn body against lambda body, line breaks in a hole | TICKET-260 (landed); re-run 2026-10-16: still open a line break inside a hole | decided, see below |
@@ -69,12 +69,12 @@ These settle rules U5 to U10, U15 and U16. Ancestor output is from programs that
 | Rule | Decision |
 |---|---|
 | U5 | An operator requires its protocol. `a in b` requires `b: Contains[A]`; `for a in b` requires `b: Iterable[A]`. Builtin types declare their protocols like user types, with conditions where needed (`List[T]: Contains[T] where T: Eq`). |
-| U6, U7 | A range is a value of type `Range`. `a..b` and `a..=b` (inclusive, as Rust) build one. Fields: `start: int?`, `end: int?`, `step: int = 1`, `inclusive: bool = false`. The constructor and the literal build the same value (`Range(5, None) == 5..`, `Range(0, 3, inclusive=true) == 0..=3`), and every rule is a rule about the value, not the spelling. Open ends `..b` and `a..` exist for slices. `Range` satisfies `Iterable[int]` (not `Iterator`: one range can be iterated twice) and `Contains[int]`. The literal has no step syntax; `Range(a, b, step)` is the one place for a step. `range()` is deleted: `range(n)` becomes `0..n`, `range(a, b, c)` becomes `Range(a, b, c)`, and a use that needs a list writes `List(0..n)`. |
+| U6, U7 | A range is a value of type `Range`. `a..b` and `a..=b` (inclusive, as Rust) build one. Fields: `start: int?`, `end: int?`, `step: int = 1`, `inclusive: bool = false`. The constructor and the literal build the same value (`Range(5, None) == 5..`, `Range(0, 3, inclusive=true) == 0..=3`), and every rule is a rule about the value, not the spelling. Open ends `..b` and `a..` exist for slices. `Range` satisfies `Iterable[int]` (not `Iterator`: one range can be iterated twice) and `Contains[int]`. The literal has no step syntax; `Range(a, b, step)` is the one place for a step. `range()` is deleted: `range(n)` becomes `0..n`, `range(a, b, c)` becomes `Range(a, b, c)`, and a use that needs a list writes `List.from_iter(0..n)`. |
 | U7, slices | `xs[a..b]` replaces `xs[a:b]`. A type is sliceable through `Slice` with `slice(self, r: Range)`. Open ends: `xs[..2]`, `xs[3..]`. Negative bounds stay (`xs[-2..]`). `xs[::-1]` becomes `xs.reversed()`. A stepped range slices: `xs[Range(0, 10, 2)]` obeys the step, so no new method is needed. Out-of-range bounds clamp as CPython. No `r[i]` on a `Range`; `Range` is `Eq` and `Hashable`. `..` binds below arithmetic and above comparison and `in`. |
-| U7, open ends | `for i in 5..` is lazy and legal; at the top of `int` it faults with the integer-overflow fault. The collectors do not test for a range: `List(5..)` behaves as `List` of any infinite iterator does and runs until memory ends (Rust does the same). The rules live in `Range`'s own methods: `.len()` on a range with a missing bound faults, and a range with no start cannot be iterated. Open ends work in a slice and with `in`. A general memory fault (CPython raises `MemoryError`) is a possible later feature, not planned. |
+| U7, open ends | `for i in 5..` is lazy and legal; at the top of `int` it faults with the integer-overflow fault. The collectors do not test for a range: `List.from_iter(5..)` behaves as `List` of any infinite iterator does and runs until memory ends (Rust does the same). The rules live in `Range`'s own methods: `.len()` on a range with a missing bound faults, and a range with no start cannot be iterated. Open ends work in a slice and with `in`. A general memory fault (CPython raises `MemoryError`) is a possible later feature, not planned. |
 | U7, negative bounds | A negative bound means "count from the end" in every slice form. One function resolves a `Range` against a length `n`: a missing start is 0 and a missing end is `n`; a negative bound `b` becomes `b + n`; an inclusive end adds 1 after that; both bounds clamp to `0..n`; start >= end gives an empty result. `xs[0..=-1]` is the whole list. A plain index stays strict: `xs[-4]` faults. Rust has no negative index; CPython owns this rule. |
 | U16, reverse | `reversed()` returns a new value on `List`, `str`, `bytes`, `bytearray`. `reverse()` changes in place and exists on `List` and `bytearray` only. `str.reverse()` is deleted. |
-| U6, channels | `Channel[T]` satisfies `Iterable[T]`. `for v in ch` ends when the channel is closed and empty; `List(ch)` blocks until then (Rust: `rx.iter().collect()`). The comprehension veto and the `for`-only arms go away. |
+| U6, channels | `Channel[T]` satisfies `Iterable[T]`. `for v in ch` ends when the channel is closed and empty; `List.from_iter(ch)` blocks until then (Rust: `rx.iter().collect()`). The comprehension veto and the `for`-only arms go away. |
 | U8 | A block expression is legal in value position only: the right side of `:=`, `=`, `return`, `yield`, and a lambda body. The `if` form is an expression only on one line (`if a: b else: c`, with `elif`); an `if` with an indented block is a statement, because a Chezzi block has no tail value. A `match` used as a value has expression arms. Open: the `recover:` block (see below). |
 | U9 | One unpacking grammar at `:=`, `for`, comprehensions and `match`. No outer parentheses (`a, b := t`, as Python); a nested pattern takes parentheses (`a, (b, c) := t`); `_` skips a slot; a bare tuple is a tuple at the end of a statement (`return a, b`, `x := 1, 2`). Only shapes whose size the checker knows unpack outside `match`: tuples and struct fields. No list unpack and no `*rest`. An enum variant unpacks in `match` only. |
 | U10 | A type name is never a value. A parameter of type `fn(T) -> U` accepts a function; `xs.map(MyStruct)`, `xs.map(E.Variant)` and `xs.map(str)` are errors that say the name is a type, and the user writes `fn(e): MyStruct(e)`. |
@@ -88,7 +88,7 @@ These settle rules U5 to U10, U15 and U16. Ancestor output is from programs that
 - A type that declares both `slice(self, r: Range)` and `index(self, k: Range)` is a declaration error:
   `x[r]` would be ambiguous. No precedence rule. A `Map` with range keys has no `slice`, so `m[0..3]`
   is a key lookup.
-- "Inclusive" means "include the end value" for each step direction: `List(Range(2, 0, -1,
+- "Inclusive" means "include the end value" for each step direction: `List.from_iter(Range(2, 0, -1,
   inclusive=true))` is `[2, 1, 0]`, and a slice selects the positions the range yields.
 - `g[0..2].push([9])` changes a temporary copy that the program drops. It gets one warning (`'push'
   changes a temporary copy; the result is dropped`, TICKET-254) at top level and inside a spawned
@@ -123,7 +123,7 @@ Sibling types that differed with no stated reason:
 | `int? < int?`, `false < true` (2026-11-03) | `int!str < int!str` | Rust orders both |
 | struct has automatic `.copy()` | enum has none | Rust derives `Clone` on both |
 | `iter.islice({1, 2}, 1)`, `[1.5].sum()` | `iter.enumerate({1, 2})`, `iter.sum([1.5])`, `{1, 2}.map(f)`, `xs.extend({2})`, `",".join({"a"})` | CPython works |
-| `bytearray()`, `bytearray(2)`, `bytes(2)` (2026-11-03) | `bytes()`, `bytes({1, 2})` | CPython works |
+| `bytearray()`, `bytearray.zeroed(2)`, `bytes.zeroed(2)`, `bytes.from_iter({1, 2})` (2026-11-03) | `bytes()` | CPython works |
 | `match` literal patterns for int, float (2026-11-03), str, bool, tuple | bytes | CPython `case 1.5:` |
 
 Hook spelling (U16): `remove` returns `V?` on Map, `bool` on Set, nothing on the concurrent
@@ -285,6 +285,7 @@ Gates stop new disagreement. The unifying rules above repair what exists.
 | builtin types declare their protocols in `std/*.chz` like user types, and every operator asks the one conformance decider | most of the 888 builtin-type arms; every operator-against-bound disagreement |
 | one method table per type; the run time dispatches from the table, not from name strings | the 226 name tests in `src/vm` |
 | no wildcard arm on a language enum (G1) | the "new construct silently absorbed" class |
+| a builtin type's constructor only makes an empty value; `T.from_iter(xs)` / `T.zeroed(n)` are static `native fn` decls of its prelude `native struct` (2026-11-03) | the checker's and the VM's per-type constructor-with-argument arms, the hand list of prelude type names in `hoist.rs` / `graph_pass.rs`, and `infer_conv_arg` |
 
 Do these before the JIT: a JIT adds one more copy of each by-name dispatch.
 
@@ -306,7 +307,7 @@ Owner direction (2026-10-11): fixes are done outside the pipeline for now.
 ## Documented as deliberate (class A), for the owner to reconfirm
 
 - A tuple is not iterable, indexable or sized; only `.N` and destructuring.
-- `float` is not Hashable. `Map(m)` is rejected (TICKET-160).
+- `float` is not Hashable. A Map iterates its `(k, v)` pairs, so `Map.from_iter(m)` copies `m`.
 - Int `/` truncates and `%` follows the dividend (`-7 / 2` is `-3`; CPython `-4`).
 - A present `T?` prints as its bare payload.
 - Types, `import`, `test fn`, `extern`, `native` are top-level only (owner decision).

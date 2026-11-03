@@ -222,7 +222,7 @@ nobody to send faults in milliseconds instead of hanging, while `ex.submit(fn():
     `?(b"")` is the EOF sentinel; `read_bytes(0)` is a no-op `?(b"")` that still errs on a closed
     socket; and it **drains any carried tail first**, including the undecodable bytes a str `read`'s
     sticky `!"invalid utf-8 …"` refused to deliver, so mixing the two on one socket is lossless.
-    `write_bytes` takes a `bytes` (convert a `bytearray` with `bytes(ba)`). `timeout_ms` behaves as
+    `write_bytes` takes a `bytes` (convert a `bytearray` with `bytes.from_iter(ba)`). `timeout_ms` behaves as
     for `read`/`write`.
 - `Listener`: `accept(timeout_ms?: int) -> Socket!` · `addr() -> str!` · `close() -> None`.
   `close()` from another task wakes a task parked in `accept`; that call returns the error `accept on a

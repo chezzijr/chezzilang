@@ -561,17 +561,17 @@ fn native_cells() -> Vec<Cell> {
     vec![
         cell(
             "builtin_receiver/pos",
-            "s := Set([1, 2])\ns.insert(3)\nprint(s.len())\n",
+            "s := Set.from_iter([1, 2])\ns.insert(3)\nprint(s.len())\n",
             prints("3"),
         ),
         cell(
             "builtin_receiver/kw",
-            "s := Set([1, 2])\ns.insert(x=3)\nprint(s.len())\n",
+            "s := Set.from_iter([1, 2])\ns.insert(x=3)\nprint(s.len())\n",
             Expect::Rejects("'insert' takes no named arguments"),
         ),
         cell(
             "builtin_receiver_user_twin/kw",
-            &format!("{counter}s := Set([1, 2])\ns.insert(x=3)\nprint(s.len())\n"),
+            &format!("{counter}s := Set.from_iter([1, 2])\ns.insert(x=3)\nprint(s.len())\n"),
             Expect::Rejects("'insert' takes no named arguments"),
         ),
         cell("native_method/pos", &sock("sk.read(10, 5)"), prints("ok")),
@@ -598,13 +598,23 @@ fn native_cells() -> Vec<Cell> {
         ),
         cell(
             "builtin_ctor/pos",
-            "s: Set[int] = Set([1])\nprint(s.len())\n",
-            prints("1"),
+            "s := Set[int]()\nprint(s.len())\n",
+            prints("0"),
         ),
         cell(
             "builtin_ctor/kw",
-            "s: Set[int] = Set(xs=[1])\nprint(s.len())\n",
+            "s := Set[int](xs=[1])\nprint(s.len())\n",
             Expect::Rejects("'Set' takes no named arguments"),
+        ),
+        cell(
+            "builtin_static/pos",
+            "s: Set[int] = Set.from_iter([1])\nprint(s.len())\n",
+            prints("1"),
+        ),
+        cell(
+            "builtin_static/kw",
+            "s: Set[int] = Set.from_iter(xs=[1])\nprint(s.len())\n",
+            Expect::Rejects("'from_iter' takes no named arguments"),
         ),
         cell(
             "fn_field/pos",

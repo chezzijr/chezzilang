@@ -86,7 +86,7 @@ r'C:\tmp'     # str — raw, single-quote / uppercase R"…" both work; cannot c
 r"""{"k": [1,2]}"""  # str — triple raw: embeds quotes + braces verbatim (best for JSON / brace-heavy)
 b"\x01\x02AB"  # bytes — byte-string literal; \xHH hex byte + \n \t \r \\ \" \' \0; no \u, no interp
 b'\xff'       # bytes — single quotes / uppercase B'…' both work; raw byte >=0x80 must use \xHH
-bytearray([1, 2, 3])  # bytearray — MUTABLE byte buffer; constructor-only (no literal), see below
+bytearray.from_iter([1, 2, 3])  # bytearray — MUTABLE byte buffer; no literal, see below
 [1, 2, 3]     # List[int]
 {"a": 1}      # Map[str, int]
 ```
@@ -112,17 +112,17 @@ ordinary `str`, lexed verbatim:
   example JSON: `r"""{"k": [1,2]}"""`.
 - Not supported: a raw-bytes prefix `rb"..."` and Rust-style `r#"..."#` delimiters.
 
-**`bytearray` — the MUTABLE sibling (Python `bytearray` model).** Constructor-only (no literal):
-`bytearray()` (empty), `bytearray(N)` (N zero bytes), `bytearray(b)` (a mutable copy of a `bytes`),
-`bytearray([ints])` (each element 0–255).
+**`bytearray` — the MUTABLE sibling (Python `bytearray` model).** No literal:
+`bytearray()` (empty), `bytearray.zeroed(N)` (N zero bytes), `bytearray.from_iter(xs)` (the bytes of
+any iterable of `int`: a `bytes`, a `bytearray`, a `List[int]`, a `Range`; each element 0–255).
 
 - `ba[i]` → `int` 0–255. `ba[i] = x` mutates in place; the value must be 0–255 and the index in range,
   else a recoverable panic. `ba[a..b]` → a NEW `bytearray` (copy, byte offsets).
 - `for x in ba` yields `int`. Methods: `ba.len()`, `.push(int)`, `.pop() -> int?`,
   `.extend(bytes | bytearray | List[int])`.
-- `==`/`!=` are structural; `b"a" == bytearray([97])` is content-equal (as in Python).
+- `==`/`!=` are structural; `b"a" == bytearray.from_iter([97])` is content-equal (as in Python).
 - `bytearray` is NOT `Hashable` (mutable, like `list`/`set`/`map`).
-- Repr: `bytearray(b'...')`. `bytes(ba)` gives an immutable snapshot; `bytearray(b)` a mutable copy.
+- Repr: `bytearray(b'...')`. `bytes.from_iter(ba)` gives an immutable snapshot; `bytearray.from_iter(b)` a mutable copy.
 - A task gets a `bytearray` by handle, like a `list` (M3.4): a write in the task lands on the parent's buffer.
 - Not supported: a `byte`/`u8` scalar, non-UTF-8 codecs, base64/hex.
 
@@ -133,29 +133,33 @@ ordinary `str`, lexed verbatim:
 | str → bytes (UTF-8) | `s.encode()` | `bytes` | method on `str`; always succeeds (str is UTF-8 internally) |
 | bytes → str (UTF-8) | `b.decode()` | `str` | method on `bytes`; **recoverable** fault on invalid UTF-8 |
 | bytearray → str (UTF-8) | `ba.decode()` | `str` | identical to `bytes.decode()` (decodes the current buffer) |
-| any iterable → list | `List(it)` | `List[T]` | `it` is any **for-iterable**; `T` is the element type. `List[T]()` / `List()` are the empty forms. |
-| any iterable → set | `Set(it)` | `Set[T]` | dedup; `T` must be `Hashable`; `Set[T]()` / `Set()` (0 args) is the empty set |
-| iterable of 2-tuples → map | `Map(it)` | `Map[K, V]` | `it` yields `(K, V)` pairs; last-wins on dup keys; `K` `Hashable`. `Map[K, V]()` / `Map()` are the empty forms. |
+| any iterable → list | `List.from_iter(it)` | `List[T]` | `it` is any **for-iterable**; `T` is the element type. `List[T]()` / `List()` are the empty forms. |
+| any iterable → set | `Set.from_iter(it)` | `Set[T]` | dedup; `T` must be `Hashable`; `Set[T]()` / `Set()` (0 args) is the empty set |
+| iterable of 2-tuples → map | `Map.from_iter(it)` | `Map[K, V]` | `it` yields `(K, V)` pairs; last-wins on dup keys; `K` `Hashable`. `Map[K, V]()` / `Map()` are the empty forms. |
 
 `.encode()`/`.decode()` are UTF-8 only; there is no encoding-name argument.
 `"héllo".encode().decode() == "héllo"` round-trips. `b"\xff\xfe".decode()` faults recoverably
 (`recover:` catches it).
 
-`List(it)` / `Set(it)` / `Map(it)` accept any for-iterable, the same set `for x in it` accepts:
+`List.from_iter(it)` / `Set.from_iter(it)` / `Map.from_iter(it)` (the static `from_iter` of each type's
+`native struct` decl in `std/prelude.chz`) accept any for-iterable, the same set `for x in it` accepts:
 `list`, `set`, `str` (per-char `str`), `bytes`/`bytearray` (per-byte `int`), `map` (`(key, value)` pairs),
-`Channel` (`List(ch)` drains it until the channel is closed and empty), a `Range` value, and a user
-struct with `next(self) -> T?`. They do not need an `Iterable[T]` bound.
+`Channel` (`List.from_iter(ch)` drains it until the channel is closed and empty), a `Range` value, and a user
+struct with `next(self) -> T?`. They do not need an `Iterable[T]` bound. A call on the type's name
+makes only an empty value: `List([1])` is a type error whose help names `List.from_iter(xs)`.
 
 - `List[T]()` / `Map[K, V]()` / `Set[T]()` take a turbofish that pins the types.
 - The bare `List()` / `Map()` / `Set()` take their type from the expected type on the same statement
   (`xs: List[int] = List()`), like `[]` / `{}`. An untyped `xs := List()` is an error (see
   "Inference" in §10). The literals stay the idiomatic empty forms.
-- A turbofish with an argument checks the elements: `List[int]([1, 2])` is fine, `List[int](["a"])`
-  is a static error.
-- `Map(it)`'s element must be exactly a 2-tuple `(K, V)`; anything else is a static type error.
+- A turbofish on the static checks the elements: `List[int].from_iter([1, 2])` is fine,
+  `List[int].from_iter(["a"])` is a static error (`iterator element type str does not match the
+  declared element type int`). The elements keep their own type, so `List[int?].from_iter([5])` is
+  an error too (help: `write each element as \`?x\``), and `List[int?].from_iter([?5])` checks.
+- `Map.from_iter(it)`'s element must be exactly a 2-tuple `(K, V)`; anything else is a static type error.
 
-> **`Map(it)` vs `xs.map(f)` do not clash.** `Map(pairs)` is the constructor (a bare-name call);
-> `xs.map(f)` is the `List` method. `Map([(1, "a")])` builds a `Map[int, str]` while
+> **`Map.from_iter(it)` vs `xs.map(f)` do not clash.** `Map.from_iter(pairs)` is a static method of the type;
+> `xs.map(f)` is the `List` method. `Map.from_iter([(1, "a")])` builds a `Map[int, str]` while
 > `[1, 2].map(double)` transforms a list.
 
 **Multi-line literals & trailing commas.** Inside `[]`, `{}` and `()` newlines and indentation are

@@ -770,14 +770,9 @@ const GRAMMAR_LOOSER: &[(&str, &str, &str)] = &[
         "context: a `wait:` of one `else:` arm has nothing to race",
     ),
     (
-        "nativeStructMember",
-        "native instance method must declare `self`",
-        "context: the first param of a native method is `self`",
-    ),
-    (
         "nativeEnumMembers",
-        "native instance method must declare `self`",
-        "context: the first param of a native method is `self`",
+        "a native enum method must declare `self`",
+        "context: a native enum has no static methods; the first param of its method is `self`",
     ),
     (
         "nativeHead",

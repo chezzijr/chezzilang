@@ -125,8 +125,8 @@ test fn struct_key_map():
     assert m.len() == 1
 
 test fn struct_set_algebra():
-    a: Set[P] = Set([P(1), P(2), P(2), P(3)])   # P(2) deduped by hash
-    b: Set[P] = Set([P(2), P(3), P(4)])
+    a: Set[P] = Set.from_iter([P(1), P(2), P(2), P(3)])   # P(2) deduped by hash
+    b: Set[P] = Set.from_iter([P(2), P(3), P(4)])
     assert a.len() == 3
     assert a.union(b).len() == 4
     assert a.intersection(b).len() == 2
@@ -163,22 +163,22 @@ test fn cyclic_key_faults_everywhere():
     # sanity: `==` itself faults (the behavior we are matching)
     r := recover: a1 == a2
     assert_depth_fault(r, "==")
-    # Set.has / `in` / Set([...]) collide-construct / add
-    s := Set([a1])
+    # Set.has / `in` / Set.from_iter([...]) collide-construct / add
+    s := Set.from_iter([a1])
     r := recover: s.contains(a2)
     assert_depth_fault(r, "Set.has")
     r := recover: (a2 in s)
     assert_depth_fault(r, "in Set")
-    r := recover: Set([a1, a2])
-    assert_depth_fault(r, "Set([...]) construct")
+    r := recover: Set.from_iter([a1, a2])
+    assert_depth_fault(r, "Set.from_iter([...]) construct")
     r := recover: s.insert(a2)
     assert_depth_fault(r, "Set.add")
     # set algebra (operator + method forms must both fault)
-    r := recover: (Set([a1]) | Set([a2]))
+    r := recover: (Set.from_iter([a1]) | Set.from_iter([a2]))
     assert_depth_fault(r, "Set |")
-    r := recover: Set([a1]).union(Set([a2]))
+    r := recover: Set.from_iter([a1]).union(Set.from_iter([a2]))
     assert_depth_fault(r, "Set.union")
-    r := recover: Set([a1]).difference(Set([a2]))
+    r := recover: Set.from_iter([a1]).difference(Set.from_iter([a2]))
     assert_depth_fault(r, "Set.difference")
     # Map: collide-construct / get / insert / `in` / remove
     m: Map[Cyc, int] = {}
@@ -210,15 +210,15 @@ fn assign_map(m: Map[Cyc, int], k: Cyc):
 
 test fn noncyclic_controls():
     # plain scalars
-    assert Set([1, 2, 3]).contains(2) == true
-    assert Set([1, 2, 3]).contains(9) == false
+    assert Set.from_iter([1, 2, 3]).contains(2) == true
+    assert Set.from_iter([1, 2, 3]).contains(9) == false
     assert {"a": 1}["a"] == 1
     assert [1, 2, 3].contains(2) == true
     assert [1, 2, 3].index_of(2) == 1
     # non-cyclic Cyc keys (empty `next`) still work across Set/Map ops
     k1 := Cyc(1)
     k2 := Cyc(2)
-    s: Set[Cyc] = Set([k1, k2])
+    s: Set[Cyc] = Set.from_iter([k1, k2])
     assert s.contains(Cyc(1)) == true
     assert s.contains(Cyc(9)) == false
     s.insert(Cyc(3))

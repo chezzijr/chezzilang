@@ -21,7 +21,7 @@ fn key_same[T: Hashable](a: T, b: T) -> bool:
     return a == b
 
 fn distinct[T: Hashable](xs: List[T]) -> int:
-    return Set(xs).len()
+    return Set.from_iter(xs).len()
 
 test fn a_hashable_bound_licenses_eq_and_set():
     assert key_same("a", "a")

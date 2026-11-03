@@ -236,6 +236,7 @@ impl Compiler {
         Ok(matches!(
             self.resolution(callee)?,
             Resolution::MethodFn { .. }
+                | Resolution::NativeStatic(_)
                 | Resolution::Variant { .. }
                 | Resolution::VariantFn { .. }
                 | Resolution::Fn { .. }
@@ -383,6 +384,7 @@ impl Compiler {
                 | Resolution::IndexCall
                 | Resolution::Variant { .. }
                 | Resolution::MethodFn { .. }
+                | Resolution::NativeStatic(_)
                 | Resolution::VariantFn { .. }
                 | Resolution::WitnessStatic(_)
                 | Resolution::ModuleMember { .. }
@@ -406,6 +408,7 @@ impl Compiler {
                     | Resolution::IndexCall
                     | Resolution::Variant { .. }
                     | Resolution::MethodFn { .. }
+                    | Resolution::NativeStatic(_)
                     | Resolution::VariantFn { .. }
                     | Resolution::WitnessStatic(_)
                     | Resolution::Module(_)

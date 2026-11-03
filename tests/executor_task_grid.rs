@@ -912,7 +912,7 @@ _ := ex.submit(bad)
         ("loop", "n := 0\nwhile n < 300000:\n    n += 1\n"),
         (
             "native-hof",
-            "n := List(0..200000).map(double).fold(0, keep)\n",
+            "n := List.from_iter(0..200000).map(double).fold(0, keep)\n",
         ),
         ("sleep", "time.sleep_ms(300)\n"),
         (

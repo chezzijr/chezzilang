@@ -453,7 +453,7 @@ fn writer_write_bytes_binary_roundtrip_parity() {
         let t = TmpDir::new();
         let f = t.0.join("bin");
         let src = format!(
-            "import create, read_bytes from std.io\nfn main():\n    w := create(\"{f}\")?\n    w.write_bytes(bytes([0, 1, 255]))?\n    w.close()?\n    b := read_bytes(\"{f}\")?\n    print(str(b.len()) + \":\" + str(b[0]) + \",\" + str(b[1]) + \",\" + str(b[2]))\nmain()\n",
+            "import create, read_bytes from std.io\nfn main():\n    w := create(\"{f}\")?\n    w.write_bytes(bytes.from_iter([0, 1, 255]))?\n    w.close()?\n    b := read_bytes(\"{f}\")?\n    print(str(b.len()) + \":\" + str(b[0]) + \",\" + str(b[1]) + \",\" + str(b[2]))\nmain()\n",
             f = f.display()
         );
         let entry = t.write("main.chz", &src);
@@ -551,7 +551,7 @@ fn writer_program_type_checks_clean() {
     // `main` must return Result to use `?` (no `fn main` exception — see the try-in-nil-fn soundness fix).
     let src = "import create, buffered, stdout, Writer from std.io\n\
                fn tag(w: Writer) -> Writer:\n    return w\n\
-               fn main() -> int!:\n    w := create(\"/tmp/x\")?\n    w.write(\"a\")?\n    w.write_bytes(bytes([1]))?\n    w.flush()?\n    w.close()?\n    bw := tag(buffered(stdout(), 4096))\n    bw.write(\"b\")?\n    bw.flush()?\n    return ?0\nmain()\n";
+               fn main() -> int!:\n    w := create(\"/tmp/x\")?\n    w.write(\"a\")?\n    w.write_bytes(bytes.from_iter([1]))?\n    w.flush()?\n    w.close()?\n    bw := tag(buffered(stdout(), 4096))\n    bw.write(\"b\")?\n    bw.flush()?\n    return ?0\nmain()\n";
     let t = TmpDir::new();
     let entry = t.write("main.chz", src);
     let graph = crate::resolver::build_graph(&entry).expect("resolve");

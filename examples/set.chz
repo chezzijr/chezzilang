@@ -1,6 +1,6 @@
 # examples/set.chz — the set type (M8): `{a, b, c}` literals (deduped, insertion-ordered),
 # membership, mutation, set algebra, and iteration. Elements are hashable scalars (int/str/bool).
-# Empty set is `Set()` (since `{}` is the empty map); `Set(list)` builds one from a list.
+# Empty set is `Set()` (since `{}` is the empty map); `Set.from_iter(list)` builds one from a list.
 
 # Literal dedups and keeps first-seen order.
 nums := {3, 1, 4, 1, 5, 9, 2, 6, 5}
@@ -25,7 +25,7 @@ print(a.difference(b).len())      # 2
 print({1, 2, 3} == {3, 2, 1})     # true
 
 # Build from a list (dedups) and iterate (insertion order).
-seen := Set(["red", "green", "red", "blue", "green"])
+seen := Set.from_iter(["red", "green", "red", "blue", "green"])
 print(seen.len())                 # 3
 order := ""
 for c in seen:

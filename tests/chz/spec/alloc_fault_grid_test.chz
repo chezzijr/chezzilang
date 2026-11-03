@@ -15,17 +15,17 @@ fn outcome(op: fn() -> int) -> str:
         !e: return "fault: {e.message()}"
 
 fn byte_past_u32() -> int:
-    b := bytearray(4294967297)
+    b := bytearray.zeroed(4294967297)
     b[4294967296] = 7
     return b.len() + b[4294967296]
 
 fn ops() -> List[fn() -> int]:
     return [
-        fn() -> int: bytearray(4611686018427387904).len(),
-        fn() -> int: bytearray(4294967296).len(),
+        fn() -> int: bytearray.zeroed(4611686018427387904).len(),
+        fn() -> int: bytearray.zeroed(4294967296).len(),
         byte_past_u32,
-        fn() -> int: bytes(4611686018427387904).len(),
-        fn() -> int: bytes(4294967296).len(),
+        fn() -> int: bytes.zeroed(4611686018427387904).len(),
+        fn() -> int: bytes.zeroed(4294967296).len(),
         fn() -> int: [0].repeat(4611686018427387904).len(),
         fn() -> int: [0, 1, 2].repeat(1099511627776).len(),
         fn() -> int: [0].repeat(9223372036854775807).len(),
@@ -34,10 +34,10 @@ fn ops() -> List[fn() -> int]:
     ]
 
 GOLDEN := [
-    "fault: bytearray() size 4611686018427387904 is too large to allocate",
+    "fault: bytearray.zeroed() size 4611686018427387904 is too large to allocate",
     "ok 4294967296",
     "ok 4294967304",
-    "fault: bytes() size 4611686018427387904 is too large to allocate",
+    "fault: bytes.zeroed() size 4611686018427387904 is too large to allocate",
     "ok 4294967296",
     "fault: list repeat capacity overflow",
     "fault: list repeat capacity overflow",

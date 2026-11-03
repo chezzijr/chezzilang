@@ -17,10 +17,10 @@ BAD := b"A\xffB.txt"
 
 # `bytes` has no `+` — accumulate through a `bytearray` (the one concatenation route that exists).
 fn cat(a: bytes, b: bytes) -> bytes:
-    ba := bytearray(a)
+    ba := bytearray.from_iter(a)
     for x in b:
         ba.push(x)
-    return bytes(ba)
+    return bytes.from_iter(ba)
 
 # `T!E` unwrappers that ASSERT instead of propagating (a `test fn` returns None, so `?` is out).
 fn paths(r: List[path.Path]!) -> List[path.Path]:

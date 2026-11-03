@@ -2523,7 +2523,7 @@ fn pathlike_is_satisfied_by_the_three_byte_spellings() {
         "import PathLike from std.path\nfn f(p: PathLike) -> bytes:\n    return p.as_path()\nprint(f(b\"a\").len())\n",
     );
     ok(
-        "import PathLike from std.path\nfn f(p: PathLike) -> bytes:\n    return p.as_path()\nprint(f(bytearray(b\"a\")).len())\n",
+        "import PathLike from std.path\nfn f(p: PathLike) -> bytes:\n    return p.as_path()\nprint(f(bytearray.from_iter(b\"a\")).len())\n",
     );
     ok(
         "import PathLike from std.path\nfn f[T: PathLike](p: T) -> bytes:\n    return p.as_path()\nprint(f(\"a\").len())\n",

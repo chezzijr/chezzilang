@@ -250,7 +250,7 @@ const T254_SHAPES: &[T254Shape] = &[
             // A builtin constructor call is not in `fresh_shape`: the warning declines (ceiling).
             t254_row(
                 "ctor",
-                "List([5])",
+                "List.from_iter([5])",
                 "9",
                 T254Expect::Silent,
                 "List",
@@ -838,12 +838,32 @@ fn native_container_results_are_new_objects() {
         ("str", "x := \"a,b\"", "chars()", "r.pop()"),
         ("str", "x := \"a\\nb\"", "split_lines()", "r.pop()"),
     ];
+    // The static methods that return a container: `r := {kind}.{call}` must not share `x`.
+    let static_rows: &[(&str, &str, &str, &str)] = &[
+        ("List", "x := [3, 1]", "from_iter(x)", "r.pop()"),
+        ("Map", "x := {\"a\": 1}", "from_iter(x)", "r.remove(\"a\")"),
+        ("Set", "x := {1, 2}", "from_iter(x)", "r.remove(1)"),
+        (
+            "bytearray",
+            "x := bytearray()\nx.push(97)",
+            "from_iter(x)",
+            "r.pop()",
+        ),
+        (
+            "bytearray",
+            "x := bytearray()\nx.push(97)",
+            "zeroed(1)",
+            "r.pop()",
+        ),
+    ];
     let c = prelude_container_checker();
     let mut bad: Vec<String> = Vec::new();
     for kind in ["List", "Map", "Set", "bytearray", "str", "bytes"] {
         let info = c.structs.get(kind).expect("seeded container struct");
         for (name, sig) in &info.methods {
             let container = fn_writes::native_container(&sig.ret);
+            // A static method (`List.from_iter(x)`) is called through the type, not on `x`.
+            let rows = if sig.is_static { static_rows } else { rows };
             let sampled = rows
                 .iter()
                 .any(|(k, _, call, _)| *k == kind && call.split('(').next() == Some(name.as_str()));
@@ -855,9 +875,17 @@ fn native_container_results_are_new_objects() {
             }
         }
     }
-    for (kind, setup, call, mutate) in rows {
+    let calls = rows
+        .iter()
+        .map(|(k, setup, call, mutate)| (*k, *setup, format!("x.{call}"), *mutate))
+        .chain(
+            static_rows
+                .iter()
+                .map(|(k, setup, call, mutate)| (*k, *setup, format!("{k}.{call}"), *mutate)),
+        );
+    for (kind, setup, call, mutate) in calls {
         let src = format!(
-            "{setup}\nbefore := \"{{x}}\"\nr := x.{call}\n{mutate}\nprint(\"{{x}}\" == before)\n"
+            "{setup}\nbefore := \"{{x}}\"\nr := {call}\n{mutate}\nprint(\"{{x}}\" == before)\n"
         );
         match crate::compiler::run_for_tests::run_capture(&src) {
             Ok(out) if out.trim() == "true" => {}

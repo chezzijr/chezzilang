@@ -60,8 +60,8 @@ main()";
 #[test]
 fn set_algebra_survives_gc_stress() {
     let src = "\
-a := Set([\"al\" + \"pha\", \"be\" + \"ta\", \"gam\" + \"ma\"])
-b := Set([\"be\" + \"ta\", \"de\" + \"lta\"])
+a := Set.from_iter([\"al\" + \"pha\", \"be\" + \"ta\", \"gam\" + \"ma\"])
+b := Set.from_iter([\"be\" + \"ta\", \"de\" + \"lta\"])
 print(a.union(b).len())
 print(a.intersection(b).len())
 print(a.difference(b).len())
@@ -217,12 +217,12 @@ struct K:
         junk := [str(self.n)]
         return self.n
 fn main():
-    a := Set([K(1), K(2), K(2), K(3)])
+    a := Set.from_iter([K(1), K(2), K(2), K(3)])
     print(a.len())
     a.insert(K(3))
     a.insert(K(4))
     print(a.len())
-    b := Set([K(3), K(4), K(5)])
+    b := Set.from_iter([K(3), K(4), K(5)])
     print(a.union(b).len())
     print(a.intersection(b).len())
     print(a.difference(b).len())
@@ -248,7 +248,7 @@ struct K:
         junk := [str(self.n), str(other.n)]
         return junk[0] == junk[1]
 fn make_set() -> Set[K]:
-    return Set([K(1), K(2), K(2), K(3)])
+    return Set.from_iter([K(1), K(2), K(2), K(3)])
 fn make_list() -> List[K]:
     return [K(1), K(2), K(2), K(3)]
 fn make_map() -> Map[K, str]:
@@ -264,7 +264,7 @@ fn main():
     a.insert(K(3))
     a.insert(K(4))
     print(a.len())
-    b := Set([K(3), K(4), K(5)])
+    b := Set.from_iter([K(3), K(4), K(5)])
     print(a.union(b).len(), a.intersection(b).len(), a.difference(b).len())
     print((a | b).len(), (a ^ b).len())
     print(make_set().contains(K(2)))              # inline-temporary receiver
@@ -277,8 +277,8 @@ fn main():
     m.update(make_map())
     print(m.len())
     print({K(7): str(7), K(7): str(8)}.len(), {K(9), K(9)}.len())   # map/set literals
-    print(Map([(K(1), str(1)), (K(1), str(2))]).len())              # Map() ctor
-    print(Set(make_list()).len())                                   # Set() ctor
+    print(Map.from_iter([(K(1), str(1)), (K(1), str(2))]).len())              # Map() ctor
+    print(Set.from_iter(make_list()).len())                                   # Set() ctor
 main()";
     // a = {1,2,3,4}; b = {3,4,5}; |a∪b|=5, |a∩b|=2, |a\\b|=2, |a^b|=3
     assert_eq!(
@@ -309,7 +309,7 @@ fn main():
     m: Map[K, List[str]] = {K(1): [str(1)], K(2): [str(2), str(3)]}
     box := ConcurrentMap(RwShared(m))
     print(box.contains(K(1)), box.contains(K(9)), box.get(K(2)), box.get(K(9)))
-    s := ConcurrentSet(RwShared(Set([K(1), K(2)])))
+    s := ConcurrentSet(RwShared(Set.from_iter([K(1), K(2)])))
     print(s.contains(K(2)), s.contains(K(7)))
 main()";
     assert_eq!(
@@ -397,8 +397,8 @@ fn main():
     print(xs.unique().len())
     # Set algebra: `mine`/`other`/`out` are three Rust locals over the same orphaned elements.
     reset()
-    sa := Set(xs)
-    sb := Set(ys)
+    sa := Set.from_iter(xs)
+    sb := Set.from_iter(ys)
     reset()
     arm()
     print(sa.union(sb).len())
@@ -411,8 +411,8 @@ main()";
 #[test]
 fn map_and_set_eq_snapshot_survives_an_eq_that_empties_the_sources() {
     let src = "\
-sa: Set[K] = Set([])
-sb: Set[K] = Set([])
+sa: Set[K] = Set.from_iter([])
+sb: Set[K] = Set.from_iter([])
 ma: Map[K, List[str]] = {}
 mb: Map[K, List[str]] = {}
 armed: List[int] = []
@@ -735,8 +735,8 @@ fn main():
     s := {a, b, K(3)}                          # NewSet literal
     a.n = 90                                   # mutate originals AFTER insert
     b.n = 91
-    mi := Map([(K(4), str(4)), (K(5), str(5))])  # Map(iterable)
-    si := Set([K(6), K(7), K(6)])                # Set(iterable)
+    mi := Map.from_iter([(K(4), str(4)), (K(5), str(5))])  # Map.from_iter(iterable)
+    si := Set.from_iter([K(6), K(7), K(6)])                # Set.from_iter(iterable)
     c := K(8)
     s.insert(c)
     c.n = 92
@@ -802,7 +802,7 @@ struct P:
         return pad[0] * 31
 
 fn make_set() -> ConcurrentSet[P]:
-    return ConcurrentSet(RwShared(Set([P(1), P(2), P(3)])))
+    return ConcurrentSet(RwShared(Set.from_iter([P(1), P(2), P(3)])))
 
 fn make_map() -> ConcurrentMap[P, int]:
     return ConcurrentMap(RwShared({P(1): 10, P(2): 20}))
@@ -1155,7 +1155,7 @@ main()";
 fn bytearray_growth_retires_until_collect() {
     let src = "\
 fn main():
-    b := bytearray(b\"a\")
+    b := bytearray.from_iter(b\"a\")
     for i in 1..100:
         b.push(i)
     print(b.len(), b[0], b[50], b[99])
@@ -1219,7 +1219,7 @@ main()";
 fn set_insert_growth_retires_index_and_entries() {
     let src = "\
 fn main():
-    s: Set[int] = Set([0])
+    s: Set[int] = Set.from_iter([0])
     for i in 1..100:
         s.insert(i)
     print(s.len(), 0 in s, 50 in s, 99 in s, 100 in s)
@@ -1240,7 +1240,7 @@ struct K:
         return self.n == other.n
 
 fn main():
-    s: Set[K] = Set([K(0)])
+    s: Set[K] = Set.from_iter([K(0)])
     for i in 1..20:
         s.insert(K(i))
     print(s.len(), K(0) in s, K(19) in s, K(20) in s)
@@ -1264,7 +1264,7 @@ struct K:
         return self.n == other.n
 
 fn main():
-    s: Set[K] = Set([K(0)])
+    s: Set[K] = Set.from_iter([K(0)])
     for i in 1..{N}:
         s.insert(K(i))
     found := 0
@@ -2121,8 +2121,8 @@ fn racy_container_ops_never_panic() {
     let src = "\
 L: List[int] = [1, 2, 3]
 M: Map[int, int] = {1: 1, 2: 2}
-S: Set[int] = Set([1, 2])
-BA := bytearray(b\"abc\")
+S: Set[int] = Set.from_iter([1, 2])
+BA := bytearray.from_iter(b\"abc\")
 R := 1..3
 BIG: List[int] = []
 

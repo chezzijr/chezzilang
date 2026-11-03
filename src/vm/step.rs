@@ -303,6 +303,7 @@ impl Vm {
                 self.do_static_call(&key, method, *argc, span)?
             }
             Op::CallBuiltin(b, argc) => self.do_builtin(*b, *argc, span)?,
+            Op::CallNativeStatic(which, argc) => self.do_native_static(*which, *argc, span)?,
             Op::LoadBuiltin(b) => {
                 let v = self.fn_value(FnKey::Builtin(*b), || Obj::Builtin(*b));
                 self.push(v);

@@ -455,7 +455,7 @@ const PROGRAMS: &[(&str, Result<&str, &str>)] = &[
     ),
     // builtins
     (
-        "print(List(0..4))\nprint(int(\"7\") + 1)\nprint(float(3))\nprint([1, 2, 3].len())\nprint(str(42))",
+        "print(List.from_iter(0..4))\nprint(int(\"7\") + 1)\nprint(float(3))\nprint([1, 2, 3].len())\nprint(str(42))",
         Ok("[0, 1, 2, 3]\n8\n3.0\n3\n42\n"),
     ),
     // recursion

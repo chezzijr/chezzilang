@@ -577,6 +577,14 @@ fn hover_static_method_callee() {
 }
 
 #[test]
+fn hover_builtin_static_method_shows_its_decl() {
+    // `List.from_iter` is declared in `std/prelude.chz`; its hover is that declaration's signature.
+    let h = hov("xs := List.from_iter([1])\n", 0, 12).expect("hover on List.from_iter");
+    assert_eq!(h.display, "fn(S) -> List[T]");
+    assert_eq!(h.kind, crate::checker::HoverKind::Func);
+}
+
+#[test]
 fn hover_static_method_receiver() {
     // Hovering the receiver `Foo` of `Foo.default()` reports the struct type.
     let src =
@@ -644,9 +652,9 @@ fn hover_struct_field_decl() {
 
 #[test]
 fn hover_container_ctor_turbofish_callee() {
-    // CONFIRMING (already green): `List[int]()` callee is a bare Ident reaching builtin_sig.
+    // `List[int]()` callee is a bare Ident reaching builtin_sig: the empty ctor takes no argument.
     let h = hov("a := List[int]()\n", 0, 5).expect("hover on List[int] ctor callee");
-    assert_eq!(h.display, "fn(?) -> List[?]");
+    assert_eq!(h.display, "fn() -> List[?]");
     assert_eq!(h.kind, crate::checker::HoverKind::Func);
 }
 
@@ -656,7 +664,7 @@ fn hover_container_ctor_bare_callee() {
     // (The annotation types the empty list on its own statement — an error would make
     // `hover_type` short-circuit to None before the callee hit is returned.)
     let h = hov("b: List[int] = List()\n", 0, 15).expect("hover on bare List ctor callee");
-    assert_eq!(h.display, "fn(?) -> List[?]");
+    assert_eq!(h.display, "fn() -> List[?]");
     assert_eq!(h.kind, crate::checker::HoverKind::Func);
 }
 
@@ -664,7 +672,7 @@ fn hover_container_ctor_bare_callee() {
 fn hover_map_ctor_turbofish_callee() {
     // CONFIRMING (already green): `Map[str, int]()` callee records its display sig.
     let h = hov("m := Map[str, int]()\n", 0, 5).expect("hover on Map ctor callee");
-    assert_eq!(h.display, "fn(?) -> Map[?, ?]");
+    assert_eq!(h.display, "fn() -> Map[?, ?]");
     assert_eq!(h.kind, crate::checker::HoverKind::Func);
 }
 

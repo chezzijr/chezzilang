@@ -310,7 +310,7 @@ fn dense_index_collision_upgrade_parity() {
 #[test]
 fn fxhash_set_dedup_and_ops() {
     // Set dedup + union/intersection/difference over the index hasher.
-    let src = "a := Set([1, 2, 3, 2, 1])\nb := Set([3, 4, 5])\n\
+    let src = "a := Set.from_iter([1, 2, 3, 2, 1])\nb := Set.from_iter([3, 4, 5])\n\
                    print(a.len())\nprint(a.union(b).len())\nprint(a.intersection(b).len())\nprint(a.difference(b).len())\n";
     assert_eq!(run_parity(src), "3\n5\n1\n2\n");
 }

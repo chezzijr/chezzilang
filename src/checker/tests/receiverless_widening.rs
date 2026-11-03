@@ -142,15 +142,15 @@ fn protocol_note_reaches_every_value_slot() {
         "fn f(x: Dog) -> Named: return x\n",
         "fn f2(x: Dog) -> Named: x\n",
         "import Iterator from std.iter\nfn g() -> Iterator[Named]:\n    yield d\n",
-        "xs := List[Named]([d])\n",
+        "xs := List[Named].from_iter([d])\n",
         "ys: List[Named] = []\nys.push(d)\n",
         "fn k(n: Named = d) -> str: return n.name()\n",
         "struct H2:\n    n: Named = d\n",
         "fv := viaSlot\nfn viaSlot(n: Named) -> str: return n.name()\nfv(d)\n",
         "fv2 := viaSlot\nfn viaSlot(n: Named) -> str: return n.name()\nfv2(n=d)\n",
-        "s := Set[Named]([d])\n",
-        "mk := Map[Named, str]([(d, \"a\")])\n",
-        "mv := Map[str, Named]([(\"a\", d)])\n",
+        "s := Set[Named].from_iter([d])\n",
+        "mk := Map[Named, str].from_iter([(d, \"a\")])\n",
+        "mv := Map[str, Named].from_iter([(\"a\", d)])\n",
     ];
     for tail in tails {
         let src = format!("{prelude}{tail}");
@@ -353,7 +353,7 @@ fn builtin_map_set_str_bytes_satisfy_user_protocol_ticket_024() {
         "protocol Sized:\n    fn len(self) -> int\n\nfn total(x: Sized) -> int:\n    return x.len()\n\nfn main():\n    print(total(b\"ab\"))\n",
     );
     ok(
-        "protocol Sized:\n    fn len(self) -> int\n\nfn total(x: Sized) -> int:\n    return x.len()\n\nfn main():\n    print(total(bytearray(b\"ab\")))\n",
+        "protocol Sized:\n    fn len(self) -> int\n\nfn total(x: Sized) -> int:\n    return x.len()\n\nfn main():\n    print(total(bytearray.from_iter(b\"ab\")))\n",
     );
 }
 
@@ -2688,7 +2688,10 @@ fn comparable_tuple_list_option_non_comparable_element_rejected() {
         "cannot compare",
     );
     rejects("print({1: 2} < {1: 3})\n", "cannot compare");
-    rejects("print(Set([1]) < Set([2]))\n", "cannot compare");
+    rejects(
+        "print(Set.from_iter([1]) < Set.from_iter([2]))\n",
+        "cannot compare",
+    );
     rejects(
         &format!("{plain}xs := [(1, Plain(1))]\nxs.sort()\n"),
         "does not satisfy Comparable",

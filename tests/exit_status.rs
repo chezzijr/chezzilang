@@ -730,7 +730,7 @@ fn keep(a: int, b: int) -> int:
 
 ex := Executor()
 ex.submit(bail)
-n := List(0..10000000).map(double).fold(0, keep)
+n := List.from_iter(0..10000000).map(double).fold(0, keep)
 print("main hof finished {{n}}")
 "#
         ),
@@ -821,7 +821,7 @@ fn cleanup():
     i := 0
     while i < 3000000:
         i = i + 1
-    n := List(0..1000000).map(double).fold(0, keep)
+    n := List.from_iter(0..1000000).map(double).fold(0, keep)
     print("DEFER EXIT {{i}} {{n}}")
 
 fn sib():
@@ -1232,7 +1232,7 @@ test fn loop_spins():
     assert total > 0
 
 test fn hof_spins():
-    total := List(0..10000000).map(double).fold(0, add)
+    total := List.from_iter(0..10000000).map(double).fold(0, add)
     assert total > 0
 "#,
     );
@@ -1350,7 +1350,7 @@ test fn hof_completes():
     doubled := xs.map(double)
     assert doubled == [2, 4, 6, 8, 10]
     assert xs.fold(0, add) == 15
-    assert List(0..1000).map(double).fold(0, add) == 999000
+    assert List.from_iter(0..1000).map(double).fold(0, add) == 999000
 "#,
     );
     for args in [

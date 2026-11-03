@@ -328,7 +328,7 @@ test fn an_erased_eq_bound_can_call_eq_on_every_granted_receiver():
     assert eqm([1, 2], [1, 2]) == true
     assert eqm((1, 2), (1, 3)) == false
     assert eqm({"k": 1}, {"k": 1}) == true
-    assert eqm(Set([1]), Set([1])) == true
+    assert eqm(Set.from_iter([1]), Set.from_iter([1])) == true
     assert eqm(b"ab", b"ab") == true
     assert eqm(D1Pt(1), D1Pt(2)) == false, "a struct with no `eq` of its own"
 

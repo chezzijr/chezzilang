@@ -43,7 +43,7 @@ fn write_file(p: PathLike, text: str) -> None!:
 
 # Binary whole-file I/O (R1). `read_file` DECODES UTF-8, so it errs on a binary file — `read_bytes`
 # is the escape hatch. Same 64 MB read cap as `read_file`; `write_bytes` (like `write_file`) has none.
-# `write_bytes` takes a `bytes` DATA arg — convert a `bytearray` buffer with `bytes(ba)` (an explicit
+# `write_bytes` takes a `bytes` DATA arg — convert a `bytearray` buffer with `bytes.from_iter(ba)` (an explicit
 # copy, like CPython's `bytes(ba)`; `bytearray` is deliberately NOT assignable to a `bytes` sink).
 fn read_bytes(p: PathLike) -> bytes!:
     return _read_bytes(p.as_path())

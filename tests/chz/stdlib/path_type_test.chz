@@ -60,7 +60,7 @@ test fn path_fns_still_take_a_bare_str_literal():
 
 test fn path_fns_take_bytes_and_path_too():
     assert fs.exists(b"/")
-    assert fs.exists(bytearray(b"/"))
+    assert fs.exists(bytearray.from_iter(b"/"))
     assert fs.exists(path.Path(b"/"))
     assert fs.is_dir(path.Path(b"/"))
 

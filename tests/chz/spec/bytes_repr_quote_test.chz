@@ -11,5 +11,5 @@ test fn bytes_with_both_quotes_keep_single_quotes_and_escape():
     assert str(b"x") == "b'x'"
 
 test fn bytearray_picks_the_quote_but_still_escapes_a_single_quote():
-    assert str(bytearray(b"'")) == "bytearray(b\"\\'\")"
-    assert str(bytearray(b"x")) == "bytearray(b'x')"
+    assert str(bytearray.from_iter(b"'")) == "bytearray(b\"\\'\")"
+    assert str(bytearray.from_iter(b"x")) == "bytearray(b'x')"

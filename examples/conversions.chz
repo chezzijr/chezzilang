@@ -25,7 +25,7 @@ fn main():
     print(enc.decode() == s)   # true
 
     # bytearray.decode() — identical to bytes.decode().
-    ba := bytearray([104, 105])
+    ba := bytearray.from_iter([104, 105])
     print(ba.decode())         # hi
 
     # --- invalid UTF-8 decode faults RECOVERABLY (catchable by recover:) ---
@@ -34,23 +34,23 @@ fn main():
         ?v: print(v)
         !e: print("caught")
 
-    # --- List(it) over every for-iterable shape; sum to stay order-independent ---
-    print(List([10, 20, 30]).sum())        # 60 (from a list)
-    print(List(Set([1, 2, 3])).sum())      # 6 (from a set)
-    print(List("ab").len())                # 2 (from a str -> per-char str)
-    print(List(b"hi").sum())               # 209 (from bytes -> per-byte int: 104+105)
-    print(List(bytearray([1, 2, 3])).sum())# 6 (from a bytearray)
-    print(List(0..4).sum())            # 6 (from a range -> 0+1+2+3)
-    print(List(Counter(0, 5)).sum())       # 10 (from a user iterator -> 0+1+2+3+4)
+    # --- List.from_iter(it) over every for-iterable shape; sum to stay order-independent ---
+    print(List.from_iter([10, 20, 30]).sum())        # 60 (from a list)
+    print(List.from_iter(Set.from_iter([1, 2, 3])).sum())      # 6 (from a set)
+    print(List.from_iter("ab").len())                # 2 (from a str -> per-char str)
+    print(List.from_iter(b"hi").sum())               # 209 (from bytes -> per-byte int: 104+105)
+    print(List.from_iter(bytearray.from_iter([1, 2, 3])).sum())# 6 (from a bytearray)
+    print(List.from_iter(0..4).sum())            # 6 (from a range -> 0+1+2+3)
+    print(List.from_iter(Counter(0, 5)).sum())       # 10 (from a user iterator -> 0+1+2+3+4)
 
-    # --- Set(it) dedup over several iterables ---
-    print(Set([1, 1, 2, 2, 3]).len())      # 3 (list dedup)
-    print(Set("aabbc").len())              # 3 (str dedup: a b c)
-    print(Set(0..3).len())             # 3 (range)
-    print(Set(Counter(0, 4)).len())        # 4 (user iterator)
+    # --- Set.from_iter(it) dedup over several iterables ---
+    print(Set.from_iter([1, 1, 2, 2, 3]).len())      # 3 (list dedup)
+    print(Set.from_iter("aabbc").len())              # 3 (str dedup: a b c)
+    print(Set.from_iter(0..3).len())             # 3 (range)
+    print(Set.from_iter(Counter(0, 4)).len())        # 4 (user iterator)
 
-    # --- Map(it) from a list of 2-tuples + last-wins dup key ---
-    m := Map([(1, "a"), (2, "b"), (1, "c")])
+    # --- Map.from_iter(it) from a list of 2-tuples + last-wins dup key ---
+    m := Map.from_iter([(1, "a"), (2, "b"), (1, "c")])
     print(m.len())                         # 2 (key 1 deduped)
     print(m[1])                            # c (last-wins)
     print(m[2])                            # b

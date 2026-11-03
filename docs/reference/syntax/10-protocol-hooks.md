@@ -36,7 +36,7 @@ return that is not `E?`, no `self`) is an ordinary method: it never runs under `
 a conforming `iter`.
 
 **The `Iterator[T]` bound has one element type.** In a `[S: Iterator[T], T]` body, `s.next()` runs
-`next` while `for q in s` and `List(s)` run `iter`. A type whose two hooks yield different types does
+`next` while `for q in s` and `List.from_iter(s)` run `iter`. A type whose two hooks yield different types does
 not satisfy `Iterator` (it still satisfies `Iterable`). A generic `Both[T]` gets one answer for every
 instantiation.
 
@@ -55,7 +55,7 @@ first(Both(2))
 ```
 
 `Iterable[T]` also works as a plain parameter type (`fn f(xs: Iterable[int])`): the body may
-`for v in xs`, `[v for v in xs]` or `List(xs)`. It is invariant: a `List[int]` is an `Iterable[int]`,
+`for v in xs`, `[v for v in xs]` or `List.from_iter(xs)`. It is invariant: a `List[int]` is an `Iterable[int]`,
 not an `Iterable[Any]`. A bare `Iterable` with no arg is not iterable. An `Iterable[T]` value has no
 `.next()`; take a cursor with `xs.iter()`.
 
@@ -149,7 +149,7 @@ print(Point(1, 2))            # (1, 2)           — a `str` hook's output is NO
   result is never quoted.
 
 **A container that contains itself prints the back edge as `...`** (CPython's rule): `[...]`, `{...}`,
-`Set(...)` or `...`. Only an object still being rendered counts, so a shared acyclic child prints in full:
+`Set.from_iter(...)` or `...`. Only an object still being rendered counts, so a shared acyclic child prints in full:
 
 ```chezzi
 xs: List[Any] = [1]
@@ -184,7 +184,7 @@ The prebuilt **`Hashable`** protocol (`hash(self) -> int`, and it embeds `Eq`) g
   build-dependent 64-bit value, possibly negative).
 
 **`Hashable` embeds `Eq`, so `[T: Hashable]` is enough for a `Map`/`Set` keyed on `T`.** A
-`[T: Hashable]` body may write `a == b`, `Set(xs)` or `{x: 1}`; a redundant `+ Eq` still checks and
+`[T: Hashable]` body may write `a == b`, `Set.from_iter(xs)` or `{x: 1}`; a redundant `+ Eq` still checks and
 says the same. The key check runs on every `Map[T, _]`/`Set[T]` type the signature or body spells,
 even a bare mention, and a bound-free `fn h[T](xs: Set[T])` is rejected. A type whose `eq` cannot
 hold for the instantiation (`Box[Tag]` with `eq ... where T: Comparable`) is not `Hashable`, so it
@@ -195,7 +195,7 @@ is no key. This is Go's `comparable` and Python's `__hash__` plus `__eq__` pairi
 mutating your original after the insert cannot corrupt the stored key.
 
 - Every insert path copies: `m[k] = v`, `{k: v}` and `{a, b}` literals, `set.insert`, `Map.insert`, `Map.update` /
-  `Map.merge`, `Map(it)` / `Set(it)`.
+  `Map.merge`, `Map.from_iter(it)` / `Set.from_iter(it)`.
 - Map **values** are not copied. A lookup key (`m[k]`, `k in m`, `s.contains(k)`) is not copied.
   Scalar keys need no copy.
 - The copy covers mutable aggregates (nested structs/enums/lists/maps/sets). A by-reference value

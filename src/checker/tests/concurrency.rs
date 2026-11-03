@@ -601,16 +601,16 @@ fn rwshared_map_write_entry_methods() {
 fn rwshared_set_readview_methods() {
     // Set read-view: len/contains/for_each/fold. E arm-recovered from the concrete Set[E].
     entry_ok(
-        "import std.concurrency\nimport ConcurrentSet from std.concurrency.collection\nfn main():\n    box := ConcurrentSet(concurrency.RwShared(Set([1, 2, 3])))\n    print(box.len())\n    print(box.contains(2))\n    box.for_each(fn(x): print(x))\n    print(box.fold(0, fn(a, x): a + x))\nmain()\n",
+        "import std.concurrency\nimport ConcurrentSet from std.concurrency.collection\nfn main():\n    box := ConcurrentSet(concurrency.RwShared(Set.from_iter([1, 2, 3])))\n    print(box.len())\n    print(box.contains(2))\n    box.for_each(fn(x): print(x))\n    print(box.fold(0, fn(a, x): a + x))\nmain()\n",
     );
     // contains with the wrong element type is rejected (E = int; str arg mismatches).
     entry_rejects(
-        "import std.concurrency\nimport ConcurrentSet from std.concurrency.collection\nfn main():\n    box := ConcurrentSet(concurrency.RwShared(Set([1, 2, 3])))\n    print(box.contains(\"x\"))\nmain()\n",
+        "import std.concurrency\nimport ConcurrentSet from std.concurrency.collection\nfn main():\n    box := ConcurrentSet(concurrency.RwShared(Set.from_iter([1, 2, 3])))\n    print(box.contains(\"x\"))\nmain()\n",
         "expected",
     );
     // Set fold R not pinned to E — str accumulator over Set[int] folds to str.
     entry_ok(
-        "import std.concurrency\nimport ConcurrentSet from std.concurrency.collection\nfn main():\n    box := ConcurrentSet(concurrency.RwShared(Set([1, 2, 3])))\n    s := box.fold(\"\", fn(a, x): a + str(x))\n    print(s)\nmain()\n",
+        "import std.concurrency\nimport ConcurrentSet from std.concurrency.collection\nfn main():\n    box := ConcurrentSet(concurrency.RwShared(Set.from_iter([1, 2, 3])))\n    s := box.fold(\"\", fn(a, x): a + str(x))\n    print(s)\nmain()\n",
     );
 }
 

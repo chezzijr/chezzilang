@@ -339,22 +339,12 @@ impl Parser {
         // only (desugar's `collect_module_reg` ignores `StmtKind::Native`, so it is never injected
         // at a call site). The checker still rejects a `native` decl in a USER module outright.
         let params = self.parse_params(true)?;
-        // Phase 4c-followup — a `native fn` INSIDE a `native struct` body is an INSTANCE method and
-        // MUST declare a leading bare `self` (untyped), mirroring user struct methods; harvest strips
-        // it so the method-table sig is byte-identical to the pre-`self` spelling. A module-level
-        // `native fn`/`native ctor` is a free function and must NOT take `self`. `self` is a plain
-        // identifier, detected here by name — and it is valid ONLY as the first parameter.
+        // A `native fn` inside a `native struct` body is an instance method when its first
+        // parameter is a bare `self` (harvest strips it), and a static method otherwise, as in a
+        // user struct. A module-level `native fn`/`native ctor` is a free function and must NOT
+        // take `self`. `self` is a plain identifier, valid ONLY as the first parameter.
         let first_is_self = params.first().is_some_and(Param::is_self);
-        if in_struct {
-            if kind == NativeKind::Fn && !first_is_self {
-                return Err(ParseError {
-                    message: "native instance method must declare `self` as its first parameter \
-                              (static native methods are not yet supported)"
-                        .to_string(),
-                    span: name_span,
-                });
-            }
-        } else if first_is_self {
+        if !in_struct && first_is_self {
             return Err(ParseError {
                 message: "module-level `native fn` cannot take `self`".to_string(),
                 span: name_span,
@@ -501,6 +491,14 @@ impl Parser {
                     return Err(self
                         .err("native enum methods must be `native fn` declarations".to_string()));
                 };
+                if !decl.params.first().is_some_and(Param::is_self) {
+                    return Err(ParseError {
+                        message: "a native enum method must declare `self` as its first parameter \
+                                  (a native enum has no static methods)"
+                            .to_string(),
+                        span: decl.name_span,
+                    });
+                }
                 self.expect_member_end("native method", &decl.name)?;
                 methods.push(decl);
                 self.skip_newlines();

@@ -4,6 +4,7 @@
 use super::infer_access::json_decode_sig;
 use super::setup::{HeadBinding, TypeHead, TypeHeadKind, TypeRead};
 use super::*;
+use crate::base::builtin_method::NativeStatic;
 
 impl Checker {
     /// M24 — PERMANENT WALL, not a v1 limit: a generic fn that takes hidden witness arguments
@@ -294,8 +295,44 @@ impl Checker {
             Some(app) => (app.head, Some((app.args, app.args_span))),
             None => (obj, None),
         };
-        let th = self.type_head(head)?;
+        let th = self
+            .type_head(head)
+            .or_else(|| head.kind.as_ident().and_then(|n| self.builtin_type_head(n)))?;
         Some((th, args))
+    }
+
+    /// The static methods a prelude `native struct` decl declares for the builtin type `name`, sorted.
+    fn builtin_statics(&self, name: &str) -> Vec<String> {
+        let mut out: Vec<String> = self
+            .container_seeds
+            .get(name)
+            .map(|info| {
+                info.methods
+                    .iter()
+                    .filter(|(_, sig)| sig.is_static)
+                    .map(|(m, _)| m.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
+        out.sort();
+        out
+    }
+
+    /// A builtin type the prelude declares as a `native struct` (`List`, `bytes`), as the head of a
+    /// member path only (`List.from_iter(xs)`): read alone it stays a builtin type name, never a
+    /// value. A binding of the name hides it, as it hides a user type.
+    fn builtin_type_head(&self, name: &str) -> Option<TypeHead> {
+        if !self.container_seeds.contains_key(name) || self.head_hides_type(name) {
+            return None;
+        }
+        Some(TypeHead {
+            kind: TypeHeadKind::Struct,
+            key: name.to_string(),
+            name: name.to_string(),
+            spelled: name.to_string(),
+            pinned: None,
+            native_handle: true,
+        })
     }
 
     /// The fn-like member `name` of type head `th`: a payload variant (a constructor fn) or a
@@ -307,9 +344,6 @@ impl Checker {
         head_args: Option<WrittenTypeArgs>,
         name: &str,
     ) -> Option<PathFn> {
-        if th.native_handle {
-            return None;
-        }
         let key = &th.key;
         let params_of = |tps: &[TyParam]| {
             tps.iter()
@@ -341,6 +375,15 @@ impl Checker {
                 } else {
                     method(tps, self.enum_methods.get(key)?.get(name)?, recv)
                 }
+            }
+            // A native type's methods have no proto: only a static one, which its decl declares,
+            // is a member of the type path.
+            TypeHeadKind::Struct if th.native_handle => {
+                let info = self.struct_shape(key)?;
+                let msig = info.methods.get(name).filter(|s| s.is_static)?;
+                let res = Resolution::NativeStatic(NativeStatic::from_key(&th.name, name)?);
+                let tps = info.type_params.clone();
+                (method_value_sig(msig, &tps, Ty::Unknown), tps, res)
             }
             TypeHeadKind::Struct => {
                 let info = self.struct_shape(key)?;
@@ -549,6 +592,7 @@ impl Checker {
             Some(
                 r @ (Resolution::Fn { .. }
                 | Resolution::MethodFn { .. }
+                | Resolution::NativeStatic(_)
                 | Resolution::ParamMethodFn { .. }),
             ) => {
                 let pf = self.path_fn(head)?;
@@ -617,7 +661,8 @@ impl Checker {
             if !self
                 .structs
                 .get(&th.key)
-                .is_some_and(|info| info.methods.contains_key(name))
+                .and_then(|info| info.methods.get(name))
+                .is_some_and(|sig| !sig.is_static)
             {
                 return false;
             }
@@ -682,7 +727,7 @@ impl Checker {
                 };
                 Some(Ty::enum_ty(key, args))
             }
-            Some(Resolution::MethodFn { .. }) => {
+            Some(Resolution::MethodFn { .. } | Resolution::NativeStatic(_)) => {
                 let pf = self.type_member_fn(&th, head_args, name)?;
                 Some(self.path_fn_value_ty(obj.id, pf, None, name_span))
             }
@@ -741,6 +786,19 @@ impl Checker {
                 }
             }
             TypeRead::Variant(s) => ctor(s),
+            // A builtin type whose prelude decl declares static methods builds its values there
+            // (`List.from_iter(xs)`, `bytes.zeroed(n)`), so the remedy names them.
+            TypeRead::Builtin(n) if !self.builtin_statics(n).is_empty() => {
+                let statics: Vec<String> = self
+                    .builtin_statics(n)
+                    .iter()
+                    .map(|m| format!("`{n}.{m}(…)`"))
+                    .collect();
+                format!(
+                    "'{n}' is a type, not a value — use one of its static methods ({})",
+                    statics.join(", ")
+                )
+            }
             TypeRead::Builtin(n)
                 if self.builtin_callee(n).is_some()
                     || n.rsplit_once('.').is_some_and(|(_, m)| {

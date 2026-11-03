@@ -1065,10 +1065,10 @@ fn vm_bytearray_ops() {
     // len, push, pop, extend, ==/!=, and Display bytearray(b'...').
     let src = concat!(
         "fn main():\n",
-        "    print(bytearray())\n",                // bytearray(b'')
-        "    print(bytearray(3))\n",               // bytearray(b'\x00\x00\x00')
-        "    print(bytearray(b\"\\x01\\x02\"))\n", // bytearray(b'\x01\x02')
-        "    ba := bytearray([1, 2, 3])\n",
+        "    print(bytearray())\n",         // bytearray(b'')
+        "    print(bytearray.zeroed(3))\n", // bytearray(b'\x00\x00\x00')
+        "    print(bytearray.from_iter(b\"\\x01\\x02\"))\n", // bytearray(b'\x01\x02')
+        "    ba := bytearray.from_iter([1, 2, 3])\n",
         "    print(ba)\n",            // bytearray(b'\x01\x02\x03')
         "    print(ba[0])\n",         // 1
         "    print(ba[-1])\n",        // 3
@@ -1084,8 +1084,8 @@ fn vm_bytearray_ops() {
         "    ba.extend(b\"\\xFF\")\n",
         "    ba.extend([7, 8])\n",
         "    print(ba)\n", // bytearray(b'\x01\x02\x03\xff\x07\x08')
-        "    print(bytearray([1]) == bytearray([1]))\n", // true
-        "    print(bytearray([1]) != bytearray([2]))\n", // true
+        "    print(bytearray.from_iter([1]) == bytearray.from_iter([1]))\n", // true
+        "    print(bytearray.from_iter([1]) != bytearray.from_iter([2]))\n", // true
         "main()\n"
     );
     assert_golden_out(
@@ -1103,7 +1103,7 @@ fn vm_bytearray_index_write_and_shared_mutation() {
     // ba[i] = x mutates in place; a second binding observes it (proves in-place, not copy).
     let src = concat!(
         "fn main():\n",
-        "    ba := bytearray([1, 2, 3])\n",
+        "    ba := bytearray.from_iter([1, 2, 3])\n",
         "    ba2 := ba\n",
         "    ba[0] = 65\n",
         "    print(ba2[0])\n", // 65 — same buffer
@@ -1120,7 +1120,7 @@ fn vm_bytearray_oob_and_value_range_recoverable() {
     // An out-of-range index OR an out-of-range value (not 0..=255) is a recoverable fault.
     let src = concat!(
         "fn main():\n",
-        "    ba := bytearray([1, 2])\n",
+        "    ba := bytearray.from_iter([1, 2])\n",
         "    r1 := recover:\n",
         "        ba[9] = 1\n",
         "    match r1:\n",
@@ -1142,12 +1142,12 @@ fn vm_bytearray_oob_and_value_range_recoverable() {
 
 #[test]
 fn vm_bytearray_huge_size_is_recoverable_not_abort() {
-    // `bytearray(N)` for an absurd N must fault recoverably (try_reserve), NOT abort the process
+    // `bytearray.zeroed(N)` for an absurd N must fault recoverably (try_reserve), NOT abort the process
     // (SIGABRT) uncatchably — the language's recoverable-fault invariant (cf. range()'s cap).
     let src = concat!(
         "fn main():\n",
         "    r := recover:\n",
-        "        bytearray(9999999999999)\n",
+        "        bytearray.zeroed(9999999999999)\n",
         "    match r:\n",
         "        ?v: print(\"ok\")\n",
         "        !e: print(\"caught huge\")\n",
@@ -1159,18 +1159,18 @@ fn vm_bytearray_huge_size_is_recoverable_not_abort() {
 
 #[test]
 fn vm_bytearray_conversion_bridge() {
-    // bytes(ba) -> immutable snapshot; bytearray(b) -> mutable copy; round-trip + independence.
+    // bytes.from_iter(ba) -> immutable snapshot; bytearray.from_iter(b) -> mutable copy; round-trip + independence.
     let src = concat!(
         "fn main():\n",
-        "    ba := bytearray([1, 2, 3])\n",
-        "    b := bytes(ba)\n",
+        "    ba := bytearray.from_iter([1, 2, 3])\n",
+        "    b := bytes.from_iter(ba)\n",
         "    print(b)\n", // b'\x01\x02\x03'
         "    ba[0] = 99\n",
         "    print(b)\n", // b'\x01\x02\x03' — snapshot unaffected
-        "    ba2 := bytearray(b\"\\x07\\x08\")\n",
+        "    ba2 := bytearray.from_iter(b\"\\x07\\x08\")\n",
         "    ba2[0] = 10\n",
-        "    print(ba2)\n",          // bytearray(b'\n\x08') — 0x0a renders as \n
-        "    print(bytearray(b))\n", // bytearray(b'\x01\x02\x03')
+        "    print(ba2)\n", // bytearray(b'\n\x08') — 0x0a renders as \n
+        "    print(bytearray.from_iter(b))\n", // bytearray(b'\x01\x02\x03')
         "main()\n"
     );
     assert_golden_out(
@@ -1191,7 +1191,7 @@ fn bytearray_crosses_channel_deep_copy() {
         "fn main():\n",
         "    ch := Channel[bytearray]()\n",
         "    parallel:\n",
-        "        spawn ch.send(bytearray([1, 2]))\n",
+        "        spawn ch.send(bytearray.from_iter([1, 2]))\n",
         "    print(ch.recv())\n",
         "main()\n"
     );
@@ -1228,7 +1228,7 @@ fn iter_snapshot_order_matches_for() {
         ("{1: \"a\", 2: \"b\"}.keys()", "1\n2\n"), // keys()
         ("\"abc\"", "a\nb\nc\n"),
         ("b\"hi\"", "104\n105\n"),
-        ("bytearray([7, 8])", "7\n8\n"),
+        ("bytearray.from_iter([7, 8])", "7\n8\n"),
     ] {
         let via_for = format!("fn main():\n    for x in {coll}:\n        print(x)\nmain()\n");
         let via_iter = format!(
@@ -1255,11 +1255,11 @@ fn iter_self_on_iterator_value() {
 #[test]
 fn list_of_cursor_roundtrip_both_engines() {
     assert_golden_out(
-        "fn main():\n    print(List([5, 6, 7].iter()))\nmain()\n",
+        "fn main():\n    print(List.from_iter([5, 6, 7].iter()))\nmain()\n",
         "[5, 6, 7]\n",
     );
     assert_golden_out(
-        "fn main():\n    print(Set({1, 2}.iter()).len())\nmain()\n",
+        "fn main():\n    print(Set.from_iter({1, 2}.iter()).len())\nmain()\n",
         "2\n",
     );
 }
@@ -1332,7 +1332,7 @@ fn for_named_cursor_partial_consume_then_drain() {
         "        seen = seen + 1\n",
         "        if x == 2:\n",
         "            break\n",
-        "    rest := List(it)\n",
+        "    rest := List.from_iter(it)\n",
         "    print(\"seen={seen} rest={rest}\")\n",
         "main()\n"
     );

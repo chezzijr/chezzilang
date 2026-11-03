@@ -15,9 +15,9 @@ fn main():
     print(str(true))         # true
 
     # native ctor bytes / bytearray — from a List[int]
-    b := bytes([65, 66])
+    b := bytes.from_iter([65, 66])
     print(b[0])              # 65
-    ba := bytearray([90])
+    ba := bytearray.from_iter([90])
     print(ba[0])             # 90
 
     # native fn ord / chr (round-trip)

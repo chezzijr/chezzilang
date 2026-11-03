@@ -195,8 +195,8 @@ fn counter_field_set(c: Counter):
 test fn every_mutating_native_lands_on_the_parents_value():
     xs := [1, 2, 3]
     m := {"a": 1}
-    s := Set([1, 2])
-    b := bytearray([1, 2])
+    s := Set.from_iter([1, 2])
+    b := bytearray.from_iter([1, 2])
     c2 := Counter(1)
     parallel:
         spawn:
@@ -222,8 +222,8 @@ test fn every_mutating_native_lands_on_the_parents_value():
             counter_field_set(c2)
     assert xs == [9, 2, 3, 4]
     assert m == {"c": 3}
-    assert s == Set([2, 3])
-    assert b == bytearray([1, 2, 1])
+    assert s == Set.from_iter([2, 3])
+    assert b == bytearray.from_iter([1, 2, 1])
     assert c2.n == 2
 
 fn push_arg(ys: List[int], r: Channel[str]):

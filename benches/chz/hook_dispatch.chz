@@ -21,7 +21,7 @@ fn eq_loop(n: int) -> int:
     return hits
 
 fn set_loop(n: int) -> int:
-    s: Set[P] = Set([])
+    s: Set[P] = Set.from_iter([])
     i := 0
     while i < n:
         s.insert(P(i % 1000))

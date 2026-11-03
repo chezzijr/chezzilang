@@ -43,13 +43,13 @@ test fn a_generator_iter_hook_drives_for():
 
 test fn a_generator_iter_hook_inside_a_generator():
     # CPython `h5_1_panic.py`: `[6, 4, 2]`. It used to panic the VM.
-    assert List(doubled(Countdown(3))) == [6, 4, 2]
+    assert List.from_iter(doubled(Countdown(3))) == [6, 4, 2]
 
 test fn a_generator_index_hook_returns_its_generator():
     # CPython `h5_1_index.py`: `after [0, 10, 20]`.
     t := Table(10)
     g := t[3]
-    assert List(g) == [0, 10, 20]
+    assert List.from_iter(g) == [0, 10, 20]
 
 # ---- D2: a static `str` is not the display hook ----
 
@@ -117,14 +117,14 @@ fn through_bound[S: Iterable[T], T](s: S) -> List[T]:
     return [x for x in s]
 
 fn through_slot(s: Iterable[str]) -> List[str]:
-    return List(s.iter())
+    return List.from_iter(s.iter())
 
 test fn iter_wins_over_next_everywhere():
     # CPython `both.py`: `['a', 'b']`; `for` calls `__iter__`.
     assert [x for x in Both(2)] == ["a", "b"]
     assert through_bound(Both(2)) == ["a", "b"]
     assert through_slot(Both(2)) == ["a", "b"]
-    assert List(Both(2)) == ["a", "b"]
+    assert List.from_iter(Both(2)) == ["a", "b"]
 
 # ---- D6: every consumer accepts what `for` accepts ----
 
@@ -139,9 +139,9 @@ struct Pairs:
 
 test fn list_set_map_and_inference_accept_an_iter_only_struct():
     b := Bag([1, 2, 3])
-    assert List(b) == [1, 2, 3]
-    assert Set(b) == {1, 2, 3}
-    assert Map(Pairs()) == {"k": 9}
+    assert List.from_iter(b) == [1, 2, 3]
+    assert Set.from_iter(b) == {1, 2, 3}
+    assert Map.from_iter(Pairs()) == {"k": 9}
     assert through_bound(b) == [1, 2, 3]
 
 # ---- D4: a type may ask conformance of itself ----
@@ -153,7 +153,7 @@ struct Node:
     fn eq(self, other: Self) -> bool:
         return self.id == other.id
     fn peers(self) -> Set[Node]:
-        return Set([self, self])
+        return Set.from_iter([self, self])
 
 test fn a_method_returns_a_set_of_its_own_type():
     # CPython, Rust and Go print `2` for `len + 1`.

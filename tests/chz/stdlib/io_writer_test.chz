@@ -137,7 +137,7 @@ test fn large_write_bytes_returns_the_full_count():
     ba := bytearray()
     for i in 0..200000:
         ba.push(255)
-    big := bytes(ba)
+    big := bytes.from_iter(ba)
     match io.create(p):
         ?w:
             match w.write_bytes(big):

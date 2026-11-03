@@ -228,6 +228,12 @@ impl Compiler {
                     Resolution::MethodFn { type_key, method } => {
                         fc.emit(Op::MakeMethodFunc { type_key, method }, expr.span);
                     }
+                    Resolution::NativeStatic(which) => {
+                        let p = self.synth_fn_proto(SynthFn::NativeStatic(which), |c| {
+                            Ok(c.build_native_static_fn(which))
+                        })?;
+                        fc.emit(Op::MakeFunc(p), expr.span);
+                    }
                     // A bound's instance method through a type parameter (`T.get`).
                     Resolution::ParamMethodFn { method, arity } => {
                         let p = self.synth_fn_proto(
@@ -616,6 +622,7 @@ impl Compiler {
             | other @ Resolution::ParamMethodFn { .. }
             | other @ Resolution::IndexCall
             | other @ Resolution::MethodFn { .. }
+            | other @ Resolution::NativeStatic(_)
             | other @ Resolution::WitnessStatic(_)
             | other @ Resolution::ModuleMember { .. }
             | other @ Resolution::Member

@@ -836,7 +836,7 @@ fn encode_decode_roundtrip_multibyte() {
 /// `bytearray.decode()` mirrors `bytes.decode()` exactly (decode the current buffer).
 #[test]
 fn bytearray_decode_matches_bytes() {
-    let src = "fn main():\n    print(bytearray([104, 105]).decode())\n    print(b\"hi\".decode())\nmain()\n";
+    let src = "fn main():\n    print(bytearray.from_iter([104, 105]).decode())\n    print(b\"hi\".decode())\nmain()\n";
     let out = run(src);
     assert_eq!(out, "hi\nhi\n");
 }
@@ -860,7 +860,7 @@ fn invalid_utf8_decode_recoverable() {
 /// VM/interp. The map last-wins on a duplicate key mirrors the `{k: v}` literal.
 #[test]
 fn constructors_over_user_iterator_and_dupkey() {
-    let src = "struct C:\n    n: int\n    limit: int\n    fn next(self) -> int?:\n        if self.n >= self.limit:\n            return None\n        v := self.n\n        self.n = self.n + 1\n        return ?v\nfn main():\n    print(List(C(0, 4)).sum())\n    print(Set(C(0, 4)).len())\n    m := Map([(1, \"a\"), (1, \"b\")])\n    print(m.len())\n    print(m[1])\nmain()\n";
+    let src = "struct C:\n    n: int\n    limit: int\n    fn next(self) -> int?:\n        if self.n >= self.limit:\n            return None\n        v := self.n\n        self.n = self.n + 1\n        return ?v\nfn main():\n    print(List.from_iter(C(0, 4)).sum())\n    print(Set.from_iter(C(0, 4)).len())\n    m := Map.from_iter([(1, \"a\"), (1, \"b\")])\n    print(m.len())\n    print(m[1])\nmain()\n";
     let out = run(src);
     assert_eq!(out, "6\n4\n1\nb\n");
 }
