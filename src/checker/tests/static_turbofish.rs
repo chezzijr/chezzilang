@@ -1685,10 +1685,10 @@ fn builtin_method_grid_declared_checked_and_hovered() {
             .into_iter()
             .filter(|m| !m.starts_with('_'))
             .collect();
-        for m in declared.difference(&table) {
+        if let Some(m) = declared.difference(&table).next() {
             panic!("{ty}.{m} is declared in std/ but the checker's table has no such method");
         }
-        for m in table.difference(&declared) {
+        if let Some(m) = table.difference(&declared).next() {
             panic!("{ty}.{m} is in the checker's table but not declared in std/");
         }
         let doc = builtin_type_doc(ty).unwrap_or_else(|| panic!("{ty} has no hover text"));

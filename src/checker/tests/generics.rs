@@ -2344,7 +2344,8 @@ fn hashable_is_one_verdict_per_kind_at_every_site() {
         ("(1, HE(1))", true, RUSTC),
         ("opt", false, owner),
     ];
-    let sites: [(&str, fn(&str) -> String); 3] = [
+    type Site = (&'static str, fn(&str) -> String);
+    let sites: [Site; 3] = [
         ("map key", |v| format!("m := {{{v}: 1}}\n")),
         ("set element", |v| format!("s := Set([{v}])\n")),
         ("Hashable bound", |v| format!("print(k({v}))\n")),
