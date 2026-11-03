@@ -931,9 +931,8 @@ fn native_struct_mixes_bodyless_and_bodied_methods() {
 
 #[test]
 fn native_fn_allows_optional_trailing_default() {
-    // Phase 4f — a `native fn` may carry a DEFAULTED trailing param (`timeout_ms: int = 0`),
-    // the file-backed spelling of std.request's optional-tail sig. The parser now accepts a
-    // default in a native decl (grammar already permits it); the `= 0` is a marker only.
+    // Phase 4f — a `native fn` may carry a DEFAULTED trailing param (`timeout_ms: int = 0`). The
+    // parser accepts a default in a native decl; a call fills it from the decl.
     let StmtKind::Native(d) = only("native fn get(url: str, timeout_ms: int = 0) -> Response!\n")
     else {
         panic!("expected StmtKind::Native");
@@ -943,7 +942,7 @@ fn native_fn_allows_optional_trailing_default() {
     assert!(d.params[0].default.is_none(), "url has no default");
     assert!(
         d.params[1].default.is_some(),
-        "timeout_ms carries the `= 0` optional-tail marker"
+        "timeout_ms carries its `= 0` default"
     );
 }
 
@@ -1125,8 +1124,8 @@ fn native_struct_test_fn_rejected() {
 fn native_struct_parses_native_methods() {
     // Phase 4c-followup — a `native fn` inside a native-struct body is an INSTANCE method: it
     // declares a leading bare `self` (mirroring user structs), harvested into `methods` with the
-    // `self` KEPT in the parsed decl (harvest strips it). A trailing `= default` param lowers to
-    // an optional-tail marker (like a free native fn).
+    // `self` KEPT in the parsed decl (harvest strips it). A trailing `= default` param is an
+    // ordinary default (like a free native fn's).
     let StmtKind::NativeStruct {
         name,
         fields,

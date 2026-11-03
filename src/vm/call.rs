@@ -160,7 +160,13 @@ impl Vm {
                 }
                 self.run_proto(proto, home, Some(h), args, true, false, span)
             }
-            Callee::Native { func, name, kind } => {
+            Callee::Native {
+                func,
+                name,
+                kind,
+                defaults,
+            } => {
+                let args = self.fill_decl_defaults(args, defaults);
                 self.invoke_native(func, &name, kind, args, span)
             }
             // A first-class universe builtin fn value (`print`/`ord`/`chr`/`panic`) — route
@@ -281,10 +287,16 @@ impl Vm {
                 proto: *proto,
                 home: *home,
             }),
-            Obj::Native { func, name, kind } => Some(Callee::Native {
+            Obj::Native {
+                func,
+                name,
+                kind,
+                defaults,
+            } => Some(Callee::Native {
                 func: *func,
                 name: name.clone(),
                 kind: *kind,
+                defaults,
             }),
             Obj::Builtin(b) => Some(Callee::Builtin(*b)),
             Obj::Cffi(c) => Some(Callee::Cffi(std::sync::Arc::clone(c))),
@@ -315,6 +327,33 @@ impl Vm {
             | Obj::Reader(_)
             | Obj::Generator(_) => None,
         }
+    }
+
+    /// The one filler of a short native call: append the decl's default of each trailing
+    /// parameter the call left out. Only a call through a fn value is short (a direct call has its
+    /// defaults filled at the call site by the checker's binder), as a user fn value's prologue fills
+    /// its own (DEC-182).
+    pub(super) fn fill_decl_defaults(
+        &mut self,
+        mut args: Vec<Value>,
+        defaults: &crate::base::builtin_method::DeclDefaults,
+    ) -> Vec<Value> {
+        use crate::base::builtin_method::DeclDefault;
+        let arity = defaults.min + defaults.values.len();
+        if args.len() < defaults.min {
+            return args;
+        }
+        for d in &defaults.values[args.len().min(arity) - defaults.min..] {
+            let v = match *d {
+                DeclDefault::Int(n) => self.make_int(n),
+                DeclDefault::Float(x) => self.box_float(x),
+                DeclDefault::Bool(b) => Value::bool(b),
+                DeclDefault::Str(s) => self.alloc_str(s.to_string()),
+                DeclDefault::None => self.alloc_enum("Option", "None", &[]),
+            };
+            args.push(v);
+        }
+        args
     }
 
     /// Invoke a native (Rust) function value (M6c). Builds a [`VmHost`] over the evaluated args,

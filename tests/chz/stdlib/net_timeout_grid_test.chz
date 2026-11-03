@@ -1,0 +1,249 @@
+# tests/chz/stdlib/net_timeout_grid_test.chz — the optional `timeout_ms: int? = None` of the socket ops
+# and of `request.get`. A socket op: `None` (or the argument left out) waits, `0` polls once, `n > 0`
+# waits n ms; a negative value polls once (it saturates to 0, as before). `request.get`: `None`, `0`
+# and a negative value use the agent's default limits; `n > 0` is the limit.
+#
+# Axes: op {read, read_bytes, write, write_bytes, accept, request.get} x form {omitted, None, 0, 50,
+# -5, by name 0, by name None}. The omitted and positional cells are the base build's output (the
+# twin oracle, measured 2026-11-04). For a waiting form the other side acts after 200-300 ms, and
+# the call succeeds whatever the order; for a polling form the other side never acts, so the call
+# times out whatever the timing.
+import std.net
+import std.time
+import std.request
+
+const_forms := ["omitted", "none", "zero", "fifty", "neg", "name_zero", "name_none"]
+
+fn waits(form: str) -> bool:
+    return form == "omitted" or form == "none" or form == "name_none"
+
+fn txt(r: str!) -> str:
+    match r:
+        ?s: return "ok {s}"
+        !e: return e.message()
+
+fn btxt(r: bytes!) -> str:
+    match r:
+        ?b: return "ok {b.len()}"
+        !e: return e.message()
+
+fn ntxt(r: int!) -> str:
+    match r:
+        ?n: return "ok {n}"
+        !e: return e.message()
+
+fn read_with(c: net.Socket, form: str) -> str:
+    if form == "omitted":
+        return txt(c.read(2))
+    if form == "none":
+        return txt(c.read(2, None))
+    if form == "zero":
+        return txt(c.read(2, 0))
+    if form == "fifty":
+        return txt(c.read(2, 50))
+    if form == "neg":
+        return txt(c.read(2, -5))
+    if form == "name_zero":
+        return txt(c.read(n=2, timeout_ms=0))
+    return txt(c.read(2, timeout_ms=None))
+
+fn read_bytes_with(c: net.Socket, form: str) -> str:
+    if form == "omitted":
+        return btxt(c.read_bytes(2))
+    if form == "none":
+        return btxt(c.read_bytes(2, None))
+    if form == "zero":
+        return btxt(c.read_bytes(2, 0))
+    if form == "fifty":
+        return btxt(c.read_bytes(2, 50))
+    if form == "neg":
+        return btxt(c.read_bytes(2, -5))
+    if form == "name_zero":
+        return btxt(c.read_bytes(timeout_ms=0, n=2))
+    return btxt(c.read_bytes(2, timeout_ms=None))
+
+fn read_case(op: str, form: str) -> str!:
+    ln := net.listen("127.0.0.1:0")?
+    c := net.connect(ln.addr()?)?
+    peer := ln.accept()?
+    out := Channel[str](1)
+    parallel:
+        spawn:
+            if waits(form):
+                time.sleep_ms(200)
+                _ := peer.write("hi")
+        spawn:
+            if op == "read":
+                out.send(read_with(c, form))
+            else:
+                out.send(read_bytes_with(c, form))
+    c.close()
+    peer.close()
+    ln.close()
+    return ?out.recv()
+
+fn drain(peer: net.Socket) -> int:
+    total := 0
+    while true:
+        match peer.read_bytes(65536):
+            ?b:
+                if b.len() == 0:
+                    return total
+                total += b.len()
+            !_: return total
+    return total
+
+fn write_with(c: net.Socket, form: str, big: str) -> str:
+    if form == "omitted":
+        return ntxt(c.write(big))
+    if form == "none":
+        return ntxt(c.write(big, None))
+    if form == "zero":
+        return ntxt(c.write(big, 0))
+    if form == "fifty":
+        return ntxt(c.write(big, 50))
+    if form == "neg":
+        return ntxt(c.write(big, -5))
+    if form == "name_zero":
+        return ntxt(c.write(data=big, timeout_ms=0))
+    return ntxt(c.write(big, timeout_ms=None))
+
+fn write_bytes_with(c: net.Socket, form: str, big: bytes) -> str:
+    if form == "omitted":
+        return ntxt(c.write_bytes(big))
+    if form == "none":
+        return ntxt(c.write_bytes(big, None))
+    if form == "zero":
+        return ntxt(c.write_bytes(big, 0))
+    if form == "fifty":
+        return ntxt(c.write_bytes(big, 50))
+    if form == "neg":
+        return ntxt(c.write_bytes(big, -5))
+    if form == "name_zero":
+        return ntxt(c.write_bytes(timeout_ms=0, data=big))
+    return ntxt(c.write_bytes(big, timeout_ms=None))
+
+# The payload is larger than the kernel buffers; for a waiting form the peer starts draining after
+# 200 ms, for a polling form it never drains.
+fn write_case(op: str, form: str) -> str!:
+    ln := net.listen("127.0.0.1:0")?
+    c := net.connect(ln.addr()?)?
+    peer := ln.accept()?
+    big := "x".repeat(16777216)
+    out := Channel[str](1)
+    got := Channel[int](1)
+    parallel:
+        spawn:
+            r := ""
+            if op == "write":
+                r = write_with(c, form, big)
+            else:
+                r = write_bytes_with(c, form, big.encode())
+            c.close()
+            out.send(r)
+        spawn:
+            if waits(form):
+                time.sleep_ms(200)
+                got.send(drain(peer))
+            else:
+                got.send(0)
+    peer.close()
+    ln.close()
+    _ := got.recv()
+    return ?out.recv()
+
+fn accept_with(ln: net.Listener, form: str) -> net.Socket!:
+    if form == "omitted":
+        return ln.accept()
+    if form == "none":
+        return ln.accept(None)
+    if form == "zero":
+        return ln.accept(0)
+    if form == "fifty":
+        return ln.accept(50)
+    if form == "neg":
+        return ln.accept(-5)
+    if form == "name_zero":
+        return ln.accept(timeout_ms=0)
+    return ln.accept(timeout_ms=None)
+
+fn accept_case(form: str) -> str!:
+    ln := net.listen("127.0.0.1:0")?
+    addr := ln.addr()?
+    out := Channel[str](1)
+    parallel:
+        spawn:
+            if waits(form):
+                time.sleep_ms(200)
+                _ := net.connect(addr)
+        spawn:
+            match accept_with(ln, form):
+                ?s:
+                    s.close()
+                    out.send("ok")
+                !e: out.send(e.message())
+    ln.close()
+    return ?out.recv()
+
+fn get_with(url: str, form: str) -> request.Response!:
+    if form == "omitted":
+        return request.get(url)
+    if form == "none":
+        return request.get(url, None)
+    if form == "zero":
+        return request.get(url, 0)
+    if form == "fifty":
+        return request.get(url, 50)
+    if form == "neg":
+        return request.get(url, -5)
+    if form == "name_zero":
+        return request.get(url=url, timeout_ms=0)
+    return request.get(url, timeout_ms=None)
+
+# A one-shot local HTTP server that answers after 300 ms; under a 50 ms limit it never answers.
+fn get_case(form: str) -> str!:
+    ln := net.listen("127.0.0.1:0")?
+    url := "http://{ln.addr()?}/"
+    out := Channel[str](1)
+    parallel:
+        spawn:
+            if form != "fifty":
+                match ln.accept():
+                    ?s:
+                        _ := s.read(1)
+                        time.sleep_ms(300)
+                        _ := s.write("HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nhi")
+                        s.close()
+                    !_: pass
+        spawn:
+            match get_with(url, form):
+                ?resp: out.send("ok {resp.status}")
+                !_: out.send("error")
+    ln.close()
+    return ?out.recv()
+
+test fn a_socket_read_waits_on_none_and_polls_on_zero():
+    for op in ["read", "read_bytes"]:
+        for form in const_forms:
+            got := read_case(op, form) ?? "setup failed"
+            want := if waits(form): (if op == "read": "ok hi" else: "ok 2") else: "timeout"
+            assert got == want, "{op} {form}: {got}"
+
+test fn a_socket_write_waits_on_none_and_polls_on_zero():
+    for op in ["write", "write_bytes"]:
+        for form in const_forms:
+            got := write_case(op, form) ?? "setup failed"
+            want := if waits(form): "ok 16777216" else: "timeout"
+            assert got == want, "{op} {form}: {got}"
+
+test fn accept_waits_on_none_and_polls_on_zero():
+    for form in const_forms:
+        got := accept_case(form) ?? "setup failed"
+        want := if waits(form): "ok" else: "timeout"
+        assert got == want, "accept {form}: {got}"
+
+test fn request_get_uses_its_default_limits_unless_given_a_positive_timeout():
+    for form in const_forms:
+        got := get_case(form) ?? "setup failed"
+        want := if form == "fifty": "error" else: "ok 200"
+        assert got == want, "get {form}: {got}"

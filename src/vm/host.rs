@@ -26,6 +26,25 @@ impl crate::native::Host for OffloadHost {
     fn arg_is_int(&self, i: usize) -> bool {
         matches!(self.args.get(i), Some(crate::native::NativeArg::Int(_)))
     }
+    fn arg_opt_int(&mut self, i: usize) -> Result<Option<i64>, crate::native::HostError> {
+        use crate::native::NativeArg as A;
+        match self.args.get(i) {
+            Some(A::None) => Ok(None),
+            Some(A::Some(inner)) => match inner.as_ref() {
+                A::Int(n) => Ok(Some(*n)),
+                A::Float(_)
+                | A::Bool(_)
+                | A::Str(_)
+                | A::Bytes(_)
+                | A::Map(_)
+                | A::List(_)
+                | A::None
+                | A::Some(_) => Err(crate::native::HostError::arg_type(i, "int?", "other")),
+            },
+            Some(_) => Err(crate::native::HostError::arg_type(i, "int?", "other")),
+            None => Err(crate::native::HostError::missing_arg(i)),
+        }
+    }
     fn arg_float(&mut self, i: usize) -> Result<f64, crate::native::HostError> {
         match self.args.get(i) {
             Some(crate::native::NativeArg::Float(f)) => Ok(*f),
@@ -122,6 +141,10 @@ enum ArgShape {
     /// A struct: its fields' C values in declaration order ([`ArgCopy::c_form`] of each), or
     /// `None` when a field has no C shape.
     Struct(Option<crate::native::NativeRet>),
+    /// The absent value of a `T?` (`None`).
+    NoneValue,
+    /// A present `T?` (`?x`): its payload's shape.
+    Some(Box<ArgShape>),
     /// Any other value: nil, a tuple, a closure, a handle.
     Other,
 }
@@ -150,6 +173,8 @@ impl ArgCopy {
             | ArgShape::List(_)
             | ArgShape::Map(_)
             | ArgShape::Struct(_)
+            | ArgShape::NoneValue
+            | ArgShape::Some(_)
             | ArgShape::Other => Err(self.wrong(i, "float")),
         }
     }
@@ -197,7 +222,12 @@ impl ArgCopy {
             ArgShape::Ptr(a) => Some(N::Ptr(a)),
             ArgShape::Str(s) => Some(N::Str(s)),
             ArgShape::Struct(c) => c,
-            ArgShape::Bytes(_) | ArgShape::List(_) | ArgShape::Map(_) | ArgShape::Other => None,
+            ArgShape::Bytes(_)
+            | ArgShape::List(_)
+            | ArgShape::Map(_)
+            | ArgShape::NoneValue
+            | ArgShape::Some(_)
+            | ArgShape::Other => None,
         }
     }
     /// In list order (it IS the argv). Every element must be a str.
@@ -215,6 +245,8 @@ impl ArgCopy {
             | ArgShape::Ptr(_)
             | ArgShape::Map(_)
             | ArgShape::Struct(_)
+            | ArgShape::NoneValue
+            | ArgShape::Some(_)
             | ArgShape::Other => Err(self.wrong(i, "List[str]")),
         }
     }
@@ -236,14 +268,43 @@ impl ArgCopy {
             | ArgShape::Ptr(_)
             | ArgShape::List(_)
             | ArgShape::Struct(_)
+            | ArgShape::NoneValue
+            | ArgShape::Some(_)
             | ArgShape::Other => Err(self.wrong(i, "Map[str, str]")),
+        }
+    }
+    /// An `int?`: `None` for the absent value, else the int of `?n`.
+    pub(super) fn opt_int(self, i: usize) -> Result<Option<i64>, crate::native::HostError> {
+        match self.shape {
+            ArgShape::NoneValue => Ok(None),
+            ArgShape::Some(inner) => ArgCopy {
+                shape: *inner,
+                ty: self.ty,
+            }
+            .int(i)
+            .map(Some),
+            ArgShape::Int(_)
+            | ArgShape::Float(_)
+            | ArgShape::Bool(_)
+            | ArgShape::Str(_)
+            | ArgShape::Bytes(_)
+            | ArgShape::Ptr(_)
+            | ArgShape::List(_)
+            | ArgShape::Map(_)
+            | ArgShape::Struct(_)
+            | ArgShape::Other => Err(self.wrong(i, "int?")),
         }
     }
     /// D5 — the `Send` primitive form a dirty-pool thread serves ([`OffloadHost`]), or `None`
     /// when the arg has none (the call then runs inline: a safe fallback, never a fault).
     pub(super) fn offload_form(self) -> Option<crate::native::NativeArg> {
         use crate::native::NativeArg as A;
+        let ty = self.ty;
         match self.shape {
+            ArgShape::NoneValue => Some(A::None),
+            ArgShape::Some(inner) => ArgCopy { shape: *inner, ty }
+                .offload_form()
+                .map(|a| A::Some(Box::new(a))),
             ArgShape::Int(n) => Some(A::Int(n)),
             ArgShape::Float(f) => Some(A::Float(f)),
             ArgShape::Bool(b) => Some(A::Bool(b)),
@@ -288,6 +349,19 @@ impl Vm {
                         .collect::<Option<Vec<_>>>()
                         .map(crate::native::NativeRet::List),
                 ),
+                // A carrier `T?` (the only `Option` a native param declares).
+                Obj::Enum {
+                    variant_id,
+                    payload,
+                } if *variant_id == crate::base::op::VID_NONE_VARIANT && payload.is_empty() => {
+                    ArgShape::NoneValue
+                }
+                Obj::Enum {
+                    variant_id,
+                    payload,
+                } if *variant_id == crate::base::op::VID_SOME && payload.len() == 1 => {
+                    ArgShape::Some(Box::new(self.copy_arg(payload.get(0)).shape))
+                }
                 Obj::ByteArray(_)
                 | Obj::BigInt(_)
                 | Obj::FloatBox(_)
@@ -421,6 +495,9 @@ impl crate::native::Host for DoorHost<'_, '_> {
     }
     fn arg_is_int(&self, i: usize) -> bool {
         self.args.get(i).is_some_and(ArgCopy::is_int)
+    }
+    fn arg_opt_int(&mut self, i: usize) -> Result<Option<i64>, crate::native::HostError> {
+        self.arg(i)?.opt_int(i)
     }
     fn arg_float(&mut self, i: usize) -> Result<f64, crate::native::HostError> {
         self.arg(i)?.float(i)
@@ -557,6 +634,9 @@ impl crate::native::Host for VmHost<'_> {
     }
     fn arg_is_int(&self, i: usize) -> bool {
         self.args.get(i).is_some_and(|v| self.vm.is_integral(*v))
+    }
+    fn arg_opt_int(&mut self, i: usize) -> Result<Option<i64>, crate::native::HostError> {
+        self.arg(i)?.opt_int(i)
     }
     fn arg_float(&mut self, i: usize) -> Result<f64, crate::native::HostError> {
         self.arg(i)?.float(i)

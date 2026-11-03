@@ -67,7 +67,7 @@ impl Checker {
             );
             return Ty::Unknown;
         }
-        let Some(bound) = self.bind_call(sig.slots.as_deref(), method, args, 0, span) else {
+        let Some(bound) = self.bind_sig(&sig, method, args, 0, span) else {
             return Ty::Unknown;
         };
         let args: &[Expr] = &bound;

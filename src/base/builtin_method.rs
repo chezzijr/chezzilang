@@ -5,6 +5,53 @@
 
 include!(concat!(env!("OUT_DIR"), "/builtin_methods.rs"));
 
+/// A literal default of a `native fn` parameter, as its decl in `std/*.chz` spells it. The build
+/// script reads every native default into [`NATIVE_DEFAULTS`]; a default that is no literal of its
+/// parameter's type fails the build.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum DeclDefault {
+    Int(i64),
+    Float(f64),
+    Bool(bool),
+    Str(&'static str),
+    None,
+}
+
+/// The trailing defaulted parameters of a native: a call passes at least `min` arguments, and
+/// `values[i]` is the default of parameter `min + i`.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct DeclDefaults {
+    pub min: usize,
+    pub values: &'static [DeclDefault],
+}
+
+impl DeclDefaults {
+    /// A native with no default.
+    pub const NONE: Self = Self {
+        min: 0,
+        values: &[],
+    };
+}
+
+/// The defaults of the native fn `name` of the native std module `module` (`"std.io"`), or none.
+/// A direct call has every argument (the checker's binder fills the defaults at the call site);
+/// a call through a fn value is filled from this table by the callee.
+pub fn native_fn_defaults(module: &str, name: &str) -> &'static DeclDefaults {
+    NATIVE_DEFAULTS
+        .iter()
+        .find(|(m, n, _, _)| *m == module && *n == name)
+        .map_or(&DeclDefaults::NONE, |(_, _, _, d)| d)
+}
+
+/// The defaults of the native decl `name` whose parameters (without `self`) are `params`, for the
+/// checker's binder. The build makes that pair name one decl.
+pub fn native_decl_defaults(name: &str, params: &[&str]) -> &'static DeclDefaults {
+    NATIVE_DEFAULTS
+        .iter()
+        .find(|(_, n, ps, _)| *n == name && *ps == params)
+        .map_or(&DeclDefaults::NONE, |(_, _, _, d)| d)
+}
+
 /// The `_` container primitives of an `RwShared[T]` box (`std.concurrency.collection` calls them).
 /// DEC-243: the box has exactly four decls, so these have no `native fn` line; this enum owns them.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]

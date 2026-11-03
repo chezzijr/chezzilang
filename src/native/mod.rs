@@ -347,6 +347,10 @@ pub enum NativeArg {
     /// served back via [`Host::arg_str_list`]. Order is preserved (it IS the argv), so the spawned
     /// process sees the same argument vector across engines.
     List(Vec<String>),
+    /// The absent value of a `T?` argument (`request.get`'s `timeout_ms = None`).
+    None,
+    /// A present `T?` argument: its payload.
+    Some(Box<NativeArg>),
 }
 
 /// The engine-agnostic context a native function operates through. Object-safe (`&mut dyn Host`):
@@ -361,6 +365,11 @@ pub trait Host {
     /// Whether `args[i]` is an int (no promotion). Lets a numeric-polymorphic native fn
     /// (`abs`/`min`/`max`) pick an int vs float result without consuming the argument.
     fn arg_is_int(&self, i: usize) -> bool;
+    /// `args[i]` as an `int?`: `None` for the absent value, else the int. A test host that passes
+    /// no `T?` reads a plain int.
+    fn arg_opt_int(&mut self, i: usize) -> Result<Option<i64>, HostError> {
+        self.arg_int(i).map(Some)
+    }
     /// `args[i]` as a float; an int argument is promoted (matches the builtin `sqrt`).
     fn arg_float(&mut self, i: usize) -> Result<f64, HostError>;
     /// `args[i]` as a bool; errors if it is not a bool. Used by the C-ABI FFI (`extern`) to marshal a

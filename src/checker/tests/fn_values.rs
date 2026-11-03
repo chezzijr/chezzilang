@@ -1061,19 +1061,24 @@ fn a_generic_methods_callee_filled_default_may_be_omitted() {
     );
 }
 
-/// A first-class BUILTIN function value takes NO keyword arguments, as the direct call refuses them.
+/// A first-class BUILTIN function value binds keyword arguments by its decl's parameter names, as
+/// the direct call does (`ord(c)`).
 #[test]
-fn kw_value_builtin_rejects_keywords() {
-    rejects("p := ord\np(x=\"a\")\n", "takes no named arguments");
+fn kw_value_builtin_binds_by_its_decl() {
+    rejects(
+        "p := ord\np(x=\"a\")\n",
+        "unknown named argument 'x' (its parameters are: c)",
+    );
+    entry_ok("p := ord\nprint(p(c=\"a\"))\n");
 }
 
-/// A std native fn value takes no named arguments either; `math.sqrt(x=4.0)` refuses them, and the
-/// base binary ran `f(x=4.0)` through the value and printed `2.0`.
+/// A std native fn value binds named arguments as its direct call does (`math.sqrt(x=4.0)`).
 #[test]
-fn a_native_fn_value_takes_no_named_arguments() {
+fn a_native_fn_value_binds_named_arguments() {
+    entry_ok("import std.math\nf := math.sqrt\nprint(f(x=4.0))\n");
     entry_rejects(
-        "import std.math\nf := math.sqrt\nprint(f(x=4.0))\n",
-        "'f' takes no named arguments",
+        "import std.math\nf := math.sqrt\nprint(f(y=4.0))\n",
+        "unknown named argument 'y' (its parameters are: x)",
     );
 }
 
@@ -2684,7 +2689,7 @@ fn print_keywords_bind_through_the_declaration() {
     );
     entry_rejects(
         "print(\"a\", foo=1)\n",
-        "unknown named argument 'foo' (its parameters are: sep, end)",
+        "unknown named argument 'foo' (its parameters are: args, sep, end)",
     );
     entry_rejects("print(1, end=2)\n", "expected str, found int");
     entry_ok("print(1, 2, end=\"\", sep=\"-\")\n");

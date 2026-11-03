@@ -544,7 +544,9 @@ fn stmt_fill_cells() -> Vec<Cell> {
     ]
 }
 
-/// A native, builtin or `extern` callee takes no named arguments, as CPython's `chr` does not.
+/// A native binds named arguments like a user fn (owner ruling 2026-11-03, which lifts DEC-182's
+/// refusal): by its decl's parameter names. A builtin with no decl (`Set[int](..)`) and an `extern`
+/// take none.
 fn native_cells() -> Vec<Cell> {
     let counter = "struct Counter:\n    n: int\n    fn insert(self, amount: int = 1) -> int:\n        return self.n + amount\n";
     let sock = |call: &str| {
@@ -567,18 +569,23 @@ fn native_cells() -> Vec<Cell> {
         cell(
             "builtin_receiver/kw",
             "s := Set.from_iter([1, 2])\ns.insert(x=3)\nprint(s.len())\n",
-            Expect::Rejects("'insert' takes no named arguments"),
+            Expect::Rejects("unknown named argument 'x' (its parameters are: v)"),
+        ),
+        cell(
+            "builtin_receiver/kw_by_its_name",
+            "s := Set.from_iter([1, 2])\ns.insert(v=3)\nprint(s.len())\n",
+            prints("3"),
         ),
         cell(
             "builtin_receiver_user_twin/kw",
             &format!("{counter}s := Set.from_iter([1, 2])\ns.insert(x=3)\nprint(s.len())\n"),
-            Expect::Rejects("'insert' takes no named arguments"),
+            Expect::Rejects("unknown named argument 'x' (its parameters are: v)"),
         ),
         cell("native_method/pos", &sock("sk.read(10, 5)"), prints("ok")),
         cell(
             "native_method/kw",
             &sock("sk.read(10, timeout_ms=5)"),
-            Expect::Rejects("'read' takes no named arguments"),
+            prints("ok"),
         ),
         cell(
             "native_module_fn/pos",
@@ -588,13 +595,18 @@ fn native_cells() -> Vec<Cell> {
         cell(
             "native_module_fn/kw",
             &req("request.get(\"http://x\", timeout_ms=5)"),
-            Expect::Rejects("'get' takes no named arguments"),
+            prints("ok"),
         ),
         cell("native_free_fn/pos", "print(chr(65))\n", prints("A")),
         cell(
             "native_free_fn/kw",
             "print(chr(65, n=66))\n",
-            Expect::Rejects("'chr' takes no named arguments"),
+            Expect::Rejects("argument 'n' specified both positionally and by name"),
+        ),
+        cell(
+            "native_free_fn/kw_by_its_name",
+            "print(chr(n=65))\n",
+            prints("A"),
         ),
         cell(
             "builtin_ctor/pos",
@@ -614,7 +626,7 @@ fn native_cells() -> Vec<Cell> {
         cell(
             "builtin_static/kw",
             "s: Set[int] = Set.from_iter(xs=[1])\nprint(s.len())\n",
-            Expect::Rejects("'from_iter' takes no named arguments"),
+            prints("1"),
         ),
         cell(
             "fn_field/pos",
@@ -744,7 +756,7 @@ fn t187_cells() -> Vec<Cell> {
         cell(
             "t187/builtin_str/named",
             "print(\"aaa\".replace(old=\"a\", new=\"b\"))\n",
-            Expect::Rejects("takes no named arguments"),
+            prints("bbb"),
         ),
         cell(
             "t187/protocol/one_param_mismatch",

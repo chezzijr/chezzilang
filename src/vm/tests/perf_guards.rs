@@ -1221,6 +1221,7 @@ fn vm_calls_native_fn_value() {
         name: "add".into(),
         func: add,
         kind: crate::native::Kind::Inline,
+        defaults: &crate::base::builtin_method::DeclDefaults::NONE,
     });
     vm.push(Value::obj(h));
     vm.push(Value::int(40));
@@ -1252,6 +1253,7 @@ fn callable_classifies_every_fn_kind() {
             name: "n".into(),
             func: nop,
             kind: crate::native::Kind::Inline,
+            defaults: &crate::base::builtin_method::DeclDefaults::NONE,
         },
         Obj::Builtin(crate::base::builtin::Builtin::Ord),
     ];
@@ -1348,6 +1350,7 @@ fn vm_native_str_return_lowers_to_heap_with_no_children() {
         name: "greet".into(),
         func: greet,
         kind: crate::native::Kind::Inline,
+        defaults: &crate::base::builtin_method::DeclDefaults::NONE,
     });
     // A native fn handle has no GC children (guards the mark-phase claim).
     assert!(vm.heap.children(nat).is_empty());

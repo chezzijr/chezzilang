@@ -176,9 +176,11 @@ nobody to send faults in milliseconds instead of hanging, while `ex.submit(fn():
 `ch.recv()` in `main` works. Residual cases: [`gaps.md`](../../contributing/gaps.md).
 
 ### `Socket` / `Listener` — from `std.net` (see §4)
-- `Socket`: `read(n: int, timeout_ms?: int) -> str!` · `write(s: str, timeout_ms?: int) -> int!` ·
-  `read_bytes(n: int, timeout_ms?: int) -> bytes!` · `write_bytes(b: bytes, timeout_ms?: int) -> int!` ·
-  `close() -> None`.
+- `Socket`: `read(n: int, timeout_ms: int? = None) -> str!` · `write(s: str, timeout_ms: int? = None) -> int!` ·
+  `read_bytes(n: int, timeout_ms: int? = None) -> bytes!` · `write_bytes(b: bytes, timeout_ms: int? = None) -> int!` ·
+  `close() -> None`. `timeout_ms` (Python `settimeout`, Rust `set_read_timeout`): `None` (the
+  default) waits, `0` polls once, `n > 0` waits at most n ms and then gives `!"timeout"`; a negative
+  value polls once, as `0`. It goes by position or by name (`s.read(10, timeout_ms=50)`).
   `read` is a **`str`-only seam**: it decodes, and it never decodes lossily (no U+FFFD, ever):
   - `n` bounds the NEW bytes taken off the socket. If the previous read ended mid-codepoint, its ≤3-byte
     tail is carried on the socket and prepended here, so `read(n)` can return **up to `n + 3` bytes**,
@@ -224,7 +226,7 @@ nobody to send faults in milliseconds instead of hanging, while `ex.submit(fn():
     sticky `!"invalid utf-8 …"` refused to deliver, so mixing the two on one socket is lossless.
     `write_bytes` takes a `bytes` (convert a `bytearray` with `bytes.from_iter(ba)`). `timeout_ms` behaves as
     for `read`/`write`.
-- `Listener`: `accept(timeout_ms?: int) -> Socket!` · `addr() -> str!` · `close() -> None`.
+- `Listener`: `accept(timeout_ms: int? = None) -> Socket!` · `addr() -> str!` · `close() -> None`.
   `close()` from another task wakes a task parked in `accept`; that call returns the error `accept on a
   closed listener` (Go's `Close` cancelling a blocked `Accept`).
 - `Socket`/`Listener` are std type names (a module may declare its own `struct Socket`, which shadows

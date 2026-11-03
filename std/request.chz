@@ -10,11 +10,10 @@
 # `src/native/request.rs`, dispatched via `native_members("std.request")`). The backends compile
 # NOTHING for a `native fn`/`native struct` — the front-end reads ONLY the signature.
 #
-# `get`/`post`/`request` carry an OPTIONAL trailing `timeout_ms: int` (a positive value overrides the
-# agent's default timeout caps for that call). Spelled as a trailing `= 0` default: harvest lowers a
-# trailing-default param to an optional-tail FnSig (min_params = len - 1). The `= 0` is a MARKER only —
-# desugar never injects a native-fn default at a call site, so `arg_count()` stays truthful (the runtime
-# `read_timeout` keys on the supplied arg count). The verb wrappers (put/patch/delete/head) are plain.
+# `get`/`get_bytes`/`post`/`request` take an optional `timeout_ms: int? = None`: a positive value is
+# the limit for that call; `None`, `0` and a negative value keep the agent's default limits. Like
+# every native default, the call site (or, through a fn value, the callee) fills `None` from this
+# decl. The verb wrappers (put/patch/delete/head) are plain.
 #
 # FIELD ORDER IS LOAD-BEARING: `Response`'s field order is positional across the remaining hand-built
 # runtime layout copies (compiler `Compiler::new`, interp finalize, `native/request.rs` response_ret,
@@ -25,10 +24,10 @@ native struct Response:
     body: str
     headers: Map[str, str]
 
-native fn get(url: str, timeout_ms: int = 0) -> Response!
-native fn get_bytes(url: str, timeout_ms: int = 0) -> bytes!
-native fn post(url: str, body: str, timeout_ms: int = 0) -> Response!
-native fn request(method: str, url: str, body: str, headers: Map[str, str], timeout_ms: int = 0) -> Response!
+native fn get(url: str, timeout_ms: int? = None) -> Response!
+native fn get_bytes(url: str, timeout_ms: int? = None) -> bytes!
+native fn post(url: str, body: str, timeout_ms: int? = None) -> Response!
+native fn request(method: str, url: str, body: str, headers: Map[str, str], timeout_ms: int? = None) -> Response!
 native fn put(url: str, body: str) -> Response!
 native fn patch(url: str, body: str) -> Response!
 native fn delete(url: str) -> Response!

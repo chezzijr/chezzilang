@@ -296,7 +296,7 @@ impl Vm {
         Value::obj(self.heap.alloc(Obj::Writer(core)))
     }
 
-    /// R2 — `io.buffered(w, size = 8192)`: wrap a `Writer` in a `Backing::Buffered` that accumulates in
+    /// R2 — `io.buffered(w, size)`: wrap a `Writer` in a `Backing::Buffered` that accumulates in
     /// the VM and drains to `w` on flush / buffer-full / close (the Go `bufio.NewWriter` escape hatch).
     fn io_buffered(&mut self, args: &[Value], span: Span) -> Result<Value, RuntimeError> {
         let inner = if let Some(v) = args.first()
@@ -307,10 +307,11 @@ impl Vm {
         } else {
             return Err(self.err("buffered expects a Writer".into(), span));
         };
+        // `size` is always there: the call site (or, through a fn value, the callee) fills the
+        // decl's `size: int = 8192`.
         let cap = match args.get(1) {
-            None => 8192,
             Some(v) if self.is_integral(*v) => self.int_of(*v).max(1) as usize,
-            Some(_) => return Err(self.err("buffered size expects an int".into(), span)),
+            Some(_) | None => return Err(self.err("buffered size expects an int".into(), span)),
         };
         let core = Arc::new(WriterCore {
             inner: Mutex::new(Some(Backing::Buffered {

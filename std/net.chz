@@ -35,23 +35,22 @@
 # switch to `read_bytes` and recover the exact bytes instead of having to `close()`. `write_bytes`
 # takes a `bytes`; convert a `bytearray` buffer with `bytes.from_iter(ba)`.
 #
-# `read`/`write`/`accept` carry an OPTIONAL trailing `timeout_ms: int` (`!"timeout"` if no data /
-# not writable / no connection within it). Spelled as a trailing `= 0` default: harvest lowers a
-# trailing-default param to an optional-tail sig (min_params = len - 1). The `= 0` is a MARKER only —
-# desugar never injects a native-fn default at a call site, so the supplied arg count stays truthful.
+# `read`/`write`/`read_bytes`/`write_bytes`/`accept` take an optional `timeout_ms: int? = None`
+# (Python's `settimeout(None)`, Rust's `set_read_timeout(None)`): `None` waits, `0` polls once, `n > 0`
+# waits at most n ms and then gives `!"timeout"`; a negative value polls once, as `0`.
 
 native struct Socket:
-    native fn read(self, n: int, timeout_ms: int = 0) -> str!
-    native fn write(self, data: str, timeout_ms: int = 0) -> int!
-    native fn read_bytes(self, n: int, timeout_ms: int = 0) -> bytes!
-    native fn write_bytes(self, data: bytes, timeout_ms: int = 0) -> int!
+    native fn read(self, n: int, timeout_ms: int? = None) -> str!
+    native fn write(self, data: str, timeout_ms: int? = None) -> int!
+    native fn read_bytes(self, n: int, timeout_ms: int? = None) -> bytes!
+    native fn write_bytes(self, data: bytes, timeout_ms: int? = None) -> int!
     # `None`, never `T!E` — a flush error on close is SWALLOWED (matches CPython's `socket.close()`,
     # also `-> None`; Go's `Close() error` reports it, a divergence). Contrast `io.Writer.close(self) ->
     # None!`, which gets this right.
     native fn close(self) -> None
 
 native struct Listener:
-    native fn accept(self, timeout_ms: int = 0) -> Socket!
+    native fn accept(self, timeout_ms: int? = None) -> Socket!
     native fn addr(self) -> str!
     # Same swallow as `Socket.close` above.
     native fn close(self) -> None

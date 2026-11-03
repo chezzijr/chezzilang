@@ -1137,6 +1137,7 @@ impl Vm {
                         name: (*mname).into(),
                         func: *func,
                         kind: *kind,
+                        defaults: crate::base::builtin_method::native_fn_defaults(name, mname),
                     }
                 });
                 self.module_define(mod_obj, mname, nat);

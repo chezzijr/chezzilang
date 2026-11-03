@@ -774,6 +774,7 @@ impl Checker {
             witness_params: Vec::new(),
             variadic: None,
             slots: None,
+            native: None,
             c_variadic: false,
         };
         let probed = self.probe_uninferable_dependent_result_params(&msig, &mut mmap);

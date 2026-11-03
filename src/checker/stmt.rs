@@ -449,7 +449,8 @@ impl Checker {
                 }
             }
             // Imports, extern blocks, and native (fn/ctor/struct/enum) decls carry nothing to check in
-            // pass 2 (native decls are fully validated + registered in `hoist`).
+            // pass 2 (native decls are fully validated + registered in `hoist`; the build checks
+            // that each native default is a literal of its parameter's type).
             StmtKind::Import(_)
             | StmtKind::Extern { .. }
             | StmtKind::Native(_)

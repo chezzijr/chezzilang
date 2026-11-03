@@ -1,17 +1,18 @@
 ### `std.request`
-`get(url, timeout_ms?: int) -> Response!` · `get_bytes(url, timeout_ms?: int) -> bytes!` ·
-`post(url, body, timeout_ms?: int) -> Response!` · `put(url, body)` · `patch(url, body)` ·
+`get(url, timeout_ms: int? = None) -> Response!` · `get_bytes(url, timeout_ms: int? = None) -> bytes!` ·
+`post(url, body, timeout_ms: int? = None) -> Response!` · `put(url, body)` · `patch(url, body)` ·
 `delete(url)` · `head(url)` ·
-`request(method, url, body, headers: Map[str, str], timeout_ms?: int) -> Response!` (method in UPPERCASE).
+`request(method, url, body, headers: Map[str, str], timeout_ms: int? = None) -> Response!` (method in UPPERCASE).
 
 Results use `struct Response { status: int, body: str, headers: Map[str, str] }` (header names
 lowercased). A ≥400 status is **not** an error: the code is in `Response.status`; only
 transport/DNS/TLS failures become `!e`. Blocking (offloaded) and
 [uninterruptible while in flight](04-native-core.md#blocking-calls-cannot-be-interrupted).
 
-- **Timeout.** The optional trailing `timeout_ms` sets a **per-request total deadline** that overrides
-  the default caps (connect 10s / read 30s / write 30s) for that one call; `timeout_ms <= 0` or omitted
-  uses the defaults. A timeout (like any transport failure) is a recoverable `!e`, never a panic.
+- **Timeout.** A positive `timeout_ms` sets a **per-request total deadline** that overrides the
+  default caps (connect 10s / read 30s / write 30s) for that one call; `None` (the default), `0` and a
+  negative value use the default caps. (A socket op reads `0` as "poll once"; a request has no
+  poll-once form.) A timeout (like any transport failure) is a recoverable `!e`, never a panic.
 - **Query strings.** Build one with `std.encoding.query_encode` and compose
   `url + "?" + query_encode(params)`.
 - **Response headers.** A header sent more than once is **joined with `, `** (Python `requests`;

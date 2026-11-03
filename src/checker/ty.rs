@@ -1410,6 +1410,8 @@ pub enum ArgFill {
         module: usize,
         expr: crate::ast::Expr,
     },
+    /// An omitted slot of a native decl, filled with its literal default (the build's table).
+    Literal(crate::base::builtin_method::DeclDefault),
 }
 
 /// The argument slot plan of every call that `Checker::bind_call` bound, keyed `(graph module

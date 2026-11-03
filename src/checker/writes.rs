@@ -55,7 +55,7 @@ impl Checker {
                             fn_writes::SlotSrc::Pack(elems)
                         }),
                 ),
-                crate::checker::ArgFill::Inline { .. } => {
+                crate::checker::ArgFill::Inline { .. } | crate::checker::ArgFill::Literal(_) => {
                     Some(fn_writes::SlotSrc::Default { inline: true })
                 }
                 crate::checker::ArgFill::Provider(_) => {

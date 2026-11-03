@@ -18,16 +18,22 @@ impl Checker {
         span: Span,
         hint: Option<&Ty>,
     ) -> Option<Ty> {
+        // A builtin binds like every declared fn: its prelude decl's slots take named arguments and
+        // fill omitted defaults (`print` packs the surplus into its variadic slot and fills
+        // `sep`/`end`). A builtin with no decl (`builtin_container_sig`) has no slots, so the binder
+        // refuses a named argument. Each arm below checks the bound list.
+        let bound = match self.builtin_sig(b.name()) {
+            Some(sig) => self.bind_sig(&sig, b.name(), args, 0, span),
+            None => self.bind_call(None, b.name(), args, 0, span),
+        };
+        let Some(bound) = bound else {
+            return Some(Ty::Unknown);
+        };
+        let args: &[Expr] = &bound;
         match b {
-            // `print` binds like every declared fn: the prelude decl's slots pack the surplus into
-            // its variadic slot and fill `sep`/`end`, and the bound args check against its params.
             Builtin::Print => {
                 let sig = self.builtin_sig("print")?;
-                let Some(bound) = self.bind_call(sig.slots.as_deref(), "print", args, 0, span)
-                else {
-                    return Some(Ty::Nil);
-                };
-                self.check_args_range("print", &sig.params, sig.min_params, &bound, span);
+                self.check_args_range("print", &sig.params, sig.min_params, args, span);
                 Some(Ty::Nil)
             }
             // `panic(msg)` raises the same recoverable `RuntimeError` the runtime uses for overflow/

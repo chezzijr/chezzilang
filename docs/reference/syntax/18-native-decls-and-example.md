@@ -18,6 +18,12 @@ native ctor bytearray() -> bytearray
   native-controlled/never (how `panic` diverges). User code has no `any`/`never`.
 - Std-only: in a user `.chz` it is *native fn/ctor declarations are only allowed in standard-library
   modules*. Top-level only.
+- **Parameters bind like a user fn's.** A call passes them by position or by name, and a parameter
+  default must be a literal of the parameter's type (`0`, `"x"`, `true`, `None` for a `T?`, `-1`);
+  the build fails otherwise. The build reads the defaults into one table (`NATIVE_DEFAULTS`,
+  `src/base/build_methods.rs`): a direct call fills an omitted default at the call site (the
+  checker's binder), and a call through a fn value that leaves one out is filled by the callee from
+  the same table. So a native never reads "was this argument passed".
 
 The universe builtins `print`, `ord`, `chr`, `panic` (fns) and `int`, `float`, `str`, `bytes`,
 `bytearray` (ctors) are declared in `std/prelude.chz`. `print` is

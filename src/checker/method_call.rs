@@ -108,8 +108,7 @@ impl Checker {
                     self.record_method_hover(name_span, f);
                 }
                 if let Some(fsig) = fsig {
-                    let Some(bound) = self.bind_call(fsig.slots.as_deref(), method, args, 0, span)
-                    else {
+                    let Some(bound) = self.bind_sig(&fsig, method, args, 0, span) else {
                         return Ty::Unknown;
                     };
                     let args: &[Expr] = &bound;
@@ -568,9 +567,12 @@ impl Checker {
             // decl in `std/prelude.chz` (re-seeded by `seed_stdlib_structs`), with no type args.
             Ty::Int | Ty::Float | Ty::Bool | Ty::Str | Ty::Bytes => {
                 let key = super::fn_writes::native_receiver(&obj_ty).unwrap_or_default();
-                if let Some(sig) = self.native_method_sig(key, method, &[]) {
+                if let Some(sig) = self.native_handle_method(key, method, &[]) {
                     self.record_method_hover(name_span, &sig);
-                    self.check_args(method, &sig.params, args, span);
+                    let Some(args) = self.bind_sig(&sig, method, args, 0, span) else {
+                        return Ty::Unknown;
+                    };
+                    self.check_args(method, &sig.params, &args, span);
                     return sig.ret;
                 }
                 self.infer_all(args);
@@ -638,9 +640,13 @@ impl Checker {
                 // (`Comparable`) and `sum` (`Add`) are the List methods carrying a where-clause today —
                 // `min`/`max` pair one with an `Option[T]` return; it is a no-op for every other method.
                 if let Some(sig) =
-                    self.native_method_sig("List", method, std::slice::from_ref(&elem))
+                    self.native_handle_method("List", method, std::slice::from_ref(&elem))
                 {
                     self.record_method_hover(name_span, &sig);
+                    let Some(args) = self.bind_sig(&sig, method, args, 0, span) else {
+                        return Ty::Unknown;
+                    };
+                    let args: &[Expr] = &args;
                     // A method carrying its OWN `[U]` params (`map`/`fold`/`sort_by_key`, the
                     // closure-result HOFs that retired `infer_list_hof`) needs the generic solver so its
                     // return-position param is recovered from the closure body (the loop-back). The
@@ -709,9 +715,12 @@ impl Checker {
                 // bytearray` (re-seeded by `seed_stdlib_structs`); `bytearray` is non-generic so no type
                 // args are substituted. `extend` is handled above (its arg may be any of three
                 // byte-sequence shapes, not a flat FnSig).
-                if let Some(sig) = self.native_method_sig("bytearray", method, &[]) {
+                if let Some(sig) = self.native_handle_method("bytearray", method, &[]) {
                     self.record_method_hover(name_span, &sig);
-                    self.check_args(method, &sig.params, args, span);
+                    let Some(args) = self.bind_sig(&sig, method, args, 0, span) else {
+                        return Ty::Unknown;
+                    };
+                    self.check_args(method, &sig.params, &args, span);
                     return sig.ret;
                 }
                 self.infer_all(args);
@@ -728,9 +737,12 @@ impl Checker {
                 // `seed_stdlib_structs`); the key/value types are substituted for `Ty::Param("K")`/
                 // `Ty::Param("V")` here (DECLARATION order — `[k, v]`).
                 let targs = [(**k).clone(), (**v).clone()];
-                if let Some(sig) = self.native_method_sig("Map", method, &targs) {
+                if let Some(sig) = self.native_handle_method("Map", method, &targs) {
                     self.record_method_hover(name_span, &sig);
-                    self.check_args_range(method, &sig.params, sig.min_params, args, span);
+                    let Some(args) = self.bind_sig(&sig, method, args, 0, span) else {
+                        return Ty::Unknown;
+                    };
+                    self.check_args_range(method, &sig.params, sig.min_params, &args, span);
                     return sig.ret;
                 }
                 self.infer_all(args);
@@ -744,10 +756,13 @@ impl Checker {
                 // `seed_stdlib_structs`); the element type is substituted for `Ty::Param("T")` here.
                 let elem = (**elem).clone();
                 if let Some(sig) =
-                    self.native_method_sig("Set", method, std::slice::from_ref(&elem))
+                    self.native_handle_method("Set", method, std::slice::from_ref(&elem))
                 {
                     self.record_method_hover(name_span, &sig);
-                    self.check_args_range_coll(method, &sig.params, sig.min_params, args, span);
+                    let Some(args) = self.bind_sig(&sig, method, args, 0, span) else {
+                        return Ty::Unknown;
+                    };
+                    self.check_args_range_coll(method, &sig.params, sig.min_params, &args, span);
                     return sig.ret;
                 }
                 self.infer_all(args);
@@ -763,10 +778,13 @@ impl Checker {
                 // element type `T`.
                 let elem = (**elem).clone();
                 if let Some(sig) =
-                    self.native_method_sig("Channel", method, std::slice::from_ref(&elem))
+                    self.native_handle_method("Channel", method, std::slice::from_ref(&elem))
                 {
                     self.record_method_hover(name_span, &sig);
-                    self.check_args(method, &sig.params, args, span);
+                    let Some(args) = self.bind_sig(&sig, method, args, 0, span) else {
+                        return Ty::Unknown;
+                    };
+                    self.check_args(method, &sig.params, &args, span);
                     // `trip()`'s `where T: bool` (harvested onto `where_bounds`) is enforced here with
                     // the `T -> elem` substitution — `trip` is level-trigger-latch-only and always
                     // delivers `bool true`, so it's sound only on `Channel[bool]`. No-op for every
@@ -806,10 +824,9 @@ impl Checker {
                     hint,
                 ) {
                     NativeHandleMethod::Generic(t) => t,
-                    NativeHandleMethod::Concrete(sig) => {
-                        self.check_args_range(method, &sig.params, sig.min_params, args, span);
+                    NativeHandleMethod::Concrete(sig, bound) => {
                         if method == "read" {
-                            return self.recover_read_ret(args);
+                            return self.recover_read_ret(&bound);
                         }
                         sig.ret
                     }
@@ -1019,10 +1036,9 @@ impl Checker {
                     hint,
                 ) {
                     NativeHandleMethod::Generic(t) => t,
-                    NativeHandleMethod::Concrete(sig) => {
-                        self.check_args_range(method, &sig.params, sig.min_params, args, span);
+                    NativeHandleMethod::Concrete(sig, bound) => {
                         if method == "read" {
-                            return self.recover_read_ret(args);
+                            return self.recover_read_ret(&bound);
                         }
                         sig.ret
                     }
@@ -1099,10 +1115,7 @@ impl Checker {
                 };
                 match resolved {
                     NativeHandleMethod::Generic(t) => t,
-                    NativeHandleMethod::Concrete(sig) => {
-                        self.check_args_range(method, &sig.params, sig.min_params, args, span);
-                        sig.ret
-                    }
+                    NativeHandleMethod::Concrete(sig, _) => sig.ret,
                     NativeHandleMethod::Miss => {
                         self.infer_all(args);
                         let names = self.method_names("Atomic");
@@ -1132,10 +1145,7 @@ impl Checker {
                     hint,
                 ) {
                     NativeHandleMethod::Generic(t) => t,
-                    NativeHandleMethod::Concrete(sig) => {
-                        self.check_args_range(method, &sig.params, sig.min_params, args, span);
-                        sig.ret
-                    }
+                    NativeHandleMethod::Concrete(sig, _) => sig.ret,
                     NativeHandleMethod::Miss => {
                         self.infer_all(args);
                         let names = self.method_names("AtomicInt");
@@ -1165,10 +1175,7 @@ impl Checker {
                     hint,
                 ) {
                     NativeHandleMethod::Generic(t) => t,
-                    NativeHandleMethod::Concrete(sig) => {
-                        self.check_args_range(method, &sig.params, sig.min_params, args, span);
-                        sig.ret
-                    }
+                    NativeHandleMethod::Concrete(sig, _) => sig.ret,
                     NativeHandleMethod::Miss => {
                         self.infer_all(args);
                         let mut names = self.method_names("Executor");

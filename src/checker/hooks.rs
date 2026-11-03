@@ -509,6 +509,7 @@ impl Checker {
                 witness_params: Vec::new(),
                 variadic: None,
                 slots: None,
+                native: None,
                 c_variadic: false,
             };
             let msig = &want;

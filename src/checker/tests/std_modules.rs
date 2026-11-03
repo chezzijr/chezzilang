@@ -534,16 +534,21 @@ fn request_fn_sigs_exact() {
     let resp = || Ty::Struct("Response".to_string(), vec![]);
     // (name, params, ret, min_params). get/post/request are optional-tail (min = len-1).
     let expected: Vec<(&str, Vec<Ty>, Ty, usize)> = vec![
-        ("get", vec![Ty::Str, Ty::Int], Ty::result(resp()), 1),
+        (
+            "get",
+            vec![Ty::Str, Ty::option(Ty::Int)],
+            Ty::result(resp()),
+            1,
+        ),
         (
             "get_bytes",
-            vec![Ty::Str, Ty::Int],
+            vec![Ty::Str, Ty::option(Ty::Int)],
             Ty::result(Ty::Bytes),
             1,
         ),
         (
             "post",
-            vec![Ty::Str, Ty::Str, Ty::Int],
+            vec![Ty::Str, Ty::Str, Ty::option(Ty::Int)],
             Ty::result(resp()),
             2,
         ),
@@ -554,7 +559,7 @@ fn request_fn_sigs_exact() {
                 Ty::Str,
                 Ty::Str,
                 Ty::Map(Box::new(Ty::Str), Box::new(Ty::Str)),
-                Ty::Int,
+                Ty::option(Ty::Int),
             ],
             Ty::result(resp()),
             4,
@@ -941,18 +946,18 @@ fn net_sig_from_file_not_native_module_sig() {
     );
     // R1 — the binary twins: `read_bytes -> Result[bytes]`, `write_bytes(bytes) -> Result[int]`.
     let read_bytes = socket.methods.get("read_bytes").unwrap();
-    assert_eq!(read_bytes.params, vec![Ty::Int, Ty::Int]);
+    assert_eq!(read_bytes.params, vec![Ty::Int, Ty::option(Ty::Int)]);
     assert_eq!(read_bytes.ret, Ty::result(Ty::Bytes));
     let write_bytes = socket.methods.get("write_bytes").unwrap();
-    assert_eq!(write_bytes.params, vec![Ty::Bytes, Ty::Int]);
+    assert_eq!(write_bytes.params, vec![Ty::Bytes, Ty::option(Ty::Int)]);
     assert_eq!(write_bytes.ret, Ty::result(Ty::Int));
     // read/write are optional-tail (the trailing `timeout_ms`); close is nil.
     let read = socket.methods.get("read").unwrap();
-    assert_eq!(read.params, vec![Ty::Int, Ty::Int]);
+    assert_eq!(read.params, vec![Ty::Int, Ty::option(Ty::Int)]);
     assert_eq!(read.ret, Ty::result(Ty::Str));
     assert_eq!(read.min_params, 1);
     let write = socket.methods.get("write").unwrap();
-    assert_eq!(write.params, vec![Ty::Str, Ty::Int]);
+    assert_eq!(write.params, vec![Ty::Str, Ty::option(Ty::Int)]);
     assert_eq!(write.ret, Ty::result(Ty::Int));
     assert_eq!(write.min_params, 1);
     let close = socket.methods.get("close").unwrap();
@@ -966,7 +971,7 @@ fn net_sig_from_file_not_native_module_sig() {
     lmeths.sort();
     assert_eq!(lmeths, ["accept", "addr", "close"]);
     let accept = listener.methods.get("accept").unwrap();
-    assert_eq!(accept.params, vec![Ty::Int]);
+    assert_eq!(accept.params, vec![Ty::option(Ty::Int)]);
     assert_eq!(accept.ret, Ty::result(Ty::Socket));
     assert_eq!(accept.min_params, 0);
     let addr = listener.methods.get("addr").unwrap();
@@ -1363,7 +1368,11 @@ fn native_method_harvest_strips_self() {
         .methods
         .get("read")
         .expect("Socket.read");
-    assert_eq!(read.params, vec![Ty::Int, Ty::Int], "self must be stripped");
+    assert_eq!(
+        read.params,
+        vec![Ty::Int, Ty::option(Ty::Int)],
+        "self must be stripped"
+    );
     assert_eq!(
         read.min_params, 1,
         "optional-tail count unaffected by strip"

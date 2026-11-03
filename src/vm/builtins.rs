@@ -125,22 +125,25 @@ impl Vm {
         }
     }
 
-    /// D6c — parse the optional trailing `timeout_ms` int arg of a net socket op. `Ok(None)` if no
-    /// timeout arg was passed (park forever — the existing behavior). `Ok(Some(Timeout))` otherwise:
-    /// `poll_once` is true iff `ms <= 0` (`0` polls once and never parks; a negative saturates to it),
-    /// and `deadline` is `now + ms`, saturated to a far-future deadline for a pathological `ms`
-    /// (centuries) rather than panicking the worker on `Instant` overflow (mirrors `sleep_ms`). `Err`
-    /// for a non-int timeout arg (the checker also rejects this; this is the runtime backstop).
+    /// D6c — the `timeout_ms: int? = None` argument (index `idx`) of a net socket op. The call site
+    /// fills an omitted `None` from the decl, so the argument is always there. `Ok(None)` for `None`
+    /// (park until done). `Ok(Some(Timeout))` for an int: `poll_once` is true iff `ms <= 0` (`0`
+    /// polls once and never parks; a negative saturates to it), and `deadline` is `now + ms`,
+    /// saturated to a far-future deadline for a pathological `ms` (centuries) rather than panicking
+    /// the worker on `Instant` overflow (mirrors `sleep_ms`). `Err` for a missing or non-`int?`
+    /// argument (the checker rejects both; this is the runtime backstop).
     pub(super) fn parse_timeout_ms(
         &self,
-        arg: Option<&Value>,
+        args: &[Value],
+        idx: usize,
         span: Span,
     ) -> Result<Option<SockTimeout>, RuntimeError> {
-        let Some(v) = arg else {
-            return Ok(None);
+        let bad = || self.err("timeout_ms expects an int? (milliseconds)".into(), span);
+        let Some(&v) = args.get(idx) else {
+            return Err(bad());
         };
-        let Some(ms) = self.int_val(*v) else {
-            return Err(self.err("timeout_ms expects an int (milliseconds)".into(), span));
+        let Some(ms) = self.copy_arg(v).opt_int(idx).map_err(|_| bad())? else {
+            return Ok(None);
         };
         let poll_once = ms <= 0;
         let ms = ms.max(0) as u64;

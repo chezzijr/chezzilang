@@ -1025,40 +1025,35 @@ fn bind_call_reports_each_named_argument_error() {
     );
 }
 
-/// A native, builtin or `extern` callee has no Chezzi parameter list (`FnSig::slots` is `None`), so
-/// it takes no named arguments, and says so by name.
+/// A native binds named arguments by its decl's parameter names, like a user fn (owner ruling
+/// 2026-11-03, which lifts DEC-182's refusal); a builtin with no decl (`Set[int](..)`) still takes
+/// none and says so by name.
 #[test]
-fn builtin_and_native_callees_refuse_named_arguments() {
-    for (src, head) in [
-        ("s := Set.from_iter([1, 2])\ns.insert(x=3)\n", "insert"),
-        (
-            "import std.net\nfn f(sk: net.Socket) -> str:\n    r := sk.read(10, timeout_ms=5)\n    return \"{r}\"\n",
-            "read",
-        ),
-        (
-            "import std.request\nfn f() -> str:\n    r := request.get(\"http://x\", timeout_ms=5)\n    return \"{r}\"\n",
-            "get",
-        ),
-        ("print(chr(65, n=66))\n", "chr"),
-        ("s := Set[int](xs=[1])\nprint(s.len())\n", "Set"),
-        (
-            "s: Set[int] = Set.from_iter(xs=[1])\nprint(s.len())\n",
-            "from_iter",
-        ),
+fn a_native_callee_binds_named_arguments_by_its_decl() {
+    for src in [
+        "s := Set.from_iter([1, 2])\ns.insert(v=3)\n",
+        "import std.net\nfn f(sk: net.Socket) -> str:\n    r := sk.read(10, timeout_ms=5)\n    return \"{r}\"\n",
+        "import std.request\nfn f() -> str:\n    r := request.get(\"http://x\", timeout_ms=5)\n    return \"{r}\"\n",
+        "print(chr(n=66))\n",
+        "s: Set[int] = Set.from_iter(xs=[1])\nprint(s.len())\n",
     ] {
-        entry_rejects(src, &format!("'{head}' takes no named arguments"));
+        entry_ok(src);
     }
+    entry_rejects(
+        "s := Set.from_iter([1, 2])\ns.insert(x=3)\n",
+        "unknown named argument 'x' (its parameters are: v)",
+    );
+    entry_rejects(
+        "s := Set[int](xs=[1])\nprint(s.len())\n",
+        "'Set' takes no named arguments",
+    );
     // A user struct that declares a same-named method changes nothing for a builtin receiver.
     let src = "struct Counter:\n    n: int\n    fn insert(self, amount: int = 1) -> int:\n        return self.n + amount\ns := Set.from_iter([1, 2])\ns.insert(x=3)\n";
     let errs = check_entry(src);
     assert!(
-        errs.iter()
-            .any(|e| e.message.contains("'insert' takes no named arguments")),
-        "got: {errs:?}"
-    );
-    assert!(
-        !errs.iter().any(|e| e.message.contains("only supported on")
-            || e.message.contains("unknown named argument")),
+        errs.iter().any(|e| e
+            .message
+            .contains("unknown named argument 'x' (its parameters are: v)")),
         "got: {errs:?}"
     );
 }

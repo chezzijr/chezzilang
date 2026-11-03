@@ -307,6 +307,7 @@ impl Checker {
             witness_params: wparams,
             variadic: decl.params.iter().position(|p| p.is_variadic),
             slots: Some(self.decl_param_slots(decl, span.file)),
+            native: None,
             c_variadic: false,
         }
     }

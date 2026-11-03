@@ -47,11 +47,13 @@ pub(super) fn prelude_print_defaults(stmts: &[Stmt]) -> Result<[String; 2], Comp
 
 impl Compiler {
     /// The opcode for a call whose head the checker resolved to [`Resolution::Builtin`].
+    #[allow(clippy::too_many_arguments)] // the call's parts + its id + span
     fn compile_builtin_call(
         &mut self,
         fc: &mut FnComp,
         b: Builtin,
         call_id: crate::ast::NodeId,
+        callee: &Expr,
         args: &[Expr],
         named: &[(String, Expr)],
         span: Span,
@@ -99,7 +101,8 @@ impl Compiler {
                         match fill {
                             crate::checker::ArgFill::Arg(ci) => self.compile_expr(fc, pick(*ci))?,
                             crate::checker::ArgFill::Provider(_)
-                            | crate::checker::ArgFill::Inline { .. } => {
+                            | crate::checker::ArgFill::Inline { .. }
+                            | crate::checker::ArgFill::Literal(_) => {
                                 self.compile_default_fill(fc, fill, span)?
                             }
                             crate::checker::ArgFill::Pack(_) => {
@@ -125,36 +128,36 @@ impl Compiler {
             | Builtin::List
             | Builtin::Map
             | Builtin::Set => {
-                self.compile_args(fc, args)?;
-                fc.emit(Op::CallBuiltin(b, args.len()), span);
+                let argc = self.compile_call_args(fc, call_id, callee, args, named, span)?;
+                fc.emit(Op::CallBuiltin(b, argc), span);
             }
             // `Channel[T](cap)` pops the optional capacity; `Channel[T]()` is unbounded.
             Builtin::Channel => {
-                self.compile_args(fc, args)?;
-                fc.emit(Op::NewChannel(!args.is_empty()), span);
+                let argc = self.compile_call_args(fc, call_id, callee, args, named, span)?;
+                fc.emit(Op::NewChannel(argc > 0), span);
             }
             // The boxes copy their init value in (the checker validated one argument).
             Builtin::Shared => {
-                self.compile_args(fc, args)?;
+                self.compile_call_args(fc, call_id, callee, args, named, span)?;
                 fc.emit(Op::NewShared, span);
             }
             Builtin::RwShared => {
-                self.compile_args(fc, args)?;
+                self.compile_call_args(fc, call_id, callee, args, named, span)?;
                 fc.emit(Op::NewRwShared, span);
             }
             Builtin::Atomic => {
-                self.compile_args(fc, args)?;
+                self.compile_call_args(fc, call_id, callee, args, named, span)?;
                 fc.emit(Op::NewAtomic, span);
             }
             Builtin::AtomicInt => {
-                self.compile_args(fc, args)?;
+                self.compile_call_args(fc, call_id, callee, args, named, span)?;
                 fc.emit(Op::NewAtomicInt, span);
             }
             // `Executor()` is uncapped; `Executor(n)` caps the running jobs at `n`.
             Builtin::Executor => {
-                self.compile_args(fc, args)?;
+                let argc = self.compile_call_args(fc, call_id, callee, args, named, span)?;
                 fc.emit(
-                    if args.is_empty() {
+                    if argc == 0 {
                         Op::NewExecutor
                     } else {
                         Op::NewExecutorN
@@ -309,7 +312,7 @@ impl Compiler {
                     return Ok(());
                 }
                 Resolution::Builtin(b) => {
-                    return self.compile_builtin_call(fc, b, call_id, args, named, span);
+                    return self.compile_builtin_call(fc, b, call_id, callee, args, named, span);
                 }
                 Resolution::Member | Resolution::ModuleMember { .. } | Resolution::Fn { .. } => {}
                 other @ Resolution::Local
@@ -420,7 +423,7 @@ impl Compiler {
         if let ExprKind::Ident(_) = &callee.kind {
             match self.resolution(callee)?.clone() {
                 Resolution::Builtin(b) => {
-                    return self.compile_builtin_call(fc, b, call_id, args, named, span);
+                    return self.compile_builtin_call(fc, b, call_id, callee, args, named, span);
                 }
                 Resolution::StructCtor(key) => {
                     let argc = self.compile_call_args(fc, call_id, callee, args, named, span)?;
@@ -570,6 +573,19 @@ impl Compiler {
         self.finish(vf)
     }
 
+    /// Push a native decl's literal default (`DeclDefault`), as `compile_expr` pushes the literal.
+    fn emit_decl_default(&self, fc: &mut FnComp, d: &crate::base::builtin_method::DeclDefault) {
+        use crate::base::builtin_method::DeclDefault;
+        let span = Span::RUNTIME;
+        match *d {
+            DeclDefault::Int(n) => fc.emit(Op::ConstInt(n), span),
+            DeclDefault::Float(x) => fc.emit(Op::ConstFloat(x), span),
+            DeclDefault::Bool(b) => fc.emit(if b { Op::True } else { Op::False }, span),
+            DeclDefault::Str(s) => fc.emit(Op::ConstStr(s.to_string()), span),
+            DeclDefault::None => self.emit_new_enum(fc, "Option", "None", 0, span),
+        }
+    }
+
     /// TICKET-180 — what the name head `e` denotes: the checker's recorded [`Resolution`], the
     /// ONLY source. A miss is an internal error: a checker arm returned without recording, so fix
     /// that arm and never add a fallback here. A compiler-synthesized node
@@ -694,7 +710,9 @@ impl Compiler {
                     self.compile_expr(fc, &pack)?;
                     srcs.push(None);
                 }
-                crate::checker::ArgFill::Provider(_) | crate::checker::ArgFill::Inline { .. } => {
+                crate::checker::ArgFill::Provider(_)
+                | crate::checker::ArgFill::Inline { .. }
+                | crate::checker::ArgFill::Literal(_) => {
                     self.compile_default_fill(fc, fill, span)?;
                     srcs.push(None);
                 }
@@ -726,6 +744,10 @@ impl Compiler {
                 self.current_module_idx = saved;
                 r
             }
+            crate::checker::ArgFill::Literal(d) => {
+                self.emit_decl_default(fc, d);
+                Ok(())
+            }
             crate::checker::ArgFill::Arg(_) | crate::checker::ArgFill::Pack(_) => {
                 Err(CompileError {
                     message: "internal: not a default fill".into(),
@@ -750,7 +772,8 @@ impl Compiler {
             crate::checker::ArgFill::Inline { module, .. } => *module,
             crate::checker::ArgFill::Arg(_)
             | crate::checker::ArgFill::Pack(_)
-            | crate::checker::ArgFill::Provider(_) => self.current_module_idx,
+            | crate::checker::ArgFill::Provider(_)
+            | crate::checker::ArgFill::Literal(_) => self.current_module_idx,
         };
         Ok(crate::base::json_desc::DefaultThunk { proto, module })
     }

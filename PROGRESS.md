@@ -251,6 +251,17 @@ Each group below is one fact decided in two or more places (grouped 2026-10-16).
     bimodal across processes (20 runs: 263-321 ms plus 7 runs at 526-563 ms); with ASLR off
     (`setarch -R`) all 20 were 263-334 ms. `child_rusage::burn_scale` calibrates in one process and
     the test measures in another, so the two can land in different modes.
+25. **A native binds named arguments and fills its defaults from its decl (done 2026-11-04).** A
+    native fn, native method and native static take named arguments by their decl's parameter names
+    and fill an omitted default at the call site, through the one binder (`Checker::bind_call`),
+    as a user fn does (owner ruling 2026-11-03; it lifts DEC-182's refusal). The build reads every
+    native default into `NATIVE_DEFAULTS` (a default that is not a literal of its parameter's type
+    fails the build); the checker builds a native's slots from it on first need (`bind_sig`), and a
+    call through a native fn value is filled by the callee (`Vm::fill_decl_defaults`). The
+    VM's hand copies are deleted (the socket and request absent-timeout cases, `io.buffered`'s
+    8192); `a_native_argument_takes_its_default_from_its_decl` (`tests/owner_guards.rs`) keeps them
+    out. Socket and request `timeout_ms` is `int? = None` (None waits, socket `0` polls once).
+    Grids: `tests/native_call_binding_grid.rs`, `tests/chz/stdlib/net_timeout_grid_test.chz`.
 
 ### Open questions for the owner
 

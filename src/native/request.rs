@@ -489,16 +489,13 @@ fn do_request(
     lower_result(url, send(method, url, headers, timeout, body))
 }
 
-/// Read an optional trailing `timeout_ms: int` at arg index `idx` (guarded by `arg_count`): absent
-/// or `<= 0` → `None` (fall back to the agent's default caps); a positive value → `Some(Duration)`.
+/// The `timeout_ms: int? = None` argument at index `idx` (the call site or, through a fn value, the
+/// callee fills `None` from the decl): `None`, `0` or a negative value -> `None` (the agent's
+/// default limits); a positive value -> `Some(Duration)`.
 fn read_timeout(h: &mut dyn Host, idx: usize) -> Result<Option<Duration>, HostError> {
-    if h.arg_count() > idx {
-        let ms = h.arg_int(idx)?;
-        if ms > 0 {
-            return Ok(Some(Duration::from_millis(ms as u64)));
-        }
-    }
-    Ok(None)
+    Ok(h.arg_opt_int(idx)?
+        .filter(|ms| *ms > 0)
+        .map(|ms| Duration::from_millis(ms as u64)))
 }
 
 fn get(h: &mut dyn Host) -> Result<NativeRet, HostError> {

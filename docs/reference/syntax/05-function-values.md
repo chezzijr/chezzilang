@@ -39,10 +39,11 @@ bind by the wrong function's labels.
 - A default that names a type parameter is filled by the callee, so a value call may omit it only at
   the end: `h := f[int]; h(1, c=9)` over `fn f[T](a: T, b: List[T] = List[T](), c: int = 3)` is
   refused. Call the function by name for that shape.
-- A certain binding takes named arguments only through its declaration's slots. A builtin takes
-  exactly its keyword-only params by name (`p := print; p(1, 2, sep="-")`); `p := ord; p(c="a")`
-  and `f := math.sqrt; f(x=4.0)` report `'p' takes no named arguments` and `'f' takes no named
-  arguments`, as the direct calls do.
+- A certain binding takes named arguments only through its declaration's slots. A native value
+  binds by its decl's parameter names, as the direct call does: `p := print; p(1, 2, sep="-")`,
+  `p := ord; p(c="a")`, `f := math.sqrt; f(x=4.0)`. A call through a native value that leaves out a
+  trailing default gets the decl's default (`g := io.buffered; g(w)` uses `size = 8192`): the callee
+  fills it from a table the build reads from the decl.
 - A keyword call through a fn-typed struct field or a tuple slot (`h.f(x=4)`, `t.0(x=4)`) is refused:
   member-call syntax resolves as a method first. Bind it first (`g := h.f` then `g(x=4)`).
 - A binding typed from `fn a(x: int = 1)` may be called with no argument, so a function that requires

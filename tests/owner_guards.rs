@@ -435,3 +435,77 @@ fn a_prelude_ctor_takes_no_argument() {
         );
     }
 }
+
+/// The lines of production code `code` that give a native argument a default by hand: an
+/// `args.get(i)` / `args.first()` read whose next lines take a literal for the absent case
+/// (`.unwrap_or(..)`, `unwrap_or_default`, `None => <literal>`), or a count test `arg_count() >`.
+/// A native's defaults belong to its decl: the call site fills them (`Checker::bind_call`), and a
+/// call through a fn value is filled by `Vm::fill_decl_defaults` from the generated table.
+fn hand_defaults(code: &str) -> Vec<usize> {
+    let lines: Vec<&str> = code.lines().collect();
+    let literal_arm = |l: &str| {
+        l.split_once("None =>").is_some_and(|(_, rest)| {
+            let r = rest.trim_start();
+            r.starts_with(|c: char| c.is_ascii_digit() || c == '"' || c == '-')
+                || r.starts_with("true")
+                || r.starts_with("false")
+        })
+    };
+    let mut hits = Vec::new();
+    for (n, line) in lines.iter().enumerate() {
+        if line.contains("arg_count() >") || line.contains("arg_count() <") {
+            hits.push(n + 1);
+            continue;
+        }
+        if !(line.contains("args.get(") || line.contains("args.first()")) {
+            continue;
+        }
+        let window = &lines[n..(n + 5).min(lines.len())];
+        if window
+            .iter()
+            .any(|l| l.contains(".unwrap_or(") || l.contains("unwrap_or_default") || literal_arm(l))
+        {
+            hits.push(n + 1);
+        }
+    }
+    hits
+}
+
+#[test]
+fn a_native_argument_takes_its_default_from_its_decl() {
+    let mut copies = Vec::new();
+    for dir in ["src/vm", "src/native"] {
+        let root = Path::new(dir);
+        for path in rust_files(root) {
+            let rel = path.strip_prefix(root).unwrap();
+            if is_test_file(rel) {
+                continue;
+            }
+            let code = production_code(&fs::read_to_string(&path).unwrap(), false);
+            for n in hand_defaults(&code) {
+                copies.push(format!("{dir}/{}:{n}", rel.display()));
+            }
+        }
+    }
+    assert!(
+        copies.is_empty(),
+        "a native argument defaulted by hand (its decl owns the default):\n{}",
+        copies.join("\n")
+    );
+    // The scan fires on each shape this rule deleted (`io_buffered`'s size, `parse_timeout_ms`'s
+    // and `read_timeout`'s absent case, `signed_arg`'s `false`), and not on a plain read.
+    for (shape, fires) in [
+        ("let cap = match args.get(1) {\n    None => 8192,\n", true),
+        (
+            "let s = args.get(1).and_then(|v| v.as_bool()).unwrap_or(false);\n",
+            true,
+        ),
+        ("if h.arg_count() > idx {\n", true),
+        (
+            "let Some(&v) = args.get(idx) else {\n    return Err(bad());\n};\n",
+            false,
+        ),
+    ] {
+        assert_eq!(!hand_defaults(shape).is_empty(), fires, "{shape}");
+    }
+}

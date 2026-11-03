@@ -248,6 +248,9 @@ pub enum Obj {
         name: Box<str>,
         func: crate::native::NativeFn,
         kind: crate::native::Kind,
+        /// The defaults its decl declares (`DeclDefaults::NONE` for most): a call through the value
+        /// may leave out the trailing defaulted arguments, and `Vm::fill_decl_defaults` fills them.
+        defaults: &'static crate::base::builtin_method::DeclDefaults,
     },
     /// A first-class UNIVERSE builtin FUNCTION value (`print`/`ord`/`chr`/`panic`), carried by id.
     /// Produced by `Op::LoadBuiltin` when the name is used in value position; calling it (via

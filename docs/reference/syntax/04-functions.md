@@ -291,12 +291,15 @@ Rules:
   receiver through its implementors' shared parameter shape (if implementors differ, pass positionally).
 - A call through a function value uses the same binder and messages (`unknown named argument 'x'`,
   `missing required argument 'a'`, ...).
-- A builtin, native or `extern` callee takes no named arguments: `s.insert(x=3)` on a `Set` is
-  `'insert' takes no named arguments; pass its arguments positionally`, and so are `chr(65, n=66)` and
-  `Set.from_iter(xs=[1])`. The exception is `print`: `sep=` (default `" "`) and `end=` (default `"\n"`), both
-  `str` (see [`stdlib.md`](../stdlib/01-builtins.md)). `print("a", end="")` writes `a` with no newline;
-  `print("a","b", sep="-", end="!")` writes `a-b!`. Its decl is
-  `native fn print(...args: Any, sep: str = " ", end: str = "\n") -> None`.
+- A native callee (a `native fn`, a native method, a native static method) binds like a user fn,
+  by the parameter names of its decl in `std/*.chz`: `s.insert(v=3)`, `chr(n=65)`,
+  `Set.from_iter(xs=[1])`, `sock.read(10, timeout_ms=5)`. An omitted default is filled from the decl,
+  at the call site. `s.insert(x=3)` is `unknown named argument 'x' (its parameters are: v)`. A builtin
+  with no decl (`Set[int](..)`, `Channel[T](..)`) and an `extern` take no named arguments:
+  `'Set' takes no named arguments; pass its arguments positionally`. `print` takes `sep=` (default
+  `" "`) and `end=` (default `"\n"`), both `str` (see [`stdlib.md`](../stdlib/01-builtins.md)):
+  `print("a", end="")` writes `a` with no newline; `print("a","b", sep="-", end="!")` writes `a-b!`.
+  Its decl is `native fn print(...args: Any, sep: str = " ", end: str = "\n") -> None`.
 - A static method (no `self`) takes defaults; `S.mk()` fills them.
 - Closures and enum variant constructors take no defaults (enum methods do).
 

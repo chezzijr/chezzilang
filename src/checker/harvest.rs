@@ -477,9 +477,17 @@ impl Checker {
         // inference path (`infer_generic_method`), not the fixed-arity path (empty for the common case).
         sig.type_params = own_tps;
         sig.variadic = variadic;
-        // A native takes no named arguments (DEC-182) unless a parameter follows its variadic one
-        // (`print(...args, sep, end)`): then `slots` carries the keyword-only names and defaults.
-        sig.slots = crate::desugar::native_param_slots(decl, skip);
+        // A native binds named arguments and fills its defaults like a user fn: its slots are built
+        // on first need from its parameter names (`labels`) and the build's table of its defaults.
+        sig.native = Some(if decl.params.iter().any(|p| p.default.is_some()) {
+            let names: Vec<&str> = decl.params[skip..]
+                .iter()
+                .map(|p| p.name.as_str())
+                .collect();
+            crate::base::builtin_method::native_decl_defaults(&decl.name, &names)
+        } else {
+            &crate::base::builtin_method::DeclDefaults::NONE
+        });
         sig.labels = decl
             .params
             .iter()

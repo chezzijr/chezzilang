@@ -417,7 +417,7 @@ impl Vm {
         if self.poll_timeout_check(span)? {
             return Ok(self.sock_err("timeout"));
         }
-        let timeout = self.parse_timeout_ms(args.get(1), span)?;
+        let timeout = self.parse_timeout_ms(args, 1, span)?;
         let n = match args.first() {
             Some(v) if self.is_integral(*v) => {
                 (self.int_of(*v).max(0) as usize).min(MAX_SOCKET_READ)
@@ -563,7 +563,7 @@ impl Vm {
                 None => self.sock_err("timeout"),
             });
         }
-        let timeout = self.parse_timeout_ms(args.get(1), span)?;
+        let timeout = self.parse_timeout_ms(args, 1, span)?;
         // Cap the per-call buffer: a huge `read(n)` (caller-controlled) must not eagerly allocate
         // gigabytes before a byte arrives (review). The caller already loops for large payloads —
         // `read` returns the actual count.
@@ -777,7 +777,7 @@ impl Vm {
         if self.poll_timeout_check(span)? {
             return Ok(self.sock_err("timeout"));
         }
-        let timeout = self.parse_timeout_ms(args.get(1), span)?;
+        let timeout = self.parse_timeout_ms(args, 1, span)?;
         let data = if which == SocketMethod::WriteBytes
             && let Some(v) = args.first()
         {
@@ -937,7 +937,7 @@ impl Vm {
         if self.poll_timeout_check(span)? {
             return Ok(self.sock_err("timeout"));
         }
-        let timeout = self.parse_timeout_ms(args.first(), span)?;
+        let timeout = self.parse_timeout_ms(args, 0, span)?;
         // N2 — the per-call deadline, latched on the fiber so it survives a park's ip-rewind re-run.
         let deadline = timeout
             .filter(|t| !t.poll_once)

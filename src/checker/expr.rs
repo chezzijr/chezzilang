@@ -14,8 +14,9 @@ pub(super) enum NativeHandleMethod {
     /// A harvested method carrying its OWN `[U]` params — already routed through the generic
     /// solver; the returned `Ty` is the arm's result.
     Generic(Ty),
-    /// A non-generic sig; the caller runs its own residual (`check_args_range` + any special case).
-    Concrete(Box<FnSig>),
+    /// A non-generic sig, its arguments bound and checked; the caller runs any special case on the
+    /// bound argument list.
+    Concrete(Box<FnSig>, Vec<Expr>),
     /// Lookup miss; the caller runs `infer_all(args)` + "no method" error.
     Miss,
 }
@@ -110,7 +111,6 @@ impl Checker {
             named: named.to_vec(),
             pack_origin: crate::checker::witness_key_span(callee, span),
             consumed: false,
-            span,
             bracket: bracket.cloned(),
         };
         let saved = self.call_ctx.replace(ctx);
@@ -245,7 +245,7 @@ impl Checker {
                     @ (Resolution::Builtin(_) | Resolution::StructCtor(_) | Resolution::Fn { .. }),
                 ) => {
                     if let Some(ty) =
-                        self.infer_item_call(callee, name, r, args, named, &targs, span, expected)
+                        self.infer_item_call(callee, name, r, args, &targs, span, expected)
                     {
                         return ty;
                     }
@@ -603,7 +603,6 @@ impl Checker {
         name: &str,
         r: &Resolution,
         args: &[Expr],
-        named: &[(String, Expr)],
         targs: &[Ty],
         span: Span,
         expected: Option<&Ty>,
@@ -633,17 +632,6 @@ impl Checker {
                     .or_else(|| builtin_type_doc(name))
             };
             self.hover_record_at(callee.span, &fty, HoverKind::Func, doc);
-        }
-        // A builtin takes named arguments only through the keyword-only slots of its prelude
-        // declaration (`print`'s `sep`/`end`); a user fn of the same name (it shadows the builtin)
-        // takes its own: the callee's resolution decides.
-        if !named.is_empty()
-            && let Some(Resolution::Builtin(b)) = self.classify_path(callee)
-            && self
-                .builtin_sig(b.name())
-                .is_none_or(|sig| sig.slots.is_none())
-        {
-            self.refuse_named(name, named, span);
         }
         if self.reject_item_targs(name, args, targs, span) {
             return Some(Ty::Unknown);
@@ -944,6 +932,11 @@ impl Checker {
                     crate::ast::renumber_expr(&mut e);
                     e
                 }
+                ArgFill::Literal(d) => Expr {
+                    id: crate::ast::NodeId::SYNTH,
+                    kind: literal_expr_kind(*d),
+                    span,
+                },
             })
             .collect();
         if let Some((from, _)) = self
@@ -971,6 +964,28 @@ impl Checker {
             );
         }
         Some(Cow::Owned(bound))
+    }
+
+    /// [`Self::bind_call`] against `sig`'s slots. A native sig builds its slots here, on first need:
+    /// a named argument, a variadic, or a call that leaves out a parameter. A call that passes every
+    /// parameter by position binds nothing, as `bind_call` would answer, without building them.
+    pub(super) fn bind_sig<'a>(
+        &mut self,
+        sig: &FnSig,
+        head: &str,
+        args: &'a [Expr],
+        n_targs: usize,
+        span: Span,
+    ) -> Option<std::borrow::Cow<'a, [Expr]>> {
+        if sig.native.is_none() {
+            return self.bind_call(sig.slots.as_deref(), head, args, n_targs, span);
+        }
+        let named = self.call_ctx.as_ref().is_some_and(|c| !c.named.is_empty());
+        if !named && sig.variadic.is_none() && args.len() >= sig.params.len() {
+            return Some(std::borrow::Cow::Borrowed(args));
+        }
+        let slots = sig.native_slots();
+        self.bind_call(slots.as_deref(), head, args, n_targs, span)
     }
 
     /// Mark the named arguments of the call being dispatched ([`Self::call_ctx`]) consumed: a binder
@@ -1025,23 +1040,6 @@ impl Checker {
         }
     }
 
-    /// [`Self::native_handle_method`] for a call: a builtin receiver method takes no named
-    /// arguments, so the call's named arguments get [`Self::refuse_named`].
-    pub(super) fn native_method_sig(
-        &mut self,
-        key: &str,
-        method: &str,
-        targs: &[Ty],
-    ) -> Option<FnSig> {
-        let sig = self.native_handle_method(key, method, targs)?;
-        if let Some(c) = self.call_ctx.clone()
-            && !c.named.is_empty()
-        {
-            self.refuse_named(method, &c.named, c.span);
-        }
-        Some(sig)
-    }
-
     /// The ONE map from a classified default to its fill: `S(...)` and `json.decode[S]` both read
     /// it (TICKET-198). `None` is a hole the callee's prologue fills (legal only as a trailing run).
     pub(super) fn default_fill(&self, d: &crate::desugar::Dflt, n_targs: usize) -> Option<ArgFill> {
@@ -1052,6 +1050,7 @@ impl Checker {
             Dflt::Provider { name, .. } | Dflt::GenericProvider { name, .. } => {
                 Some(ArgFill::Provider(name.clone()))
             }
+            Dflt::Literal(d) => Some(ArgFill::Literal(*d)),
             Dflt::Inline(e) => Some(ArgFill::Inline {
                 module: self
                     .module_idx_of_file
@@ -1383,5 +1382,17 @@ pub(super) fn single_targ(targs: &[Ty]) -> Option<&Ty> {
     match targs {
         [t] => Some(t),
         _ => None,
+    }
+}
+
+/// The expression a native decl's literal default spells, for the checker to type a filled slot.
+fn literal_expr_kind(d: crate::base::builtin_method::DeclDefault) -> ExprKind {
+    use crate::base::builtin_method::DeclDefault;
+    match d {
+        DeclDefault::Int(n) => ExprKind::Int(n),
+        DeclDefault::Float(x) => ExprKind::Float(x),
+        DeclDefault::Bool(b) => ExprKind::Bool(b),
+        DeclDefault::Str(s) => ExprKind::Str(s.to_string()),
+        DeclDefault::None => ExprKind::NoneLit,
     }
 }

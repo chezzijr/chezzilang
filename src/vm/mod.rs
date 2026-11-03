@@ -917,6 +917,7 @@ pub(crate) enum Callee {
         func: crate::native::NativeFn,
         name: Box<str>,
         kind: crate::native::Kind,
+        defaults: &'static crate::base::builtin_method::DeclDefaults,
     },
     Builtin(crate::base::builtin::Builtin),
     Cffi(std::sync::Arc<crate::native::cffi::Cffi>),

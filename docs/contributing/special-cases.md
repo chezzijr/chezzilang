@@ -169,7 +169,7 @@ Function kinds:
 |---|---|---|---|---|---|---|---|---|
 | defaults | ok | ok | ok | no | no | ok | no | n/a |
 | variadic | ok | ok | ok | no | no | no | no | `print` only; ok as a value |
-| named arguments at the call | ok | ok | ok | ok | ok | ok | no | no |
+| named arguments at the call | ok | ok | ok | ok | ok | ok | no | ok |
 | own generic parameters | ok | no | ok | no | no | on the type | on the type | ok |
 | statement body, `yield` | ok | ok | ok | no | — | — | — | — |
 | self-recursion | ok | ok | ok | only when the binding is global | — | — | — | — |
@@ -316,7 +316,6 @@ Owner direction (2026-10-11): fixes are done outside the pipeline for now.
   rejects `int`. Handles never witness a user protocol.
 - Protocol conformance includes parameter names (TICKET-187; Go accepts any names).
 - `defer` is block-scoped (Go: function-scoped).
-- Native methods refuse named arguments (DEC-182).
 - Return type is inferred only for an inline-expression body.
 - `recover:` and `match` are not allowed inside brackets because layout is off there.
 

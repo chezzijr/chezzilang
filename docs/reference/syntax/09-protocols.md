@@ -54,7 +54,7 @@ struct Doc2:
   `IndexSet.set_index` names `k`, `v`; `Slice.slice` names `r`; `Contains.contains` names `item`. So
   `fn compare(self, o: P) -> int` does not make `P` `Comparable`; write `other`.
 - A built-in type conforms through its native method's names (`str.replace(self, old, new)` satisfies
-  `Rep`). A direct call to a native method still takes no named arguments.
+  `Rep`). A direct call to a native method binds named arguments by the same names.
 - The hooks follow the same names: a misnamed `index`, `set_index`, `contains` or `slice` does not make
   the type indexable, index-assignable, `in`-testable or sliceable, and the error says why:
   `cannot index into V (method 'index' parameter 1 is named 'i', but Index declares 'k')`,

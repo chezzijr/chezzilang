@@ -379,8 +379,6 @@ struct CallCtx {
     /// A binder or a refusal answered the call's named arguments; otherwise `infer_call` reports
     /// the generic refusal.
     consumed: bool,
-    /// The call span, where a refusal is reported.
-    span: Span,
     /// The expression reading of a one-arg call bracket (`ExprKind::Call::bracket`).
     bracket: Option<Expr>,
 }
@@ -473,11 +471,14 @@ struct FnSig {
     /// every ordinary signature.
     variadic: Option<usize>,
     /// The declaration's call-binding slots (receiver dropped), which `Checker::bind_call` binds
-    /// named, omitted and variadic arguments against. `None` for a native, builtin or `extern` sig
-    /// (built by [`FnSig::plain`]): it has no Chezzi parameter list, takes
-    /// no named arguments, and its `= 0` defaults are arity markers the runtime reads from the
-    /// supplied argument count. Excluded from `fn_sig_eq`.
+    /// named, omitted and variadic arguments against. `None` for a native decl (its slots are built
+    /// on first need from [`Self::native`], see [`Self::native_slots`]), a builtin with no decl and
+    /// an `extern` sig (built by [`FnSig::plain`]). Excluded from `fn_sig_eq`.
     slots: Option<Vec<crate::desugar::SlotSpec>>,
+    /// A native decl's literal defaults (`DeclDefaults::NONE` when it has none), read from the
+    /// table the build generates from its decl. `Some` marks the sig native: its parameter names
+    /// are `labels`. `None` for every other sig. Excluded from `fn_sig_eq`.
+    native: Option<&'static crate::base::builtin_method::DeclDefaults>,
     /// An `extern` fn declared with a trailing bare `...` (C varargs): a call takes at least
     /// `params.len()` args, and each surplus arg is a C variadic arg (`check_c_variadic_args`).
     /// Distinct from `variadic` (Chezzi's `...xs: T`, collapsed to a `List`). `false` everywhere
@@ -520,8 +521,30 @@ impl FnSig {
             witness_params: Vec::new(),
             variadic: None,
             slots: None,
+            native: None,
             c_variadic: false,
         }
+    }
+
+    /// The call-binding slots of a native sig, built on first need (a named argument, an omitted
+    /// default, a variadic, a call through its value): its decl's names (`labels`) and literal
+    /// defaults. `None` for a sig that is not native.
+    pub(super) fn native_slots(&self) -> Option<Vec<crate::desugar::SlotSpec>> {
+        let d = self.native?;
+        Some(
+            self.labels
+                .iter()
+                .enumerate()
+                .map(|(i, name)| crate::desugar::SlotSpec {
+                    name: name.clone(),
+                    default: i
+                        .checked_sub(d.min)
+                        .and_then(|k| d.values.get(k))
+                        .map(|v| crate::desugar::Dflt::Literal(*v)),
+                    is_variadic: self.variadic == Some(i),
+                })
+                .collect(),
+        )
     }
 }
 
@@ -699,7 +722,7 @@ fn fn_value_ty(f: &FnSig) -> Ty {
     let split = f.variadic.map_or(f.params.len(), |v| v + 1);
     let mut labels = FnLabels::new(f.labels.clone())
         .with_min(f.min_params)
-        .with_slots(f.slots.clone());
+        .with_slots(f.slots.clone().or_else(|| f.native_slots()));
     labels.kw = f.params[split..].to_vec();
     let variadic = match (f.variadic, f.c_variadic) {
         (Some(_), _) => crate::ast::Variadic::Pack,

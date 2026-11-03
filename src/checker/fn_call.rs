@@ -128,7 +128,7 @@ impl Checker {
             self.error(span, super::globals::kw_ambiguous_msg(name));
             return sig.ret.clone();
         }
-        let Some(bound) = self.bind_call(sig.slots.as_deref(), name, args, 0, span) else {
+        let Some(bound) = self.bind_sig(&sig, name, args, 0, span) else {
             return Ty::Unknown;
         };
         let args: &[Expr] = &bound;
@@ -340,10 +340,14 @@ impl Checker {
         // harvested native method carrying its own `[U]` may have it only in the return type.
         hint: Option<&Ty>,
     ) -> NativeHandleMethod {
-        let Some(sig) = self.native_method_sig(key, method, targs) else {
+        let Some(sig) = self.native_handle_method(key, method, targs) else {
             return NativeHandleMethod::Miss;
         };
         self.record_method_hover(name_span, &sig);
+        let Some(bound) = self.bind_sig(&sig, method, args, 0, span) else {
+            return NativeHandleMethod::Generic(Ty::Unknown);
+        };
+        let args: &[Expr] = &bound;
         // A harvested method carrying its OWN `[U]` params needs the generic solver (the harvest
         // STRIPS `self`, so PREPEND the concrete receiver — mirrors the `List` arm).
         if !sig.type_params.is_empty() {
@@ -368,11 +372,12 @@ impl Checker {
                 hint,
             ));
         }
-        NativeHandleMethod::Concrete(Box::new(sig))
+        self.check_args_range(method, &sig.params, sig.min_params, args, span);
+        NativeHandleMethod::Concrete(Box::new(sig), args.to_vec())
     }
 
     /// The plain reserved-handle arm shared by `Socket`/`Listener`/`Writer`/`Reader`: no element type
-    /// to substitute (`&[]`) and no per-arm residual — a Concrete sig is just `check_args_range` +
+    /// to substitute (`&[]`) and no per-arm residual — a Concrete sig (bound and checked) is just
     /// `sig.ret`. Routed through `resolve_native_handle_method` so a future bodied/generic method on
     /// any of these handles auto-infers instead of silently missing dispatch.
     #[allow(clippy::too_many_arguments)]
@@ -399,10 +404,7 @@ impl Checker {
             None,
         ) {
             NativeHandleMethod::Generic(t) => t,
-            NativeHandleMethod::Concrete(sig) => {
-                self.check_args_range(method, &sig.params, sig.min_params, args, span);
-                sig.ret
-            }
+            NativeHandleMethod::Concrete(sig, _) => sig.ret,
             NativeHandleMethod::Miss => {
                 self.infer_all(args);
                 let names = self.method_names(key);
