@@ -56,8 +56,8 @@ pub(super) fn mutates_receiver(recv: &Ty, method: &str) -> bool {
 // `native struct str` / `bytes` / `bytearray` in `std/prelude.chz`, harvested into that reserved scalar's
 // method table (re-seeded by `seed_stdlib_structs`) and looked up via `native_handle_method` with NO type
 // args (the scalars are non-generic — the identity path returns the stored sig verbatim). The
-// `str(x)`/`bytes()`/`bytearray()` CTORS stay the `native ctor` decls, and runtime dispatch stays
-// Rust-inline (`vm/mod.rs core_method` / `bytes_method`). The `bytearray.extend` special-case (its arg may
+// `int()`/`str()`/`bytes()`/`bytearray()` CTORS stay the `native ctor` decls, and runtime dispatch stays
+// Rust-inline (`vm/core_method.rs` `scalar_method` / `core_method` / `bytes_method`). The `bytearray.extend` special-case (its arg may
 // be any of bytes|bytearray|List[int], not a flat `FnSig`) stays an explicit branch in `infer_method_call`
 // BEFORE the table lookup.
 
@@ -144,7 +144,9 @@ pub(super) fn builtin_type_doc(name: &str) -> Option<String> {
         }
         "Map" => "key→value hash map — Map[K, V](); index with m[k], iterate with `for k, v in m:`",
         "Set" => "unordered collection of unique elements — Set[T](); operators | & - ^",
-        "str" => "immutable UTF-8 text; index/slice by codepoint, concatenate with +",
+        "int" => "64-bit signed integer; int() is 0",
+        "float" => "64-bit float; float() is 0.0; to_int() is None for NaN, ±inf and outside i64",
+        "str" => "immutable UTF-8 text; index/slice by codepoint, join with +; str() is \"\"",
         "bytes" => {
             "immutable byte sequence — b\"...\", bytes.from_iter(xs), bytes.zeroed(n); index with b[i] (byte as int)"
         }

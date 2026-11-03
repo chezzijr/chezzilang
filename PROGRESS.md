@@ -228,6 +228,16 @@ Each group below is one fact decided in two or more places (grouped 2026-10-16).
     `tests/builtin_static_grid.rs`, 108 cells; guard
     `a_builtin_type_with_from_iter_has_no_ctor_with_an_argument`. History:
     `docs/history/progress/2026-11.md`.
+22. **A scalar converts by a method or `"{x}"`, and `T()` gives its zero value (done 2026-11-03).**
+    `int()`/`float()`/`str()`/`bool()`/`bytes()` are `0`/`0.0`/`""`/`false`/`b''` (Python `int()`,
+    Rust `i64::default()`). A conversion is a method of the source type's prelude `native struct`:
+    `n.to_float() -> float`, `f.to_int() -> int?` (`None` for NaN, ±inf and outside i64),
+    `s.to_int()`/`s.to_float()`; display is `"{x}"`. Every `T(x)` is `T() takes no argument` with a
+    help derived from the argument type (`x.to_int()`, `"{x}"`, `x != 0`, `if x: 1 else: 0`, "already
+    an int"). No bool conversion (Go, Rust). Deleted: `builtin_int`/`float`/`bool`/`str` (VM),
+    `reject_non_scalar_cast` and its type list, the scalar receivers' separate "no method" arm.
+    `tests/scalar_conversion_grid.rs`, 99 cells; guard `a_prelude_ctor_takes_no_argument`. History:
+    `docs/history/progress/2026-11.md`.
 
 ### Open questions for the owner
 

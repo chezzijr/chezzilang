@@ -51,7 +51,7 @@ test fn alias_generic_static():
 # No defaults here: this pins the runtime KEYS (compiler) before any desugar change. A dead alias
 # key faults at construction; a wrong nominal key prints the wrong type name or fails `==`.
 test fn alias_runtime_keys():
-    assert str(Position(3, 4)) == "Point(x=3, y=4)"
+    assert "{Position(3, 4)}" == "Point(x=3, y=4)"
     assert show(Position(3, 4)) == "Point(3,4)"
     assert show(Spot(5, 6)) == "Point(5,6)"
     assert show(Pos(7, 8)) == "Point(7,8)"

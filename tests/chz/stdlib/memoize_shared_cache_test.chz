@@ -11,7 +11,7 @@ fn double(x: int) -> int:
 fn _child_memo(m: fn(int) -> int, ch: Channel[str]):
     r := recover: m(21)
     match r:
-        ?v: ch.send(str(v))
+        ?v: ch.send("{v}")
         !e: ch.send(e.message())
 
 test fn memoize_wrapper_called_in_spawned_task_returns_value():
@@ -31,4 +31,4 @@ test fn memoize_owner_gets_the_same_object_every_call():
     m := memoize1(listed)
     a := m(1)
     a.push(9)
-    assert m(1) == [1, 9], str(m(1))
+    assert m(1) == [1, 9], "{m(1)}"

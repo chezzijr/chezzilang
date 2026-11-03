@@ -100,9 +100,9 @@ test fn handles_and_cursors_are_eq_by_identity():
 
 test fn every_kind_is_stringable():
     assert show([1, 2]) == "[1, 2]"
-    assert show({"a": 1}) == str({"a": 1})
-    assert show((1, "x")) == str((1, "x"))
-    assert show(Flags(1)) == str(Flags(1))
+    assert show({"a": 1}) == "{ {"a": 1} }"
+    assert show((1, "x")) == "{(1, "x")}"
+    assert show(Flags(1)) == "{Flags(1)}"
 
 test fn bytes_and_str_are_comparable_through_the_bound():
     assert lt("a", "b")

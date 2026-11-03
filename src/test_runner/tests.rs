@@ -827,7 +827,7 @@ fn over_memory_counts_a_nested_core_backlog() {
              test fn nested():\n    s := make()\n    parts: List[str] = []\n    \
              for i in 0..100000:\n        parts.push(\"0123456789\")\n    \
              blob := \"\".join(parts)\n    for i in 0..300:\n        \
-             s.get().send(blob + str(i))\n    assert true\n",
+             s.get().send(blob + \"{i}\")\n    assert true\n",
     );
     {
         let report = run_tests_capped(&nested, CAP);

@@ -5,14 +5,14 @@
 # golden-output guard for the migration.
 
 fn main():
-    # native ctor int — string + float conversions (1-arg sig, sourced from std/prelude.chz)
-    print(int("5"))          # 5
-    print(int(3.9))          # 3  (truncates toward zero)
+    # conversions are methods (`native struct str` / `float` in std/prelude.chz); each gives `T?`
+    print("5".to_int())      # 5
+    print((3.9).to_int())    # 3  (truncates toward zero)
+    print("2.5".to_float())  # 2.5
 
-    # native ctor float / str
-    print(float("2.5"))      # 2.5
-    print(str(42))           # 42
-    print(str(true))         # true
+    # display is interpolation
+    print("42")              # 42
+    print("{true}")          # true
 
     # native ctor bytes / bytearray — from a List[int]
     b := bytes.from_iter([65, 66])

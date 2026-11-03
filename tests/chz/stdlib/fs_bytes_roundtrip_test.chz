@@ -44,7 +44,7 @@ fn ok_nil(r: None!, what: str):
 
 # Make a per-test scratch dir holding exactly one file named BAD; hand back the dir path (raw bytes).
 fn fixture(name: str) -> bytes:
-    d := os.temp_dir().str() + "/chz_w7_8_" + name + "_" + str(os.getpid())
+    d := os.temp_dir().str() + "/chz_w7_8_" + name + "_{os.getpid()}"
     ok_nil(fs.mkdir(d), "mkdir")
     ok_nil(io.write_bytes(cat(cat(d.encode(), b"/"), BAD), b"hi"), "write_bytes")
     return d.encode()
@@ -71,7 +71,7 @@ test fn list_dir_round_trips_a_non_utf8_name():
 # W7-8 review — `glob`'s `?` consumes one Unicode SCALAR wherever the name is valid UTF-8 (and one raw
 # BYTE only inside a byte run that is not), which is what the matcher does and what the docs must say.
 test fn glob_question_matches_one_scalar():
-    d := os.temp_dir().str() + "/chz_w7_8_globq_" + str(os.getpid())
+    d := os.temp_dir().str() + "/chz_w7_8_globq_{os.getpid()}"
     ok_nil(fs.mkdir(d), "mkdir")
     defer fs.remove_dir(d)
     # `aéc.txt` — the é is TWO bytes (c3 a9), so a byte-counting `?` could not match it.

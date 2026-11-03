@@ -404,7 +404,7 @@ fn span(path: str) -> int!str:
   loop, or use `?`. `os.exit` ends the program but does not count as leaving for the checker. Inside a nested fn or a generator `return` leaves that fn.
 - A `spawn:` block and a `defer:` block reject it, as they reject `?`.
 
-**How a carrier prints** (`print`, `str()`, interpolation, a container element, an `assert` message, a
+**How a carrier prints** (`print`, interpolation, a container element, an `assert` message, a
 fault text): a present or success value prints as its payload (`5`), an absent one as `None`, an
 error as `!` and the error (`!boom`; `!'boom'` inside a list), a `None!E` success as `None`. A `?`
 prints only before an absent payload, so a present `None` of an `int??` prints `?None`. The text does

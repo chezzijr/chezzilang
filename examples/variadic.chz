@@ -16,10 +16,10 @@ fn labeled(prefix: str, ...xs: int, sep: str = ", ") -> str:
     first := true
     for x in xs:
         if first:
-            parts = parts + str(x)
+            parts = parts + "{x}"
             first = false
         else:
-            parts = parts + sep + str(x)
+            parts = parts + sep + "{x}"
     return prefix + parts
 
 # `Any` accepts a value of any type.

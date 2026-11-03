@@ -5,7 +5,7 @@ fn done() -> None!str:
 
 test fn ok_zero_arg_constructs_a_result_nil():
     r := done()
-    assert str(r) == "None"
+    assert "{r}" == "None"
     match r:
         ?_:
             assert true

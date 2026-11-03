@@ -30,7 +30,7 @@ type IntBox = Box[int]
 type Spot = Position
 
 fn show(p: Point) -> str:
-    return "Point(" + str(p.x) + "," + str(p.y) + ")"
+    return "Point({p.x},{p.y})"
 
 fn uid(u: UserId) -> int:
     return u.id

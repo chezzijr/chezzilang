@@ -524,7 +524,7 @@ fn return_in_spawn_nested_in_recover_reports_spawn_only() {
 // converts (write `float(x)`). The checker's accepted set is now a SUBSET of what the type-blind
 // compiler can lower, so no sink can end up holding an `Int` under a static `float`.
 
-const WIDEN_NOTE: &str = "write 1.0 (or float(x))";
+const WIDEN_NOTE: &str = "write 1.0 (or x.to_float())";
 
 /// V1 — a non-const int element in a `List[float]` call-arg slot. Checked clean before, ran as an
 /// `Int` under a static `float` (`xs[0] / 2` → `0.0` instead of `0.5`).
@@ -1070,7 +1070,7 @@ fn index_set_incoherent_rejected() {
 // through `set_index`'s `val`, exactly as the desugar does. No compound-only coherence rule exists.
 #[test]
 fn index_set_split_pair_compound_equals_its_desugar() {
-    let pair = "struct S:\n    f: float\n    fn index(self, k: int) -> int:\n        return int(self.f)\n    fn set_index(self, k: int, v: float):\n        self.f = v\ns := S(1.0)\n";
+    let pair = "struct S:\n    f: float\n    fn index(self, k: int) -> int:\n        return self.f.to_int() ?? 0\n    fn set_index(self, k: int, v: float):\n        self.f = v\ns := S(1.0)\n";
     entry_ok(&format!("{pair}s[0] = s[0] + 1.5\n"));
     entry_ok(&format!("{pair}s[0] += 1.5\n"));
 }

@@ -20,11 +20,11 @@ test fn a_generic_call_on_the_right_of_a_concat_is_pinned():
 test fn an_any_slot_concat_renders_like_its_str_literal_twin():
     a: List[Any] = [1] + ["a"]
     b: List[Any] = [1, "a"]
-    assert str(a) == "[1, 'a']"
-    assert str(a) == str(b)
+    assert "{a}" == "[1, 'a']"
+    assert "{a}" == "{b}"
 
 test fn an_any_slot_concat_renders_like_its_float_literal_twin():
     c: List[Any] = [1] + [2, 2.5]
     d: List[Any] = [1, 2, 2.5]
-    assert str(c) == "[1, 2, 2.5]"
-    assert str(c) == str(d)
+    assert "{c}" == "[1, 2, 2.5]"
+    assert "{c}" == "{d}"

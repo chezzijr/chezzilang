@@ -35,10 +35,10 @@ type parameter only it would pin (`store(fn(a): a + 1)` for `fn store[T](x: T) -
 appears only in its return (`fn applyone[U](x: int, f: fn(int) -> U) -> U`,
 `fn mymap[U](xs: List[int], f: fn(int) -> U) -> List[U]`) recovers `U` from the body of the closure/fn
 passed for `f`, as `.map`/`.fold` do. `applyone(5, fn(x): x * 2)` yields `int`;
-`mymap([1,2,3], fn(x): str(x))` yields `List[str]`. The body may be an expression, a `.method(…)`
+`mymap([1,2,3], fn(x): "{x}")` yields `List[str]`. The body may be an expression, a `.method(…)`
 call or a nested generic call (`fn(x): ident(x)`). When a sibling argument or a slot already pins `U`
 (`fn f[U](init: U, g: fn(int) -> U) -> U` with `init = 0`), the closure's return is checked against
-it (`fn(x): str(x)` is a type error). `fn make[U]() -> U` stays un-inferable.
+it (`fn(x): "{x}"` is a type error). `fn make[U]() -> U` stays un-inferable.
 
 **An annotation pins a generic call.** A let's declared type, a declared return type and a parameter
 type each pin the called generic's type parameters, which then fix dependent closure params:

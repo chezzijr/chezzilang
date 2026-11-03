@@ -9,7 +9,7 @@
 # Chezzi lists are append + index-read (no in-place element assignment), which suits a functional
 # merge sort that returns fresh sorted lists.
 #
-# In a real judge submission you'd read the data from stdin with `std.io.read_line()` + `int(...)`;
+# In a real judge submission you'd read the data from stdin with `std.io.read_line()` + `s.to_int()`;
 # here the input is inline so the program is deterministic (and golden-testable).
 
 import std.io
@@ -95,12 +95,12 @@ fn analyze(xs: List[int]) -> Stats:
             lo = x
         if x > hi:
             hi = x
-    mean := float(total) / float(n)
+    mean := total.to_float() / n.to_float()
     acc := 0.0
     for x in xs:
-        d := float(x) - mean
+        d := x.to_float() - mean
         acc += d * d
-    sd := math.sqrt(acc / float(n))
+    sd := math.sqrt(acc / n.to_float())
     return Stats(n, total, lo, hi, mean, sd)
 
 # ---- helpers -------------------------------------------------------------------------------------
@@ -111,7 +111,7 @@ fn join_ints(xs: List[int]) -> str:
     for x in xs:
         if i > 0:
             out = out + ", "
-        out = out + str(x)
+        out = out + "{x}"
         i += 1
     return out
 

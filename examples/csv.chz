@@ -33,12 +33,12 @@ fn main():
 
     encoded := csv.format(rows)
     decoded := csv.parse(encoded)
-    io.print("roundtrip: " + str(eq2(rows, decoded)))
+    io.print("roundtrip: {eq2(rows, decoded)}")
 
     # Direct parse asserts.
     # Quoted field with an embedded comma stays ONE field.
     c := csv.parse("\"a,b\",c")
-    io.print("comma_fields: " + str(c[0].len()))          # 2
+    io.print("comma_fields: {c[0].len()}")          # 2
     io.print("comma_first: " + c[0][0])                   # a,b
 
     # "" inside a quoted field -> one literal quote.
@@ -47,17 +47,17 @@ fn main():
 
     # Embedded newline in a quoted field stays ONE field / ONE record.
     nl := csv.parse("\"line1\nline2\",x")
-    io.print("nl_rows: " + str(nl.len()))                 # 1
-    io.print("nl_first: " + str(nl[0][0].len()))          # 11 (line1\nline2)
+    io.print("nl_rows: {nl.len()}")                 # 1
+    io.print("nl_first: {nl[0][0].len()}")          # 11 (line1\nline2)
 
     # Empty input -> [].
-    io.print("empty_len: " + str(csv.parse("").len()))    # 0
+    io.print("empty_len: {csv.parse("").len()}")    # 0
 
     # Trailing separator -> no spurious final record.
-    io.print("trail_rows: " + str(csv.parse("a,b\r\n").len()))   # 1
+    io.print("trail_rows: {csv.parse("a,b\r\n").len()}")   # 1
 
     # Blank interior line -> an EMPTY record (CPython csv.reader).
-    io.print("blank_mid: " + str(csv.parse("a\n\nb").len()))     # 3
+    io.print("blank_mid: {csv.parse("a\n\nb").len()}")     # 3
 
     # format([]) -> "".
     empty_rows: List[List[str]] = []
@@ -65,11 +65,11 @@ fn main():
 
     # TRAILING empty record round-trips (format terminates each record with CRLF).
     trail: List[List[str]] = [["a", "b"], [""]]
-    io.print("trail_rt: " + str(eq2(trail, csv.parse(csv.format(trail)))))   # true
+    io.print("trail_rt: {eq2(trail, csv.parse(csv.format(trail)))}")   # true
     # SOLE empty record round-trips too.
     sole: List[List[str]] = [[""]]
-    io.print("sole_fmt: " + str(csv.format(sole).len()))         # 4  (== "\"\"\r\n")
-    io.print("sole_rt: " + str(eq2(sole, csv.parse(csv.format(sole)))))      # true
+    io.print("sole_fmt: {csv.format(sole).len()}")         # 4  (== "\"\"\r\n")
+    io.print("sole_rt: {eq2(sole, csv.parse(csv.format(sole)))}")      # true
 
     # Perf sanity: a 20k-field row parses fast (would hang under the old O(n^2) per-char slice).
     bparts: List[str] = []
@@ -79,6 +79,6 @@ fn main():
         k += 1
     bparts.push("end")
     big := ",".join(bparts)
-    io.print("big_fields: " + str(csv.parse(big)[0].len()))      # 20001
+    io.print("big_fields: {csv.parse(big)[0].len()}")      # 20001
 
 main()

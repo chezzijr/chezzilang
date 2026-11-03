@@ -51,7 +51,7 @@ fn calls_for(n: int) -> int:
     return 100000
 
 fn report(name: str, n: int, callers: int, calls: int, t0: float):
-    us := (time.monotonic() - t0) * 1000000.0 / float(calls)
+    us := (time.monotonic() - t0) * 1000000.0 / calls.to_float()
     print("{name}|{n}|{callers}|{us}")
 
 fn shared_updates(s: concurrency.Shared[Table], calls: int):

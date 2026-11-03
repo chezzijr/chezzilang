@@ -1,14 +1,14 @@
 # bytes — immutable byte-sequence type (Python `bytes` model). Exercises every row of the
 # bytes operation table: literal (with \xHH escapes), index -> int, slice -> bytes (incl.
 # reverse / step / negative bounds), for-loop -> int, len, == / !=, an out-of-range index
-# under recover:, plus Display / str() / interpolation (the b'...' repr).
+# under recover:, plus Display / interpolation (the b'...' repr).
 
 fn main():
     b := b"\x01\x02\x03\xFF"
 
-    # Display / str() / interpolation — Python b'...' repr (\xHH for non-printable / >=0x80).
+    # Display / interpolation — Python b'...' repr (\xHH for non-printable / >=0x80).
     print(b)
-    print(str(b"hi\n"))
+    print("{b"hi\n"}")
     ab := b"AB"
     print("interp: {ab}")
 

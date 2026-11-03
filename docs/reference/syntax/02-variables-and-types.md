@@ -452,18 +452,18 @@ constructor, a `yield`, a generic type-argument binding (`mx(1, 2.5)` with one `
 `if`/`match` branch join. The message names the fix:
 
 ```
-x: float = 1              # cannot assign int to variable of type float — write 1.0 (or float(x))
+x: float = 1              # cannot assign int to variable of type float — write 1.0 (or x.to_float())
 l: List[float] = [1.5]
-l.push(3)                 # argument 1 of 'push': expected float, found int — write 1.0 (or float(x))
+l.push(3)                 # argument 1 of 'push': expected float, found int — write 1.0 (or x.to_float())
 ```
 
-- Write `1.0` for a constant (Rust's `let x: f64 = 1;` is E0308 too), or `float(i)` for a value.
+- Write `1.0` for a constant (Rust's `let x: f64 = 1;` is E0308 too), or `i.to_float()` for a value.
 - `float`→`int` is a type error too (lossy). A sink spelled through an alias (`type F = float`,
   `type LF = List[float]`) follows the same rule.
 - Arithmetic and comparison on values still mix: `2 * 1.5` (`3.0`), `i * f`, `x + 1` with `x: float`,
   `f += 1`, `i < f`, `1 == 2.3` give `float` / `bool` (the VM promotes by runtime tag).
 - A mixed literal (`[1, 2.5]`, `if c: 1 else: 2.5`) is an `int` and a `float` in one slot, so it is
-  an error (`list elements differ: int vs float — write 1.0 (or float(x))`). A `float` slot always
+  an error (`list elements differ: int vs float — write 1.0 (or x.to_float())`). A `float` slot always
   holds a real float, so `x: float = 3.0` makes `x / 2 == 1.5`.
 - An `Any` slot keeps an `int` an `int` (`x: Any = if c: 1 else: 2.5` stores `1`;
   `xs: List[Any] = [1, -2.5]` keeps the `1`), as Go's `var x any = 1` does.

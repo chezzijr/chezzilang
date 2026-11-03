@@ -33,7 +33,7 @@ Functions: `abs`, `floor`, `ceil`, `round`, `pow(base, exp)`, `sqrt`, `sin`, `co
   unpinned `g := math.abs` is rejected with the instantiate hint (`math.abs[<T>]`), as Go rejects
   `g := Abs`.
 - A `float` parameter never accepts an `int` (rule D3, `syntax.md §3`): `sqrt(16)` / `floor(2)` are type
-  errors naming `write 1.0 (or float(x))`. Write `sqrt(16.0)` / `floor(2.0)`, or `sqrt(float(i))` for a
+  errors naming `write 1.0 (or x.to_float())`. Write `sqrt(16.0)` / `floor(2.0)`, or `sqrt(i.to_float())` for a
   typed `int` value.
 - `math.round` rounds **half away from zero** (`round(2.5)` → `3.0`, `round(-2.5)` → `-3.0`). The `:.0f`
   format spec uses **banker's rounding** (`"{2.5:.0f}"` → `2`, matching Python). Use `math.round` for
@@ -55,8 +55,8 @@ Number / integer functions (Python `math` semantics):
   faults like `a / b`. (A bodied Chezzi fn beside the native decls: the hybrid module form.)
 - `sign[T: Num](x: T) -> T`: like `abs` (`int`→`int`, `float`→`float`); returns `-1`/`0`/`1`
   (numpy/Go convention). `sign(0.0)` is `0.0`, `sign(NaN)` is `NaN`.
-- `trunc(x: float) -> int`: truncate toward zero. Equivalent to the `int(x)` builtin; faults on a
-  non-finite or out-of-i64-range input (same as `int()`).
+- `trunc(x: float) -> int`: truncate toward zero; faults on a non-finite or out-of-i64-range input.
+  `x.to_int() -> int?` is the total form (`None` there).
 - `hypot(x, y) -> float`: `sqrt(x*x + y*y)`. `cbrt(x) -> float`: real cube root (total; `cbrt(-8.0)` → `-2.0`).
 - `factorial(n) -> int!`, `comb(n, k) -> int!`, `perm(n, k) -> int!`: return a clean `!e` (never a
   fault) on a bad domain (negative `n`/`k`) or i64 overflow. `factorial` tops out at `20!` (`21!`

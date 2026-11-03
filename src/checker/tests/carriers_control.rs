@@ -1177,7 +1177,7 @@ fn scalar_ctor_not_firstclass_value() {
     rejects("fn w():\n    f := bytearray\n", "bytearray");
     // A scalar ctor in `defer` single-call position must still be wrapped (not first-class).
     rejects(
-        "fn w():\n    defer str(\"x\")\n",
+        "fn w():\n    defer str()\n",
         "built-ins and constructors must be wrapped",
     );
 }

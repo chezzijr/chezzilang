@@ -82,19 +82,19 @@ impl Vm {
         let result = match b {
             // Unwinds instead of pushing a value.
             Builtin::Panic => return Err(self.builtin_panic(&args, span)),
-            Builtin::Int => self.builtin_int(&args, span)?,
-            Builtin::Float => self.builtin_float(&args, span)?,
-            Builtin::Bool => self.builtin_bool(&args, span)?,
-            Builtin::Str => self.builtin_str(&args, span)?,
             Builtin::Ord => self.builtin_ord(&args, span)?,
             Builtin::Chr => self.builtin_chr(&args, span)?,
-            // A call on a builtin type's name makes an empty value; the checker admits no argument.
+            // A call on a builtin type's name makes the empty or zero value; the checker admits no
+            // argument.
+            Builtin::Int => Value::int(0),
+            Builtin::Float => self.box_float(0.0),
+            Builtin::Bool => Value::bool(false),
+            Builtin::Str => self.alloc_str(String::new()),
+            Builtin::Bytes => Value::obj(self.heap.alloc(Obj::Bytes(Box::default()))),
             Builtin::Set => Value::obj(self.heap.alloc(Obj::Set(SetData::default()))),
             Builtin::List => Value::obj(self.heap.alloc(Obj::List(Vec::new().into()))),
             Builtin::Map => Value::obj(self.heap.alloc(Obj::Map(MapData::default()))),
             Builtin::ByteArray => Value::obj(self.heap.alloc(Obj::ByteArray(RVec::new()))),
-            // The checker rejects every `bytes(...)` call.
-            Builtin::Bytes => unreachable!("bytes() reached the VM"),
             // `Lowering::Print` and `Lowering::Opcode` builtins have opcodes of their own.
             Builtin::Print
             | Builtin::Channel
@@ -614,118 +614,6 @@ impl Vm {
         alloc(n as usize).map_err(|AllocFailed| {
             self.err(format!("{what}() size {n} is too large to allocate"), span)
         })
-    }
-
-    pub(super) fn builtin_int(
-        &mut self,
-        args: &[Value],
-        span: Span,
-    ) -> Result<Value, RuntimeError> {
-        self.arity_err("int", args, 1, span)?;
-        let v = args[0];
-        if self.is_integral(v) {
-            // `int(int)` is identity — inline or boxed big-int, returned unchanged.
-            return Ok(v);
-        }
-        if v.is_float() {
-            let f = self.float_of(v);
-            if !f.is_finite() || f < i64::MIN as f64 || f >= 9_223_372_036_854_775_808.0 {
-                return Err(self.err(format!("int(): {f} is out of integer range"), span));
-            }
-            return Ok(self.make_int(f as i64));
-        }
-        if let Some(b) = v.as_bool() {
-            return Ok(Value::int(i64::from(b)));
-        }
-        if let Some(h) = v.as_obj()
-            && let Obj::Str(s) = self.heap.get(h)
-        {
-            let s = s.to_string();
-            return match parse_i64_pep515(s.trim()) {
-                Ok(n) => Ok(self.make_int(n)),
-                Err(IntParseErr::Overflow) => Err(self.err(
-                    format!(
-                        "int(): '{s}' overflows i64 (range -9223372036854775808..=9223372036854775807)"
-                    ),
-                    span,
-                )),
-                Err(IntParseErr::Malformed) => {
-                    Err(self.err(format!("int(): cannot parse '{s}' as an integer"), span))
-                }
-            };
-        }
-        Err(self.err(format!("int() cannot convert {}", self.type_name(v)), span))
-    }
-
-    pub(super) fn builtin_float(
-        &mut self,
-        args: &[Value],
-        span: Span,
-    ) -> Result<Value, RuntimeError> {
-        self.arity_err("float", args, 1, span)?;
-        let v = args[0];
-        if v.is_float() {
-            return Ok(v);
-        }
-        if self.is_integral(v) {
-            let f = self.int_of(v) as f64;
-            return Ok(self.box_float(f));
-        }
-        if let Some(b) = v.as_bool() {
-            return Ok(self.box_float(f64::from(b)));
-        }
-        if let Some(h) = v.as_obj()
-            && let Obj::Str(s) = self.heap.get(h)
-        {
-            let s = s.to_string();
-            return match strip_num_underscores(s.trim()).and_then(|t| t.parse::<f64>().ok()) {
-                Some(f) => Ok(self.box_float(f)),
-                None => Err(self.err(format!("float(): cannot parse '{s}' as a float"), span)),
-            };
-        }
-        Err(self.err(
-            format!("float() cannot convert {}", self.type_name(v)),
-            span,
-        ))
-    }
-
-    /// `bool(x)` — total truthiness cast over the scalars. Never faults on int/float/bool/str:
-    /// int 0 -> false else true; float 0.0/-0.0 -> false, NaN -> true
-    /// (Rust `f != 0.0` is already false for both zeros and true for NaN — matches Python), else
-    /// true; bool -> identity; str "" -> false else true (non-empty is truthy — NOT a parse, so
-    /// `bool(" ")` is true). A non-scalar arg faults exactly like `int()`/`float()`.
-    pub(super) fn builtin_bool(
-        &mut self,
-        args: &[Value],
-        span: Span,
-    ) -> Result<Value, RuntimeError> {
-        self.arity_err("bool", args, 1, span)?;
-        let v = args[0];
-        if let Some(n) = self.int_val(v) {
-            return Ok(Value::bool(n != 0));
-        }
-        if v.is_float() {
-            return Ok(Value::bool(self.float_of(v) != 0.0));
-        }
-        if let Some(b) = v.as_bool() {
-            return Ok(Value::bool(b));
-        }
-        if let Some(h) = v.as_obj()
-            && let Obj::Str(s) = self.heap.get(h)
-        {
-            return Ok(Value::bool(!s.is_empty()));
-        }
-        Err(self.err(format!("bool() cannot convert {}", self.type_name(v)), span))
-    }
-
-    pub(super) fn builtin_str(
-        &mut self,
-        args: &[Value],
-        span: Span,
-    ) -> Result<Value, RuntimeError> {
-        self.arity_err("str", args, 1, span)?;
-        let s = self.stringify(args[0], span, 0)?;
-        Ok(Value::obj(self.heap.alloc(Obj::Str(s.into()))))
     }
 
     /// `ord(s)` — codepoint of the ONE character of `s`.

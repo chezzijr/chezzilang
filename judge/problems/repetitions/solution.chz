@@ -18,6 +18,6 @@ fn main():
             prev = c
         if cur > best:
             best = cur
-    io.print(str(best))
+    io.print("{best}")
 
 main()

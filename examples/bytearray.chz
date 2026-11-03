@@ -2,7 +2,7 @@
 # literal). Exercises the whole operation table: all 4 constructor forms, index read + WRITE, an
 # out-of-range write under recover:, slice -> bytearray (reverse / step), for-loop -> int, push /
 # pop / extend, len, == (incl. cross bytes==bytearray), shared mutation through two bindings, the
-# bytes <-> bytearray conversion round-trip, and the bytearray(b'...') Display / str() / interp repr.
+# bytes <-> bytearray conversion round-trip, and the bytearray(b'...') Display / interpolation repr.
 
 fn main():
     # Four constructor forms.
@@ -12,8 +12,8 @@ fn main():
     ba := bytearray.from_iter([1, 2, 3, 255])    # from a List[int]
     print(ba)                          # bytearray(b'\x01\x02\x03\xff')
 
-    # Display / str() / interpolation — the bytearray(b'...') repr (distinct from bytes' bare b'...').
-    print(str(ba))
+    # Display / interpolation — the bytearray(b'...') repr (distinct from bytes' bare b'...').
+    print("{ba}")
     print("interp: {ba}")
 
     # ba[i] -> int (0..255), including a negative index.

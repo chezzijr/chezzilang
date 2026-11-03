@@ -26,10 +26,13 @@ native fn ord(c: str) -> int
 native fn chr(n: int) -> str
 native fn panic(msg: str)
 
-native ctor int(x) -> int
-native ctor float(x) -> float
-native ctor bool(x) -> bool
-native ctor str(x) -> str
+# A call on a scalar type's name sets no field, so it gives the zero value (`int()` is `0`, Python
+# `int()`, Rust `i64::default()`). A conversion is a method on the source value (`n.to_float()`,
+# `f.to_int()`, `s.to_int()`), and display is interpolation (`"{x}"`, Go `fmt.Sprint`).
+native ctor int() -> int
+native ctor float() -> float
+native ctor bool() -> bool
+native ctor str() -> str
 native ctor bytes() -> bytes
 native ctor bytearray() -> bytearray
 
@@ -176,7 +179,7 @@ native struct Channel[T]:
     native fn cap(self) -> int
 
 # The reserved scalar METHOD tables (`str`/`bytes`/`bytearray`). Identity stays the reserved
-# `Ty::Str`/`Ty::Bytes`/`Ty::ByteArray` (`resolve_type`) and the `str(x)`/`bytes()`/`bytearray()`
+# `Ty::Str`/`Ty::Bytes`/`Ty::ByteArray` (`resolve_type`) and the `str()`/`bytes()`/`bytearray()`
 # CTORS stay the `native ctor` decls above; runtime dispatch stays Rust-inline (`vm/mod.rs core_method` /
 # `bytes_method`). Only the METHOD-TABLE sigs are file-backed here — harvested into each scalar's method
 # table (re-seeded by `seed_stdlib_structs`), looked up via `native_handle_method` with no type args (the
@@ -227,6 +230,15 @@ native struct str:
     # string (explicit `str` error type, not the default `Error` existential).
     native fn parse_int(self) -> Result[int, str]
     native fn parse_float(self) -> Result[float, str]
+
+# The numeric conversions. `int` to `float` is total (Rust `n as f64`: past 2^53 it rounds to the
+# nearest float). `float` to `int` truncates toward zero and gives `None` for NaN, the infinities and
+# a value outside i64 (Rust `f64::to_i64` in `num-traits`), so no NaN becomes a silent number.
+native struct int:
+    native fn to_float(self) -> float
+
+native struct float:
+    native fn to_int(self) -> Option[int]
 
 # `bytes` (immutable byte sequence): `decode() -> str` (UTF-8, recoverable fault on invalid UTF-8) and
 # `len()` (byte count). `extend` is NOT a bytes method (bytes is immutable).

@@ -200,7 +200,7 @@ print("{3.14159:.{2}f}")  # runtime precision            → "3.14"
   never faults with `format spec:` on a concrete-typed hole.
 
 **Plain float printing matches CPython `repr()`/`str()`, except `NaN` casing:** Chezzi prints `NaN`
-where CPython prints `nan`, on every path (`print`, `str()`, interpolation, container element,
+where CPython prints `nan`, on every path (`print`, interpolation, container element,
 `{x:.2f}`, `{x:>8}`). `inf`/`-inf` agree. Test with `math.is_nan`, not a string.
 
 - A bare float uses scientific notation when the decimal exponent is `< -4` or `>= 16`, else fixed:

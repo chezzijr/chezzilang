@@ -8,7 +8,7 @@ fn main():
     keys: List[str] = []
     i := 0
     while i < 1000:
-        keys.push("key-" + str(i))
+        keys.push("key-{i}")
         i += 1
 
     m: Map[str, int] = {}

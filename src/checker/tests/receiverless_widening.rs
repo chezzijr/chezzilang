@@ -199,7 +199,7 @@ fn value_slot_protocol_note_absent_for_a_non_protocol_mismatch() {
     let errs = check_src(src);
     assert!(
         errs.iter()
-            .any(|e| e.message.ends_with(" — write 1.0 (or float(x))")),
+            .any(|e| e.message.ends_with(" — write 1.0 (or x.to_float())")),
         "expected a widen-note error, got: {errs:?}"
     );
 }

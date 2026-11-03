@@ -231,12 +231,12 @@ test fn a_reader_waits_for_a_slow_writer_and_a_print_does_not():
         spawn:
             _ := started.recv()
             _ := started.recv()
-            before := [str(s), str(w)]
+            before := ["{s}", "{w}"]
             gate.send(1)
             gate.send(1)
-            shown.send(before + [str(s.get()), str(w.get()), str(w.read(fn(x): x))])
+            shown.send(before + ["{s.get()}", "{w.get()}", "{w.read(fn(x): x)}"])
     got := shown.recv()
-    assert got == ["Shared(0)", "RwShared(0)", "1", "1", "1"], str(got)
+    assert got == ["Shared(0)", "RwShared(0)", "1", "1", "1"], "{got}"
 
 struct Pair:
     other: Shared[Pair?]
@@ -246,7 +246,7 @@ test fn two_boxes_that_hold_each_other_print_with_a_cycle_marker():
     b: Shared[Pair?] = Shared(None)
     a.set(?Pair(b))
     b.set(?Pair(a))
-    text := str([a, b])
+    text := "{[a, b]}"
     assert text.contains("Shared(...)"), text
     assert text.starts_with("[Shared(Pair(other=Shared(Pair(other=Shared(...)")
 

@@ -208,7 +208,7 @@ fn module_label(import: &Import) -> String {
 }
 
 /// D3 (TICKET-138): an int NEVER widens into a `float` slot, at any sink. The fix a diagnostic names.
-pub(crate) const FLOAT_FIX_NOTE: &str = " — write 1.0 (or float(x))";
+pub(crate) const FLOAT_FIX_NOTE: &str = " — write 1.0 (or x.to_float())";
 
 /// Does `actual` differ from `expected` by an int sitting where a `float` is expected — at the top or
 /// nested under the same type constructor? It only picks whether a failed slot check carries

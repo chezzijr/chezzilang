@@ -25,7 +25,7 @@ fn write_then_read(p: str, cap: int, text: str, use_close: bool) -> str!:
 
 # A per-process scratch path: two concurrent suite runs must not truncate/delete each other's file.
 fn scratch(name: str) -> str:
-    return os.temp_dir().str() + "/chz_w6_1_" + name + "_" + str(os.getpid()) + ".txt"
+    return os.temp_dir().str() + "/chz_w6_1_" + name + "_{os.getpid()}.txt"
 
 fn check(name: str, cap: int, text: str, use_close: bool):
     p := scratch(name)
@@ -105,12 +105,12 @@ test fn flush_through_a_closed_inner_is_a_clean_err_naming_the_inner():
 
 test fn stdout_write_bytes_returns_the_input_length():
     match io.stdout().write_bytes(b"\xff\xfe"):
-        ?n: assert n == 2, "stdout write_bytes returned " + str(n)
+        ?n: assert n == 2, "stdout write_bytes returned {n}"
         !e: assert false, "stdout write_bytes: " + e.message()
 
 test fn stderr_write_bytes_returns_the_input_length():
     match io.stderr().write_bytes(b"\xff\xfe"):
-        ?n: assert n == 2, "stderr write_bytes returned " + str(n)
+        ?n: assert n == 2, "stderr write_bytes returned {n}"
         !e: assert false, "stderr write_bytes: " + e.message()
 
 test fn file_write_bytes_round_trips_non_utf8():
@@ -121,7 +121,7 @@ test fn file_write_bytes_round_trips_non_utf8():
     match io.create(p):
         ?w:
             match w.write_bytes(raw):
-                ?n: assert n == 5, "file write_bytes returned " + str(n)
+                ?n: assert n == 5, "file write_bytes returned {n}"
                 !e: assert false, "file write_bytes: " + e.message()
             _ := w.close()
         !e: assert false, "create: " + e.message()
@@ -141,12 +141,12 @@ test fn large_write_bytes_returns_the_full_count():
     match io.create(p):
         ?w:
             match w.write_bytes(big):
-                ?n: assert n == 200000, "large write_bytes returned " + str(n)
+                ?n: assert n == 200000, "large write_bytes returned {n}"
                 !e: assert false, "large write_bytes: " + e.message()
             _ := w.close()
         !e: assert false, "create: " + e.message()
     match io.read_bytes(p):
-        ?got: assert got.len() == 200000, "short file: " + str(got.len())
+        ?got: assert got.len() == 200000, "short file: {got.len()}"
         !e: assert false, "read_bytes: " + e.message()
 
 test fn write_that_drains_into_a_closed_inner_names_the_inner_too():

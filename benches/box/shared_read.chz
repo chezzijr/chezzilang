@@ -31,5 +31,5 @@ for n in [1, 1000, 100000]:
         parallel:
             for _ in 0..callers:
                 spawn reads(s, each, sink)
-        us := (time.monotonic() - t0) * 1000000.0 / float(each * callers)
+        us := (time.monotonic() - t0) * 1000000.0 / (each * callers).to_float()
         print("Shared.read|{n}|{callers}|{us}")

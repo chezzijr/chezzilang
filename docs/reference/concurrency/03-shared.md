@@ -95,8 +95,8 @@ same one-value box behind a read-write guard.
 | `get()` | the live value, by handle | the live value, by handle |
 | pick it when | you mostly write, or read a small part of a big value (`read`) | reads dominate and readers must not queue |
 
-**Display rule.** `print`, `str` and interpolation of a `Shared` / `RwShared` / `Atomic` render what
-the box holds structurally, with no user `str` hook: `str(Shared(P(1)))` is `Shared(P(x=1))` even when
+**Display rule.** `print` and interpolation of a `Shared` / `RwShared` / `Atomic` render what
+the box holds structurally, with no user `str` hook: `"{Shared(P(1))}"` is `Shared(P(x=1))` even when
 `P` defines `str`. A box that holds itself, directly or through a container or a struct, prints the
 cycle marker like any other container cycle:
 

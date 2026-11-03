@@ -98,13 +98,13 @@ test fn sort_mutation_through_tuple_faults():
 test fn float_zero_elements_use_float_order():
     xs := [(1, 0.0), (1, -0.0)]
     xs.sort()
-    assert str(xs[0].1) == "0.0"
-    assert str(xs[1].1) == "-0.0"
+    assert "{xs[0].1}" == "0.0"
+    assert "{xs[1].1}" == "-0.0"
     zs := [(0, 0.0), (0, -0.0)]
     m := zs.min() ?? (9, 9.0)
-    assert str(m.1) == "0.0"
+    assert "{m.1}" == "0.0"
     n := zs.max() ?? (9, 9.0)
-    assert str(n.1) == "0.0"
+    assert "{n.1}" == "0.0"
 
 # CPython 3.14.7: n=float('nan'); m=float('nan')
 #   (n,1)<(n,2) True   (n,1)<(m,2) False   (n,1)>(m,2) False   (n,1)<=(m,2) False

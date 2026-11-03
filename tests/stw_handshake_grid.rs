@@ -250,7 +250,7 @@ fn allocer(out: Channel[str]):
     i := 0
     xs: List[str] = []
     while i < 200:
-        xs.push(str(i))
+        xs.push(\"{i}\")
         i += 1
     out.send(\"allocer done\")
 fn main():
@@ -317,7 +317,7 @@ main()
     out.send(\"{r.read_line()}\")
 fn printer(r: io.Reader, out: Channel[str]):
     time.sleep_ms(300)
-    out.send(str(r))
+    out.send(\"{r}\")
 fn allocer(fin: Channel[str], out: Channel[str]):
     while fin.len() < 1:
         _ := busy(1)

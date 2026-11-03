@@ -285,7 +285,7 @@ impl Vm {
                     }
                 }
                 // Raw display fallback (no method dispatch here): `Name(inner)`. The `str(self)`
-                // override is honored by `stringify` (the path print/`str()` actually use).
+                // override is honored by `stringify` (the path print and interpolation use).
                 Obj::Func { proto, .. } => Ok(format!("<fn {}>", self.program.protos[*proto].name)),
                 Obj::Closure { .. } => Ok("<closure>".to_string()),
                 Obj::Module(m) => Ok(format!("<module {}>", m.names().name)),
@@ -372,7 +372,7 @@ impl Vm {
         self.display_box(core, depth, &mut OpenRender::default())
     }
 
-    /// Protocol-aware render for `print` / `str()` / interpolation: a struct with a self-only
+    /// Protocol-aware render for `print` / interpolation: a struct with a self-only
     /// `str(self) -> str` method (the `Stringable` protocol) dispatches to it; everything else uses
     /// the default structural repr, recursing through `stringify` so nested structs honour the
     /// protocol too. Distinct from the `&self` `display` above, which stays the pure structural form

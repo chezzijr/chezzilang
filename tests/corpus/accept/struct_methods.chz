@@ -4,4 +4,4 @@ struct Point:
     y: int
 
     fn dist(self) -> float:
-        return float(self.x * self.x + self.y * self.y)
+        return (self.x * self.x + self.y * self.y).to_float()

@@ -5,11 +5,11 @@ import std.io
 fn main():
     n := 0
     match io.read_line():
-        ?l: n = int(l)
+        ?l: n = l.to_int() ?? panic("input is not an int")
         None:    return
     out: List[str] = []
     while n != 1:
-        out.push(str(n))
+        out.push("{n}")
         if n % 2 == 0:
             n = n / 2
         else:

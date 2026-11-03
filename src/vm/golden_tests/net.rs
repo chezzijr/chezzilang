@@ -472,7 +472,7 @@ fn serve() -> int!:
     print(\"listening\")
     conn := l.accept()?
     b := conn.read_bytes(64)?
-    print(\"GOT:\" + str(b.len()))
+    print(\"GOT:\" + \"{{b.len()}}\")
     conn.write(\"echo:hi\")?
     conn.close()
     l.close()
@@ -663,8 +663,8 @@ fn run() -> int!:
                 spawn drain(sock, seen, bad)
             sock.close()
             return ?0
-    print(\"SEEN:\" + str(seen.get()))
-    print(\"BAD:\" + str(bad.get()))
+    print(\"SEEN:\" + \"{seen.get()}\")
+    print(\"BAD:\" + \"{bad.get()}\")
     return ?0
 
 fn main():

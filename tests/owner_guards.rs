@@ -385,3 +385,53 @@ fn a_builtin_type_with_from_iter_has_no_ctor_with_an_argument() {
     }
     assert!(seen > 0, "no builtin type declares from_iter");
 }
+
+/// A call on a builtin type's name sets no field (owner rule: a constructor sets fields only), so
+/// every `native ctor` in `std/prelude.chz` declares no parameter, and a call with an argument is a
+/// type error. A conversion is a method on the source value. The ctor list is read from the decls,
+/// so a ctor that starts to accept an argument again fails here.
+#[test]
+fn a_prelude_ctor_takes_no_argument() {
+    let prelude = fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("std/prelude.chz"))
+        .expect("read std/prelude.chz");
+    let ctors: Vec<&str> = prelude
+        .lines()
+        .filter_map(|l| l.strip_prefix("native ctor "))
+        .collect();
+    assert!(!ctors.is_empty(), "std/prelude.chz declares no native ctor");
+    for decl in ctors {
+        let (name, rest) = decl
+            .split_once('(')
+            .expect("a ctor decl has a parameter list");
+        assert!(
+            rest.starts_with(')'),
+            "`native ctor {decl}` declares a parameter: a conversion is a method on the source value"
+        );
+        let dir =
+            std::env::temp_dir().join(format!("chezzi-ctor-noarg-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("main.chz"),
+            format!("x := {name}(1)\ny := {name}()\n"),
+        )
+        .unwrap();
+        let out = std::process::Command::new(env!("CARGO_BIN_EXE_chezzi"))
+            .args(["check", "main.chz"])
+            .current_dir(&dir)
+            .output()
+            .expect("run chezzi");
+        let _ = fs::remove_dir_all(&dir);
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(
+            !out.status.success()
+                && text.matches("takes no argument").count() == 1
+                && text.contains("chezzi: 1 type error"),
+            "`{name}(1)` must reject with one error and `{name}()` must check clean:\n{text}"
+        );
+    }
+}

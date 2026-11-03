@@ -1250,7 +1250,7 @@ fn nested():
 ex := Executor()
 ex.submit(nested)
 _ := joining.recv()
-print(\"inner still running: \" + str(not sleep_over.get()))
+print(\"inner still running: \" + \"{not sleep_over.get()}\")
 ex.cancel()
 print(\"main done\")
 ";

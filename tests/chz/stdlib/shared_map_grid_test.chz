@@ -51,13 +51,13 @@ fn _ops[K: Hashable + Eq](keys: List[K], put: fn(K, int) -> None, del: fn(K) -> 
     del(keys[2])
     put(keys[2], 20)
     log := items()
-    log = log + "|" + str(get(keys[1])) + str(get(keys[2])) + str(get(keys[5]))
-    log = log + "|" + str(has(keys[3])) + str(has(keys[5])) + "|" + str(len())
-    log = log + "|" + str(goi(keys[0], 99)) + str(goi(keys[5], 55)) + "|" + str(len())
+    log = log + "|{get(keys[1])}{get(keys[2])}{get(keys[5])}"
+    log = log + "|{has(keys[3])}{has(keys[5])}|{len()}"
+    log = log + "|{goi(keys[0], 99)}{goi(keys[5], 55)}|{len()}"
     return log
 
 fn _show[K](k: K, v: int) -> str:
-    return str(k) + "=" + str(v) + ";"
+    return "{k}={v};"
 
 # ---- holders ---------------------------------------------------------------------------------------
 fn _map_ops[K: Hashable + Eq](keys: List[K]) -> str:
@@ -190,7 +190,7 @@ fn _grid[K: Hashable + Eq](keys: List[K]) -> str:
 # ---- memoize ---------------------------------------------------------------------------------------
 fn _tagged[K](calls: concurrency.AtomicInt, k: K) -> str:
     calls.add(1)
-    return "v" + str(k)
+    return "v{k}"
 
 fn _child_memo[K: Hashable + Eq](m: fn(K) -> str, keys: List[K], ch: Channel[str]):
     r := recover: _call_all(m, keys)
@@ -209,12 +209,12 @@ fn _call_all[K: Hashable + Eq](m: fn(K) -> str, keys: List[K]) -> str:
 fn _memo_grid[K: Hashable + Eq](keys: List[K]) -> str:
     want := ""
     for k in keys:
-        want = want + "v" + str(k) + ";"
+        want = want + "v{k};"
     bad := ""
     c0 := concurrency.AtomicInt(0)
     m0 := memoize1(fn(k: K) -> str: _tagged(c0, k))
     if _call_all(m0, keys) != want or _call_all(m0, keys) != want or c0.load() != keys.len():
-        bad = bad + "parent: calls=" + str(c0.load()) + "\n"
+        bad = bad + "parent: calls={c0.load()}\n"
     c1 := concurrency.AtomicInt(0)
     m1 := memoize1(fn(k: K) -> str: _tagged(c1, k))
     ch := Channel[str](1)
@@ -222,7 +222,7 @@ fn _memo_grid[K: Hashable + Eq](keys: List[K]) -> str:
         spawn _child_memo(m1, keys, ch)
     got := ch.recv()
     if got != want or _call_all(m1, keys) != want or c1.load() != keys.len():
-        bad = bad + "spawn: " + got + " calls=" + str(c1.load()) + "\n"
+        bad = bad + "spawn: " + got + " calls={c1.load()}\n"
     c2 := concurrency.AtomicInt(0)
     m2 := memoize1(fn(k: K) -> str: _tagged(c2, k))
     ex := concurrency.Executor()
@@ -230,7 +230,7 @@ fn _memo_grid[K: Hashable + Eq](keys: List[K]) -> str:
     ex.shutdown()
     got2 := must(o.get())
     if got2 != want or _call_all(m2, keys) != want or c2.load() != keys.len():
-        bad = bad + "executor: " + got2 + " calls=" + str(c2.load()) + "\n"
+        bad = bad + "executor: " + got2 + " calls={c2.load()}\n"
     return bad
 
 # ---- the map grid ----------------------------------------------------------------------------------
@@ -278,8 +278,8 @@ test fn single_entry_writes_keep_their_own_aliases():
     _rw_put(b, "b", [ys, ys])
     m := b.get()
     m["a"][0].push(7)
-    assert m["a"][1] == [1, 7], str(m)
-    assert m["b"] == [[2], [2]], str(m)
+    assert m["a"][1] == [1, 7], "{m}"
+    assert m["b"] == [[2], [2]], "{m}"
 
 # The same with cells, where an id collision IS visible: a rebuild reuses the first cell it built for
 # an id, so entry b's closure would share entry a's counter. Fails with the splice memo seeded at 0, or
@@ -301,7 +301,7 @@ test fn single_entry_writes_keep_their_own_cells():
     m := b.get()
     a := m["a"]()
     c := m["b"]()
-    assert a == 1 and c == 101, "a() = " + str(a) + ", b() = " + str(c)
+    assert a == 1 and c == 101, "a() = {a}, b() = {c}"
 
 # A store whose entries alias one list across entries is not piece-self-contained: removing or
 # overwriting the entry that defines the list must not leave the other entry's back-reference dangling.
@@ -314,12 +314,12 @@ test fn remove_and_overwrite_keep_a_cross_entry_alias_alive():
     b := concurrency.RwShared(m)
     _rw_del(b, "a")
     match ConcurrentMap(b).get("b"):
-        ?v: assert v == [1, 2], str(v)
+        ?v: assert v == [1, 2], "{v}"
         None: assert false, "b missing after removing a"
     _rw_put(b, "c", [4])
     _rw_put(b, "b", [5])
     want: Map[str, List[int]] = {"b": [5], "c": [4]}
-    assert b.get() == want, str(b.get())
+    assert b.get() == want, "{b.get()}"
 
 # ---- lookup under a concurrent remove of a colliding key ------------------------------------------
 # Every even `P` hashes alike. One task keeps removing the oldest other colliding key and putting it
@@ -360,4 +360,4 @@ test fn colliding_key_lookup_never_misses_under_concurrent_churn():
         spawn _churn(b, stop)
         spawn _look(b, stop, ch)
     misses := ch.recv()
-    assert misses == 0, "P(14) reported missing " + str(misses) + " times"
+    assert misses == 0, "P(14) reported missing {misses} times"

@@ -7,7 +7,7 @@ use super::*;
 #[test]
 fn value_only_on_operand_stack_survives() {
     assert_eq!(
-        run_capture_stress("print([str(1), str(2), str(3)][0] + [str(4), str(5)][1])"),
+        run_capture_stress("print([\"1\", \"2\", \"3\"][0] + [\"4\", \"5\"][1])"),
         "15\n"
     );
 }
@@ -18,9 +18,9 @@ fn value_only_on_operand_stack_survives() {
 fn value_in_frame_slot_survives() {
     let src = "\
 fn main():
-    x := [str(1), str(2)]
-    junk := str(3)
-    more := [str(4), str(5), str(6)]
+    x := [\"1\", \"2\"]
+    junk := \"3\"
+    more := [\"4\", \"5\", \"6\"]
     print(x)
 main()";
     assert_eq!(run_capture_stress(src), "['1', '2']\n");
@@ -30,10 +30,10 @@ main()";
 #[test]
 fn value_in_module_global_survives() {
     let src = "\
-K := [str(7), str(8)]
+K := [\"7\", \"8\"]
 fn main():
-    a := str(1)
-    b := [str(2), str(3)]
+    a := \"1\"
+    b := [\"2\", \"3\"]
     print(K)
 main()";
     assert_eq!(run_capture_stress(src), "['7', '8']\n");
@@ -45,11 +45,11 @@ main()";
 fn value_in_closure_capture_survives() {
     let src = "\
 fn make() -> fn() -> str:
-    secret := str(42)
+    secret := \"42\"
     return fn(): secret
 fn main():
     g := make()
-    junk := [str(1), str(2), str(3)]
+    junk := [\"1\", \"2\", \"3\"]
     print(g())
 main()";
     assert_eq!(run_capture_stress(src), "42\n");
@@ -82,7 +82,7 @@ fn struct_sort_survives_gc_stress() {
 struct M:
     c: int
     fn compare(self, other: M) -> int:
-        junk := [str(self.c), str(other.c)]
+        junk := [\"{self.c}\", \"{other.c}\"]
         return self.c - other.c
     fn eq(self, other: M) -> bool:
         return self.c == other.c
@@ -98,7 +98,7 @@ fn main():
     xs.sort()
     out := \"\"
     for m in xs:
-        out = out + str(m.c)
+        out = out + \"{m.c}\"
     print(out)
     make().sort()              # inline temporary receiver
     print(\"ok\")
@@ -114,7 +114,7 @@ fn tuple_ordering_survives_gc_stress() {
 struct M:
     c: int
     fn compare(self, other: M) -> int:
-        junk := [str(self.c), str(other.c)]
+        junk := [\"{self.c}\", \"{other.c}\"]
         return self.c - other.c
     fn eq(self, other: M) -> bool:
         return self.c == other.c
@@ -130,7 +130,7 @@ fn main():
     xs.sort()
     out := \"\"
     for t in xs:
-        out = out + str(t.0.c)
+        out = out + \"{t.0.c}\"
     print(out)
     make().sort()
     print((M(1), 2) < (M(1), 3))
@@ -150,7 +150,7 @@ fn struct_eq_dispatch_survives_gc_stress() {
 struct M:
     c: int
     fn eq(self, other: M) -> bool:
-        junk := [str(self.c), str(other.c)]
+        junk := [\"{self.c}\", \"{other.c}\"]
         return junk[0] == junk[1]
 fn make(n: int) -> M:
     return M(n)
@@ -182,13 +182,13 @@ fn map_struct_key_survives_gc_stress() {
 struct K:
     n: int
     fn hash(self) -> int:
-        junk := [str(self.n), str(self.n + 1)]
+        junk := [\"{self.n}\", \"{self.n + 1}\"]
         return self.n
 fn make_map() -> Map[K, str]:
     m: Map[K, str] = {}
     i := 0
     while i < 8:
-        m[K(i)] = str(i)
+        m[K(i)] = \"{i}\"
         i = i + 1
     return m
 fn main():
@@ -214,7 +214,7 @@ fn set_struct_hash_survives_gc_stress() {
 struct K:
     n: int
     fn hash(self) -> int:
-        junk := [str(self.n)]
+        junk := [\"{self.n}\"]
         return self.n
 fn main():
     a := Set.from_iter([K(1), K(2), K(2), K(3)])
@@ -245,7 +245,7 @@ struct K:
     fn hash(self) -> int:
         return self.n % 3
     fn eq(self, other: K) -> bool:
-        junk := [str(self.n), str(other.n)]
+        junk := [\"{self.n}\", \"{other.n}\"]
         return junk[0] == junk[1]
 fn make_set() -> Set[K]:
     return Set.from_iter([K(1), K(2), K(2), K(3)])
@@ -255,7 +255,7 @@ fn make_map() -> Map[K, str]:
     m: Map[K, str] = {}
     i := 0
     while i < 6:
-        m[K(i)] = str(i)
+        m[K(i)] = \"{i}\"
         i = i + 1
     return m
 fn main():
@@ -276,8 +276,8 @@ fn main():
     print(m.merge(make_map()).len(), m.remove(K(0)), m.len())
     m.update(make_map())
     print(m.len())
-    print({K(7): str(7), K(7): str(8)}.len(), {K(9), K(9)}.len())   # map/set literals
-    print(Map.from_iter([(K(1), str(1)), (K(1), str(2))]).len())              # Map() ctor
+    print({K(7): \"7\", K(7): \"8\"}.len(), {K(9), K(9)}.len())   # map/set literals
+    print(Map.from_iter([(K(1), \"1\"), (K(1), \"2\")]).len())              # Map() ctor
     print(Set.from_iter(make_list()).len())                                   # Set() ctor
 main()";
     // a = {1,2,3,4}; b = {3,4,5}; |a∪b|=5, |a∩b|=2, |a\\b|=2, |a^b|=3
@@ -301,12 +301,12 @@ struct K:
     fn hash(self) -> int:
         return self.n % 3
     fn eq(self, other: K) -> bool:
-        junk := [str(self.n), str(other.n)]
+        junk := [\"{self.n}\", \"{other.n}\"]
         return junk[0] == junk[1]
 fn main():
     # LIST values, not str: a freshly-rebuilt list can never alias an interned program constant,
     # so an unrooted `v` really is collectable while `eq` runs.
-    m: Map[K, List[str]] = {K(1): [str(1)], K(2): [str(2), str(3)]}
+    m: Map[K, List[str]] = {K(1): [\"1\"], K(2): [\"2\", \"3\"]}
     box := ConcurrentMap(RwShared(m))
     print(box.contains(K(1)), box.contains(K(9)), box.get(K(2)), box.get(K(9)))
     s := ConcurrentSet(RwShared(Set.from_iter([K(1), K(2)])))
@@ -352,7 +352,7 @@ struct K:
                 xs.remove(0)
             while ys.len() > 0:
                 ys.remove(0)
-            junk := [str(self.n), str(other.n)]
+            junk := [\"{self.n}\", \"{other.n}\"]
         return self.n == other.n
 
 fn reset():
@@ -432,7 +432,7 @@ struct K:
             ma.remove(K(2))
             mb.remove(K(1))
             mb.remove(K(2))
-            junk := [str(self.n), str(other.n)]
+            junk := [\"{self.n}\", \"{other.n}\"]
         return self.n == other.n
 
 fn reset():
@@ -443,10 +443,10 @@ fn reset():
     sb.insert(K(1))
     sb.insert(K(2))
     # LIST values, not str: a rebuilt list can never alias an interned program constant.
-    ma[K(1)] = [str(1)]
-    ma[K(2)] = [str(2)]
-    mb[K(1)] = [str(1)]
-    mb[K(2)] = [str(2)]
+    ma[K(1)] = [\"1\"]
+    ma[K(2)] = [\"2\"]
+    mb[K(1)] = [\"1\"]
+    mb[K(2)] = [\"2\"]
 
 fn main():
     reset()
@@ -466,7 +466,7 @@ fn struct_sort_by_inline_temporary_survives_gc_stress() {
 struct M:
     c: int
     fn compare(self, other: M) -> int:
-        junk := [str(self.c)]
+        junk := [\"{self.c}\"]
         return self.c - other.c
     fn eq(self, other: M) -> bool:
         return self.c == other.c
@@ -489,7 +489,7 @@ main()";
 fn value_propagated_by_try_survives() {
     let src = "\
 fn d() -> str!:
-    return !str(99)
+    return !\"99\"
 fn use() -> str!:
     x := d()?
     return ?x
@@ -509,7 +509,7 @@ fn allocation_loop_is_bounded() {
 fn main():
     i := 0
     while i < 10000:
-        x := [str(i)]
+        x := [\"{i}\"]
         i += 1
     print(i)
 main()";
@@ -553,7 +553,7 @@ fn main():
     print(add(3))
     print(pick(Opt.Has(9)))
     print(pick(Opt.Nope))
-    items := [str(1), str(2), str(3)]
+    items := [\"1\", \"2\", \"3\"]
     for s in items:
         print(s)
 main()";
@@ -572,10 +572,10 @@ fn work(tag: str, out: Channel[str]):
     out.send(\"{tag}!\")
 fn main():
     ch := Channel[str]()
-    base := str(100)
+    base := \"100\"
     parallel:
-        spawn work(str(1), ch)
-        spawn work(str(2), ch)
+        spawn work(\"1\", ch)
+        spawn work(\"2\", ch)
         spawn:
             ch.send(\"blk-{base}\")
     print(ch.len())
@@ -607,7 +607,7 @@ fn stash(s: Shared[Channel[str]]):
 fn main():
     s := Shared(Channel[str]())
     stash(s)
-    base := str(100)
+    base := \"100\"
     ch := s.get()
     print(ch.recv())
 main()";
@@ -631,10 +631,10 @@ fn appended(xs: List[str], v: str) -> List[str]:
 fn push_one(s: Shared[List[str]], v: str):
     s.update(fn(xs): appended(xs, v))
 fn main():
-    s := Shared([str(0)])
+    s := Shared([\"0\"])
     parallel:
-        spawn push_one(s, str(1))
-        spawn push_one(s, str(2))
+        spawn push_one(s, \"1\")
+        spawn push_one(s, \"2\")
     print(s.get())
 main()";
     // The two spawns race for `s`'s lock under the pooled engine (the only engine now `--serial` is
@@ -703,8 +703,8 @@ fn work(tag: str, out: Channel[str]):
 fn main():
     ch := Channel[str]()
     ex := Executor()
-    ex.submit(fn(): work(str(1), ch))
-    ex.submit(fn(): work(str(2), ch))
+    ex.submit(fn(): work(\"1\", ch))
+    ex.submit(fn(): work(\"2\", ch))
     ex.shutdown()
     for _ in 0..2:
         print(ch.recv())
@@ -726,23 +726,23 @@ fn map_struct_key_snapshot_survives_gc_stress() {
 struct K:
     n: int
     fn hash(self) -> int:
-        junk := [str(self.n), str(self.n + 1)]
+        junk := [\"{self.n}\", \"{self.n + 1}\"]
         return self.n
 fn main():
     a := K(1)
     b := K(2)
-    m: Map[K, str] = {a: str(1), b: str(2)}   # NewMap literal
+    m: Map[K, str] = {a: \"1\", b: \"2\"}   # NewMap literal
     s := {a, b, K(3)}                          # NewSet literal
     a.n = 90                                   # mutate originals AFTER insert
     b.n = 91
-    mi := Map.from_iter([(K(4), str(4)), (K(5), str(5))])  # Map.from_iter(iterable)
+    mi := Map.from_iter([(K(4), \"4\"), (K(5), \"5\")])  # Map.from_iter(iterable)
     si := Set.from_iter([K(6), K(7), K(6)])                # Set.from_iter(iterable)
     c := K(8)
     s.insert(c)
     c.n = 92
     ks := \"\"
     for k in m.keys():
-        ks = ks + str(k.n)
+        ks = ks + \"{k.n}\"
     print(ks)                                  # 12 (snapshots, not 90/91)
     print(s.difference({K(1), K(2), K(3), K(8)}).len())   # 0 (all present as snapshots)
     print(mi.keys()[0].n)                      # 4
@@ -760,8 +760,8 @@ fn boxed_float_in_list_survives_collect() {
     let src = "\
 fn main():
     xs := [1.5, 2.5, 3.5]
-    junk := [str(1), str(2), str(3), str(4)]
-    more := [str(5), str(6)]
+    junk := [\"1\", \"2\", \"3\", \"4\"]
+    more := [\"5\", \"6\"]
     print(xs[0] + xs[1] + xs[2])
 main()";
     assert_eq!(run_capture_stress(src), "7.5\n");
@@ -773,7 +773,7 @@ fn boxed_bigint_in_list_survives_collect() {
     let src = "\
 fn main():
     xs := [4611686018427387905, 4611686018427387906]
-    junk := [str(1), str(2), str(3)]
+    junk := [\"1\", \"2\", \"3\"]
     print(xs[0])
     print(xs[1])
 main()";
@@ -836,48 +836,48 @@ struct Bag:
 
 fn main():
     # REPLACING stores on every single-value core, interleaved with allocation.
-    s := Shared(Bag([str(1)]))
+    s := Shared(Bag([\"1\"]))
     for i in 0..20:
-        s.update(fn(b): Bag(b.xs + [str(i)]))
-        junk := [str(i), str(i + 1)]
+        s.update(fn(b): Bag(b.xs + [\"{i}\"]))
+        junk := [\"{i}\", \"{i + 1}\"]
     print(s.get().xs.len())
 
-    rw := RwShared([str(0)])
+    rw := RwShared([\"0\"])
     for i in 0..20:
-        rw.write(fn(xs): xs + [str(i)])
-        junk := [str(i)]
+        rw.write(fn(xs): xs + [\"{i}\"])
+        junk := [\"{i}\"]
     print(rw.get().len())
 
-    a := Atomic([str(9)])
+    a := Atomic([\"9\"])
     for i in 0..10:
-        a.store([str(i), str(i)])
-        junk := [str(i)]
+        a.store([\"{i}\", \"{i}\"])
+        junk := [\"{i}\"]
     print(a.load()[0])
 
     # A payload that DOES root the heap: a closure with captures, parked in a channel.
     ch := Channel[fn() -> str]()
-    tag := str(42)
+    tag := \"42\"
     ch.send(fn() -> str: tag)
     filler := []
     for i in 0..30:
-        filler.push([str(i)])
+        filler.push([\"{i}\"])
     f := ch.recv()
     print(f())
 
     # A NESTED core inside a core: the outer must stay DIRTY so the inner's contents stay rooted.
     inner := Channel[str]()
-    inner.send(str(7))
+    inner.send(\"7\")
     outer := Shared(inner)
     for i in 0..30:
-        junk := [str(i)]
+        junk := [\"{i}\"]
     print(outer.get().recv())
 
     # An Executor queue holding submitted closures across a stressed run.
     ex := Executor(1)
-    note := str(5)
+    note := \"5\"
     ex.submit(fn(): print(note))
     for i in 0..20:
-        junk := [str(i)]
+        junk := [\"{i}\"]
     ex.shutdown()
 main()";
     assert_eq!(run_capture_stress(src), "21\n21\n9\n42\n7\n5\n");
@@ -907,7 +907,7 @@ struct P:
         return self.k - other.k
     fn eq(self, other: P) -> bool:
         return self.k == other.k
-pts: List[P] = [P(str(3), 3), P(str(1), 1), P(str(2), 2)]
+pts: List[P] = [P(\"3\", 3), P(\"1\", 1), P(\"2\", 2)]
 fn main():
     match pts.min():
         ?p: print(p.tag)
@@ -919,7 +919,7 @@ main()";
 struct Q:
     tag: str
     k: int
-qs: List[Q] = [Q(str(3), 3), Q(str(1), 1), Q(str(2), 2)]
+qs: List[Q] = [Q(\"3\", 3), Q(\"1\", 1), Q(\"2\", 2)]
 fn key(q: Q) -> int:
     qs.remove(0)
     return q.k
@@ -944,23 +944,23 @@ struct Acc:
     log: List[str]
     n: int
 fn tag(i: int) -> str:
-    return \"t\" + str(i)
+    return \"t\" + \"{i}\"
 fn add(a: Acc, s: str) -> Acc:
-    junk := [str(1), str(2), str(3)]
-    a.log.push(s + str(junk.len()))
+    junk := [\"1\", \"2\", \"3\"]
+    a.log.push(s + \"{junk.len()}\")
     a.n += 1
     return a
 fn main():
-    keep := [str(7), str(8)]
-    s := Shared(Acc([str(0)], 0))
+    keep := [\"7\", \"8\"]
+    s := Shared(Acc([\"0\"], 0))
     for i in 0..3:
-        pre := \"p\" + str(i)
+        pre := \"p\" + \"{i}\"
         s.update(fn(a): add(a, pre + tag(i)))
     print(s.read(fn(a): a.log.len() + a.n))
     print(s.get().log)
     print(s)
-    s.set(Acc([str(9)], 9))
-    print(s.read(fn(a): a.log[0] + str(a.n)))
+    s.set(Acc([\"9\"], 9))
+    print(s.read(fn(a): a.log[0] + \"{a.n}\"))
     print(keep)
 main()";
     assert_eq!(
@@ -986,21 +986,21 @@ struct Acc:
 struct K:
     id: str
     fn hash(self) -> int:
-        junk := [str(1), str(2)]
+        junk := [\"1\", \"2\"]
         return self.id.len() + junk.len()
     fn eq(self, other: K) -> bool:
-        junk := [str(3)]
+        junk := [\"3\"]
         return self.id == other.id and junk.len() == 1
 fn add(a: Acc, s: str) -> Acc:
-    junk := [str(1), str(2), str(3)]
-    a.log.push(s + str(junk.len()))
+    junk := [\"1\", \"2\", \"3\"]
+    a.log.push(s + \"{junk.len()}\")
     a.n += 1
     return a
 fn main():
-    keep := [str(7), str(8)]
-    w := RwShared(Acc([str(0)], 0))
+    keep := [\"7\", \"8\"]
+    w := RwShared(Acc([\"0\"], 0))
     for i in 0..3:
-        pre := \"p\" + str(i)
+        pre := \"p\" + \"{i}\"
         w.write(fn(a): add(a, pre))
     print(w.read(fn(a): a.log.len() + a.n))
     print(w.get().log)
@@ -1009,11 +1009,11 @@ fn main():
     xs: RwShared[List[List[str]]] = RwShared([])
     st: RwShared[Set[K]] = RwShared(Set[K]())
     for i in 0..4:
-        m._set_key(K(\"k\" + str(i)), [str(i), str(i + 1)])
-        xs._push([str(i)])
-        st._add(K(\"k\" + str(i % 2)))
+        m._set_key(K(\"k\" + \"{i}\"), [\"{i}\", \"{i + 1}\"])
+        xs._push([\"{i}\"])
+        st._add(K(\"k\" + \"{i % 2}\"))
     print(m._get_key(K(\"k2\")), m._has(K(\"k9\")), m._len())
-    print(m._get_or_insert(K(\"k1\"), [str(0)]), m._get_or_insert(K(\"k7\"), [str(7)]))
+    print(m._get_or_insert(K(\"k1\"), [\"0\"]), m._get_or_insert(K(\"k7\"), [\"7\"]))
     _ := m._remove_key(K(\"k0\"))
     print(xs._at(1), xs._slice(1..3), xs._len())
     print(st._contains(K(\"k1\")), st._len(), m._len())
@@ -1040,8 +1040,8 @@ import Shared from std.concurrency
 KS: str = \"abcdefghijklmnopqrstuvwxyz0123456789abcdefghijklmnopqrstuvwxyz\"
 fn probe(x: int) -> int:
     n := KS.len()
-    junk := [str(x), str(x + 1), str(x + 2)]
-    more := [str(n), str(n + 1)]
+    junk := [\"{x}\", \"{x + 1}\", \"{x + 2}\"]
+    more := [\"{n}\", \"{n + 1}\"]
     m := KS.len()
     return n + m + junk.len() + more.len()
 fn main():
@@ -1060,16 +1060,16 @@ main()";
 fn nested_shared_calls_survive_collections_at_every_depth() {
     let src = "\
 import Shared from std.concurrency
-G: List[str] = [str(1), str(2)]
+G: List[str] = [\"1\", \"2\"]
 fn main():
-    a: Shared[List[str]] = Shared([str(0)])
+    a: Shared[List[str]] = Shared([\"0\"])
     b: Shared[List[str]] = Shared([])
     fn inner(ys: List[str]) -> List[str]:
-        ys.push(G[1] + str(G.len()))
+        ys.push(G[1] + \"{G.len()}\")
         return ys
     fn outer(xs: List[str]) -> List[str]:
         b.update(inner)
-        xs.push(str(b.read(fn(ys): ys.len())) + G[0])
+        xs.push(\"{b.read(fn(ys): ys.len())}\" + G[0])
         return xs
     a.update(outer)
     a.update(outer)
@@ -1360,10 +1360,10 @@ struct P:
 fn main():
     p := P(a=1, b=\"x\", c=3, d=[4], e=5)
     p.a = 10
-    p.b = str(20)
-    p.d = [str(40).len()]
+    p.b = \"20\"
+    p.d = [\"40\".len()]
     p.e = 50
-    junk := [str(1), str(2)]
+    junk := [\"1\", \"2\"]
     print(p.a, p.b, p.c, p.d, p.e, junk.len())
 main()";
     assert_eq!(run_capture_stress(src), "10 20 3 [2] 50 2\n");
@@ -1392,11 +1392,11 @@ fn closure_captures_are_a_fixed_rvec() {
     assert_eq!(rvec_cap(captured), 2);
     let src = "\
 fn mk(a: str, b: int) -> fn() -> str:
-    return fn() -> str: a + str(b)
+    return fn() -> str: a + \"{b}\"
 
 fn main():
-    f := mk(str(7), 8)
-    junk := [str(1), str(2)]
+    f := mk(\"7\", 8)
+    junk := [\"1\", \"2\"]
     print(f(), f(), junk.len())
 main()";
     assert_eq!(run_capture_stress(src), "78 78 2\n");
@@ -1426,8 +1426,8 @@ enum Shape:
     Circle(str, int)
 
 fn main():
-    xs := [Shape.Dot, Shape.Circle(str(3), 4), Shape.Dot]
-    junk := [str(1), str(2)]
+    xs := [Shape.Dot, Shape.Circle(\"3\", 4), Shape.Dot]
+    junk := [\"1\", \"2\"]
     n := 0
     for x in xs:
         match x:
@@ -1446,12 +1446,12 @@ main()";
 fn module_slots_are_an_rvec() {
     let _g = super::rvec::test_serial();
     let src = "\
-K := [str(7)]
+K := [\"7\"]
 N := 0
 fn main():
     for i in 0..20:
         N = N + i
-    junk := [str(1), str(2)]
+    junk := [\"1\", \"2\"]
     print(K, N, junk.len())
 main()";
     let owned = src.to_string();
@@ -1606,7 +1606,7 @@ fn generator_next_from_two_tasks_faults_cleanly() {
         "\
 fn count(n: int) -> Iterator[int]:
     for i in 0..n:
-        s := [str(i)]
+        s := [\"{{i}}\"]
         yield i + s.len() - 1
 
 G := count({N})
@@ -1904,7 +1904,7 @@ L: List[str] = []
 
 fn main():
     for i in 0..64:
-        L.push(\"s\" + str(i))
+        L.push(\"s\" + \"{i}\")
 main()"
         .to_string();
     /// Reads its list arg 4 times; `false` when an element is not an `s<n>` str.
@@ -2459,8 +2459,8 @@ C := BIG.iter()"
         ("SP.b", |w, g, _| field(w, g[SP], "b").map(|_| ())),
         ("SQ.a", |w, g, _| field(w, g[SQ], "a").map(|_| ())),
         ("SQ.d", |w, g, _| field(w, g[SQ], "d").map(|_| ())),
-        ("str(SP)", |w, g, _| render(w, g[SP])),
-        ("str(SQ)", |w, g, _| render(w, g[SQ])),
+        ("\"{SP}\"", |w, g, _| render(w, g[SP])),
+        ("\"{SQ}\"", |w, g, _| render(w, g[SQ])),
         ("SP == SP", |w, g, _| {
             w.values_equal(Value::obj(g[SP]), Value::obj(g[SP]));
             Ok(())
@@ -2476,9 +2476,9 @@ C := BIG.iter()"
             w.hash_value(Value::obj(g[SQ]), Span::RUNTIME).map(|_| ())
         }),
         ("CT.get()", |w, g, _| call_field(w, g[CT], "get")),
-        ("str(CT)", |w, g, _| render(w, g[CT])),
+        ("\"{CT}\"", |w, g, _| render(w, g[CT])),
         ("C.next", |w, g, _| step(w, g[C])),
-        ("str(C)", |w, g, _| render(w, g[C])),
+        ("\"{C}\"", |w, g, _| render(w, g[C])),
         ("for x in C", |w, g, k| {
             if k == OPS / 2 {
                 w.drain_iterable(Value::obj(g[C]), Span::RUNTIME)?;
@@ -2489,7 +2489,7 @@ C := BIG.iter()"
             let m = home(w, g);
             field(w, m, "F").map(|_| ())
         }),
-        ("str(mod)", |w, g, _| {
+        ("\"{mod}\"", |w, g, _| {
             let m = home(w, g);
             render(w, m)
         }),

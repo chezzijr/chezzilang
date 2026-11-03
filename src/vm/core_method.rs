@@ -5,7 +5,8 @@ use super::call::py_blank;
 use super::*;
 use crate::ast::BinaryOp;
 use crate::base::builtin_method::{
-    BytearrayMethod, BytesMethod, ListMethod, MapMethod, SetMethod, StrMethod,
+    BytearrayMethod, BytesMethod, FloatMethod, IntMethod, ListMethod, MapMethod, SetMethod,
+    StrMethod,
 };
 use crate::base::hooks::{Hook, Unhooked};
 
@@ -116,8 +117,8 @@ impl Vm {
         }
         match (hook, args.len()) {
             (Hook::Neg, 0) => Ok(Some(self.neg_value(recv, span)?)),
-            // `Stringable` for a kind with no `str` method of its own: the SAME rendering `print`,
-            // `str()` and `"{x}"` use. Miss-only, so a declared `str` hook is dispatched first.
+            // `Stringable` for a kind with no `str` method of its own: the SAME rendering `print`
+            // and `"{x}"` use. Miss-only, so a declared `str` hook is dispatched first.
             (Hook::Str, 0) => {
                 let s = self.stringify(recv, span, 0)?;
                 Ok(Some(Value::obj(self.heap.alloc(Obj::Str(s.into())))))
@@ -299,6 +300,51 @@ impl Vm {
         match self.intrinsic_proto_method(Value::obj(h), method, args, span)? {
             Some(v) => Ok(v),
             None => Err(self.err(format!("type {type_name} has no method '{method}'"), span)),
+        }
+    }
+
+    /// A method on a scalar receiver (an inline or boxed int, a float, a bool, `None`): the
+    /// `native struct int` / `float` decls, then the intrinsic protocol methods.
+    pub(super) fn scalar_method(
+        &mut self,
+        recv: Value,
+        method: &str,
+        args: &[Value],
+        span: Span,
+    ) -> Result<Value, RuntimeError> {
+        if let Some(n) = self.int_val(recv)
+            && let Some(which) = IntMethod::from_name(method)
+        {
+            return match which {
+                IntMethod::ToFloat => {
+                    self.arity_err("to_float", args, 0, span)?;
+                    Ok(self.box_float(n as f64))
+                }
+            };
+        }
+        if recv.is_float()
+            && let Some(which) = FloatMethod::from_name(method)
+        {
+            return match which {
+                // Truncates toward zero; NaN, the infinities and a value outside i64 give `None`.
+                FloatMethod::ToInt => {
+                    self.arity_err("to_int", args, 0, span)?;
+                    let f = self.float_of(recv).trunc();
+                    if f.is_finite() && f >= i64::MIN as f64 && f < 9_223_372_036_854_775_808.0 {
+                        let nv = self.make_int(f as i64);
+                        Ok(self.alloc_enum("Option", "Some", &[nv]))
+                    } else {
+                        Ok(self.alloc_enum("Option", "None", &[]))
+                    }
+                }
+            };
+        }
+        match self.intrinsic_proto_method(recv, method, args, span)? {
+            Some(v) => Ok(v),
+            None => Err(self.err(
+                format!("type {} has no method '{method}'", self.type_name(recv)),
+                span,
+            )),
         }
     }
 

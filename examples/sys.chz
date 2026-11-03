@@ -26,10 +26,10 @@ match process.cmd("exit 7"):
     !e: print("failed: " + e.message())
 
 # --- std.fs: existence, type, size, listing, and a simple */? glob ---
-print("exists(Cargo.toml): " + str(fs.exists("Cargo.toml")))
-print("exists(nope.xyz): " + str(fs.exists("nope.xyz")))
-print("is_dir(examples): " + str(fs.is_dir("examples")))
-print("is_file(examples): " + str(fs.is_file("examples")))
+print("exists(Cargo.toml): {fs.exists("Cargo.toml")}")
+print("exists(nope.xyz): {fs.exists("nope.xyz")}")
+print("is_dir(examples): {fs.is_dir("examples")}")
+print("is_file(examples): {fs.is_file("examples")}")
 
 match fs.list_dir("examples/sysfixture"):
     ?names: print("list: " + shown(names))
@@ -40,12 +40,12 @@ match fs.glob("examples/sysfixture/*.txt"):
     !e: print("error: " + e.message())
 
 match fs.size("examples/sysfixture/a.txt"):
-    ?n: print("size: " + str(n))
+    ?n: print("size: {n}")
     !e: print("error: " + e.message())
 
 # --- std.time: wall clock (non-deterministic → booleans), then deterministic formatting ---
-print("now > 0: " + str(time.now() > 0))
-print("monotonic >= 0: " + str(time.monotonic() >= 0.0))
+print("now > 0: {time.now() > 0}")
+print("monotonic >= 0: {time.monotonic() >= 0.0}")
 time.sleep_ms(0)
 print("format(0): " + time.format(0))
 print("format(1700000000): " + time.format(1700000000))

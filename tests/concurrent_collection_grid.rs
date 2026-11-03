@@ -309,7 +309,7 @@ fn program(cell: &Cell, eight: bool) -> (String, String) {
         }
         (Read(expr, value), true) => {
             src.push_str(&format!(
-                "    ch: Channel[str] = Channel(8)\n    parallel:\n        for _t in 0..8:\n            spawn:\n                ch.send(str({expr}))\n    for _j in 0..8:\n        print(ch.recv())\n"
+                "    ch: Channel[str] = Channel(8)\n    parallel:\n        for _t in 0..8:\n            spawn:\n                ch.send(\"{{{expr}}}\")\n    for _j in 0..8:\n        print(ch.recv())\n"
             ));
             [*value; 8].join("\n")
         }

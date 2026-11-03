@@ -90,7 +90,7 @@ struct Parser:
                 col = 1
             else:
                 col += 1
-        return msg + " at line " + str(line) + " column " + str(col) + " (char " + str(pos) + ")"
+        return msg + " at line {line} column {col} (char {pos})"
 
     fn parse_value(self) -> Json!:
         self.skip_ws()
@@ -186,7 +186,7 @@ struct Parser:
         return ?n
 
     fn parse_number(self) -> Json!:
-        # Scan a JSON number, validating its shape FIRST so `float(raw)` below only ever sees a
+        # Scan a JSON number, validating its shape FIRST so `raw.to_float()` below only ever sees a
         # well-formed numeral (a bad numeral would otherwise abort the program, not return an error).
         start := self.pos
         if self.peek() == "-":
@@ -236,7 +236,9 @@ struct Parser:
         return self.num_float(raw, start)
 
     fn num_float(self, raw: str, start: int) -> Json!:
-        f := float(raw)
+        # `raw` is a numeral the scanner checked; a text Rust's f64 parser still rejects is a decode error.
+        f := raw.to_float() else:
+            return !self.at_pos("invalid number", start)
         # Go's `encoding/json` rejects a numeral that overflows f64 (`1e400` → +inf) AT DECODE, so we
         # never manufacture a `Json.Num(inf/-inf/NaN)` that our own `stringify` (num_str) would then
         # refuse to serialize. `f - f` is `0.0` for every finite `f` and NaN for a non-finite one.
@@ -366,7 +368,7 @@ fn escape(s: str) -> str:
 
 # Render a `Json.Num` float. `Json.Int` (a separate variant) covers the integer case, so a `Num`
 # always renders as a float — CPython prints `3.0` for `json.dumps(3.0)` and `3` for
-# `json.dumps(3)`; the same split holds here since `str(f)` matches CPython's `repr(f)` shape.
+# `json.dumps(3)`; the same split holds here since `"{f}"` matches CPython's `repr(f)` shape.
 fn num_str(f: float) -> str:
     # Standard JSON has no NaN/Infinity. A non-finite float (NaN / +inf / -inf) can never round-trip
     # through valid JSON (Chezzi's own `json.parse` rejects the bare tokens), so FAULT loudly rather
@@ -375,7 +377,7 @@ fn num_str(f: float) -> str:
     # non-finite.
     if f - f != 0.0:
         panic("cannot serialize non-finite float to JSON")
-    return str(f)
+    return "{f}"
 
 # Serialize a `Json` tree to a JSON document. `Arr`/`Obj` recurse structurally, so a tree built
 # directly (no `parse` involved — `j = Json.Arr([j])` in a loop) can nest past the VM's `maximum
@@ -400,7 +402,7 @@ fn stringify_depth(j: Json, depth: int) -> str:
             if b:
                 return "true"
             return "false"
-        Json.Int(i): return str(i)
+        Json.Int(i): return "{i}"
         Json.Num(n): return num_str(n)
         Json.Str(s): return escape(s)
         Json.Arr(xs):
@@ -443,7 +445,7 @@ fn as_bool(j: Json) -> bool?:
 
 fn as_float(j: Json) -> float?:
     match j:
-        Json.Int(i): return ?float(i)
+        Json.Int(i): return ?i.to_float()
         Json.Num(n): return ?n
         _: return None
 
@@ -451,14 +453,11 @@ fn as_int(j: Json) -> int?:
     match j:
         Json.Int(i): return ?i
         Json.Num(n):
-            # JSON stores every number as f64; `int()` faults on out-of-range/non-finite. Keep
-            # this a total function: gate on the i64 window and return None when unrepresentable.
-            # `n == 2^63` (== i64::MAX after f64 rounding) is special-cased since int(2^63) faults.
+            # JSON stores every number as f64; `to_int` gives None outside i64 and for a non-finite
+            # `n`. i64::MAX rounds to 2^63 as an f64, so this branch maps 2^63 back to i64::MAX.
             if n == 9223372036854775808.0:
                 return ?9223372036854775807
-            if n >= -9223372036854775808.0 and n < 9223372036854775808.0:
-                return ?int(n)
-            return None
+            return n.to_int()
         _: return None
 
 fn as_str(j: Json) -> str?:

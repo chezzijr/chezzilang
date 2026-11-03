@@ -314,8 +314,8 @@ fn sign(h: &mut dyn Host) -> Result<NativeRet, HostError> {
     }
 }
 
-// `trunc(x) -> int`: toward-zero truncation. Equivalent to `int(x)`; faults on non-finite / out-of-range
-// with the same message shape as the `int()` builtin (no intra-language drift).
+// `trunc(x) -> int`: toward-zero truncation; faults on non-finite / out-of-range. `x.to_int()` is
+// the total form (`None` there).
 fn trunc(h: &mut dyn Host) -> Result<NativeRet, HostError> {
     expect_args(h, "trunc", 1)?;
     let x = h.arg_float(0)?;

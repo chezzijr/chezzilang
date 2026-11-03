@@ -17,7 +17,7 @@ struct Point:
 # (a) LOCAL Display resolves the type name from tid.
 test fn local_display_resolves_name():
     p := Point(1, 2)
-    assert str(p) == "Point(x=1, y=2)"
+    assert "{p}" == "Point(x=1, y=2)"
 
 # (b) METHOD dispatch keys the method table by the tid-resolved name.
 test fn method_dispatch_resolves_name():
@@ -34,5 +34,5 @@ test fn cross_heap_resolves_name():
     parallel:
         spawn:
             q := ch.recv()
-            result.set(str(q) + "|" + str(q.sum()))
+            result.set("{q}|{q.sum()}")
     assert result.get() == "Point(x=1, y=2)|3"

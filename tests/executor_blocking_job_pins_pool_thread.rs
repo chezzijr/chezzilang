@@ -156,7 +156,7 @@ fn six_sleeping_jobs_overlap_at_one_worker() {
 #[test]
 #[cfg(target_os = "linux")]
 fn a_yielded_pool_thread_retires_instead_of_growing_the_pool() {
-    let src = "import Executor from std.concurrency\nimport std.io\nimport std.time\n\nfn thread_count() -> int:\n    text := io.read_file(\"/proc/self/status\") ?? \"\"\n    for ln in text.split(\"\\n\"):\n        if ln.starts_with(\"Threads:\"):\n            parts := ln.split(\"\\t\")\n            return parts[1].trim().to_int() ?? -1\n    return -1\n\nwarmup := Executor()\n_ := warmup.submit(fn(): time.sleep_ms(1))\nwarmup.shutdown()\ntime.sleep_ms(300)\nprint(\"mid \" + str(thread_count()))\n\nch := Channel[int]()\nex := Executor()\nfor _ in 0..40:\n    _ := ex.submit(fn(): ch.recv())\nfn feeder():\n    for i in 0..40:\n        ch.send(i)\n_ := ex.submit(feeder)\nex.shutdown()\ntime.sleep_ms(300)\nprint(\"end \" + str(thread_count()))\n";
+    let src = "import Executor from std.concurrency\nimport std.io\nimport std.time\n\nfn thread_count() -> int:\n    text := io.read_file(\"/proc/self/status\") ?? \"\"\n    for ln in text.split(\"\\n\"):\n        if ln.starts_with(\"Threads:\"):\n            parts := ln.split(\"\\t\")\n            return parts[1].trim().to_int() ?? -1\n    return -1\n\nwarmup := Executor()\n_ := warmup.submit(fn(): time.sleep_ms(1))\nwarmup.shutdown()\ntime.sleep_ms(300)\nprint(\"mid \" + \"{thread_count()}\")\n\nch := Channel[int]()\nex := Executor()\nfor _ in 0..40:\n    _ := ex.submit(fn(): ch.recv())\nfn feeder():\n    for i in 0..40:\n        ch.send(i)\n_ := ex.submit(feeder)\nex.shutdown()\ntime.sleep_ms(300)\nprint(\"end \" + \"{thread_count()}\")\n";
     let (status, stdout, _) = run(src, None, 60);
     let status = status.unwrap_or_else(|| {
         panic!(

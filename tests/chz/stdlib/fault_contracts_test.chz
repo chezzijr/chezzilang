@@ -166,7 +166,7 @@ test fn crypto_token_hex_out_of_range_faults():
         !e: assert e.message() == "token_hex: n exceeds the 1048576-byte cap, got 1048577"
 
 test fn path_decode_invalid_utf8_faults():
-    # `path_type_test.chz` already covers decode()'s fault (loosely, via `.contains`) and str()'s lossy
+    # `path_type_test.chz` already covers decode()'s fault (loosely, via `.contains`) and the display's lossy
     # sibling byte-exactly; this pins the EXACT message the loose check there doesn't.
     r := recover: path.Path(b"a\xffb").decode()
     match r:

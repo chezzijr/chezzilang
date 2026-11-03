@@ -42,7 +42,7 @@ test fn every_job_runs_despite_a_handle_job_fault():
     _ := ex.submit(fn(): bump(c, 100))
     ex.shutdown()
     assert err_of(t.get()).contains("boom"), err_of(t.get())
-    assert c.load() == 111, "every non-faulting job must run, got " + str(c.load())
+    assert c.load() == 111, "every non-faulting job must run, got {c.load()}"
 
 test fn each_handle_carries_its_own_fault():
     ex := concurrency.Executor()
@@ -69,7 +69,7 @@ test fn a_second_shutdown_after_a_handle_fault_is_a_no_op():
     ex.shutdown()
     ex.shutdown()
     assert err_of(t.get()).contains("boom"), err_of(t.get())
-    assert c.load() == 1, "the second shutdown must not re-run anything, got " + str(c.load())
+    assert c.load() == 1, "the second shutdown must not re-run anything, got {c.load()}"
 
 test fn a_pre_cancelled_token_stops_the_jobs():
     # The abort-siblings behaviour is not gone, it moved into the caller's hands. Cancel the token on
@@ -84,7 +84,7 @@ test fn a_pre_cancelled_token_stops_the_jobs():
     _ := ex.submit(fn(): guarded_bump(tok, c))
     _ := ex.submit(fn(): guarded_bump(tok, c))
     ex.shutdown()
-    assert c.load() == 0, "a cancelled token must stop the later jobs, got " + str(c.load())
+    assert c.load() == 0, "a cancelled token must stop the later jobs, got {c.load()}"
 
 # A JOIN NEVER WAITS FOR ITSELF. A job that shuts down the executor it is running under is itself one
 # of that executor's outstanding jobs, so a join over "outstanding == 0" waits for an event the waiting
@@ -111,7 +111,7 @@ test fn a_job_may_gracefully_shut_down_its_own_executor():
     _ := ex.submit(fn(): ex.shutdown())
     ex.shutdown()
     # A graceful shutdown trips no cancel, so the siblings the self-join waits for all run.
-    assert c.load() == 11, "a self-joining job must wait for its siblings, not report a deadlock; got " + str(c.load())
+    assert c.load() == 11, "a self-joining job must wait for its siblings, not report a deadlock; got {c.load()}"
 
 test fn a_job_may_cancel_its_own_executor():
     # The reentrant-cancel half of the same seam. No accumulator assertion: `cancel` trips the
@@ -131,4 +131,4 @@ test fn an_uncancelled_token_is_a_no_op():
     _ := ex.submit(fn(): guarded_bump(tok, c))
     _ := ex.submit(fn(): guarded_bump(tok, c))
     ex.shutdown()
-    assert c.load() == 2, "no cancel means every job runs, got " + str(c.load())
+    assert c.load() == 2, "no cancel means every job runs, got {c.load()}"

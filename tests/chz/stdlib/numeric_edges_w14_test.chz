@@ -64,15 +64,15 @@ test fn upper_format_specs_upper_case_non_finite():
 test fn signed_zero_min_max_sort():
     m := [0.0, -0.0].min()
     match m:
-        ?v: assert str(v) == "0.0", str(v)
+        ?v: assert "{v}" == "0.0", "{v}"
         None: assert false
     x := [-0.0, 0.0].max()
     match x:
-        ?v: assert str(v) == "-0.0", str(v)
+        ?v: assert "{v}" == "-0.0", "{v}"
         None: assert false
     xs := [0.0, -0.0, 1.0, -0.0]
     xs.sort()
-    assert str(xs) == "[0.0, -0.0, -0.0, 1.0]", str(xs)
+    assert "{xs}" == "[0.0, -0.0, -0.0, 1.0]", "{xs}"
 
 fn pib(s: str, base: int) -> int!:
     return math.parse_int_base(s, base)

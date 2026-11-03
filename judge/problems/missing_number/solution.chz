@@ -17,11 +17,11 @@ fn read_tokens() -> List[str]:
 
 fn main():
     toks := read_tokens()
-    n := int(toks[0])
+    n := toks[0].to_int() ?? panic("input is not an int")
     total := n * (n + 1) / 2
     s := 0
     for i in 0..(n - 1):
-        s += int(toks[1 + i])
-    io.print(str(total - s))
+        s += toks[1 + i].to_int() ?? panic("input is not an int")
+    io.print("{total - s}")
 
 main()

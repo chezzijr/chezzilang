@@ -88,7 +88,7 @@ fn repr_quote(has_single: bool, has_double: bool) -> char {
 /// Python `bytes` `repr`: `b'...'` with printable ASCII shown literally, `\n \t \r \\` and the chosen
 /// quote escaped, and every other byte as `\xHH` (lowercase hex). The quote follows [`repr_quote`]
 /// (`b"'"`). This is the single implementation `display_guarded` calls, so the representation is
-/// consistent everywhere bytes are rendered — `str(bytes)`, interpolation, and bare `print(bytes)`.
+/// consistent everywhere bytes are rendered — interpolation and bare `print(bytes)`.
 pub fn bytes_repr(bytes: &[u8]) -> String {
     bytes_repr_quoted(bytes, false)
 }
@@ -122,14 +122,14 @@ fn bytes_repr_quoted(bytes: &[u8], always_escape_single: bool) -> String {
 
 /// Python `bytearray` `repr`: `bytearray(b'...')` — the bare `b'...'` of [`bytes_repr`] wrapped in
 /// `bytearray(...)`. This is the single implementation the VM calls, so the mutable buffer's
-/// `Display`/`str()`/interpolation stay consistent, distinct from `bytes`' bare `b'...'`.
+/// `Display`/interpolation stay consistent, distinct from `bytes`' bare `b'...'`.
 pub fn bytearray_repr(bytes: &[u8]) -> String {
     format!("bytearray({})", bytes_repr_quoted(bytes, true))
 }
 
 /// Python `str` `repr`: the quoted, escaped form used whenever a string is rendered **nested inside**
 /// something else — a list/tuple/map/set element, a struct field, an enum payload. Top-level
-/// `str(s)` / `print(s)` stay the bare characters, exactly like CPython's `str` vs `repr` split.
+/// `"{s}"` / `print(s)` stay the bare characters, exactly like CPython's `str` vs `repr` split.
 /// Without it, `["a", "b"]` and `["a, b"]` both printed `[a, b]` and `[""]` printed `[]` — different
 /// values with identical output (`docs/contributing/gaps.md` §W7-25).
 ///

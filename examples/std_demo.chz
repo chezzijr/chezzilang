@@ -9,13 +9,13 @@ import std.string as text
 
 fn main():
     io.print(text.repeat("=", 10))
-    io.print("sqrt(2) = " + str(math.sqrt(2.0)))
-    io.print("floor(3.7) = " + str(math.floor(3.7)))
-    io.print("2^8 = " + str(math.pow(2.0, 8.0)))
-    io.print("max(3.0, 9.0) = " + str(cmp.max(3.0, 9.0)))
+    io.print("sqrt(2) = {math.sqrt(2.0)}")
+    io.print("floor(3.7) = {math.floor(3.7)}")
+    io.print("2^8 = {math.pow(2.0, 8.0)}")
+    io.print("max(3.0, 9.0) = {cmp.max(3.0, 9.0)}")
     io.print(text.reverse("chezzi"))
     io.print(text.pad_left("42", 5, "."))
-    io.print("args: " + str(os.args().len()))
+    io.print("args: {os.args().len()}")
     match os.env("THIS_IS_NOT_SET_12345"):
         ?v: io.print(v)
         None: io.print("env unset")

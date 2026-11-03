@@ -22,9 +22,9 @@ fn d3_widen_int_arg_into_float_param_rejected() {
     ok("fn f(z: float):\n    print(z)\nf(7.0)\n");
     rejects(
         "fn f(z: float):\n    print(z)\na := 3\nf(a)\n",
-        "write 1.0 (or float(x))",
+        "write 1.0 (or x.to_float())",
     );
-    ok("fn f(z: float):\n    print(z)\na := 3\nf(float(a))\n");
+    ok("fn f(z: float):\n    print(z)\na := 3\nf(a.to_float())\n");
 }
 
 /// D3: an int returned from a `-> float` function never widens, constant or typed.
@@ -36,9 +36,9 @@ fn d3_widen_int_return_into_float_ret_rejected() {
     );
     rejects(
         "fn g(n: int) -> float:\n    return n + 1\nprint(g(2))\n",
-        "write 1.0 (or float(x))",
+        "write 1.0 (or x.to_float())",
     );
-    ok("fn g(n: int) -> float:\n    return float(n + 1)\nprint(g(2))\n");
+    ok("fn g(n: int) -> float:\n    return (n + 1).to_float()\nprint(g(2))\n");
 }
 
 /// D3: an int never widens into a `float` struct field.

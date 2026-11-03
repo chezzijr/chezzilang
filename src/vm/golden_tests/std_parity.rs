@@ -210,15 +210,15 @@ fn json_decode_field_defaults_survive_gc_stress() {
 fn mk() -> List[str]:
     junk := []
     for i in 0..20:
-        junk.push(str(i))
-    return [str(junk.len())]
+        junk.push("{i}")
+    return ["{junk.len()}"]
 struct In:
     w: str
     tags: List[str] = mk()
 struct Out:
     xs: List[In]
     m: Map[str, In]
-    name: str = "d" + str(1)
+    name: str = "d" + "1"
 match json.decode[Out](r'{"xs":[{"w":"a"},{"w":"b"},{"w":"c"}],"m":{"k":{"w":"q"}}}'):
     ?o: print(o)
     !e: print(e)
@@ -238,8 +238,8 @@ fn json_decode_map_and_tuple_children_survive_gc_stress() {
 fn mk() -> List[str]:
     junk := []
     for i in 0..20:
-        junk.push(str(i))
-    return [str(junk.len())]
+        junk.push("{i}")
+    return ["{junk.len()}"]
 struct In:
     w: str
     tags: List[str] = mk()
@@ -278,7 +278,7 @@ fn worker():
     recover: xs.push(99)
     junk := []
     for i in 0..30:
-        junk.push([str(i), str(i + 1)])
+        junk.push([\"{i}\", \"{i + 1}\"])
 fn main():
     ex := concurrency.Executor()
     ex.submit(worker)
@@ -330,7 +330,7 @@ fn parity_from_import_then_module_scope_redeclare() {
 fn parity_import_std_string_and_str_ctor() {
     let src = "import std.string
 fn main():
-    print(str(5))
+    print(\"5\")
     print(string.pad_left(\"a\", 3, \"-\"))\nmain()";
     assert_eq!(golden_entry(src), "5\n--a\n");
 }
@@ -455,7 +455,7 @@ const PROGRAMS: &[(&str, Result<&str, &str>)] = &[
     ),
     // builtins
     (
-        "print(List.from_iter(0..4))\nprint(int(\"7\") + 1)\nprint(float(3))\nprint([1, 2, 3].len())\nprint(str(42))",
+        "print(List.from_iter(0..4))\nprint((\"7\".to_int() ?? 0) + 1)\nprint((3).to_float())\nprint([1, 2, 3].len())\nprint(\"42\")",
         Ok("[0, 1, 2, 3]\n8\n3.0\n3\n42\n"),
     ),
     // recursion
@@ -1056,7 +1056,7 @@ fn golden_std_demo_via_run_file() {
 #[test]
 fn golden_isatty_via_run_file() {
     let out = golden_entry(
-        "import std.io\nio.print(str(io.isatty()))\nio.print(str(io.isatty_stdin()))\nio.print(str(io.isatty_stderr()))\n",
+        "import std.io\nio.print(\"{io.isatty()}\")\nio.print(\"{io.isatty_stdin()}\")\nio.print(\"{io.isatty_stderr()}\")\n",
     );
     let lines: Vec<&str> = out.lines().collect();
     assert_eq!(lines.len(), 3, "expected 3 isatty lines, got {out:?}");
@@ -1093,7 +1093,7 @@ fn golden_os_setenv_environ_consistency() {
 #[test]
 fn golden_os_queries() {
     let out = golden_entry(
-        "import std.os\nprint(str(os.getpid() > 0))\nprint(os.platform())\nprint(str(os.temp_dir() != \"\"))\nmatch os.home_dir():\n    ?_: print(\"H\")\n    None: print(\"NH\")\n",
+        "import std.os\nprint(\"{os.getpid() > 0}\")\nprint(os.platform())\nprint(\"{os.temp_dir() != \"\"}\")\nmatch os.home_dir():\n    ?_: print(\"H\")\n    None: print(\"NH\")\n",
     );
     let lines: Vec<&str> = out.lines().collect();
     assert_eq!(lines.len(), 4, "expected 4 os-query lines, got {out:?}");

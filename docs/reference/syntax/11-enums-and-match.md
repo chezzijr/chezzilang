@@ -8,8 +8,8 @@ enum Shape:
 
 fn area(s: Shape) -> float:
     match s:                          # match is exhaustive — compiler checks all variants
-        Shape.Circle(r): return 3.14 * float(r * r)
-        Shape.Square(n): return float(n * n)
+        Shape.Circle(r): return 3.14 * (r * r).to_float()
+        Shape.Square(n): return (n * n).to_float()
         Shape.Point:     return 0.0
 ```
 
@@ -334,7 +334,7 @@ match-expression arm, an inline `recover: expr`) the branches must have one type
 
 **All arms and branches must agree on a type**, with no numeric adaptation (§3):
 `x := if c: 1 else: 2.5` is `branches have incompatible types: int and float — write 1.0 (or
-float(x))` (the same for `match`).
+x.to_float())` (the same for `match`).
 
 - Branches that differ but each fit a known expected type (an annotated binding, a call argument, a
   declared return) take it: `x: Sh = if true: Sq(2) else: Tr(9)` with a protocol `Sh`. Without one,

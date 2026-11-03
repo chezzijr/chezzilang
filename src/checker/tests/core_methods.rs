@@ -284,21 +284,6 @@ fn str_methods_infer_types_ok() {
 }
 
 #[test]
-fn bool_ctor_infers_bool() {
-    // `bool(x)` accepts any scalar and infers `bool` — verified via a typed target.
-    ok("b: bool = bool(3)\nprint(b)\n");
-    ok("b: bool = bool(3.0)\nprint(b)\n");
-    ok("b: bool = bool(true)\nprint(b)\n");
-    ok("b: bool = bool(\"x\")\nprint(b)\n");
-}
-
-#[test]
-fn bool_ctor_is_not_int() {
-    // `bool(x)` yields `bool`, not `int` — a mismatched typed target must reject.
-    rejects("n: int = bool(3)\n", "to variable of type int");
-}
-
-#[test]
 fn parse_int_infers_result_int_str() {
     ok("s := \"5\"\nr: int!str = s.parse_int()\nprint(r)\n");
 }
@@ -650,7 +635,7 @@ fn reserved_module_bind_alias_escape_hatch() {
         ),
         (
             "main.chz",
-            "import lib.int as ints\nprint(int(\"5\"))\nprint(ints.twice(2))\n",
+            "import lib.int as ints\nprint(int())\nprint(ints.twice(2))\n",
         ),
     ]);
     files_ok(&[

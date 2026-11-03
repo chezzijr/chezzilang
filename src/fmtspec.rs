@@ -781,7 +781,7 @@ pub(crate) fn normalize_exp(rust_e: &str, marker: char) -> String {
 }
 
 /// Canonical Python `repr()`/`str()` of a float — the single source of truth for the bare stringify
-/// path (`str(f)`, `print`, `{f}` interpolation with no type char, `json.stringify`). Matches
+/// path (`print`, `{f}` interpolation with no type char, `json.stringify`). Matches
 /// CPython: scientific notation when the decimal exponent is `< -4` or `>= 16`, otherwise fixed with
 /// an always-present `.0` on integer-valued floats. Non-finite floats keep Rust's `inf`/`-inf`/`NaN`
 /// (the NaN sign is dropped, as before). `x` is signed here; callers that pre-split the sign pass the

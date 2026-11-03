@@ -262,13 +262,13 @@ test fn grid_eq_across_a_spawn():
 
 test fn grid_repr():
     bad: List[str] = []
-    cell(bad, "plain", str(plain) == "<fn plain>")
-    cell(bad, "json.decode[T]", str(json.decode[int]) == "<fn json.decode>")
+    cell(bad, "plain", "{plain}" == "<fn plain>")
+    cell(bad, "json.decode[T]", "{json.decode[int]}" == "<fn json.decode>")
     k := 1
-    cell(bad, "closure", str(fn(n: int) -> int: n + k) == "<closure>")
-    cell(bad, "native", str(math.sqrt) == "<native fn sqrt>")
-    cell(bad, "builtin", str(ord) == "<builtin fn ord>")
-    cell(bad, "extern", str(cos) == "<extern fn cos>")
+    cell(bad, "closure", "{(fn(n: int) -> int: n + k)}" == "<closure>")
+    cell(bad, "native", "{math.sqrt}" == "<native fn sqrt>")
+    cell(bad, "builtin", "{ord}" == "<builtin fn ord>")
+    cell(bad, "extern", "{cos}" == "<extern fn cos>")
     assert bad.len() == 0, ", ".join(bad)
 
 test fn grid_global_snapshot():

@@ -21,7 +21,7 @@ show(duration.millis(3661000))
 for txt in ["1h30m", "250ms", ".5s", "0.25s", "1h30m0s"]:
     match duration.parse(txt):
         ?g:
-            print(txt + " -> " + str(g.as_millis()) + "ms -> " + g.to_string())
+            print(txt + " -> {g.as_millis()}ms -> " + g.to_string())
         !_e:
             print(txt + " -> ERR")
 
@@ -34,8 +34,8 @@ for bad in ["1us", "1.2.3s", "99999999999999h", ""]:
             print(bad + " -> Err")
 
 # accessors + arithmetic
-print(str(duration.millis(1500).as_seconds()))
-print(str(duration.millis(90000).as_minutes()))
-print(str(duration.millis(3600000).as_hours()))
-print(str(duration.seconds(2).sub(duration.millis(500)).as_millis()))
-print(str(duration.millis(250).scale(4).as_millis()))
+print("{duration.millis(1500).as_seconds()}")
+print("{duration.millis(90000).as_minutes()}")
+print("{duration.millis(3600000).as_hours()}")
+print("{duration.seconds(2).sub(duration.millis(500)).as_millis()}")
+print("{duration.millis(250).scale(4).as_millis()}")

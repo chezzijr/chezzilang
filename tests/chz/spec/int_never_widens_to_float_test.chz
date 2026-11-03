@@ -19,7 +19,7 @@ extern "libm.so.6":
 
 test fn mixed_arithmetic_still_promotes():
     assert 2 * 1.5 == 3.0
-    assert str(2 * 1.5) == "3.0"
+    assert "{2 * 1.5}" == "3.0"
     i := 3
     assert i * 1.5 == 4.5
     assert i < 3.5
@@ -29,20 +29,20 @@ test fn compound_assign_of_an_int_into_a_float_local_still_promotes():
     f := 1.5
     f += 1
     assert f == 2.5
-    assert str(f) == "2.5"
+    assert "{f}" == "2.5"
 
 test fn any_keeps_the_int_branch_an_int():
     x: Any = if true: 1 else: 2.5
-    assert str(x) == "1"
+    assert "{x}" == "1"
 
 test fn a_float_literal_list_prints_as_floats():
-    assert str([1.0, 2.5]) == "[1.0, 2.5]"
+    assert "{[1.0, 2.5]}" == "[1.0, 2.5]"
 
 test fn json_decode_of_an_int_text_into_a_float_is_a_real_float():
     # The JSON text `1` is an int token; decoding it into a `float` slot must hand back `1.0`.
     match json.decode[float]("1"):
         ?x:
-            assert str(x) == "1.0"
+            assert "{x}" == "1.0"
             assert x / 2 == 0.5
         !e:
             assert false, e.message()
@@ -50,7 +50,7 @@ test fn json_decode_of_an_int_text_into_a_float_is_a_real_float():
 test fn json_decode_into_a_float_field_is_a_real_float():
     match json.decode[Pt]("{{\"x\": 1, \"y\": 2}}"):
         ?p:
-            assert str(p.x) == "1.0"
+            assert "{p.x}" == "1.0"
             assert p.y / 4 == 0.5
         !e:
             assert false, e.message()
@@ -59,8 +59,8 @@ test fn an_extern_float_param_takes_a_float():
     assert cos(0.0) == 1.0
 
 test fn native_float_returns_are_real_floats():
-    assert str(math.floor(2.5)) == "2.0"
-    assert str(math.sqrt(16.0)) == "4.0"
-    assert str(math.abs(-3.0)) == "3.0"
+    assert "{math.floor(2.5)}" == "2.0"
+    assert "{math.sqrt(16.0)}" == "4.0"
+    assert "{math.abs(-3.0)}" == "3.0"
     assert math.pow(2.0, 3.0) / 3 == 8.0 / 3
-    assert str(duration.seconds(90).as_minutes()) == "1.5"
+    assert "{duration.seconds(90).as_minutes()}" == "1.5"

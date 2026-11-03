@@ -18,8 +18,8 @@ fn read_tokens() -> List[str]:
 
 fn main():
     toks := read_tokens()
-    n := int(toks[0])
-    m := int(toks[1])
+    n := toks[0].to_int() ?? panic("input is not an int")
+    m := toks[1].to_int() ?? panic("input is not an int")
 
     cells: List[List[str]] = []
     for r in 0..n:
@@ -55,6 +55,6 @@ fn main():
                                         stack.push((nr, nc))
                         None: break
 
-    io.print(str(rooms))
+    io.print("{rooms}")
 
 main()

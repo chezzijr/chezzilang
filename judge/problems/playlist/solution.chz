@@ -17,18 +17,18 @@ fn read_tokens() -> List[str]:
 
 fn main():
     toks := read_tokens()
-    n := int(toks[0])
+    n := toks[0].to_int() ?? panic("input is not an int")
     last: Map[int, int] = {}
     best := 0
     start := 0
     for i in 0..n:
-        v := int(toks[1 + i])
+        v := toks[1 + i].to_int() ?? panic("input is not an int")
         if last.contains(v) and last[v] >= start:
             start = last[v] + 1
         last[v] = i
         cur := i - start + 1
         if cur > best:
             best = cur
-    io.print(str(best))
+    io.print("{best}")
 
 main()

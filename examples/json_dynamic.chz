@@ -14,16 +14,16 @@ match json.parse(src):
 
         # Pull out typed values with the accessors (each returns a `T?` value).
         print(json.as_str(json.get(doc, "name")?)?)
-        print(str(json.as_int(json.get(doc, "version")?)?))
-        print(str(json.as_bool(json.get(doc, "debug")?)?))
+        print("{json.as_int(json.get(doc, "version")?)?}")
+        print("{json.as_bool(json.get(doc, "debug")?)?}")
 
         # Walk into nested containers.
         langs := json.get(doc, "langs")?
-        print(str(json.len(langs)))
+        print("{json.len(langs)}")
         print(json.as_str(json.at(langs, 0)?)?)
         stars := json.get(json.get(doc, "meta")?, "stars")?
-        print(str(json.as_float(stars)?))
-        print(str(json.is_null(json.get(json.get(doc, "meta")?, "home")?)))
+        print("{json.as_float(stars)?}")
+        print("{json.is_null(json.get(json.get(doc, "meta")?, "home")?)}")
     !e:
         print("parse failed: " + e.message())
 

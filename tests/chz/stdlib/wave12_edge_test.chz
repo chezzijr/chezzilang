@@ -7,13 +7,9 @@ import std.csv
 import std.regex
 import std.duration
 
-# W12-18a: int()/parse_int on a well-formed, out-of-range numeral must say WHY (overflow), not the
+# W12-18a: parse_int on a well-formed, out-of-range numeral must say WHY (overflow), not the
 # generic "cannot parse" the checker also gives for genuinely malformed input.
-test fn int_and_parse_int_overflow_say_overflow_not_cannot_parse():
-    r1 := recover: int("9223372036854775808")
-    match r1:
-        ?_: assert false, "9223372036854775808 does not fit i64"
-        !e: assert e.message().contains("overflow"), e.message()
+test fn parse_int_overflow_says_overflow_not_cannot_parse():
     r2 := recover: "9223372036854775808".parse_int()?
     match r2:
         ?_: assert false, "9223372036854775808 does not fit i64"

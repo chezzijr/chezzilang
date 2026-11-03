@@ -354,7 +354,7 @@ fn bytearray_not_assignable_to_bytes() {
 fn encode_decode_types() {
     // str.encode() -> bytes; bytes.decode() -> str; bytearray.decode() -> str.
     ok(
-        "fn main():\n    b: bytes = \"x\".encode()\n    s1: str = b\"x\".decode()\n    s2: str = bytearray.from_iter([120]).decode()\n    print(s1 + s2 + str(b.len()))\nmain()\n",
+        "fn main():\n    b: bytes = \"x\".encode()\n    s1: str = b\"x\".decode()\n    s2: str = bytearray.from_iter([120]).decode()\n    print(s1 + s2 + \"{b.len()}\")\nmain()\n",
     );
 }
 
@@ -663,42 +663,42 @@ fn iterator_bound_forwards_into_iterable_bound() {
 fn iterable_in_type_position_is_for_iterable() {
     // List
     ok(
-        "import Iterable from std.iter\nfn f(xs: Iterable[int]) -> int:\n    n := 0\n    for v in xs:\n        n += v\n    return n\nfn main():\n    print(str(f([1, 2, 3])))\nmain()\n",
+        "import Iterable from std.iter\nfn f(xs: Iterable[int]) -> int:\n    n := 0\n    for v in xs:\n        n += v\n    return n\nfn main():\n    print(\"{f([1, 2, 3])}\")\nmain()\n",
     );
     // Set
     ok(
-        "import Iterable from std.iter\nfn f(xs: Iterable[int]) -> int:\n    n := 0\n    for v in xs:\n        n += v\n    return n\nfn main():\n    print(str(f({1, 2, 3})))\nmain()\n",
+        "import Iterable from std.iter\nfn f(xs: Iterable[int]) -> int:\n    n := 0\n    for v in xs:\n        n += v\n    return n\nfn main():\n    print(\"{f({1, 2, 3})}\")\nmain()\n",
     );
     // A Map iterates its `(key, value)` pairs (owner U9), so a Map[str,int] is an
     // Iterable[(str, int)] and no longer an Iterable[str] (`m.keys()` is).
     ok(
-        "import Iterable from std.iter\nfn f(xs: Iterable[(str, int)]) -> int:\n    n := 0\n    for k, v in xs:\n        n += v + k.len()\n    return n\nfn main():\n    print(str(f({\"a\": 1})))\nmain()\n",
+        "import Iterable from std.iter\nfn f(xs: Iterable[(str, int)]) -> int:\n    n := 0\n    for k, v in xs:\n        n += v + k.len()\n    return n\nfn main():\n    print(\"{f({\"a\": 1})}\")\nmain()\n",
     );
     rejects(
-        "import Iterable from std.iter\nfn f(xs: Iterable[str]) -> int:\n    return 0\nfn main():\n    print(str(f({\"a\": 1})))\nmain()\n",
+        "import Iterable from std.iter\nfn f(xs: Iterable[str]) -> int:\n    return 0\nfn main():\n    print(\"{f({\"a\": 1})}\")\nmain()\n",
         "does not satisfy Iterable",
     );
     ok(
-        "import Iterable from std.iter\nfn f(xs: Iterable[str]) -> int:\n    return 0\nfn main():\n    print(str(f({\"a\": 1}.keys())))\nmain()\n",
+        "import Iterable from std.iter\nfn f(xs: Iterable[str]) -> int:\n    return 0\nfn main():\n    print(\"{f({\"a\": 1}.keys())}\")\nmain()\n",
     );
     // str iterates to str
     ok(
-        "import Iterable from std.iter\nfn f(xs: Iterable[str]) -> int:\n    n := 0\n    for v in xs:\n        n += v.len()\n    return n\nfn main():\n    print(str(f(\"abc\")))\nmain()\n",
+        "import Iterable from std.iter\nfn f(xs: Iterable[str]) -> int:\n    n := 0\n    for v in xs:\n        n += v.len()\n    return n\nfn main():\n    print(\"{f(\"abc\")}\")\nmain()\n",
     );
     // a cursor
     ok(
-        "import Iterable from std.iter\nfn f(xs: Iterable[int]) -> int:\n    n := 0\n    for v in xs:\n        n += v\n    return n\nfn main():\n    print(str(f([1, 2].iter())))\nmain()\n",
+        "import Iterable from std.iter\nfn f(xs: Iterable[int]) -> int:\n    n := 0\n    for v in xs:\n        n += v\n    return n\nfn main():\n    print(\"{f([1, 2].iter())}\")\nmain()\n",
     );
     // a generator result
     ok(
-        "import Iterable, Iterator from std.iter\nfn gen() -> Iterator[int]:\n    yield 1\n    yield 2\nfn f(xs: Iterable[int]) -> int:\n    n := 0\n    for v in xs:\n        n += v\n    return n\nfn main():\n    print(str(f(gen())))\nmain()\n",
+        "import Iterable, Iterator from std.iter\nfn gen() -> Iterator[int]:\n    yield 1\n    yield 2\nfn f(xs: Iterable[int]) -> int:\n    n := 0\n    for v in xs:\n        n += v\n    return n\nfn main():\n    print(\"{f(gen())}\")\nmain()\n",
     );
     // a comprehension over an `Iterable[T]` param, and `List.from_iter(xs)` — the other `iterable_elem` consumers.
     ok(
-        "import Iterable from std.iter\nfn f(xs: Iterable[int]) -> int:\n    ys := [v * 2 for v in xs]\n    return ys[0]\nfn main():\n    print(str(f([1, 2])))\nmain()\n",
+        "import Iterable from std.iter\nfn f(xs: Iterable[int]) -> int:\n    ys := [v * 2 for v in xs]\n    return ys[0]\nfn main():\n    print(\"{f([1, 2])}\")\nmain()\n",
     );
     ok(
-        "import Iterable from std.iter\nfn f(xs: Iterable[int]) -> int:\n    return List.from_iter(xs)[0]\nfn main():\n    print(str(f([1, 2])))\nmain()\n",
+        "import Iterable from std.iter\nfn f(xs: Iterable[int]) -> int:\n    return List.from_iter(xs)[0]\nfn main():\n    print(\"{f([1, 2])}\")\nmain()\n",
     );
     // The pre-fix workaround (`xs.iter()` first) must keep working identically — it now takes the
     // `iterable_elem` fast path instead of the Protocol method arm; both yield `Iterator[int]`.
@@ -712,13 +712,13 @@ fn iterable_in_type_position_is_for_iterable() {
 fn iterable_type_position_rejects_bad_shapes() {
     // (a) a BARE `Iterable` is an existential with unbound params — not iterable (the arity guard).
     rejects(
-        "import Iterable from std.iter\nfn f(xs: Iterable) -> int:\n    n := 0\n    for v in xs:\n        n += 1\n    return n\nfn main():\n    print(str(f([1, 2])))\nmain()\n",
+        "import Iterable from std.iter\nfn f(xs: Iterable) -> int:\n    n := 0\n    for v in xs:\n        n += 1\n    return n\nfn main():\n    print(\"{f([1, 2])}\")\nmain()\n",
         "cannot iterate over Iterable",
     );
     // (b) the two-variable `for i, v in` form: an existential carries no key/index, so the element
     // (`int`) is not a tuple — see `two_var_for_over_iterable_annotation_names_the_type`.
     rejects(
-        "import Iterable from std.iter\nfn f(xs: Iterable[int]) -> int:\n    n := 0\n    for i, v in xs:\n        n += v\n    return n\nfn main():\n    print(str(f([1, 2])))\nmain()\n",
+        "import Iterable from std.iter\nfn f(xs: Iterable[int]) -> int:\n    n := 0\n    for i, v in xs:\n        n += v\n    return n\nfn main():\n    print(\"{f([1, 2])}\")\nmain()\n",
         "tuple pattern cannot match a value of type int",
     );
     // (c) W6-3b: `Iterable` is NOT `Iterator` — an `Iterable[T]` value still cannot call `.next()`.
@@ -776,15 +776,15 @@ fn value_level_widening_still_ok() {
 #[test]
 fn iterable_annotated_param_forwards_into_iterable_bound() {
     ok(
-        "import Iterable from std.iter\nfn g[S: Iterable[T], T](xs: S) -> int:\n    n := 0\n    for v in xs:\n        n += 1\n    return n\nfn f(xs: Iterable[int]) -> int:\n    return g(xs)\nfn main():\n    print(str(f([1, 2, 3])))\nmain()\n",
+        "import Iterable from std.iter\nfn g[S: Iterable[T], T](xs: S) -> int:\n    n := 0\n    for v in xs:\n        n += 1\n    return n\nfn f(xs: Iterable[int]) -> int:\n    return g(xs)\nfn main():\n    print(\"{f([1, 2, 3])}\")\nmain()\n",
     );
     // the recovered `T` is usable as `int`…
     ok(
-        "import Iterable from std.iter\nfn g[S: Iterable[T], T](xs: S, d: T) -> int:\n    return 1\nfn f(xs: Iterable[int]) -> int:\n    return g(xs, 1)\nfn main():\n    print(str(f([1, 2, 3])))\nmain()\n",
+        "import Iterable from std.iter\nfn g[S: Iterable[T], T](xs: S, d: T) -> int:\n    return 1\nfn f(xs: Iterable[int]) -> int:\n    return g(xs, 1)\nfn main():\n    print(\"{f([1, 2, 3])}\")\nmain()\n",
     );
     // …and a wrong-element neighbour still rejects.
     rejects(
-        "import Iterable from std.iter\nfn g[S: Iterable[T], T](xs: S, d: T) -> int:\n    return 1\nfn f(xs: Iterable[int]) -> int:\n    return g(xs, \"a\")\nfn main():\n    print(str(f([1, 2, 3])))\nmain()\n",
+        "import Iterable from std.iter\nfn g[S: Iterable[T], T](xs: S, d: T) -> int:\n    return 1\nfn f(xs: Iterable[int]) -> int:\n    return g(xs, \"a\")\nfn main():\n    print(\"{f([1, 2, 3])}\")\nmain()\n",
         "does not match the declared element type",
     );
 }
@@ -793,10 +793,10 @@ fn iterable_annotated_param_forwards_into_iterable_bound() {
 #[test]
 fn documented_iterable_bound_forms_unchanged() {
     ok(
-        "import Iterable from std.iter\nfn first_or[S: Iterable[T], T](xs: S, default: T) -> T:\n    for v in xs:\n        return v\n    return default\nfn main():\n    print(str(first_or([1, 2], 0)))\nmain()\n",
+        "import Iterable from std.iter\nfn first_or[S: Iterable[T], T](xs: S, default: T) -> T:\n    for v in xs:\n        return v\n    return default\nfn main():\n    print(\"{first_or([1, 2], 0)}\")\nmain()\n",
     );
     ok(
-        "import Iterable from std.iter\nfn f[C: Iterable[int]](xs: C) -> int:\n    n := 0\n    for v in xs:\n        n += v\n    return n\nfn main():\n    print(str(f([1, 2])))\nmain()\n",
+        "import Iterable from std.iter\nfn f[C: Iterable[int]](xs: C) -> int:\n    n := 0\n    for v in xs:\n        n += v\n    return n\nfn main():\n    print(\"{f([1, 2])}\")\nmain()\n",
     );
 }
 
@@ -813,11 +813,11 @@ fn iter_only_struct_bound_recovers_its_element() {
     );
     // …and the concrete-arg workaround the docs prescribe still works.
     ok(
-        "import Iterable, Iterator from std.iter\nstruct Wrap:\n    xs: List[int]\n    fn iter(self) -> Iterator[int]:\n        return self.xs.iter()\nfn count[S: Iterable[int]](xs: S) -> int:\n    n := 0\n    for x in xs:\n        n += x\n    return n\nfn main():\n    print(str(count(Wrap([1, 2]))))\nmain()\n",
+        "import Iterable, Iterator from std.iter\nstruct Wrap:\n    xs: List[int]\n    fn iter(self) -> Iterator[int]:\n        return self.xs.iter()\nfn count[S: Iterable[int]](xs: S) -> int:\n    n := 0\n    for x in xs:\n        n += x\n    return n\nfn main():\n    print(\"{count(Wrap([1, 2]))}\")\nmain()\n",
     );
     // ANNOTATION position: works (the edge decision).
     ok(
-        "import Iterable, Iterator from std.iter\nstruct Wrap:\n    xs: List[int]\n    fn iter(self) -> Iterator[int]:\n        return self.xs.iter()\nfn f(xs: Iterable[int]) -> int:\n    n := 0\n    for v in xs:\n        n += v\n    return n\nfn main():\n    print(str(f(Wrap([1, 2]))))\nmain()\n",
+        "import Iterable, Iterator from std.iter\nstruct Wrap:\n    xs: List[int]\n    fn iter(self) -> Iterator[int]:\n        return self.xs.iter()\nfn f(xs: Iterable[int]) -> int:\n    n := 0\n    for v in xs:\n        n += v\n    return n\nfn main():\n    print(\"{f(Wrap([1, 2]))}\")\nmain()\n",
     );
 }
 
@@ -829,21 +829,21 @@ fn a_nonconforming_next_is_an_ordinary_method() {
     // (a) extra param on `next` + a conforming `iter`: `next` is an ordinary method, `iter` is the hook.
     let odd = "import Iterator from std.iter\nstruct Odd:\n    xs: List[int]\n    n: int\n    fn next(self, k: int) -> int?:\n        self.n += 1\n        if self.n > 3:\n            return None\n        return ?self.n\n    fn iter(self) -> Iterator[int]:\n        return self.xs.iter()\n";
     ok(&format!(
-        "import Iterable from std.iter\n{odd}fn viaList(xs: Iterable[int]) -> List[int]:\n    return List.from_iter(xs)\nfn main():\n    print(str(viaList(Odd([9, 9], 0))))\nmain()\n"
+        "import Iterable from std.iter\n{odd}fn viaList(xs: Iterable[int]) -> List[int]:\n    return List.from_iter(xs)\nfn main():\n    print(\"{{viaList(Odd([9, 9], 0))}}\")\nmain()\n"
     ));
     ok(&format!(
-        "{odd}fn main():\n    for v in Odd([9, 9], 0):\n        print(str(v))\nmain()\n"
+        "{odd}fn main():\n    for v in Odd([9, 9], 0):\n        print(\"{{v}}\")\nmain()\n"
     ));
     ok(&format!(
-        "import Iterable from std.iter\n{odd}fn count[S: Iterable[int]](xs: S) -> int:\n    return 0\nfn main():\n    print(str(count(Odd([9, 9], 0))))\nmain()\n"
+        "import Iterable from std.iter\n{odd}fn count[S: Iterable[int]](xs: S) -> int:\n    return 0\nfn main():\n    print(\"{{count(Odd([9, 9], 0))}}\")\nmain()\n"
     ));
     // (b) a non-`Option` return on `next` is the same class.
     ok(
-        "import Iterable, Iterator from std.iter\nstruct Bad:\n    xs: List[int]\n    fn next(self) -> int:\n        return 1\n    fn iter(self) -> Iterator[int]:\n        return self.xs.iter()\nfn f(xs: Iterable[int]) -> List[int]:\n    return List.from_iter(xs)\nfn main():\n    print(str(f(Bad([1, 2]))))\nmain()\n",
+        "import Iterable, Iterator from std.iter\nstruct Bad:\n    xs: List[int]\n    fn next(self) -> int:\n        return 1\n    fn iter(self) -> Iterator[int]:\n        return self.xs.iter()\nfn f(xs: Iterable[int]) -> List[int]:\n    return List.from_iter(xs)\nfn main():\n    print(\"{f(Bad([1, 2]))}\")\nmain()\n",
     );
     // (c) a conforming `next` alongside `iter`: `iter` is the hook `for` drives.
     ok(
-        "import Iterable, Iterator from std.iter\nstruct Both:\n    n: int\n    xs: List[int]\n    fn next(self) -> int?:\n        if self.n <= 0:\n            return None\n        self.n -= 1\n        return ?self.n\n    fn iter(self) -> Iterator[int]:\n        return self.xs.iter()\nfn f(xs: Iterable[int]) -> int:\n    n := 0\n    for v in xs:\n        n += v\n    return n\nfn main():\n    print(str(f(Both(3, [9]))))\nmain()\n",
+        "import Iterable, Iterator from std.iter\nstruct Both:\n    n: int\n    xs: List[int]\n    fn next(self) -> int?:\n        if self.n <= 0:\n            return None\n        self.n -= 1\n        return ?self.n\n    fn iter(self) -> Iterator[int]:\n        return self.xs.iter()\nfn f(xs: Iterable[int]) -> int:\n    n := 0\n    for v in xs:\n        n += v\n    return n\nfn main():\n    print(\"{f(Both(3, [9]))}\")\nmain()\n",
     );
 }
 
@@ -854,20 +854,20 @@ fn a_nonconforming_next_is_an_ordinary_method() {
 fn two_var_for_over_iterable_annotation_names_the_type() {
     // A TUPLE element destructures (TICKET-113), so this is accepted now; a non-tuple element names its own type in the one tuple message.
     ok(
-        "import Iterable from std.iter\nfn pairs(xs: Iterable[(str, int)]) -> int:\n    n := 0\n    for k, v in xs:\n        n += v\n    return n\nfn main():\n    print(str(pairs([(\"a\", 1)])))\nmain()\n",
+        "import Iterable from std.iter\nfn pairs(xs: Iterable[(str, int)]) -> int:\n    n := 0\n    for k, v in xs:\n        n += v\n    return n\nfn main():\n    print(\"{pairs([(\"a\", 1)])}\")\nmain()\n",
     );
     rejects(
-        "import Iterable from std.iter\nfn kv(xs: Iterable[str]) -> int:\n    n := 0\n    for i, v in xs:\n        n += 1\n    return n\nfn main():\n    print(str(kv([\"a\"])))\nmain()\n",
+        "import Iterable from std.iter\nfn kv(xs: Iterable[str]) -> int:\n    n := 0\n    for i, v in xs:\n        n += 1\n    return n\nfn main():\n    print(\"{kv([\"a\"])}\")\nmain()\n",
         "tuple pattern cannot match a value of type str",
     );
     // the same for an `[S: Iterable[T]]` BOUND — the other spelling of the same existential.
     rejects(
-        "import Iterable from std.iter\nfn g[S: Iterable[int]](xs: S) -> int:\n    for i, v in xs:\n        return v\n    return 0\nfn main():\n    print(str(g([1, 2])))\nmain()\n",
+        "import Iterable from std.iter\nfn g[S: Iterable[int]](xs: S) -> int:\n    for i, v in xs:\n        return v\n    return 0\nfn main():\n    print(\"{g([1, 2])}\")\nmain()\n",
         "tuple pattern cannot match a value of type int",
     );
     // a struct iterator is one more iterable: its element (`int`) is not a tuple.
     rejects(
-        "struct Counter:\n    n: int\n    fn next(self) -> int?:\n        return None\nfn main():\n    for k, v in Counter(0):\n        print(str(k))\nmain()\n",
+        "struct Counter:\n    n: int\n    fn next(self) -> int?:\n        return None\nfn main():\n    for k, v in Counter(0):\n        print(\"{k}\")\nmain()\n",
         "tuple pattern cannot match a value of type int",
     );
 }
@@ -1321,162 +1321,6 @@ fn enum_add_bound_into_generic_fn_ok() {
     ok(
         "import Add from std.ops\nenum Money:\n    Cents(int)\n    fn add(self, other: Money) -> Money:\n        match self:\n            Money.Cents(a):\n                match other:\n                    Money.Cents(b): return Money.Cents(a + b)\nfn twice[T: Add](x: T) -> T:\n    return x + x\nfn main():\n    m := twice(Money.Cents(3))\n    print(m.add(m) == Money.Cents(12))\nmain()\n",
     );
-}
-
-// ===== scalar casts =====
-
-#[test]
-fn scalar_cast_rejects_aggregate_arg() {
-    // int/float/bool over an aggregate (List/Map/Set/tuple) is outside the scalar-cast domain and
-    // always faults at runtime (`{cast}() cannot convert List`). Reject at check — a check-OK-then-
-    // run-fault hole. (`str` of an aggregate is a legal display and must still pass.)
-    rejects(
-        "fn main():\n    print(float([1, 2]))\nmain()\n",
-        "float() cannot convert List",
-    );
-    rejects(
-        "fn main():\n    print(int((1, 2)))\nmain()\n",
-        "int() cannot convert tuple",
-    );
-    rejects(
-        "fn main():\n    print(bool({1, 2}))\nmain()\n",
-        "bool() cannot convert Set",
-    );
-    rejects(
-        "fn main():\n    m := {\"a\": 1}\n    print(int(m))\nmain()\n",
-        "int() cannot convert Map",
-    );
-    // str-of-aggregate is a display, not a scalar cast — still accepted:
-    ok("fn main():\n    print(str([1, 2]))\nmain()\n");
-}
-
-#[test]
-fn scalar_cast_rejects_struct_enum_fn_arg() {
-    // W8-31: int/float/bool over a struct, enum or fn value is outside the scalar-cast domain,
-    // same as an aggregate, and always faults at runtime (`{cast}() cannot convert struct`). The
-    // checker's allow-list already rejects List/Map/Set/tuple but omits struct/enum/fn — this pins
-    // the missing arms.
-    rejects(
-        "struct P:\n    x: int\nfn main():\n    print(int(P(1)))\nmain()\n",
-        "cannot convert struct",
-    );
-    rejects(
-        "enum Color:\n    Red\n    Green\nfn main():\n    print(float(Color.Red))\nmain()\n",
-        "float() cannot convert enum",
-    );
-    rejects(
-        "fn g():\n    pass\nfn main():\n    print(bool(g))\nmain()\n",
-        "bool() cannot convert function",
-    );
-    rejects(
-        "fn main():\n    f := print\n    print(bool(f))\nmain()\n",
-        "cannot convert function",
-    );
-}
-
-#[test]
-fn scalar_cast_rejects_option_result_bytes_bytearray_shared_arg() {
-    // TICKET-020: the residual half of W8-31 — Option/Result/bytes/ByteArray/Shared are their own
-    // `Ty` variants (not `Ty::Enum`), so TICKET-017's enum arm doesn't catch them. Same shape as
-    // struct/enum/fn: check-OK today, then a runtime fault (`{cast}() cannot convert {kind}`).
-    rejects(
-        "fn main():\n    x: int? = 1\n    print(int(x))\nmain()\n",
-        "int() cannot convert an optional value (`int?`) —",
-    );
-    rejects(
-        "fn main():\n    r: int!str = ?1\n    print(int(r))\nmain()\n",
-        "int() cannot convert a result value (`int!str`) —",
-    );
-    rejects(
-        "fn main():\n    print(int(b\"ab\"))\nmain()\n",
-        "int() cannot convert bytes",
-    );
-    rejects(
-        "fn main():\n    print(int(bytearray.from_iter([1, 2])))\nmain()\n",
-        "int() cannot convert bytearray",
-    );
-    // `Shared` is import-gated, so only `entry_rejects` (which goes through `build_graph`)
-    // resolves it; `rejects` is single-module and reports `unknown type 'Shared'` instead.
-    entry_rejects(
-        "import Shared from std.concurrency\nfn main():\n    print(int(Shared(1)))\nmain()\n",
-        "int() cannot convert Shared",
-    );
-}
-
-#[test]
-fn scalar_cast_rejects_handle_family_arg() {
-    // TICKET-020: the same hole for the Channel/Shared handle family DEC-017 named as one unit.
-    // `Channel` is a global reserved name (`rejects` resolves it); the rest are import-gated
-    // (`entry_rejects`, which goes through `build_graph`).
-    rejects(
-        "fn f(x: Channel[int]):\n    print(int(x))\nfn main():\n    pass\nmain()\n",
-        "int() cannot convert Channel",
-    );
-    entry_rejects(
-        "import Atomic from std.concurrency\nfn f(x: Atomic[int]):\n    print(float(x))\nfn main():\n    pass\nmain()\n",
-        "float() cannot convert Atomic",
-    );
-    entry_rejects(
-        "import AtomicInt from std.concurrency\nfn f(x: AtomicInt):\n    print(bool(x))\nfn main():\n    pass\nmain()\n",
-        "bool() cannot convert AtomicInt",
-    );
-    entry_rejects(
-        "import RwShared from std.concurrency\nfn f(x: RwShared[int]):\n    print(int(x))\nfn main():\n    pass\nmain()\n",
-        "int() cannot convert RwShared",
-    );
-    entry_rejects(
-        "import Executor from std.concurrency\nfn f(x: Executor):\n    print(int(x))\nfn main():\n    pass\nmain()\n",
-        "int() cannot convert Executor",
-    );
-    entry_rejects(
-        "import Socket from std.net\nfn f(x: Socket):\n    print(int(x))\nfn main():\n    pass\nmain()\n",
-        "int() cannot convert Socket",
-    );
-    entry_rejects(
-        "import Listener from std.net\nfn f(x: Listener):\n    print(int(x))\nfn main():\n    pass\nmain()\n",
-        "int() cannot convert Listener",
-    );
-    entry_rejects(
-        "import Writer from std.io\nfn f(x: Writer):\n    print(int(x))\nfn main():\n    pass\nmain()\n",
-        "int() cannot convert Writer",
-    );
-    entry_rejects(
-        "import Reader from std.io\nfn f(x: Reader):\n    print(int(x))\nfn main():\n    pass\nmain()\n",
-        "int() cannot convert Reader",
-    );
-    entry_rejects(
-        "import ptr from std.ffi\nfn f(x: ptr):\n    print(int(x))\nfn main():\n    pass\nmain()\n",
-        "int() cannot convert ptr",
-    );
-}
-
-#[test]
-fn scalar_cast_still_accepts_the_payload_of_a_rejected_kind() {
-    // TICKET-020: the rule is "the CONTAINER type is outside the cast domain" — its payload must
-    // stay inside it, or the reject fires on the wrong thing.
-    ok("fn main():\n    x: int? = 1\n    print(str(x))\n    print(int(x ?? 0))\nmain()\n");
-    ok(
-        "fn take(r: int!str) -> int:\n    match r:\n        ?v:\n            return int(v)\n        !e:\n            return 0\nfn main():\n    r: int!str = ?1\n    print(take(r))\n    print(str(r))\nmain()\n",
-    );
-    ok("fn main():\n    print(int(b\"ab\"[0]))\n    print(str(b\"ab\"))\nmain()\n");
-    ok(
-        "fn main():\n    ba := bytearray.from_iter([1, 2])\n    print(int(ba[0]))\n    print(str(ba))\nmain()\n",
-    );
-    entry_ok(
-        "import Shared from std.concurrency\nfn main():\n    s := Shared(1)\n    print(int(s.get()))\n    print(str(s))\nmain()\n",
-    );
-    entry_ok(
-        "import Atomic, AtomicInt, RwShared from std.concurrency\nfn main():\n    a := Atomic(1)\n    ai := AtomicInt(1)\n    rw := RwShared(1)\n    print(int(a.load()))\n    print(int(ai.load()))\n    print(int(rw.get()))\nmain()\n",
-    );
-}
-
-#[test]
-fn scalar_cast_still_accepts_scalars_and_str() {
-    // W8-31 neighbours: the scalar-cast domain (int/float/bool/str) must stay untouched by the
-    // struct/enum/fn reject — a generic type param and str-casting a struct/enum stay clean.
-    ok("struct P:\n    x: int\nfn main():\n    print(str(P(1)))\nmain()\n");
-    ok("enum C:\n    Red\nfn main():\n    print(str(C.Red))\nmain()\n");
-    ok("fn conv[T](x: T) -> int:\n    return int(x)\nfn main():\n    print(conv(1))\nmain()\n");
 }
 
 #[test]

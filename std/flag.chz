@@ -46,7 +46,7 @@ import std.math as math
 # trims) and NOT `math.parse_int_base(s, 0)` (Python-style: no leading-0 octal, trims). Base from the
 # prefix: `0x`/`0o`/`0b` (any case) or a leading `0` = octal, else decimal. `_` is allowed only
 # between digits, or straight after a base prefix (Go `underscoreOK`). No whitespace, no second sign.
-# an error texts keep the `int()` family wording (`cannot parse`) so scripts that grep it stay stable.
+# an error texts keep the `parse_int` family wording (`cannot parse`) so scripts that grep it stay stable.
 fn _parse_go_int(s: str) -> int!str:
     bad := "cannot parse '" + s + "' as an integer"
     body := s
@@ -128,7 +128,7 @@ struct FlagSet:
         self.kind[name] = "bool"
         self.help[name] = help
         self.bools[name] = default
-        self.defs[name] = str(default)
+        self.defs[name] = "{default}"
 
     # Register an int flag with a default value and help text.
     fn int_flag(self, name: str, default: int, help: str):
@@ -136,7 +136,7 @@ struct FlagSet:
         self.kind[name] = "int"
         self.help[name] = help
         self.ints[name] = default
-        self.defs[name] = str(default)
+        self.defs[name] = "{default}"
 
     # Parse `args` into the registered flags. Returns `?positionals` on success (folding Go's
     # `Parse()` + `Args()` into one), or a clean `!e` on an unknown flag / missing value / non-int.

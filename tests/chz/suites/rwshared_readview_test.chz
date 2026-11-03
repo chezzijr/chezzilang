@@ -36,7 +36,7 @@ test fn read_view_fold_int():
 # fold with a str accumulator — proves R is NOT pinned to int (recovered from init).
 test fn read_view_fold_str():
     box := ConcurrentList(concurrency.RwShared(List.from_iter(1..4)))   # [1, 2, 3]
-    s := box.fold("", fn(a, x): a + str(x))
+    s := box.fold("", fn(a, x): a + "{x}")
     assert s == "123"
 
 # The real fan-out use case: reduce the shared list from inside a spawned task under parallel:.
@@ -109,7 +109,7 @@ test fn map_read_view_len_has_get():
         ?v: assert v == 2
         None: assert false, "expected Some(2)"
     match box.get("z"):
-        ?v: assert false, "expected None, got " + str(v)
+        ?v: assert false, "expected None, got {v}"
         None: assert true
 
 # fold_entries: sum the values. R inferred from the int init.
@@ -377,7 +377,7 @@ test fn cyclic_generator_element_rebuilds_against_the_whole_container():
             got: List[int] = []
             for v in it:
                 got.push(v)
-            assert got == [1, 99], str(got)
+            assert got == [1, 99], "{got}"
         None: assert false, "at(0) must be Some"
 
 # `contains`/`has` compare the needle with the live element. M3.3: the stored element itself is
@@ -395,7 +395,7 @@ test fn cyclic_set_contains_faults_recoverably_instead_of_aborting():
     e2.back = [e2]
     r := recover: box.contains(e2)
     match r:
-        ?v: assert false, "expected the cyclic-equality depth fault, got " + str(v)
+        ?v: assert false, "expected the cyclic-equality depth fault, got {v}"
         !err: assert err.message().contains("maximum call depth"), err.message()
 
 # AB-BA cross-box: W1 walks map A calling B.set; W2 walks set B calling A.set.

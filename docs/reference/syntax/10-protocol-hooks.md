@@ -86,11 +86,11 @@ where the operator rejects the type, and on a static method. The generic-operand
 
 The prebuilt **`Stringable`** protocol (`str(self) -> str`) sets how a value renders. A struct or enum
 with `str(self) -> str` replaces its default repr (`Name(field=value, …)`, `Variant(payload)`) in
-`print`, `str()` and `{…}` interpolation, also when nested in a list / tuple / map / set / enum
+`print` and `{…}` interpolation, also when nested in a list / tuple / map / set / enum
 payload. It works as a bound (`fn show[T: Stringable](v: T)`).
 
-`int`/`float`/`bool`/`str` satisfy `Stringable`; in an erased body `v.str()` renders as `str(v)`. This
-is bound-only: `(5).str()` on a concrete scalar is a compile error (use `str(5)`).
+`int`/`float`/`bool`/`str` satisfy `Stringable`; in an erased body `v.str()` renders as `"{v}"`. This
+is bound-only: `(5).str()` on a concrete scalar is a compile error (write `"{x}"`).
 
 **Every intrinsic grant is callable and equals its operator form.** Inside an erased `[T: P]` body you
 may call `a.add(b)`/`a.sub(b)`/`a.mul(b)`/`a.div(b)`/`a.mod(b)`/`a.neg()` on `int`/`float`,
@@ -109,7 +109,7 @@ may call `a.add(b)`/`a.sub(b)`/`a.mul(b)`/`a.div(b)`/`a.mod(b)`/`a.neg()` on `in
   (`f64::total_cmp`), while `<`/`<=`/`>`/`>=` stay IEEE (`false` for NaN). `+0.0` and `-0.0` are equal
   in that order (a stable sort keeps their order; `[0.0, -0.0].min()` is `0.0`, like CPython).
 
-**Display-hook resolution.** `print`/`str()`/interpolation use your `str` method only when it conforms
+**Display-hook resolution.** `print` and interpolation use your `str` method only when it conforms
 to `Stringable`: one `self` parameter and a `str` return (written, inferred, or a `str` alias). A static
 `str`, a `str` with extra parameters, or one that returns another type is not the display hook: the
 value prints with the default repr, `print` never calls the method, and `obj.str(…)` / `Type.str(…)`

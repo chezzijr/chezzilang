@@ -17,10 +17,10 @@ fn main():
         return n * n
     square := memoize.memoize1(slow_square)
 
-    io.print(str(square(3)))   # 9
-    io.print(str(square(3)))   # 9  (cache hit — no bump)
-    io.print(str(square(4)))   # 16
-    io.print(str(square(4)))   # 16 (cache hit — no bump)
-    io.print(str(c.count))     # 2  (one eval per distinct arg)
+    io.print("{square(3)}")   # 9
+    io.print("{square(3)}")   # 9  (cache hit — no bump)
+    io.print("{square(4)}")   # 16
+    io.print("{square(4)}")   # 16 (cache hit — no bump)
+    io.print("{c.count}")     # 2  (one eval per distinct arg)
 
 main()

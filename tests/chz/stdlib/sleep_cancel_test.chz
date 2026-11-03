@@ -42,7 +42,7 @@ test fn cancel_interrupts_a_sleeping_job():
     time.sleep_ms(50)
     ex.cancel()
     d := time.monotonic() - t0
-    assert d < 1.0, "a sleeping job must die at the cancel, not at its deadline: " + str(d) + "s"
+    assert d < 1.0, "a sleeping job must die at the cancel, not at its deadline: {d}s"
     assert woke.load() == 0, "the cancelled job must not run its post-sleep code"
 
 test fn cancel_interrupts_a_job_waiting_on_a_timer():
@@ -53,7 +53,7 @@ test fn cancel_interrupts_a_job_waiting_on_a_timer():
     time.sleep_ms(50)
     ex.cancel()
     d := time.monotonic() - t0
-    assert d < 1.0, "a timer-waiting job must die at the cancel, not at its deadline: " + str(d) + "s"
+    assert d < 1.0, "a timer-waiting job must die at the cancel, not at its deadline: {d}s"
     assert woke.load() == 0, "the cancelled job must not run its post-timer code"
 
 test fn a_sleep_still_sleeps():
@@ -64,4 +64,4 @@ test fn a_sleep_still_sleeps():
     parallel:
         spawn short_nap()
     d := time.monotonic() - t0
-    assert d >= 0.195, "a sleep must still reach its deadline: " + str(d) + "s"
+    assert d >= 0.195, "a sleep must still reach its deadline: {d}s"

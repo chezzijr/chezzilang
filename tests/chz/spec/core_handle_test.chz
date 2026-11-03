@@ -148,7 +148,7 @@ fn m32_swap(root: Shared[M32Pair], b: Shared[int], release: Channel[int]):
 
 test fn a_print_snapshots_an_atomic_before_it_waits():
     b := Shared(1)
-    root := Shared(M32Pair(Atomic(["x" + str(7)]), b))
+    root := Shared(M32Pair(Atomic(["x" + "7"]), b))
     ready := Channel[int](1)
     release := Channel[int](1)
     got := ""
@@ -156,7 +156,7 @@ test fn a_print_snapshots_an_atomic_before_it_waits():
         spawn m32_hold(b, ready, release)
         spawn m32_swap(root, b, release)
         _ := ready.recv()
-        got = str(root)
+        got = "{root}"
     old := "Shared(M32Pair(a=Atomic(['x7']), b=Shared(1)))"
     new := "Shared(M32Pair(a=Atomic(['new']), b=Shared(1)))"
     assert got == old or got == new, got

@@ -53,7 +53,10 @@ struct Parser:
             v := self.parse_expr()
             close := self.advance()   # consume ")"
             return v
-        return int(t)
+        # A token that is not an int is a parse error of the input: fault, as a parser would.
+        n := t.to_int() else:
+            panic("calc: '{t}' is not a number")
+        return n
 
 fn eval(src: str) -> int:
     p := Parser(src.split(" "), 0)

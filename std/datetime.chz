@@ -69,7 +69,7 @@ fn is_leap_year(y: int) -> bool:
 # `days_in_month(y, 13)` a plausible-looking 31 — silently wrong for a date-validating caller.
 fn days_in_month(y: int, m: int) -> int:
     if m < 1 or m > 12:
-        panic("days_in_month: month out of range: " + str(m))
+        panic("days_in_month: month out of range: {m}")
     if m == 2:
         if is_leap_year(y):
             return 29
@@ -87,9 +87,9 @@ fn days_in_month(y: int, m: int) -> int:
 # (`(2023, 13, 1)` is not 2024-01-01).
 fn days_from_civil(y: int, m: int, d: int) -> int:
     if m < 1 or m > 12:
-        panic("days_from_civil: month out of range: " + str(m))
+        panic("days_from_civil: month out of range: {m}")
     if d < 1 or d > days_in_month(y, m):
-        panic("days_from_civil: day out of range: " + str(d))
+        panic("days_from_civil: day out of range: {d}")
     yy := y
     if m <= 2:
         yy = y - 1
@@ -136,7 +136,7 @@ fn weekday(epoch: int) -> int:
 # carries the offending value in the message.
 fn weekday_name(wd: int) -> str:
     if wd < 0 or wd > 6:
-        panic("weekday_name: wd must be 0..6 (0=Sunday), got " + str(wd))
+        panic("weekday_name: wd must be 0..6 (0=Sunday), got {wd}")
     names := ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"]
     return names[wd]
 
@@ -182,28 +182,28 @@ fn now() -> DateTime:
 fn to_iso8601(dt: DateTime) -> str:
     frac := ""
     if dt.milli != 0:
-        frac = "." + s.pad_left(str(dt.milli), 3, "0")
+        frac = "." + s.pad_left("{dt.milli}", 3, "0")
     return to_date_string(dt) + "T" + to_time_string(dt) + frac + "Z"
 
 # Zero-pad a year to >=4 digits, keeping the sign in front for proleptic negative (BCE) years:
 # 2024 -> "2024", 999 -> "0999", 0 -> "0000", -44 -> "-0044" (pad_left is sign-unaware).
 fn pad_year(y: int) -> str:
     if y < 0:
-        return "-" + s.pad_left(str(-y), 4, "0")
-    return s.pad_left(str(y), 4, "0")
+        return "-" + s.pad_left("{-y}", 4, "0")
+    return s.pad_left("{y}", 4, "0")
 
 # Date only: "YYYY-MM-DD".
 fn to_date_string(dt: DateTime) -> str:
     yr := pad_year(dt.year)
-    mo := s.pad_left(str(dt.month), 2, "0")
-    dy := s.pad_left(str(dt.day), 2, "0")
+    mo := s.pad_left("{dt.month}", 2, "0")
+    dy := s.pad_left("{dt.day}", 2, "0")
     return yr + "-" + mo + "-" + dy
 
 # Time only: "HH:MM:SS".
 fn to_time_string(dt: DateTime) -> str:
-    hh := s.pad_left(str(dt.hour), 2, "0")
-    mm := s.pad_left(str(dt.minute), 2, "0")
-    ss := s.pad_left(str(dt.second), 2, "0")
+    hh := s.pad_left("{dt.hour}", 2, "0")
+    mm := s.pad_left("{dt.minute}", 2, "0")
+    ss := s.pad_left("{dt.second}", 2, "0")
     return hh + ":" + mm + ":" + ss
 
 # std.time.format style: "YYYY-MM-DD HH:MM:SS".
@@ -235,7 +235,7 @@ fn all_digits(x: str) -> bool:
     return true
 
 # ASCII digits -> non-negative int. Caller MUST all_digits-guard first (no sign/ws handling, unlike
-# int(), which trims whitespace + accepts a leading +/- — too lenient for a fixed-width ISO field).
+# `to_int()`, which trims whitespace + accepts a leading +/- — too lenient for a fixed-width ISO field).
 # A long digit string overflows i64 and FAULTS `integer overflow in Mul` (from the `n * 10` step) —
 # CPython's `int()` never overflows (arbitrary precision), the same upward divergence as elsewhere.
 fn to_uint(x: str) -> int:
@@ -360,15 +360,15 @@ fn parse_iso8601(input: str) -> DateTime!:
     # 4. range-validate BEFORE any civil math (days_from_civil computes garbage for month 13 / day 32).
     #    field2/to_uint are non-negative, so only upper bounds (+ the m<1 / d<1 zero cases) need checks.
     if m < 1 or m > 12:
-        return !("month out of range: " + str(m))
+        return !("month out of range: {m}")
     if d < 1 or d > days_in_month(y, m):
-        return !("day out of range: " + str(d))
+        return !("day out of range: {d}")
     if hh > 23:
-        return !("hour out of range: " + str(hh))
+        return !("hour out of range: {hh}")
     if mm > 59:
-        return !("minute out of range: " + str(mm))
+        return !("minute out of range: {mm}")
     if ss > 59:
-        return !("second out of range: " + str(ss))
+        return !("second out of range: {ss}")
 
     # 5. reuse to_epoch/from_epoch: normalizes any non-Z offset to UTC + fills the contractual weekday.
     epoch := to_epoch(DateTime(y, m, d, hh, mm, ss, 0)) - off

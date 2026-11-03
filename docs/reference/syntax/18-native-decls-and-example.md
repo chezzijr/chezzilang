@@ -7,7 +7,7 @@ body the engine implements, bound by name. The universe builtins are declared th
 ```chezzi
 native fn ord(c: str) -> int      # first-class universe FUNCTION
 native fn panic(msg: str)         # no `-> ret` → native-controlled/never
-native ctor int(x) -> int         # non-first-class scalar CONSTRUCTOR; `x` unannotated → dynamic
+native ctor int() -> int          # non-first-class scalar CONSTRUCTOR: the zero value, no parameter
 native ctor bytearray() -> bytearray
 ```
 
@@ -107,7 +107,8 @@ native enum Carrier[T]:    # the shape of a declaration; the prelude's two are t
 The library reference (every builtin, type method, runtime type and `std.*` module) is
 [`stdlib.md`](../stdlib/01-builtins.md).
 
-- Always available: `print`, `Range`, `int()`/`float()`/`str()`, `ord(s)→int` (a 1-character `s`;
+- Always available: `print`, `Range`, the zero values `int()`/`float()`/`str()`, the conversions
+  `n.to_float()`/`f.to_int()`/`s.to_int()`, `ord(s)→int` (a 1-character `s`;
   longer or empty faults), `chr(n)→str`, `Set()`/`Set.from_iter(list)`, `panic(msg)`, and the core-type methods.
 - Modules: `import std.X`, then `X.func(...)`.
 - `Match` (`std.regex`), `Response` (`std.request`) and `ProcResult` (`std.process`) belong to their
@@ -127,7 +128,7 @@ struct Point:
     y: int
 
     fn dist(self) -> float:
-        return sqrt(float(self.x*self.x + self.y*self.y))
+        return sqrt((self.x*self.x + self.y*self.y).to_float())
 
 fn safe_div(a: int, b: int) -> int!:
     if b == 0:

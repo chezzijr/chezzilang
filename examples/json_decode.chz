@@ -22,8 +22,8 @@ src := "{{\"name\":\"Ada\",\"age\":36,\"active\":true,\"score\":9.5,\"tags\":[\"
 
 match json.decode[User](src):
     ?u:
-        print(u.name + ", age " + str(u.age) + ", active=" + str(u.active))
-        print("score=" + str(u.score) + ", tags=" + ",".join(u.tags))
+        print(u.name + ", age {u.age}, active={u.active}")
+        print("score={u.score}, tags=" + ",".join(u.tags))
         print("city=" + u.address.city + " zip=" + u.address.zip)
         match u.nick:
             ?n: print("nick=" + n)
@@ -33,11 +33,11 @@ match json.decode[User](src):
 
 # Decode straight into a typed map and a list.
 match json.decode[Map[str, int]]("{{\"a\":1,\"b\":2,\"c\":3}}"):
-    ?m: print("map total=" + str(m["a"] + m["b"] + m["c"]))
+    ?m: print("map total={m["a"] + m["b"] + m["c"]}")
     !e: print("err: " + e.message())
 
 match json.decode[List[float]]("[1.5, 2.5, 3.0]"):
-    ?xs: print("list len=" + str(xs.len()))
+    ?xs: print("list len={xs.len()}")
     !e: print("err: " + e.message())
 
 # Type mismatches and missing keys come back as an error with a path.

@@ -3,6 +3,6 @@
 # No .expected fixture: the result is environment-dependent (how this process's fds are wired).
 import std.io
 
-io.print("stdout isatty: " + str(io.isatty()))
-io.print("stdin  isatty: " + str(io.isatty_stdin()))
-io.print("stderr isatty: " + str(io.isatty_stderr()))
+io.print("stdout isatty: {io.isatty()}")
+io.print("stdin  isatty: {io.isatty_stdin()}")
+io.print("stderr isatty: {io.isatty_stderr()}")

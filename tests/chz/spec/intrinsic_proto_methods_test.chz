@@ -79,9 +79,9 @@ test fn float_arith_methods_match_operators():
     assert mod_m(7.5, 2.0) == 7.5 % 2.0
     assert neg_m(2.5) == -2.5
     # 1.0/0.0 is inf (NOT a fault) on both forms; -0.0 renders identically
-    assert str(div_m(1.0, 0.0)) == str(1.0 / 0.0)
-    assert str(neg_m(0.0)) == str(-0.0)
-    assert str(neg_m(-0.0)) == str(-(-0.0))
+    assert "{div_m(1.0, 0.0)}" == "{1.0 / 0.0}"
+    assert "{neg_m(0.0)}" == "{-0.0}"
+    assert "{neg_m(-0.0)}" == "{-(-0.0)}"
 
 test fn arith_method_faults_match_operator_faults():
     big := 9223372036854775807
@@ -343,7 +343,7 @@ test fn scalar_compare_and_str_controls():
     assert cmp_m(2, 2) == 0
     assert (cmp_m("a", "b") < 0) == ("a" < "b")
     assert str_m(5) == "5"
-    assert str_m(1.5) == str(1.5)
+    assert str_m(1.5) == "{1.5}"
     assert str_m(true) == "true"
     assert str_m("hi") == "hi"
 

@@ -44,7 +44,7 @@ fn carrier_display_grid() {
         // ---- T?
         prints("T? present print", "print(x)", "5"),
         prints("T? present interpolation", "print(\"<{x}>\")", "<5>"),
-        prints("T? present str()", "print(str(x) + \".\")", "5."),
+        prints("T? present concat", "print(\"{x}\" + \".\")", "5."),
         prints("T? present list", "print([x])", "[5]"),
         prints("T? absent print", "print(n)", "None"),
         prints("T? absent interpolation", "print(\"<{n}>\")", "<None>"),
@@ -57,7 +57,7 @@ fn carrier_display_grid() {
         prints("T!E success list", "print([r])", "[5]"),
         prints("T!E error print", "print(e)", "!boom"),
         prints("T!E error interpolation", "print(\"<{e}>\")", "<!boom>"),
-        prints("T!E error str()", "print(str(e) + \".\")", "!boom."),
+        prints("T!E error concat", "print(\"{e}\" + \".\")", "!boom."),
         prints("T!E error list", "print([e, r])", "[!'boom', 5]"),
         prints("T!E error map value", "print({\"k\": e})", "{'k': !'boom'}"),
         // ---- None!E

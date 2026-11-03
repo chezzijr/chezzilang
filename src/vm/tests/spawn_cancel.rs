@@ -1286,7 +1286,7 @@ fn vm_rwshared_get_set_read_write_roundtrip() {
 #[test]
 fn vm_rwshared_read_returns_closure_result_no_writeback() {
     // `read` returns the closure's value and does NOT write back (the box is unchanged).
-    let src = "import RwShared from std.concurrency\nfn main():\n    r := RwShared(5)\n    print(r.read(fn(x): str(x * 3)))\n    print(r.get())\nmain()\n";
+    let src = "import RwShared from std.concurrency\nfn main():\n    r := RwShared(5)\n    print(r.read(fn(x): \"{x * 3}\"))\n    print(r.get())\nmain()\n";
     assert_eq!(run(src), "15\n5\n");
 }
 

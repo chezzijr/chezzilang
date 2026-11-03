@@ -17,14 +17,14 @@ test fn spawn_user_module_fn():
     box := Shared(0)
     parallel:
         spawn spawn_module_target_lib.bump(box, 5)
-    assert box.get() == 5, "spawned user-module fn did not run: " + str(box.get())
+    assert box.get() == 5, "spawned user-module fn did not run: {box.get()}"
 
 # The same call through an ALIASED import.
 test fn spawn_aliased_module_fn():
     box := Shared(0)
     parallel:
         spawn blib.bump(box, 7)
-    assert box.get() == 7, "spawned aliased-module fn did not run: " + str(box.get())
+    assert box.get() == 7, "spawned aliased-module fn did not run: {box.get()}"
 
 # A bare `spawn` (no `parallel:` nursery) — the function's implicit nursery joins at its end, so the
 # write is visible to the caller.
@@ -34,12 +34,12 @@ fn bare_spawner(box: Shared[int]):
 test fn spawn_module_fn_without_nursery():
     box := Shared(0)
     bare_spawner(box)
-    assert box.get() == 9, "bare-spawned module fn did not run: " + str(box.get())
+    assert box.get() == 9, "bare-spawned module fn did not run: {box.get()}"
 
 # A NATIVE module's function. `io.write_file` is observable after the nursery joins; the `defer`
 # cleanup is itself a module-qualified defer — the spelling that always worked.
 test fn spawn_native_module_fn():
-    p := os.temp_dir().str() + "/chz_m24_5_spawn_mod_" + str(os.getpid()) + ".txt"
+    p := os.temp_dir().str() + "/chz_m24_5_spawn_mod_{os.getpid()}.txt"
     defer fs.remove_file(p)
     parallel:
         spawn io.write_file(p, "spawned")

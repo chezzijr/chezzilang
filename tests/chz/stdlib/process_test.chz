@@ -18,7 +18,7 @@ import std.fs
 
 # Write the 3 bytes `A \xff B` to a per-process scratch file and return its path.
 fn bad_bytes_file(name: str) -> str:
-    p := os.temp_dir().str() + "/chz_w6_4_" + name + "_" + str(os.getpid()) + ".bin"
+    p := os.temp_dir().str() + "/chz_w6_4_" + name + "_{os.getpid()}.bin"
     match io.write_bytes(p, b"A\xffB"):
         ?_: pass
         !e: assert false, "setup: " + e.message()
@@ -64,13 +64,13 @@ test fn text_seam_is_a_documented_lossy_view_never_a_loss():
     match pr.run("cat '" + p + "'; exit 1"):
         ?r:
             assert r.code == 1, "the exit code must survive an undecodable stream"
-            assert r.stdout.encode() == b"A\xef\xbf\xbdB", str(r.stdout.encode())
+            assert r.stdout.encode() == b"A\xef\xbf\xbdB", "{r.stdout.encode()}"
         !e: assert false, "the text seam must not destroy the capture: " + e.message()
     # Same shape when it is stderr that cannot decode.
     match pr.run("cat '" + p + "' 1>&2; exit 1"):
         ?r:
             assert r.code == 1
-            assert r.stderr.encode() == b"A\xef\xbf\xbdB", str(r.stderr.encode())
+            assert r.stderr.encode() == b"A\xef\xbf\xbdB", "{r.stderr.encode()}"
         !e: assert false, "the text seam must not destroy the capture: " + e.message()
 
 test fn text_results_unchanged():

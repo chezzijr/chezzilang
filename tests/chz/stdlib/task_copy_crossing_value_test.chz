@@ -66,10 +66,10 @@ fn memo_in_state(state: str) -> fn(int) -> List[int]:
     return m
 
 fn read_task(t: Task[List[int]], out: Channel[str]):
-    out.send(str(must(t.get())))
+    out.send("{must(t.get())}")
 
 fn read_memo(m: fn(int) -> List[int], out: Channel[str]):
-    out.send(str(m(1)))
+    out.send("{m(1)}")
 
 fn recv_read_task(hc: Channel[Task[List[int]]], out: Channel[str]):
     read_task(hc.recv(), out)
@@ -91,7 +91,7 @@ test fn task_copy_value_through_a_spawn_call():
         parallel:
             spawn read_task(t, out)
         got.push("{s}: copy {out.recv()} owner {must(t.get())}")
-    assert str(got) == want(), str(got)
+    assert "{got}" == want(), "{got}"
 
 test fn task_copy_value_through_a_spawn_block():
     got: List[str] = []
@@ -99,9 +99,9 @@ test fn task_copy_value_through_a_spawn_block():
         t := task_in_state(s)
         out := Channel[str](1)
         parallel:
-            spawn: out.send(str(must(t.get())))
+            spawn: out.send("{must(t.get())}")
         got.push("{s}: copy {out.recv()} owner {must(t.get())}")
-    assert str(got) == want(), str(got)
+    assert "{got}" == want(), "{got}"
 
 test fn task_copy_value_through_an_executor_job():
     got: List[str] = []
@@ -112,7 +112,7 @@ test fn task_copy_value_through_an_executor_job():
         _ := ex.submit(fn(): read_task(t, out))
         ex.shutdown()
         got.push("{s}: copy {out.recv()} owner {must(t.get())}")
-    assert str(got) == want(), str(got)
+    assert "{got}" == want(), "{got}"
 
 test fn task_copy_value_through_a_channel_send():
     got: List[str] = []
@@ -124,7 +124,7 @@ test fn task_copy_value_through_a_channel_send():
         parallel:
             spawn recv_read_task(hc, out)
         got.push("{s}: copy {out.recv()} owner {must(t.get())}")
-    assert str(got) == want(), str(got)
+    assert "{got}" == want(), "{got}"
 
 test fn memo_copy_value_through_a_spawn_call():
     got: List[str] = []
@@ -134,7 +134,7 @@ test fn memo_copy_value_through_a_spawn_call():
         parallel:
             spawn read_memo(m, out)
         got.push("{s}: copy {out.recv()} owner {m(1)}")
-    assert str(got) == want(), str(got)
+    assert "{got}" == want(), "{got}"
 
 test fn memo_copy_value_through_a_spawn_block():
     got: List[str] = []
@@ -142,9 +142,9 @@ test fn memo_copy_value_through_a_spawn_block():
         m := memo_in_state(s)
         out := Channel[str](1)
         parallel:
-            spawn: out.send(str(m(1)))
+            spawn: out.send("{m(1)}")
         got.push("{s}: copy {out.recv()} owner {m(1)}")
-    assert str(got) == want(), str(got)
+    assert "{got}" == want(), "{got}"
 
 test fn memo_copy_value_through_an_executor_job():
     got: List[str] = []
@@ -155,7 +155,7 @@ test fn memo_copy_value_through_an_executor_job():
         _ := ex.submit(fn(): read_memo(m, out))
         ex.shutdown()
         got.push("{s}: copy {out.recv()} owner {m(1)}")
-    assert str(got) == want(), str(got)
+    assert "{got}" == want(), "{got}"
 
 test fn memo_copy_value_through_a_channel_send():
     got: List[str] = []
@@ -167,7 +167,7 @@ test fn memo_copy_value_through_a_channel_send():
         parallel:
             spawn recv_read_memo(hc, out)
         got.push("{s}: copy {out.recv()} owner {m(1)}")
-    assert str(got) == want(), str(got)
+    assert "{got}" == want(), "{got}"
 
 test fn owner_get_stays_one_object_after_a_crossing():
     t := task_in_state("mutated")
@@ -182,8 +182,8 @@ test fn owner_get_stays_one_object_after_a_crossing():
     a.push(7)
     b := m(1)
     b.push(7)
-    assert str(must(t.get())) == "[1, 99, 7]", str(must(t.get()))
-    assert str(m(1)) == "[1, 99, 7]", str(m(1))
+    assert "{must(t.get())}" == "[1, 99, 7]", "{must(t.get())}"
+    assert "{m(1)}" == "[1, 99, 7]", "{m(1)}"
 
 fn send_outcome[T](r: T!Error, out: Channel[str]):
     match r:
@@ -203,9 +203,9 @@ test fn a_copy_write_to_the_crossing_value_lands_on_the_one_object():
     parallel:
         spawn copy_write(t, m, out)
     got := [out.recv(), out.recv()]
-    assert got == ["write ok", "write ok"], str(got)
-    assert str(must(t.get())) == "[1, 99, 5]", str(must(t.get()))
-    assert str(m(1)) == "[1, 99, 5]", str(m(1))
+    assert got == ["write ok", "write ok"], "{got}"
+    assert "{must(t.get())}" == "[1, 99, 5]", "{must(t.get())}"
+    assert "{m(1)}" == "[1, 99, 5]", "{m(1)}"
 
 fn want_owner(state: str) -> str:
     if state == "mutated":
@@ -221,8 +221,8 @@ test fn a_copy_write_lands_in_every_owner_state():
             spawn copy_write(t, m, out)
         got := [out.recv(), out.recv()]
         assert got == ["write ok", "write ok"], "{state}: {got}"
-        assert str(must(t.get())) == want_owner(state), "{state}: {must(t.get())}"
-        assert str(m(1)) == want_owner(state), "{state}: {m(1)}"
+        assert "{must(t.get())}" == want_owner(state), "{state}: {must(t.get())}"
+        assert "{m(1)}" == want_owner(state), "{state}: {m(1)}"
 
 test fn a_copy_write_lands_in_every_owner_state_in_an_executor_job():
     for state in ["mutated", "observed", "unobserved"]:
@@ -234,15 +234,15 @@ test fn a_copy_write_lands_in_every_owner_state_in_an_executor_job():
         ex.shutdown()
         got := [out.recv(), out.recv()]
         assert got == ["write ok", "write ok"], "{state}: {got}"
-        assert str(must(t.get())) == want_owner(state), "{state}: {must(t.get())}"
-        assert str(m(1)) == want_owner(state), "{state}: {m(1)}"
+        assert "{must(t.get())}" == want_owner(state), "{state}: {must(t.get())}"
+        assert "{m(1)}" == want_owner(state), "{state}: {m(1)}"
 
 fn handoff_write(tc: Channel[Task[List[int]]], mc: Channel[fn(int) -> List[int]], out: Channel[str]):
     t := tc.recv()
     m := mc.recv()
     rt := recover: must(t.get()).push(5)
     send_outcome(rt, out)
-    out.send(str(must(t.get())))
+    out.send("{must(t.get())}")
     rm := recover: m(1).push(5)
     send_outcome(rm, out)
 
@@ -257,9 +257,9 @@ test fn a_handoff_receiver_write_is_never_silently_lost():
     parallel:
         spawn handoff_write(tc, mc, out)
     got := [out.recv(), out.recv(), out.recv()]
-    assert got == ["write ok", "[1, 5]", "write ok"], str(got)
-    assert str(must(t.get())) == "[1, 5]", str(must(t.get()))
-    assert str(m(1)) == "[1, 5]", str(m(1))
+    assert got == ["write ok", "[1, 5]", "write ok"], "{got}"
+    assert "{must(t.get())}" == "[1, 5]", "{must(t.get())}"
+    assert "{m(1)}" == "[1, 5]", "{m(1)}"
 
 struct Key:
     id: int
@@ -279,7 +279,7 @@ fn own_key_write(m: fn(Key) -> Key, out: Channel[str]):
     r := m(k)
     rk := recover: k.log.push(1)
     send_outcome(rk, out)
-    out.send(str(k.log))
+    out.send("{k.log}")
     rr := recover: r.log.push(2)
     send_outcome(rr, out)
 
@@ -289,8 +289,8 @@ test fn a_task_owned_key_reachable_from_a_memo_result_stays_writable():
     parallel:
         spawn own_key_write(m, out)
     got := [out.recv(), out.recv(), out.recv()]
-    assert got == ["write ok", "[1]", "write ok"], str(got)
-    assert str(m(Key(7, [])).log) == "[1, 2]"
+    assert got == ["write ok", "[1]", "write ok"], "{got}"
+    assert "{m(Key(7, [])).log}" == "[1, 2]"
 
 struct NeverEq:
     id: int
@@ -305,7 +305,7 @@ fn never_list(k: NeverEq) -> List[int]:
     return [k.id]
 
 fn never_use(m: fn(NeverEq) -> List[int], out: Channel[str]):
-    out.send(str(m(NeverEq(1))))
+    out.send("{m(NeverEq(1))}")
 
 # A key that never equals itself is not found by the copy's read-back: the fill's own value is
 # returned and the call ends (a retry loop there hangs).
@@ -350,4 +350,4 @@ test fn a_function_valued_channel_result_leaves_the_readers_globals_writable():
     match rg:
         ?_: pass
         !e: assert false, e.message()
-    assert str(owner_global) == "[1, 3]", str(owner_global)
+    assert "{owner_global}" == "[1, 3]", "{owner_global}"

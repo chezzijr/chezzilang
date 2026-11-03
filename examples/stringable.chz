@@ -1,5 +1,5 @@
 # M10-G1 — the `Stringable` protocol: a struct with `str(self) -> str` customises how it is
-# rendered by `print`, the `str()` builtin, and `{…}` interpolation. Structs without it keep the
+# rendered by `print` and `{…}` interpolation. Structs without it keep the
 # default `Name(field=value, …)` repr. `Stringable` is a built-in protocol (like `Comparable`), so
 # it works as a generic bound.
 
@@ -20,7 +20,7 @@ fn show[T: Stringable](v: T) -> str:
 
 p := Point(1, 2)
 print(p)                            # dispatches to Point.str
-print(str(p))                       # str() builtin dispatches too
+print("{p}")                       # interpolation dispatches too
 print("p = {p}")                    # interpolation dispatches too
 print([Point(3, 4), Point(5, 6)])   # nested inside a list
 print((Point(1, 1), 5))             # nested inside a tuple

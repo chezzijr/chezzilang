@@ -61,8 +61,8 @@ fn numbers():
     print(2.0)                         # float prints with a decimal
     print(1 + 2.5)                     # int promoted to float in mixed arith
     print(10.0 / 4.0)
-    print(float(7) / float(2))
-    print(int(3.9))                    # truncates
+    print((7).to_float() / (2).to_float())
+    print((3.9).to_int())                  # truncates
     print(1 << 10)
     print(255 & 15)
     print(10 | 5)

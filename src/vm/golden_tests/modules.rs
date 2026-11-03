@@ -334,7 +334,7 @@ fn from_import_struct_ctor_parity() {
 #[test]
 fn synthetic_struct_qualified_ctor_parity() {
     let out = golden_entry(
-        "import std.regex\nm := regex.Match(\"hi\", 0, 2, [\"a\"])\nprint(m.text + str(m.start) + str(m.end) + \",\".join(m.groups))\n",
+        "import std.regex\nm := regex.Match(\"hi\", 0, 2, [\"a\"])\nprint(m.text + \"{m.start}\" + \"{m.end}\" + \",\".join(m.groups))\n",
     );
     assert_eq!(out, "hi02a\n");
 }
@@ -342,7 +342,7 @@ fn synthetic_struct_qualified_ctor_parity() {
 #[test]
 fn synthetic_struct_bare_ctor_on_import_parity() {
     let out = golden_entry(
-        "import Match from std.regex\nm: Match = Match(\"yo\", 1, 3, [])\nprint(m.text + str(m.end))\n",
+        "import Match from std.regex\nm: Match = Match(\"yo\", 1, 3, [])\nprint(m.text + \"{m.end}\")\n",
     );
     assert_eq!(out, "yo3\n");
 }
@@ -361,7 +361,7 @@ fn regex_offsets_are_codepoint_slicable_parity() {
                    \x20       match opt:\n\
                    \x20           ?m:\n\
                    \x20               print(s[m.start..m.end])\n\
-                   \x20               print(str(s[m.start..m.end] == m.text))\n\
+                   \x20               print(\"{s[m.start..m.end] == m.text}\")\n\
                    \x20           None: print(\"none\")\n\
                    \x20   !e: print(e)\n";
     let out = golden_entry(src);
@@ -390,7 +390,7 @@ fn regex_match_file_backed_three_engine_parity() {
     let src = "import std.regex\n\
                    import Match from std.regex\n\
                    fn describe(m: Match) -> str:\n\
-                   \x20   return m.text + \"@\" + str(m.start) + \"-\" + str(m.end) + \":\" + \",\".join(m.groups)\n\
+                   \x20   return m.text + \"@\" + \"{m.start}\" + \"-\" + \"{m.end}\" + \":\" + \",\".join(m.groups)\n\
                    lit: Match = regex.Match(\"lit\", 9, 12, [\"g\"])\n\
                    print(describe(lit))\n\
                    match regex.find(\"[0-9]+\", \"a12b\"):\n\
@@ -417,7 +417,7 @@ fn regex_match_file_backed_three_engine_parity() {
 #[test]
 fn synthetic_struct_from_import_ctor_parity() {
     let out = golden_entry(
-        "import Response from std.request\nr := Response(200, \"ok\", {\"k\": \"v\"})\nprint(str(r.status) + r.body + r.headers[\"k\"])\n",
+        "import Response from std.request\nr := Response(200, \"ok\", {\"k\": \"v\"})\nprint(\"{r.status}\" + r.body + r.headers[\"k\"])\n",
     );
     assert_eq!(out, "200okv\n");
 }
@@ -425,7 +425,7 @@ fn synthetic_struct_from_import_ctor_parity() {
 #[test]
 fn synthetic_procresult_qualified_ctor_parity() {
     let out = golden_entry(
-        "import std.process\np := process.ProcResult(\"out\", \"err\", 7)\nprint(p.stdout + p.stderr + str(p.code))\n",
+        "import std.process\np := process.ProcResult(\"out\", \"err\", 7)\nprint(p.stdout + p.stderr + \"{p.code}\")\n",
     );
     assert_eq!(out, "outerr7\n");
 }
@@ -446,9 +446,9 @@ fn process_request_file_backed_three_engine_parity() {
                    import ProcResult from std.process\n\
                    import Response from std.request\n\
                    fn describe_proc(p: ProcResult) -> str:\n\
-                   \x20   return p.stdout + \"|\" + p.stderr + \"|\" + str(p.code)\n\
+                   \x20   return p.stdout + \"|\" + p.stderr + \"|\" + \"{p.code}\"\n\
                    fn describe_resp(r: Response) -> str:\n\
-                   \x20   return str(r.status) + \"|\" + r.body + \"|\" + r.headers[\"k\"]\n\
+                   \x20   return \"{r.status}\" + \"|\" + r.body + \"|\" + r.headers[\"k\"]\n\
                    pr: ProcResult = process.ProcResult(\"out\", \"err\", 7)\n\
                    rp: Response = request.Response(200, \"body\", {\"k\": \"v\"})\n\
                    print(describe_proc(pr))\n\
@@ -482,11 +482,11 @@ fn pure_type_import_no_fault_both_engines() {
 #[test]
 fn user_struct_shadows_synthetic_name_parity() {
     assert_eq!(
-        golden_entry("struct Response:\n    code: int\nr := Response(7)\nprint(str(r.code))\n"),
+        golden_entry("struct Response:\n    code: int\nr := Response(7)\nprint(\"{r.code}\")\n"),
         "7\n"
     );
     assert_eq!(
-        golden_entry("struct Match:\n    score: int\nm := Match(3)\nprint(str(m.score))\n"),
+        golden_entry("struct Match:\n    score: int\nm := Match(3)\nprint(\"{m.score}\")\n"),
         "3\n"
     );
 }
@@ -1043,7 +1043,7 @@ fn request_get_parity_against_local_server() {
     });
 
     let src = format!(
-        "import std.request\nmatch request.get(\"http://{addr}/\"):\n    ?resp:\n        print(str(resp.status))\n        print(resp.body)\n        print(resp.headers[\"x-test\"])\n    !e: print(e)\n"
+        "import std.request\nmatch request.get(\"http://{addr}/\"):\n    ?resp:\n        print(\"{{resp.status}}\")\n        print(resp.body)\n        print(resp.headers[\"x-test\"])\n    !e: print(e)\n"
     );
     let out = golden_entry(&src);
     server.join().unwrap();
@@ -1161,7 +1161,7 @@ fn request_verbs_and_headers_parity_against_local_server() {
 
     // A PUT verb wrapper, then a header-carrying general DELETE.
     let src = format!(
-        "import std.request\nmatch request.put(\"http://{addr}/\", \"payload\"):\n    ?r: print(str(r.status))\n    !e: print(e)\nmatch request.request(\"DELETE\", \"http://{addr}/\", \"\", {{\"X-Custom\": \"value\"}}):\n    ?r: print(str(r.status))\n    !e: print(e)\n"
+        "import std.request\nmatch request.put(\"http://{addr}/\", \"payload\"):\n    ?r: print(\"{{r.status}}\")\n    !e: print(e)\nmatch request.request(\"DELETE\", \"http://{addr}/\", \"\", {{\"X-Custom\": \"value\"}}):\n    ?r: print(\"{{r.status}}\")\n    !e: print(e)\n"
     );
     let out = golden_entry(&src);
     server.join().unwrap();
@@ -1189,7 +1189,7 @@ fn regex_find_groups_and_span_parity() {
 match regex.find("([a-z]+)@([a-z]+)", "xx ann@host"):
     ?opt:
         match opt:
-            ?m: print(m.text + " " + str(m.start) + " " + ",".join(m.groups))
+            ?m: print(m.text + " " + "{m.start}" + " " + ",".join(m.groups))
             None: print("none")
     !e: print(e)
 "#,

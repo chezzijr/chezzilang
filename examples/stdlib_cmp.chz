@@ -14,7 +14,7 @@ struct Money:
         return self.cents == other.cents
 
     fn show(self) -> str:
-        return "$" + str(self.cents)
+        return "${self.cents}"
 
 # cmp.min / cmp.max / cmp.clamp over primitives
 print(cmp.max(3, 7))

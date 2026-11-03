@@ -20,23 +20,22 @@ Conventions:
 |----------|-----------|-------|
 | `print` | `print(...args: Any, sep: str = " ", end: str = "\n") -> None` | Write each argument (any type) to stdout. Variadic: declared as `native fn print(...args: Any, sep, end)` in `std/prelude.chz`; `Any` is the top type, so every value is accepted. The args are joined by `sep` (default `" "`) and `end` (default `"\n"`) is appended. Both are `str` and keyword-only (the only builtin that takes named arguments). `print("a", end="")` emits `a` with no newline; `print("a","b", sep="-", end="!")` emits `a-b!`. As a value, `print` has the type `fn(...Any, str = …, str = …) -> None` and fits a `fn(...Any) -> None` slot: `p := print; p(1, 2, sep="-")` emits `1-2`, and `fs := [print]; fs[0](1, 2)` emits `1 2`. Only a certain binding (`p := print`) takes `sep=`/`end=`; any other value call uses the defaults. A `fn(Any) -> None` slot does not accept `print` (Go rejects `fmt.Println` as a `func(any)` too). |
 | `Range` | `a..b` / `a..=b` / `..b` / `a..` / `..` / `Range(start, end, step = 1, inclusive = false)` | A range of ints as a VALUE (`std/prelude.chz`, in scope everywhere). Fields `start: int?`, `end: int?`, `step: int`, `inclusive: bool`. `Iterable[int]` (iterate it any number of times), `Contains[int]` (`x in r`), `len()` (needs both bounds), Eq and Hashable. A negative `step` counts down (`Range(10, 0, -1)` yields `10,9,…,1`); `step == 0` faults at construction. There is no `range()`: `range(n)` is `0..n`, `range(a, b)` is `a..b`, `range(a, b, c)` is `Range(a, b, c)`, a list is `List.from_iter(0..n)`. |
-| `int` | `int(x) -> int` | Convert from `int`/`float`/`bool`/`str` (parses a string; truncates a float). A string parse accepts PEP-515 single underscores between digits (`"1_000"` → `1000`), like the lexer's numeric literals. ASCII digits only: `int("١٢")`/`int("１２")` raise (Go/Rust semantics; CPython's `int()` accepts Unicode decimal digits). A bad string raises (recoverable); for `None` on failure use `s.to_int() -> int?`. |
-| `float` | `float(x) -> float` | Convert from `float`/`int`/`str`. A string parse accepts PEP-515 single underscores between digits (`"1_0.5"` → `10.5`). A bad string raises; for `None` on failure use `s.to_float() -> float?`. |
-| `bool` | `bool(x) -> bool` | Truthiness cast (never faults on a scalar). `int`: `0` → `false`, else `true`. `float`: `0.0`/`-0.0` → `false`, `NaN` → `true` (as Python), else `true`. `bool`: identity. `str`: `""` → `false`, else `true` (not a parse, so `bool(" ")` is `true`). |
-| `str` | `str(x) -> str` | Stringify any value. Every type satisfies the `Stringable` protocol (see `syntax.md`), so `[T: Stringable]` generics accept `List`, `Map`, structs, handles and the rest. A string NESTED inside a container, struct field or enum payload renders as its Python `repr`, quoted and escaped (`str(["a", "b"])` is `['a', 'b']`); a bare string stays its own characters (`str("a")` is `a`). One residual difference: a codepoint that CPython's Unicode build does not assign escapes there but prints literally here (a Unicode-version skew, see [`gaps.md`](../../contributing/gaps.md)). See `syntax.md` §"A nested `str` is quoted". |
+| `int` | `int() -> int` | The zero value `0` (a call on a scalar type's name sets no field). A conversion is a method: `f.to_int() -> int?` (truncates; `None` for NaN, ±inf and outside i64), `s.to_int() -> int?`, `s.parse_int() -> int!str`. An argument is a type error that names the method ([conversions](../spec/05-conversions.md)). |
+| `float` | `float() -> float` | The zero value `0.0`. Convert with `n.to_float() -> float` (an `int`), `s.to_float() -> float?`, `s.parse_float() -> float!str`. |
+| `bool` | `bool() -> bool` | The zero value `false`. There is no truthiness cast (Go, Rust): test `x != 0` or `s.len() > 0`. |
+| `str` | `str() -> str` | The zero value `""`. Display any value with interpolation, `"{x}"` (Go `fmt.Sprint`). Every type satisfies the `Stringable` protocol (see `syntax.md`), so `[T: Stringable]` generics accept `List`, `Map`, structs, handles and the rest. A string NESTED inside a container, struct field or enum payload renders as its Python `repr`, quoted and escaped (`"{xs}"` with `xs := ["a", "b"]` is `['a', 'b']`); a bare string stays its own characters. One residual difference: a codepoint that CPython's Unicode build does not assign escapes there but prints literally here (a Unicode-version skew, see [`gaps.md`](../../contributing/gaps.md)). See `syntax.md` §"A nested `str` is quoted". |
 | `ord` | `ord(s) -> int` | Unicode codepoint of `s`, which must be exactly **one character** (`ord("é")` → 233; `ord("ab")` faults, like Python). |
 | `chr` | `chr(code) -> str` | One-character string for codepoint `code`. |
 | `panic` | `panic(msg) -> never` | Raise a recoverable fault (caught by the nearest `recover:`, else aborts). Bottom-typed. |
 
-`int()`, `float()` and `bool()` reject a `List`/`Map`/`Set`/tuple/struct/enum/function/`T?`/`T!E`/
-`bytes`/`bytearray`/`Shared`/`Channel`/`Atomic`/`AtomicInt`/`RwShared`/`Executor`/`Socket`/`Listener`/
-`Writer`/`Reader`/`ptr` argument at CHECK time.
+`int(x)`, `float(x)`, `str(x)`, `bool(x)` and `bytes(x)` are type errors for every argument; the help
+names the form for the argument's type (`bytes.from_iter(xs)` / `bytes.zeroed(n)` for `bytes`).
 
 `Map` and `Set` test membership with `contains`. `bytes` and `bytearray` take `+`, `<` and `in` (an
 int byte, or a bytes/bytearray subsequence: `Contains[int]` and `Contains[bytes]`).
 
-The universe builtins `ord`/`chr`/`panic` (first-class `native fn`) and `int`/`float`/`str`/`bytes`/
-`bytearray` (`native ctor`, not first-class) declare their signatures in Chezzi, in the always-linked
+The universe builtins `ord`/`chr`/`panic` (first-class `native fn`) and `int`/`float`/`bool`/`str`/`bytes`/
+`bytearray` (`native ctor`, no parameter, not first-class) declare their signatures in Chezzi, in the always-linked
 `std/prelude.chz`; the engine binds their bodies by name. `print` (variadic) and the empty `List`/`Map`/`Set`
 constructors are engine-synthetic. The static methods below (`List.from_iter`, `bytes.zeroed`) are
 `native fn` decls with no `self` inside each type's `native struct` in the prelude. A `native fn`/`native ctor` declaration is legal only in the prelude
@@ -75,7 +74,6 @@ the concurrency rows use **Go 1.26** (go1.26.6), because Chezzi's concurrency pr
 | `m[k]`, key absent | `key not found: 'zz'` | `KeyError: 'zz'` | **`m.get(k) -> V?`** (Python `dict.get` → `None`) |
 | `xs.remove(i)` out of range | `index 9 out of bounds (len 3)` | `IndexError: pop index out of range` | — |
 | `xs.chunk(n)` / `xs.windows(n)`, `n <= 0` | `chunk/window size must be positive, got 0` | `ValueError: n must be at least one` (`itertools.batched`) | — |
-| `int(s)` / `float(s)` on a bad string | `int(): cannot parse 'abc' as an integer`; a well-formed numeral outside i64 → `int(): '9223372036854775808' overflows i64 (range …)` (`s.parse_int()` fails with the same text minus `int(): `) | `ValueError: invalid literal for int() with base 10: 'abc'` | **`s.parse_int()`/`parse_float() -> T!str`**, `s.to_int()/to_float() -> T?` |
 | `chr(code)` out of range | `chr(): -1 is not a valid Unicode codepoint` | `ValueError: chr() arg not in range(0x110000)` | — |
 | `ord(s)` on `""` | `ord() of an empty string` | `TypeError: ord() expected a character, but string of length 0 found` | — |
 | `ord(s)` on a multi-**character** string | `ord() expects a 1-character str, got 2 characters` | `TypeError: ord() expected a character, but string of length 2 found` | — |

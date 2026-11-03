@@ -286,12 +286,12 @@ fn free_fn_hof_returnonly_pinned_mismatch_rejected() {
     // whose unannotated closure returns a MISMATCHING type (`str`) must be a clean type error, not
     // laundered onto the pinned `int`. Proves the helper's SEPARATE concrete-return check is load-bearing.
     entry_rejects(
-        "fn f[U](init: U, g: fn(int) -> U, xs: List[int]) -> U:\n    return g(xs[0])\nfn main():\n    y := f(0, fn(x): str(x), [1, 2, 3])\n    print(y)\n",
+        "fn f[U](init: U, g: fn(int) -> U, xs: List[int]) -> U:\n    return g(xs[0])\nfn main():\n    y := f(0, fn(x): \"{x}\", [1, 2, 3])\n    print(y)\n",
         "returns",
     );
     // apply-shape sibling-pin variant: `B` pinned to `int` by the `sink: B` = 99 arg, closure returns str.
     entry_rejects(
-        "fn apply[A, B](f: fn(A) -> B, a: A, sink: B) -> B:\n    return sink\nfn main():\n    y := apply(fn(x): str(x), 5, 99)\n    print(y)\n",
+        "fn apply[A, B](f: fn(A) -> B, a: A, sink: B) -> B:\n    return sink\nfn main():\n    y := apply(fn(x): \"{x}\", 5, 99)\n    print(y)\n",
         "returns",
     );
 }
@@ -336,7 +336,7 @@ fn free_fn_hof_returnonly_boundaries() {
     );
     // p11 — multiple return-only params `[U, V]`; only U flows to the result, both recovered.
     entry_ok(
-        "fn two[U, V](xs: List[int], f: fn(int) -> U, g: fn(int) -> V) -> U:\n    return f(xs[0])\nfn main():\n    y := two([1, 2, 3], fn(x): x * 2, fn(x): str(x))\n    print(y + 1)\n",
+        "fn two[U, V](xs: List[int], f: fn(int) -> U, g: fn(int) -> V) -> U:\n    return f(xs[0])\nfn main():\n    y := two([1, 2, 3], fn(x): x * 2, fn(x): \"{x}\")\n    print(y + 1)\n",
     );
     // p9 — chained/nested free HOFs `mymap(mymap(...))`.
     entry_ok(
@@ -344,7 +344,7 @@ fn free_fn_hof_returnonly_boundaries() {
     );
     // p17 — str return-only recovered and used via `.len()`.
     entry_ok(
-        "fn mymap[U](xs: List[int], f: fn(int) -> U) -> List[U]:\n    return xs.map(f)\nfn main():\n    ys := mymap([1, 2, 3], fn(x): str(x))\n    print(ys[0].len())\n",
+        "fn mymap[U](xs: List[int], f: fn(int) -> U) -> List[U]:\n    return xs.map(f)\nfn main():\n    ys := mymap([1, 2, 3], fn(x): \"{x}\")\n    print(ys[0].len())\n",
     );
 }
 
@@ -361,7 +361,7 @@ fn free_fn_hof_must_not_regress() {
     );
     // p7 — closure body producing str, used via `.len()` / concat.
     entry_ok(
-        "fn keep[U](xs: List[int], f: fn(int) -> U) -> List[U]:\n    return xs.map(f)\nfn main():\n    ys := keep([1, 2, 3], fn(x): str(x))\n    print(ys[0].len())\n",
+        "fn keep[U](xs: List[int], f: fn(int) -> U) -> List[U]:\n    return xs.map(f)\nfn main():\n    ys := keep([1, 2, 3], fn(x): \"{x}\")\n    print(ys[0].len())\n",
     );
     // annotated closure on a leaking body: `fn(x): x*2` param annotated, return still recovered.
     entry_ok(
@@ -416,7 +416,7 @@ fn free_fn_hof_sibling_closure_param_use_recovers() {
     // The Bug-1 recovery must NOT pre-empt a sibling VALUE arg that pins the same return-only param: a
     // concrete closure return that CONFLICTS with a value-arg pin is still rejected (no binding race).
     entry_rejects(
-        "fn apply[A, B](f: fn(A) -> B, a: A, sink: B) -> B:\n    return sink\nfn main():\n    y := apply(fn(x): str(x), 5, 99)\n    print(y)\n",
+        "fn apply[A, B](f: fn(A) -> B, a: A, sink: B) -> B:\n    return sink\nfn main():\n    y := apply(fn(x): \"{x}\", 5, 99)\n    print(y)\n",
         "returns",
     );
 }
@@ -433,7 +433,7 @@ fn free_fn_hof_conflicting_returnonly_closures_rejected() {
         "returns",
     );
     entry_rejects(
-        "fn two[U](f: fn(int) -> U, g: fn(int) -> U) -> U:\n    return f(0)\nfn main():\n    r := two(fn(x): x * 2, fn(x): str(x))\n    print(r + 1)\n",
+        "fn two[U](f: fn(int) -> U, g: fn(int) -> U) -> U:\n    return f(0)\nfn main():\n    r := two(fn(x): x * 2, fn(x): \"{x}\")\n    print(r + 1)\n",
         "returns",
     );
     // Two closures that AGREE on the return-only param still ACCEPT (recovered, no false positive).
@@ -1855,7 +1855,7 @@ fn uninstantiated_generic_fn_value_as_a_generic_ctor_arg_rejected() {
     );
     // …while the pinning path is untouched: `.map`/`.fold`/`.filter` still pin a bare generic fn.
     ok(
-        "fn conv[T](x: T) -> str:\n    return str(x)\n\nfn main():\n    xs := [1, 2, 3].map(conv)\n    s: str = xs[0]\n    print(s)\n",
+        "fn conv[T](x: T) -> str:\n    return \"{x}\"\n\nfn main():\n    xs := [1, 2, 3].map(conv)\n    s: str = xs[0]\n    print(s)\n",
     );
     ok(
         "import Add from std.ops\nfn add[T: Add](a: T, b: T) -> T:\n    return a + b\n\nfn main():\n    n: int = [1, 2, 3].fold(0, add)\n    print(n)\n",
@@ -2319,7 +2319,7 @@ fn local_shadowing_generic_fn_name_indexes_normally() {
 fn generic_fn_value_into_builtin_map_return_concrete_ok() {
     // `.map`'s slot fn(int) -> U pins conv's own T=int; the map result is List[str].
     ok(
-        "fn conv[T](x: T) -> str:\n    return str(x)\n\nfn main():\n    xs := [1, 2, 3].map(conv)\n    s: str = xs[0]\n    print(s)\n",
+        "fn conv[T](x: T) -> str:\n    return \"{x}\"\n\nfn main():\n    xs := [1, 2, 3].map(conv)\n    s: str = xs[0]\n    print(s)\n",
     );
 }
 
@@ -2353,7 +2353,7 @@ fn generic_fn_value_two_distinct_pins_no_launder_ok() {
     // Same conv pinned once into .map (str-returning slot) and once into a user HOF with a
     // fn(int) -> str param; each call site gets a FRESH substitution map so neither launders.
     ok(concat!(
-        "fn conv[T](x: T) -> str:\n    return str(x)\n",
+        "fn conv[T](x: T) -> str:\n    return \"{{x}}\"\n",
         "\nfn use2(f: fn(int) -> str) -> str:\n    return f(9)\n",
         "\nfn main():\n    a := [1, 2, 3].map(conv)\n    sa: str = a[0]\n    b := use2(conv)\n    print(sa)\n    print(b)\n",
     ));

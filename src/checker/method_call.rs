@@ -564,19 +564,22 @@ impl Checker {
                 );
                 Ty::Unknown
             }
-            // Core-type methods (M6): built-in methods on `str` and `list[T]`.
-            Ty::Str => {
-                // The sigs are harvested from `std/prelude.chz`'s `native struct str` (re-seeded by
-                // `seed_stdlib_structs`); `str` is non-generic so no type args are substituted.
-                if let Some(sig) = self.native_method_sig("str", method, &[]) {
+            // A non-generic builtin type's methods: the sigs are harvested from its `native struct`
+            // decl in `std/prelude.chz` (re-seeded by `seed_stdlib_structs`), with no type args.
+            Ty::Int | Ty::Float | Ty::Bool | Ty::Str | Ty::Bytes => {
+                let key = super::fn_writes::native_receiver(&obj_ty).unwrap_or_default();
+                if let Some(sig) = self.native_method_sig(key, method, &[]) {
                     self.record_method_hover(name_span, &sig);
                     self.check_args(method, &sig.params, args, span);
                     return sig.ret;
                 }
                 self.infer_all(args);
-                let names = self.method_names("str");
-                let message = format!("type str has no method '{method}'");
-                self.error_help(name_span, message, suggest::did_you_mean(method, &names));
+                let names = self.method_names(key);
+                self.error_help(
+                    name_span,
+                    format!("type {obj_ty} has no method '{method}'"),
+                    suggest::did_you_mean(method, &names),
+                );
                 Ty::Unknown
             }
             Ty::List(elem) => {
@@ -680,24 +683,6 @@ impl Checker {
                 self.error_help(
                     name_span,
                     format!("type {obj_ty} has no method '{method}'"),
-                    suggest::did_you_mean(method, &names),
-                );
-                Ty::Unknown
-            }
-            // `bytes` core methods (immutable byte sequence): only `decode() -> str` (UTF-8).
-            Ty::Bytes => {
-                // The sigs are harvested from `std/prelude.chz`'s `native struct bytes` (re-seeded by
-                // `seed_stdlib_structs`); `bytes` is non-generic so no type args are substituted.
-                if let Some(sig) = self.native_method_sig("bytes", method, &[]) {
-                    self.record_method_hover(name_span, &sig);
-                    self.check_args(method, &sig.params, args, span);
-                    return sig.ret;
-                }
-                self.infer_all(args);
-                let names = self.method_names("bytes");
-                self.error_help(
-                    name_span,
-                    format!("type bytes has no method '{method}'"),
                     suggest::did_you_mean(method, &names),
                 );
                 Ty::Unknown
@@ -1261,10 +1246,7 @@ impl Checker {
                 self.infer_all(args);
                 Ty::Unknown
             }
-            other @ Ty::Int
-            | other @ Ty::Float
-            | other @ Ty::Bool
-            | other @ Ty::Nil
+            other @ Ty::Nil
             | other @ Ty::Func { .. }
             | other @ Ty::Tuple(_)
             | other @ Ty::Result(..)

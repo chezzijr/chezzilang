@@ -14,37 +14,37 @@ test fn different_lists_no_longer_print_the_same():
     a := ["a", "b"]
     b := ["a, b"]
     assert a != b
-    assert str(a) != str(b), "str() must distinguish values that != distinguishes"
-    assert str(a) == "['a', 'b']"
-    assert str(b) == "['a, b']"
+    assert "{a}" != "{b}", "display must distinguish values that != distinguishes"
+    assert "{a}" == "['a', 'b']"
+    assert "{b}" == "['a, b']"
 
 test fn empty_string_element_is_visible():
-    assert str([""]) == "['']"
-    assert str(["", ""]) == "['', '']"
+    assert "{[""]}" == "['']"
+    assert "{["", ""]}" == "['', '']"
     assert [""].len() == 1
 
 # ---- containers ----
 
 test fn containers_quote_their_string_elements():
-    assert str(["a"]) == "['a']"
-    assert str(("x", 1)) == "('x', 1)"
-    assert str({"k": "v"}) == "{{'k': 'v'}}"
-    assert str({"a": [1, 2]}) == "{{'a': [1, 2]}}"
-    assert str([["a"], ["b"]]) == "[['a'], ['b']]"
+    assert "{["a"]}" == "['a']"
+    assert "{("x", 1)}" == "('x', 1)"
+    assert "{ {"k": "v"} }" == "{{'k': 'v'}}"
+    assert "{ {"a": [1, 2]} }" == "{{'a': [1, 2]}}"
+    assert "{[["a"], ["b"]]}" == "[['a'], ['b']]"
 
 test fn a_bare_string_is_not_quoted():
-    assert str("a") == "a"
+    assert "a" == "a"
     assert "{'a'}" == "a"
-    assert str("") == ""
+    assert "" == ""
 
 # ---- quote choice + escapes (CPython rules) ----
 
 test fn quote_choice_and_escapes():
     # A `'` in the string flips the quote to `"`; with both quotes present, `'` wins and escapes.
-    assert str(["it's"]) == "[\"it's\"]"
-    assert str(["a\nb"]) == "['a\\nb']"
-    assert str(["a\tb"]) == "['a\\tb']"
-    assert str(["back\\slash"]) == "['back\\\\slash']"
+    assert "{["it's"]}" == "[\"it's\"]"
+    assert "{["a\nb"]}" == "['a\\nb']"
+    assert "{["a\tb"]}" == "['a\\tb']"
+    assert "{["back\\slash"]}" == "['back\\\\slash']"
 
 # ---- structs, enum payloads ----
 
@@ -53,20 +53,20 @@ struct S:
     n: int
 
 test fn struct_fields_are_quoted():
-    assert str(S(name="hi", n=1)) == "S(name='hi', n=1)"
-    assert str([S(name="hi", n=1)]) == "[S(name='hi', n=1)]"
+    assert "{S(name="hi", n=1)}" == "S(name='hi', n=1)"
+    assert "{[S(name="hi", n=1)]}" == "[S(name='hi', n=1)]"
 
 # A carrier prints as the user writes it: its payload is bare at the top level and quoted when
 # the carrier itself is nested.
 test fn carrier_payload_is_quoted_only_when_nested():
-    assert str(?"h") == "h"
-    assert str([?"h"]) == "['h']"
+    assert "{?"h"}" == "h"
+    assert "{[?"h"]}" == "['h']"
     r := recover: [1][5]
     match r:
         ?_: assert false, "expected a fault"
         !e:
-            assert str(r).starts_with("!index 5"), "a top-level error payload is bare: {r}"
-            assert str([r]).starts_with("[!'index 5"), "a nested error payload is quoted: {[r]}"
+            assert "{r}".starts_with("!index 5"), "a top-level error payload is bare: {r}"
+            assert "{[r]}".starts_with("[!'index 5"), "a nested error payload is quoted: {[r]}"
 
 # ---- a display hook's own output is NOT a nested value ----
 
@@ -77,8 +77,8 @@ struct Tag:
         return "<{self.v}>"
 
 test fn display_hook_output_is_never_quoted():
-    assert str(Tag(v=7)) == "<7>"
-    assert str([Tag(v=7)]) == "[<7>]", "the hook renders the object; it is not a nested string"
+    assert "{Tag(v=7)}" == "<7>"
+    assert "{[Tag(v=7)]}" == "[<7>]", "the hook renders the object; it is not a nested string"
 
 # ---- the OTHER renderer: a wrapper box must agree with the value it holds ----
 
@@ -109,18 +109,18 @@ test fn shared_box_renders_a_cycle_and_an_alias_like_its_contents():
 test fn non_printable_characters_escape():
     # Otherwise a no-break space is indistinguishable from a space, and a zero-width space from "" —
     # the same defect, one alphabet over. Widths + lowercase hex are CPython's.
-    assert str(["\u{00a0}", " "]) == "['\\xa0', ' ']"
-    assert str(["\u{200b}", ""]) == "['\\u200b', '']"
-    assert str(["\u{1d173}"]) == "['\\U0001d173']"
+    assert "{["\u{00a0}", " "]}" == "['\\xa0', ' ']"
+    assert "{["\u{200b}", ""]}" == "['\\u200b', '']"
+    assert "{["\u{1d173}"]}" == "['\\U0001d173']"
     # Printable non-ASCII stays literal.
-    assert str(["é", "😀"]) == "['é', '😀']"
+    assert "{["é", "😀"]}" == "['é', '😀']"
 
 # Combining marks (Mn/Mc/Me) are the VISIBLE content of Devanagari/Hebrew/Arabic/Thai text, not
 # invisible whitespace like U+00A0/U+200B above — `char::escape_debug` wrongly lumps them in with
 # those, so a nested Devanagari string renders as escaped hex instead of literal text (TICKET-081/
 # TICKET-088, `docs/contributing/gaps.md` W7-25). CPython's `repr` prints them literally.
 test fn combining_marks_stay_literal_in_nested_repr():
-    assert str(["नमस्ते"]) == "['नमस्ते']"
+    assert "{["नमस्ते"]}" == "['नमस्ते']"
 
 # A 1-tuple keeps its comma inside a box too (S2-7, TICKET-273): the box renderer and `print(x)`
 # read one rule, `tuple_text` (`base/words.rs`).

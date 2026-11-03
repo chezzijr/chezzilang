@@ -17,11 +17,11 @@ fn read_tokens() -> List[str]:
 
 fn main():
     toks := read_tokens()
-    n := int(toks[0])
-    x := int(toks[1])
+    n := toks[0].to_int() ?? panic("input is not an int")
+    x := toks[1].to_int() ?? panic("input is not an int")
     coins: List[int] = []
     for i in 0..n:
-        coins.push(int(toks[2 + i]))
+        coins.push(toks[2 + i].to_int() ?? panic("input is not an int"))
 
     MOD := 1000000007
     ways: List[int] = []
@@ -34,6 +34,6 @@ fn main():
             if c <= s:
                 acc = (acc + ways[s - c]) % MOD
         ways[s] = acc
-    io.print(str(ways[x]))
+    io.print("{ways[x]}")
 
 main()

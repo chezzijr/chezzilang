@@ -718,7 +718,7 @@ pub(crate) enum IntParseErr {
     Overflow,
 }
 
-/// The one PEP-515 (underscore-stripping) base-10 integer parse, shared by every `int()`/
+/// The one PEP-515 (underscore-stripping) base-10 integer parse, shared by every
 /// `parse_int`-family caller, so overflow is diagnosed identically everywhere (W12-18a; DEC-098).
 pub(crate) fn parse_i64_pep515(s: &str) -> Result<i64, IntParseErr> {
     let Some(t) = strip_num_underscores(s) else {

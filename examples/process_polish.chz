@@ -7,20 +7,20 @@ import std.process
 
 # --- run: full structured result over `sh -c` ---
 match process.run("echo structured"):
-    ?r: print("run stdout: " + r.stdout.trim() + " code: " + str(r.code))
+    ?r: print("run stdout: " + r.stdout.trim() + " code: {r.code}")
     !e: print("run error: " + e.message())
 
 # A non-zero exit is success, carrying both streams + the code (NOT an error, NOT discarded stdout).
 match process.run("echo out; echo oops 1>&2; exit 5"):
-    ?r: print("nonzero stdout: " + r.stdout.trim() + " stderr: " + r.stderr.trim() + " code: " + str(r.code))
+    ?r: print("nonzero stdout: " + r.stdout.trim() + " stderr: " + r.stderr.trim() + " code: {r.code}")
     !e: print("run error: " + e.message())
 
 # --- run_args: no shell → metacharacters are literal (injection-safe) ---
 match process.run_args("echo", ["$(echo PWNED)", ";", "&&"]):
-    ?r: print("args stdout: " + r.stdout.trim() + " code: " + str(r.code))
+    ?r: print("args stdout: " + r.stdout.trim() + " code: {r.code}")
     !e: print("args error: " + e.message())
 
 # A spawn failure (no such program) is a catchable an error, never a panic.
 match process.run_args("no-such-prog-xyz", []):
-    ?r: print("unexpected ok code: " + str(r.code))
+    ?r: print("unexpected ok code: {r.code}")
     !e: print("spawn failed")

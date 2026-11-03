@@ -206,7 +206,7 @@ fn json_stringify_non_finite_faults_parity() {
 #[test]
 fn python_float_repr_str_parity() {
     let out = golden_entry(
-        "print(str(1e16))\nprint(1.5e300)\nprint(0.00001)\nprint(str(0 - 2.5e-8))\nprint(1.0)\nprint(0.0001)\nprint(1e15)\nprint(1e100)\n",
+        "print(\"{1e16}\")\nprint(1.5e300)\nprint(0.00001)\nprint(\"{0 - 2.5e-8}\")\nprint(1.0)\nprint(0.0001)\nprint(1e15)\nprint(1e100)\n",
     );
     assert_eq!(
         out,
@@ -254,7 +254,7 @@ fn json_decode_error_parity() {
 #[test]
 fn json_as_int_out_of_range_parity() {
     let out = golden_entry(
-        "import std.json\nfn a(s: str) -> str:\n    match json.parse(s):\n        ?j:\n            match json.as_int(j):\n                ?v: return \"SOME \" + str(v)\n                None: return \"NONE\"\n        !e: return \"PARSEERR\"\nprint(a(\"9999999999999999999\"))\nprint(a(\"42\"))\nprint(a(\"9223372036854775807\"))\nprint(a(\"-9223372036854775808\"))\nprint(a(\"2.5\"))\nprint(a(\"1e400\"))\n",
+        "import std.json\nfn a(s: str) -> str:\n    match json.parse(s):\n        ?j:\n            match json.as_int(j):\n                ?v: return \"SOME \" + \"{v}\"\n                None: return \"NONE\"\n        !e: return \"PARSEERR\"\nprint(a(\"9999999999999999999\"))\nprint(a(\"42\"))\nprint(a(\"9223372036854775807\"))\nprint(a(\"-9223372036854775808\"))\nprint(a(\"2.5\"))\nprint(a(\"1e400\"))\n",
     );
     assert_eq!(
         out,
@@ -308,7 +308,7 @@ fn i64_min_literal_runs_parity() {
 #[test]
 fn json_decode_int_out_of_range_parity() {
     let out = golden_entry(
-        "import std.json\nfn d(s: str) -> str:\n    match json.decode[int](s):\n        ?v: return \"OK \" + str(v)\n        !e: return \"ERR\"\nprint(d(\"1000000000000000000000000000000\"))\nprint(d(\"-1000000000000000000000000000000\"))\nprint(d(\"18446744073709551615\"))\nprint(d(\"9223372036854775807\"))\nprint(d(\"-9223372036854775808\"))\nprint(d(\"42\"))\n",
+        "import std.json\nfn d(s: str) -> str:\n    match json.decode[int](s):\n        ?v: return \"OK \" + \"{v}\"\n        !e: return \"ERR\"\nprint(d(\"1000000000000000000000000000000\"))\nprint(d(\"-1000000000000000000000000000000\"))\nprint(d(\"18446744073709551615\"))\nprint(d(\"9223372036854775807\"))\nprint(d(\"-9223372036854775808\"))\nprint(d(\"42\"))\n",
     );
     assert_eq!(
         out,
@@ -364,9 +364,9 @@ fn fs_stat_walk_fileinfo_parity() {
          import FileInfo from std.fs\n\
          match fs.stat(\"{file}\"):\n\
          \x20   ?fi:\n\
-         \x20       print(str(fi.size))\n\
-         \x20       print(str(fi.is_file))\n\
-         \x20       print(str(fi.is_dir))\n\
+         \x20       print(\"{{fi.size}}\")\n\
+         \x20       print(\"{{fi.is_file}}\")\n\
+         \x20       print(\"{{fi.is_dir}}\")\n\
          \x20   !e: print(\"staterr\")\n\
          match fs.walk(\"{root}\"):\n\
          \x20   ?xs:\n\

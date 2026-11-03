@@ -68,13 +68,13 @@ fn dial_write(addr: str) -> int:
 
 fn make_strs() -> List[str]:
     _ := busy(4)
-    return ["a", "b", str(busy(1))]
+    return ["a", "b", "{busy(1)}"]
 
 fn by_value(a: ffi.ptr, b: ffi.ptr) -> int:
     x := ffi.load_int64(a)
     y := ffi.load_int64(b)
     # Allocates on every call: a callback runs attached.
-    pair := str([x, y])
+    pair := "{[x, y]}"
     if pair.len() == 0:
         return 0
     if x < y:
@@ -197,13 +197,13 @@ test fn main_accept_in_place_on_a_fresh_listener_gets_its_peer():
 # `main` joins its `parallel:` in the Help mode: it waits detached and runs the fibers on a
 # joiner shell. Its own values are in the roots it published.
 test fn a_helping_join_keeps_the_joiners_values():
-    keep := [str(busy(1)), "k"]
+    keep := ["{busy(1)}", "k"]
     out := Channel[List[str]](2)
     parallel:
         spawn:
-            out.send([str(busy(2))])
+            out.send(["{busy(2)}"])
         spawn:
-            out.send([str(busy(3))])
+            out.send(["{busy(3)}"])
     got := [out.recv()[0], out.recv()[0]]
     assert keep == ["19900", "k"]
     assert got.contains("39800") and got.contains("59700")
@@ -233,5 +233,5 @@ test fn a_print_of_a_writer_in_use_reads_open():
                 _ := w.get().write("")
         spawn:
             _ := busy(1)
-            out.set([str(w.get())])
+            out.set(["{w.get()}"])
     assert out.get() == ["Writer(open)"]

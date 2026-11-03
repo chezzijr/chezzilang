@@ -50,15 +50,15 @@ test fn copy_is_independent():
 
 test fn copy_carries_a_defaulted_field():
     p := P(1, "hi")
-    assert str(P(p.x)) == "P(x=1, tag='none')"
-    assert str(p.copy()) == "P(x=1, tag='hi')", "copy() must carry a field a hand-written duplicate drops"
+    assert "{P(p.x)}" == "P(x=1, tag='none')"
+    assert "{p.copy()}" == "P(x=1, tag='hi')", "copy() must carry a field a hand-written duplicate drops"
 
 test fn copy_covers_the_spill_field_layout():
     b := Big(1, 2, 3, 4, 9)
     c := b.copy()
     c.a = 50
-    assert str(c) == "Big(a=50, b=2, c=3, d=4, e=9)"
-    assert str(b) == "Big(a=1, b=2, c=3, d=4, e=9)"
+    assert "{c}" == "Big(a=50, b=2, c=3, d=4, e=9)"
+    assert "{b}" == "Big(a=1, b=2, c=3, d=4, e=9)"
 
 test fn copy_shares_a_list_field():
     n := Nest([1, 2], P(4, "z"))
@@ -102,7 +102,7 @@ test fn copy_works_on_a_native_struct():
                     d := mm.copy()
                     d.start = 9
                     assert mm.start == 1
-                    assert str(d) == "Match(text='1', start=9, end=2, groups=[])"
+                    assert "{d}" == "Match(text='1', start=9, end=2, groups=[])"
                 None:
                     assert false, "regex.find must match the digit run"
         !e:

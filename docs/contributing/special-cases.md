@@ -123,7 +123,7 @@ Sibling types that differed with no stated reason:
 | `int? < int?`, `false < true` (2026-11-03) | `int!str < int!str` | Rust orders both |
 | struct has automatic `.copy()` | enum has none | Rust derives `Clone` on both |
 | `iter.islice({1, 2}, 1)`, `[1.5].sum()` | `iter.enumerate({1, 2})`, `iter.sum([1.5])`, `{1, 2}.map(f)`, `xs.extend({2})`, `",".join({"a"})` | CPython works |
-| `bytearray()`, `bytearray.zeroed(2)`, `bytes.zeroed(2)`, `bytes.from_iter({1, 2})` (2026-11-03) | `bytes()` | CPython works |
+| `bytearray()`, `bytes()`, `bytearray.zeroed(2)`, `bytes.zeroed(2)`, `bytes.from_iter({1, 2})` (2026-11-03) | — | CPython works |
 | `match` literal patterns for int, float (2026-11-03), str, bool, tuple | bytes | CPython `case 1.5:` |
 
 Hook spelling (U16): `remove` returns `V?` on Map, `bool` on Set, nothing on the concurrent
@@ -245,9 +245,8 @@ line joining; every pattern form; numeric literal edges; all 143 code blocks of 
 | divergence is decided by name | only `panic` is bottom-typed; `os.exit` and a user `fn die(msg: str): panic(msg)` are ordinary calls (TICKET-263, Go `os.Exit`), so a caller "can fall off the end" and the error says to write `panic(...)` after the call. No `never` type |
 | `Error.line()`, `.col()`, `.file()` | exist only on the bare `Error` existential |
 
-Builtins the language itself cannot express: `int()`/`float()`/`bool()` (an untyped parameter, overloaded
-by argument type); `bytes()`/`bytearray()` (overloaded by type and arity); `List()`/`Set()`/`Map()` (an
-internal union, not `Iterable[T]`); `Channel`, `Shared`, `RwShared`, `Atomic`, `Executor` (dedicated
+Builtins the language itself cannot express: `List()`/`Set()`/`Map()` (an internal union, not
+`Iterable[T]`); `Channel`, `Shared`, `RwShared`, `Atomic`, `Executor` (dedicated
 opcodes and type variants); `json.decode[T]`; the signatures of `Shared.read` and `Executor.submit`
 (attached in Rust).
 
@@ -286,6 +285,7 @@ Gates stop new disagreement. The unifying rules above repair what exists.
 | one method table per type; the run time dispatches from the table, not from name strings | the 226 name tests in `src/vm` |
 | no wildcard arm on a language enum (G1) | the "new construct silently absorbed" class |
 | a builtin type's constructor only makes an empty value; `T.from_iter(xs)` / `T.zeroed(n)` are static `native fn` decls of its prelude `native struct` (2026-11-03) | the checker's and the VM's per-type constructor-with-argument arms, the hand list of prelude type names in `hoist.rs` / `graph_pass.rs`, and `infer_conv_arg` |
+| a scalar's constructor gives its zero value (`int()` is `0`); a conversion is a `native fn` method of the source type's prelude `native struct` (`n.to_float()`, `f.to_int()`), and display is `"{x}"` (2026-11-03) | the cast arms with an argument (`builtin_int`/`float`/`bool`/`str` in the VM), the cast domain list `reject_non_scalar_cast`, and the scalar receivers' separate "no method" arm |
 
 Do these before the JIT: a JIT adds one more copy of each by-name dispatch.
 

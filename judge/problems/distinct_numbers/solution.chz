@@ -17,10 +17,10 @@ fn read_tokens() -> List[str]:
 
 fn main():
     toks := read_tokens()
-    n := int(toks[0])
+    n := toks[0].to_int() ?? panic("input is not an int")
     seen: Set[int] = Set()
     for i in 0..n:
-        seen.insert(int(toks[1 + i]))
-    io.print(str(seen.len()))
+        seen.insert(toks[1 + i].to_int() ?? panic("input is not an int"))
+    io.print("{seen.len()}")
 
 main()

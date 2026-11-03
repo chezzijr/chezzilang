@@ -5,7 +5,7 @@
 # Chezzi std modules coexist with the native ones (std.io/math/os) in the same program.
 
 # `Stringable` -- anything with `str(self) -> str`. A bound needs `import Stringable from std.string`;
-# interpolation and `str(x)` need no import.
+# interpolation (`"{x}"`) needs no import.
 protocol Stringable:
     fn str(self) -> str
 

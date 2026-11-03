@@ -1019,8 +1019,8 @@ fn vm_bytes_repr_and_map_key() {
     // Display/str repr is Python b'...'; bytes works as a map key (Hashable).
     let src = concat!(
         "fn main():\n",
-        "    print(b\"hi\\n\")\n",      // b'hi\n'
-        "    print(str(b\"\\xFF\"))\n", // b'\xff'
+        "    print(b\"hi\\n\")\n",       // b'hi\n'
+        "    print(\"{b\"\\xFF\"}\")\n", // b'\xff'
         "    m := {b\"a\": 1, b\"b\": 2}\n",
         "    print(m[b\"a\"])\n", // 1
         "    print(m[b\"b\"])\n", // 2

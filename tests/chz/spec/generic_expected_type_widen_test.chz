@@ -41,12 +41,12 @@ test fn expected_type_widen_carries_the_real_value_at_run_time():
 
 test fn expected_type_widen_at_a_function_argument_slot():
     fn f(x: Box[Any]) -> str:
-        return str(x.v)
+        return "{x.v}"
     assert f(Box(1)) == "1"
 
 test fn expected_type_widen_at_an_enum_variant():
     e: E[Named] = E.V(A())
-    assert str(e) == "V(A())"
+    assert "{e}" == "V(A())"
 
 test fn expected_type_widen_through_a_free_fn_return():
     c: Box[Named] = mk(A())

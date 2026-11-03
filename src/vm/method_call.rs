@@ -344,7 +344,7 @@ impl Vm {
         }
         // `str` on a scalar: int/float/bool/str intrinsically satisfy `Stringable`, so an erased
         // generic body may call `.str()` on a concrete scalar. Render via `stringify` (the same path
-        // `str(x)`/interpolation use) and alloc a fresh `Obj::Str`. The already-`Str` receiver (T=str)
+        // interpolation uses) and alloc a fresh `Obj::Str`. The already-`Str` receiver (T=str)
         // MUST be intercepted here too — otherwise it would fall to struct-method dispatch and fault;
         // `stringify` returns its raw unquoted contents. GC-safe: `recv` is already popped, and for a
         // scalar receiver `stringify` runs no user code, so the owned `String` exists before the alloc.
@@ -362,17 +362,11 @@ impl Vm {
             }
         }
         let Some(h) = recv.as_obj() else {
-            // W6-3 — an inline scalar (int/float/bool/nil) receiver: the checker grants int/float the
-            // arith operator protocols and int/bool `Hashable` intrinsically, so answer those here.
-            // Miss-only, so this costs nothing for any resolvable call.
-            if let Some(v) = self.intrinsic_proto_method(recv, method, &args, span)? {
-                self.push(v);
-                return Ok(());
-            }
-            return Err(self.err(
-                format!("type {} has no method '{method}'", self.type_name(recv)),
-                span,
-            ));
+            // An inline scalar (int/float/bool/nil) receiver: its decl's methods, then the
+            // intrinsic protocol methods the checker grants int/float/bool.
+            let v = self.scalar_method(recv, method, &args, span)?;
+            self.push(v);
+            return Ok(());
         };
         // M19 Phase 6 / N-way poly — method-call inline-cache fast path (struct methods only). Scan
         // the site's ways for a way whose cached `tid` matches the receiver layout: a hit collapses the
@@ -629,17 +623,19 @@ impl Vm {
         //   `bytes`                  → `bytes_method` (immutable: only `decode() -> str`),
         //   `bytearray`              → `bytearray_method` (`len`/`push`/`pop`/`extend`/`decode`;
         //                              separate from `core_method`, same in-place `write` discipline).
+        //   a boxed int              → `scalar_method`, as its inline twin above.
         enum Container {
             Core,
             Bytes,
             ByteArray,
+            Scalar,
         }
         let container = match self.heap.get(h) {
             Obj::Str(_) | Obj::List(_) | Obj::Map(_) | Obj::Set(_) => Some(Container::Core),
             Obj::Bytes(_) => Some(Container::Bytes),
             Obj::ByteArray(_) => Some(Container::ByteArray),
-            Obj::BigInt(_)
-            | Obj::FloatBox(_)
+            Obj::BigInt(_) => Some(Container::Scalar),
+            Obj::FloatBox(_)
             | Obj::Iter { .. }
             | Obj::Tuple(_)
             | Obj::Struct { .. }
@@ -669,6 +665,7 @@ impl Vm {
                 Container::Core => self.core_method(h, method, &args, span),
                 Container::Bytes => self.bytes_method(h, method, &args, span),
                 Container::ByteArray => self.bytearray_method(h, method, &args, span),
+                Container::Scalar => self.scalar_method(recv, method, &args, span),
             };
             // A name miss inside a dispatcher falls to the intrinsic protocol methods through
             // `container_method_miss`; any other error is the dispatcher's own and stays as it is.
@@ -872,9 +869,8 @@ impl Vm {
                 let who = Self::enum_subject(variant_id, &enum_key, |n| format!("type {n}"));
                 Err(self.err(format!("{who} has no method '{method}'"), span))
             }
-            // W6-3 — a BOXED scalar (`Obj::BigInt`, and any other Obj-tagged scalar) is Obj-tagged, so
-            // it never reaches the inline-scalar miss above and lands here instead: it must answer the
-            // same intrinsic arith/`Hashable`/`Comparable` methods its inline twin does.
+            // Any other heap value answers the intrinsic protocol methods (a boxed int returned
+            // through `scalar_method` above).
             Obj::Str(_)
             | Obj::Bytes(_)
             | Obj::ByteArray(_)

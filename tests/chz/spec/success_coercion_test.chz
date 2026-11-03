@@ -36,7 +36,7 @@ test fn bare_value_coerces_at_an_inline_expr_body():
         _: assert false, "wrong shape"
 
 test fn explicit_none_stays_unaffected():
-    assert str(none_stays()) == "None"
+    assert "{none_stays()}" == "None"
 
 test fn bare_value_coerces_at_a_closure_sink():
     c := fn() -> int?: 1
@@ -69,7 +69,7 @@ test fn if_expr_mixed_branches_coerce_the_bare_ones():
     match opt_mixed(2):
         ?v: assert v == 2
         _: assert false, "wrong shape"
-    assert str(opt_mixed(-1)) == "None"
+    assert "{opt_mixed(-1)}" == "None"
 
 test fn if_expr_mixed_branches_coerce_at_a_result_sink():
     match res_mixed(2):
@@ -84,13 +84,13 @@ test fn match_expr_mixed_branches_coerce_the_bare_ones():
     match match_mixed(S.C(7)):
         ?v: assert v == 7
         _: assert false, "wrong shape"
-    assert str(match_mixed(S.P)) == "None"
+    assert "{match_mixed(S.P)}" == "None"
 
 test fn elif_chain_mixed_branches_coerce_the_bare_ones():
     match elif_mixed(2):
         ?v: assert v == 2
         _: assert false, "wrong shape"
-    assert str(elif_mixed(0)) == "None"
+    assert "{elif_mixed(0)}" == "None"
     match elif_mixed(-5):
         ?v: assert v == 5
         _: assert false, "wrong shape"
@@ -102,14 +102,14 @@ test fn a_coalesce_owned_branch_is_never_double_wrapped():
     match nested_coalesce(None, true):
         ?v: assert v == 0
         _: assert false, "wrong shape"
-    assert str(nested_coalesce(?5, false)) == "None"
+    assert "{nested_coalesce(?5, false)}" == "None"
 
 test fn closure_if_expr_mixed_branches_coerce_the_bare_ones():
     g := fn(n: int) -> int?: if n > 0: n else: None
     match g(3):
         ?v: assert v == 3
         _: assert false, "wrong shape"
-    assert str(g(-3)) == "None"
+    assert "{g(-3)}" == "None"
 
 fn elif_tail_mixed(n: int) -> int?:
     return if n > 0: ?n elif n == 0: 0 else: 0 - n

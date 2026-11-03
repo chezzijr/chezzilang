@@ -25,13 +25,13 @@ struct Duration:
 
     # Seconds as a float (float-convert BEFORE dividing — int `/` would truncate).
     fn as_seconds(self) -> float:
-        return float(self.ms) / 1000.0
+        return self.ms.to_float() / 1000.0
 
     fn as_minutes(self) -> float:
-        return float(self.ms) / 60000.0
+        return self.ms.to_float() / 60000.0
 
     fn as_hours(self) -> float:
-        return float(self.ms) / 3600000.0
+        return self.ms.to_float() / 3600000.0
 
     # self + other.
     fn add(self, other: Duration) -> Duration:
@@ -85,7 +85,7 @@ fn _trim_trailing_zeros(x: str) -> str:
 # Format a strictly-positive ms count (sign handled by the caller).
 fn _fmt_pos(ms: int) -> str:
     if ms < 1000:
-        return str(ms) + "ms"
+        return "{ms}ms"
     total := ms / 1000            # whole seconds
     rem := ms % 1000              # leftover millis (0..999)
     h := total / 3600
@@ -93,14 +93,14 @@ fn _fmt_pos(ms: int) -> str:
     sec := total % 60
     out := ""
     if h > 0:
-        out = out + str(h) + "h"
+        out = out + "{h}h"
     if h > 0 or m > 0:
-        out = out + str(m) + "m"
+        out = out + "{m}m"
     if rem == 0:
-        out = out + str(sec) + "s"
+        out = out + "{sec}s"
     else:
-        frac := _trim_trailing_zeros(s.pad_left(str(rem), 3, "0"))
-        out = out + str(sec) + "." + frac + "s"
+        frac := _trim_trailing_zeros(s.pad_left("{rem}", 3, "0"))
+        out = out + "{sec}." + frac + "s"
     return out
 
 # ---- parse (inverse of to_string; also accepts Go's looser forms) ----
@@ -257,7 +257,10 @@ fn parse(input: str) -> Duration!:
 
 # Elapsed Duration since a `time.monotonic()` reading (seconds, float). Floors to whole ms.
 fn since(start: float) -> Duration:
-    return Duration(int((time.monotonic() - start) * 1000.0))
+    # A NaN or infinite `start` is no clock reading, so the span has no ms count: fault.
+    ms := ((time.monotonic() - start) * 1000.0).to_int() else:
+        panic("since(): start {start} is not a monotonic reading")
+    return Duration(ms)
 
 # Sleep for the given Duration (delegates to native sleep_ms; sub-ms already unrepresentable).
 fn sleep(d: Duration):

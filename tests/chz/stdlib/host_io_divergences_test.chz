@@ -11,7 +11,7 @@ test fn flag_int_accepts_go_prefixed_bases():
     match fs.parse(["-n", "0x10"]):
         ?_: pass
         !e: assert false, "unexpected Err(" + e.message() + ")"
-    assert fs.get_int("n") == 16, str(fs.get_int("n"))
+    assert fs.get_int("n") == 16, "{fs.get_int("n")}"
 
 test fn flag_int_leading_zero_is_octal():
     fs := flag.new()
@@ -19,7 +19,7 @@ test fn flag_int_leading_zero_is_octal():
     match fs.parse(["-n", "010"]):
         ?_: pass
         !e: assert false, "unexpected Err(" + e.message() + ")"
-    assert fs.get_int("n") == 8, str(fs.get_int("n"))
+    assert fs.get_int("n") == 8, "{fs.get_int("n")}"
 
 test fn base64_decode_ignores_newlines():
     match encoding.base64_decode("Zm9v\r\nYmFy\n"):
@@ -36,12 +36,12 @@ fn parse_n(val: str) -> int!str:
 
 fn expect_n(val: str, want: int):
     match parse_n(val):
-        ?n: assert n == want, val + " -> " + str(n)
+        ?n: assert n == want, val + " -> {n}"
         !m: assert false, val + " unexpected Err(" + m + ")"
 
 fn expect_bad_n(val: str):
     match parse_n(val):
-        ?n: assert false, "'" + val + "' parsed as " + str(n) + ", Go rejects it"
+        ?n: assert false, "'" + val + "' parsed as {n}, Go rejects it"
         !m: assert m.contains("cannot parse"), m
 
 # Go `strconv.ParseInt(s, 0, 64)` rejects these (measured Go 1.27.0).
@@ -77,7 +77,7 @@ test fn flag_int_i64_boundary():
     expect_n("-9223372036854775808", -9223372036854775807 - 1)
     expect_n("-0x8000000000000000", -9223372036854775807 - 1)
     match parse_n("9223372036854775808"):
-        ?n: assert false, "overflow parsed as " + str(n)
+        ?n: assert false, "overflow parsed as {n}"
         !m: assert m.contains("overflows"), m
 
 fn bad_syntax(args: List[str]) -> str:

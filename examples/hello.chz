@@ -9,7 +9,7 @@ struct Point:
     y: int
 
     fn mag_sq(self) -> float:
-        return float(self.x * self.x + self.y * self.y)
+        return (self.x * self.x + self.y * self.y).to_float()
 
 enum Shape:
     Circle(int)
@@ -17,8 +17,8 @@ enum Shape:
 
 fn area(s: Shape) -> float:
     match s:
-        Shape.Circle(r): return 3.14 * float(r * r)
-        Shape.Square(n): return float(n * n)
+        Shape.Circle(r): return 3.14 * (r * r).to_float()
+        Shape.Square(n): return (n * n).to_float()
 
 fn safe_div(a: int, b: int) -> int!:
     if b == 0:

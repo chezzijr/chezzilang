@@ -821,7 +821,7 @@ fn a_granular_read_of_a_granular_task_write_declines() {
     // The decline is per-BINDING, not a blanket "inside a projection" mute: a stale `i` read within
     // the INDEX EXPRESSION of a shielded `m[...]` still reports.
     ok(
-        "fn f(m: Map[str, int], i: int):\n    parallel:\n        spawn:\n            m[\"a\"] = 1\n            i = 3\n    print(m[str(i)])\nm := {\"a\": 0, \"0\": 7}\nf(m, 0)\n",
+        "fn f(m: Map[str, int], i: int):\n    parallel:\n        spawn:\n            m[\"a\"] = 1\n            i = 3\n    print(m[\"{i}\"])\nm := {\"a\": 0, \"0\": 7}\nf(m, 0)\n",
     );
     // Only a MUTATOR write is whole-container, so a granular read of one still reports: every member
     // of `mutates_receiver` is a read-modify-write over the whole container.

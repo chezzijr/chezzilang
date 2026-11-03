@@ -99,10 +99,10 @@ pub(super) fn native_receiver(t: &Ty) -> Option<&'static str> {
         Ty::Str => Some("str"),
         Ty::Bytes => Some("bytes"),
         Ty::ByteArray => Some("bytearray"),
-        Ty::Int
-        | Ty::Float
-        | Ty::Bool
-        | Ty::Nil
+        Ty::Int => Some("int"),
+        Ty::Float => Some("float"),
+        Ty::Bool => Some("bool"),
+        Ty::Nil
         | Ty::Func { .. }
         | Ty::Tuple(_)
         | Ty::Struct(..)

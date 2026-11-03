@@ -5,13 +5,13 @@ import std.io
 fn main():
     n := 0
     match io.read_line():
-        ?l: n = int(l.trim())
+        ?l: n = l.trim().to_int() ?? panic("input is not an int")
         None:    return
     zeros := 0
     p := 5
     while p <= n:
         zeros = zeros + n / p
         p = p * 5
-    io.print(str(zeros))
+    io.print("{zeros}")
 
 main()

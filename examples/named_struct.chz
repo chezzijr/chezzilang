@@ -7,7 +7,7 @@ struct Server:
 
     fn url(self) -> str:
         scheme := if self.tls: "https" else: "http"
-        return scheme + "://" + self.host + ":" + str(self.port)
+        return scheme + "://" + self.host + ":{self.port}"
 
 fn main():
     a := Server("localhost")                  # port=8080, tls=false

@@ -614,8 +614,8 @@ fn box_guard_ops() -> Vec<Op> {
         ),
     ];
     let displays = [
-        ("display Shared", "got.add(str(s).len() + v - 9)"),
-        ("display RwShared", "got.add(str(w).len() + v - 11)"),
+        ("display Shared", "got.add(\"{s}\".len() + v - 9)"),
+        ("display RwShared", "got.add(\"{w}\".len() + v - 11)"),
     ]
     .into_iter()
     .map(|(name, act)| Op {
@@ -653,7 +653,7 @@ const HOOKS: [(&str, &str); 12] = [
         "struct hash",
         "m: Map[PH, int] = {}\nm[PH(v)] = v\ngot.add(m.len() * 7)",
     ),
-    ("str hook", "if str(PS(v)) == \"P\":\n    got.add(7)"),
+    ("str hook", "if \"{PS(v)}\" == \"P\":\n    got.add(7)"),
     (
         "generator .next()",
         "g := gen(v)\nmatch g.next():\n    ?x: got.add(x)\n    None: pass",

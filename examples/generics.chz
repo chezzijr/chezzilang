@@ -19,7 +19,7 @@ struct Point:
         return self.compare(other) == 0
 
     fn label(self) -> str:
-        return "(" + str(self.x) + ", " + str(self.y) + ")"
+        return "({self.x}, {self.y})"
 
 # Generic, bounded: works for any Comparable type.
 fn max[T: Comparable](a: T, b: T) -> T:

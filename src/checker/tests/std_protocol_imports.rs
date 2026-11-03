@@ -250,7 +250,7 @@ fn hashable_bound_licenses_eq() {
 #[test]
 fn operators_need_no_import() {
     ok(
-        "a := 1 + 2\nb := 3 < 4\nc := \"x\" == \"y\"\nxs := [1, 2, 3]\nd := xs[0]\nxs[1] = 5\ne := 2 in xs\nfor v in xs:\n    print(v)\nm := {1: 2}\nprint(a, b, c, d, e, str(m), \"{xs}\")\n",
+        "a := 1 + 2\nb := 3 < 4\nc := \"x\" == \"y\"\nxs := [1, 2, 3]\nd := xs[0]\nxs[1] = 5\ne := 2 in xs\nfor v in xs:\n    print(v)\nm := {1: 2}\nprint(a, b, c, d, e, \"{m}\", \"{xs}\")\n",
     );
     ok(
         "struct P:\n    n: int\n    fn add(self, other: P) -> P:\n        return P(self.n + other.n)\n    fn str(self) -> str:\n        return \"P\"\nprint(P(1) + P(2))\n",

@@ -15,7 +15,7 @@ copied := nested + "/copy.txt"
 
 # mkdir is recursive (mkdir -p): one call creates a/b/c and all parents.
 match fs.mkdir(nested):
-    ?_: print("mkdir: " + str(fs.is_dir(nested)))
+    ?_: print("mkdir: {fs.is_dir(nested)}")
     !e: print("mkdir err: " + e.message())
 
 # mkdir is idempotent on an existing dir (no error the second time).
@@ -38,12 +38,12 @@ match io.read_file(log):
 
 # rename moves the file.
 match fs.rename(log, moved):
-    ?_: print("rename: gone=" + str(not fs.exists(log)) + " present=" + str(fs.exists(moved)))
+    ?_: print("rename: gone={not fs.exists(log)} present={fs.exists(moved)}")
     !e: print("rename err: " + e.message())
 
 # copy duplicates the file (source stays).
 match fs.copy(moved, copied):
-    ?_: print("copy: present=" + str(fs.exists(copied)) + " src=" + str(fs.exists(moved)))
+    ?_: print("copy: present={fs.exists(copied)} src={fs.exists(moved)}")
     !e: print("copy err: " + e.message())
 
 match io.read_file(copied):
@@ -77,5 +77,5 @@ match fs.remove_dir(root + "/a"):
     ?_: print("rm a: ok")
     !e: print("rm a err: " + e.message())
 match fs.remove_dir(root):
-    ?_: print("rm root: gone=" + str(not fs.exists(root)))
+    ?_: print("rm root: gone={not fs.exists(root)}")
     !e: print("rm root err: " + e.message())

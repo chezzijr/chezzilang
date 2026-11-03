@@ -39,7 +39,7 @@ fn gated_boom(gate: Channel[int]) -> int:
 fn show(t: Task[int]) -> str:
     r := recover: must(t.get())
     match r:
-        ?v: return str(v)
+        ?v: return "{v}"
         !e: return e.message()
 
 fn child_show(t: Task[int], out: Channel[str]):
@@ -51,7 +51,7 @@ fn child_done3(p: Task[int], ok: Task[int], bad: Task[int], out: Channel[str]):
 fn _child_get(t: Task[int], ch: Channel[str]):
     r := recover: must(t.get())
     match r:
-        ?v: ch.send(str(v))
+        ?v: ch.send("{v}")
         !e: ch.send(e.message())
 
 fn child_mutate(t: Task[List[int]], out: Channel[str]):
@@ -159,10 +159,10 @@ test fn task_mutable_result_parent_get_returns_the_same_object():
     ex.shutdown()
     a := must(t.get())
     a.push(3)
-    assert str(must(t.get())) == "[1, 2, 3]", str(must(t.get()))
+    assert "{must(t.get())}" == "[1, 2, 3]", "{must(t.get())}"
     b := must(t.get())
     b.push(4)
-    assert str(a) == "[1, 2, 3, 4]", str(a)
+    assert "{a}" == "[1, 2, 3, 4]", "{a}"
 
 test fn task_mutable_result_spawned_copy_writes_the_one_object():
     ex := concurrency.Executor()
@@ -175,7 +175,7 @@ test fn task_mutable_result_spawned_copy_writes_the_one_object():
         spawn child_mutate(t, out)
     got := out.recv()
     assert got == "push ok [1, 2, 3, 9]", got
-    assert str(must(t.get())) == "[1, 2, 3, 9]", str(must(t.get()))
+    assert "{must(t.get())}" == "[1, 2, 3, 9]", "{must(t.get())}"
 
 test fn task_mutable_result_executor_job_copy_writes_the_one_object():
     ex := concurrency.Executor()
@@ -189,7 +189,7 @@ test fn task_mutable_result_executor_job_copy_writes_the_one_object():
     ex2.shutdown()
     got := out.recv()
     assert got == "push ok [1, 2, 3, 9]", got
-    assert str(must(t.get())) == "[1, 2, 3, 9]", str(must(t.get()))
+    assert "{must(t.get())}" == "[1, 2, 3, 9]", "{must(t.get())}"
 
 test fn task_faulted_first_observer_is_a_spawned_task():
     ex := concurrency.Executor()

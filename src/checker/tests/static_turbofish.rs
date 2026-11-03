@@ -1048,9 +1048,9 @@ fn prelude_table_is_single_source_of_truth() {
         ("ord", vec![Ty::Str], Ty::Int),
         ("chr", vec![Ty::Int], Ty::Str),
         ("panic", vec![Ty::Str], Ty::Unknown),
-        ("int", vec![Ty::Unknown], Ty::Int),
-        ("float", vec![Ty::Unknown], Ty::Float),
-        ("str", vec![Ty::Unknown], Ty::Str),
+        ("int", vec![], Ty::Int),
+        ("float", vec![], Ty::Float),
+        ("str", vec![], Ty::Str),
         ("bytes", vec![], Ty::Bytes),
         ("bytearray", vec![], Ty::ByteArray),
     ];
@@ -1194,7 +1194,7 @@ fn width_ty_is_a_tag_on_its_scalar() {
         assert!(errs.is_empty(), "{body:?}: {errs:?}");
     }
     for body in [
-        "x: int8 = 5\ny: int = x + 1\nb := x < y\ns := \"{x:4d}\"\nt := str(x)\n",
+        "x: int8 = 5\ny: int = x + 1\nb := x < y\ns := \"{x:4d}\"\nt := \"{x}\"\n",
         "l: List[int8] = [1, 2]\nn: int = l[0] + 1\nfor v in l:\n    n = n + v\n",
         "m: Map[uint32, str] = {1: \"a\"}\nprint(m[1])\n",
         "fn f(x: int8) -> int8:\n    return x\ny := f(3) + 1\n",

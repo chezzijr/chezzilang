@@ -8,7 +8,7 @@ import std.os
 import std.fs
 
 fn read_back(tag: str, content: str, via_lines: bool) -> List[str]!:
-    p := os.temp_dir().str() + "/chz_t143_" + tag + "_" + str(os.getpid()) + ".txt"
+    p := os.temp_dir().str() + "/chz_t143_" + tag + "_{os.getpid()}.txt"
     io.write_file(p, content)?
     defer fs.remove_file(p)
     r := io.open(p)?
@@ -26,10 +26,10 @@ fn read_back(tag: str, content: str, via_lines: bool) -> List[str]!:
 
 test fn reader_read_line_strips_one_cr_like_go_scanner():
     match read_back("rl", "a\r\r\r\nb\r\r", false):
-        ?ls: assert ls == ["a\r\r", "b\r"], str(ls)
+        ?ls: assert ls == ["a\r\r", "b\r"], "{ls}"
         !e: assert false, e.message()
 
 test fn reader_lines_strips_one_cr_like_go_scanner():
     match read_back("ln", "a\r\r\nb\r\n\r\nc\r", true):
-        ?ls: assert ls == ["a\r", "b", "", "c"], str(ls)
+        ?ls: assert ls == ["a\r", "b", "", "c"], "{ls}"
         !e: assert false, e.message()

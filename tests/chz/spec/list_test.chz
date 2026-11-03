@@ -235,13 +235,13 @@ test fn contains_index_of_sum():
 test fn empty_float_list_sum_is_float():
     ef: List[float] = []
     s := ef.sum()
-    assert str(s) == "0.0", "empty List[float].sum() must be float 0.0, not int 0"
+    assert "{s}" == "0.0", "empty List[float].sum() must be float 0.0, not int 0"
 
 test fn sum_of_a_filter_that_emptied_a_float_list():
     prices := [10.0, 20.0, 25.0]
     disc := prices.filter(fn(p: float) -> bool: p > 100.0)
-    assert str(disc.sum()) == "0.0", "a filtered-empty List[float] must still sum to float"
-    assert str(prices.sum()) == "55.0"
+    assert "{disc.sum()}" == "0.0", "a filtered-empty List[float] must still sum to float"
+    assert "{prices.sum()}" == "55.0"
 
 test fn reverse_mutates():
     xs := [3, 1, 2]
@@ -484,13 +484,13 @@ test fn extend_mutates_through_a_loop_variable():
     lst := [[1], [2]]
     for row in lst:
         row.extend([0])
-    assert str(lst) == "[[1, 0], [2, 0]]"
+    assert "{lst}" == "[[1, 0], [2, 0]]"
 
 test fn extend_mutates_through_a_const_binding():
     xs: const List[int] = [1]
     alias := xs
     xs.extend([3])
-    assert str(alias) == "[1, 3]"
+    assert "{alias}" == "[1, 3]"
 
 # `xs.repeat(n)` is the one list repeat (owner decision 2026-11-03: `*` means multiply only; Rust
 # `vec.repeat(n)`, the rules of `str.repeat`). `n <= 0` gives `[]`; the receiver is not changed.

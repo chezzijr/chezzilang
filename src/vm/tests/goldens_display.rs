@@ -1620,7 +1620,7 @@ struct P:
     fn eq(self, other: P) -> bool:
         return self.n == other.n
     fn show(self) -> str:
-        return self.t + str(self.n)
+        return self.t + \"{self.n}\"
 xs := [P(3, \"c\"), P(1, \"a\"), P(2, \"b\"), P(1, \"z\")]
 xs.sort()
 for x in xs:
@@ -2172,7 +2172,7 @@ fn str_hook_nonstr_fallback_is_gc_safe_after_mutating_hook() {
 #[test]
 fn generic_fn_value_map_conv_runs_both_engines() {
     // `.map(conv)` — conv's own T pinned = int from the element type; yields the string list.
-    let src = "fn conv[T](x: T) -> str:\n    return str(x)\nprint([1, 2, 3].map(conv))\n";
+    let src = "fn conv[T](x: T) -> str:\n    return \"{x}\"\nprint([1, 2, 3].map(conv))\n";
     assert_mc_parity(src, "['1', '2', '3']\n");
 }
 
@@ -2207,7 +2207,7 @@ fn generic_fn_value_filter_keep_runs_both_engines() {
 #[test]
 fn generic_fn_value_user_hof_and_turbofish_run_both_engines() {
     // Regression: the pre-existing user-HOF pin and the turbofish workaround still run unchanged.
-    let src = "fn conv[T](x: T) -> str:\n    return str(x)\nfn mymap(xs: List[int], f: fn(int) -> str) -> List[str]:\n    return xs.map(f)\nprint(mymap([1, 2, 3], conv))\nprint([1, 2, 3].map(conv[int]))\n";
+    let src = "fn conv[T](x: T) -> str:\n    return \"{x}\"\nfn mymap(xs: List[int], f: fn(int) -> str) -> List[str]:\n    return xs.map(f)\nprint(mymap([1, 2, 3], conv))\nprint([1, 2, 3].map(conv[int]))\n";
     assert_mc_parity(src, "['1', '2', '3']\n['1', '2', '3']\n");
 }
 

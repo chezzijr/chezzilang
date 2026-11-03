@@ -24,49 +24,49 @@ struct NL:
 struct P:
     x: int
     fn str(self) -> str:
-        return "P<" + str(self.x) + ">"
+        return "P<{self.x}>"
 
 test fn display_shared_holding_itself_through_a_struct_terminates():
     b: Shared[NS?] = Shared(None)
     n := NS(1, b)
     b.set(?n)
-    assert str(n) == "NS(id=1, box=Shared(NS(id=1, box=Shared(...))))"
-    assert "{n}" == str(n)
-    assert str(b) == "Shared(NS(id=1, box=Shared(...)))"
+    assert "{n}" == "NS(id=1, box=Shared(NS(id=1, box=Shared(...))))"
+    assert "{n}" == "{n}"
+    assert "{b}" == "Shared(NS(id=1, box=Shared(...)))"
     print(n)
 
 test fn display_rwshared_holding_itself_through_a_struct_terminates():
     b: RwShared[NR?] = RwShared(None)
     n := NR(1, b)
     b.set(?n)
-    assert str(n) == "NR(id=1, box=RwShared(NR(id=1, box=RwShared(...))))"
-    assert "{n}" == str(n)
-    assert str(b) == "RwShared(NR(id=1, box=RwShared(...)))"
+    assert "{n}" == "NR(id=1, box=RwShared(NR(id=1, box=RwShared(...))))"
+    assert "{n}" == "{n}"
+    assert "{b}" == "RwShared(NR(id=1, box=RwShared(...)))"
     print(n)
 
 test fn display_atomic_holding_itself_through_a_struct_terminates():
     b: Atomic[NA?] = Atomic(None)
     n := NA(1, b)
     b.store(?n)
-    assert str(n) == "NA(id=1, box=Atomic(NA(id=1, box=Atomic(...))))"
-    assert "{n}" == str(n)
-    assert str(b) == "Atomic(NA(id=1, box=Atomic(...)))"
+    assert "{n}" == "NA(id=1, box=Atomic(NA(id=1, box=Atomic(...))))"
+    assert "{n}" == "{n}"
+    assert "{b}" == "Atomic(NA(id=1, box=Atomic(...)))"
     print(n)
 
 test fn display_box_holding_itself_through_a_list_terminates():
     b: Shared[List[NL]] = Shared([])
     b.set([NL(b)])
-    assert str(b) == "Shared([NL(box=Shared(...))])"
-    assert "{b}" == str(b)
+    assert "{b}" == "Shared([NL(box=Shared(...))])"
+    assert "{b}" == "{b}"
     print(b)
 
 # Pin of today's output: a box renders its contents structurally and runs no user `str` hook,
 # while a plain list does run it.
 test fn display_box_contents_are_structural_no_user_str_hook():
-    assert str(Shared(P(1))) == "Shared(P(x=1))"
-    assert str(RwShared([P(2)])) == "RwShared([P(x=2)])"
-    assert str(Atomic(P(3))) == "Atomic(P(x=3))"
-    assert str([P(4)]) == "[P<4>]"
+    assert "{Shared(P(1))}" == "Shared(P(x=1))"
+    assert "{RwShared([P(2)])}" == "RwShared([P(x=2)])"
+    assert "{Atomic(P(3))}" == "Atomic(P(x=3))"
+    assert "{[P(4)]}" == "[P<4>]"
     s := Shared(P(1))
     assert "{s}" == "Shared(P(x=1))"
 

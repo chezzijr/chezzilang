@@ -26,7 +26,8 @@ test fn negative_zero_matches_zero():
         _: assert false, "-0.0 must match"
 
 test fn nan_matches_only_the_wildcard():
-    nan := float("nan")
+    z := 0.0
+    nan := z / z
     assert name(nan) == "other"
 
 test fn a_float_pattern_works_in_every_pattern_position():

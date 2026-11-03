@@ -120,7 +120,7 @@ fn an_ancestor_send_wakes_a_receiver_parked_in_a_deeper_nursery() {
                  spawn:\n        \
                      parallel:\n            \
                          spawn:\n                \
-                             print(\"inner got \" + str(ch.recv()))\n",
+                             print(\"inner got \" + \"{ch.recv()}\")\n",
         )
         .expect("write ancestor-send repro fixture");
 

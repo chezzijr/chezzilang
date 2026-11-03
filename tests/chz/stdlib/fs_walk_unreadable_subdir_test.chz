@@ -12,7 +12,7 @@ fn cleanup(d: bytes, sub: bytes):
     _ := fs.remove_dir(d)
 
 test fn walk_error_names_the_unreadable_subdir_not_the_root():
-    d := os.temp_dir().str() + "/chz_w8_39_" + str(os.getpid())
+    d := os.temp_dir().str() + "/chz_w8_39_{os.getpid()}"
     sub := d + "/sub"
     r1 := fs.mkdir(d)
     match r1:

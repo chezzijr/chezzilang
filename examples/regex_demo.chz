@@ -16,7 +16,7 @@ match regex.is_match("[0-9]+", "abc123"):
 match regex.find("([a-z]+)@([a-z]+)\\.com", "mail: ann@host.com done"):
     ?opt:
         match opt:
-            ?m: print(m.text + " user=" + ",".join(m.groups) + " at " + str(m.start))
+            ?m: print(m.text + " user=" + ",".join(m.groups) + " at {m.start}")
             None: print("no match")
     !e: print(e)
 

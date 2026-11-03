@@ -48,8 +48,8 @@ test fn duration_round_trips_the_int_extremes():
     for ms in [i64max, i64min]:
         d := duration.millis(ms)
         match duration.parse(d.to_string()):
-            ?g: assert g.as_millis() == ms, "roundtrip failed for " + str(ms)
-            !e: assert false, "roundtrip Err for " + str(ms) + ": " + e.message()
+            ?g: assert g.as_millis() == ms, "roundtrip failed for {ms}"
+            !e: assert false, "roundtrip Err for {ms}: " + e.message()
 
 test fn flagset_parse_resets_positionals_per_call():
     fs := flag.new()
@@ -69,7 +69,7 @@ test fn flagset_help_flag_reaches_usage():
     for arg in ["--help", "-h"]:
         match fs.parse([arg]):
             !e: assert e.message() == expected, "unexpected message: " + e.message()
-            ?pos: assert false, "expected Err(help requested), got Ok(" + str(pos) + ")"
+            ?pos: assert false, "expected Err(help requested), got Ok({pos})"
 
     owns_help := flag.new()
     owns_help.bool_flag("help", false, "my own help")
@@ -106,7 +106,7 @@ fn cleanup_glob_dir(d: str):
     _ := fs.remove_dir(d)
 
 test fn fs_glob_does_not_silently_drop_character_classes():
-    d := os.temp_dir().str() + "/chz_w8_33_" + str(os.getpid())
+    d := os.temp_dir().str() + "/chz_w8_33_{os.getpid()}"
     r1 := fs.mkdir(d)
     match r1:
         ?_: pass
@@ -124,15 +124,15 @@ test fn fs_glob_does_not_silently_drop_character_classes():
 
     r := fs.glob(d + "/*.[ch]")
     match r:
-        ?matches: assert matches.len() == 2, "expected 2 matches for [ch] class, got " + str(matches.len())
+        ?matches: assert matches.len() == 2, "expected 2 matches for [ch] class, got {matches.len()}"
         !e: assert false, "unexpected Err: " + e.message()
 
     rneg := fs.glob(d + "/*.[^c]")
     match rneg:
-        ?matches: assert matches.len() == 1, "expected 1 match for [^c] class, got " + str(matches.len())
+        ?matches: assert matches.len() == 1, "expected 1 match for [^c] class, got {matches.len()}"
         !e: assert false, "unexpected Err: " + e.message()
 
     rbad := fs.glob(d + "/*.[ch")
     match rbad:
         !e: assert e.message().contains("bad pattern"), "unexpected message: " + e.message()
-        ?matches: assert false, "expected Err for malformed pattern, got Ok(" + str(matches) + ")"
+        ?matches: assert false, "expected Err for malformed pattern, got Ok({matches})"

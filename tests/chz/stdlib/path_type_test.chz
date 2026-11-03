@@ -37,15 +37,15 @@ test fn path_str_is_lossy_and_never_faults():
     # A lone 0xff is not valid UTF-8 — substituted with U+FFFD (ef bf bd), no fault. Compared as
     # BYTES: a lossy decode is not injective, so a text-only compare can pass a byte-divergent run.
     s := path.Path(b"A\xffB").str()
-    assert s.len() == 3, "one replacement char per invalid byte, got " + str(s.len())
+    assert s.len() == 3, "one replacement char per invalid byte, got {s.len()}"
     assert s.encode() == b"A\xef\xbf\xbdB"
     # Valid multi-byte UTF-8 survives the lossy path intact.
     assert path.Path(b"\xc3\xa9").str().encode() == b"\xc3\xa9"
 
-# `Path` satisfies `Stringable`, so interpolation / `str()` reach the lossy display.
+# `Path` satisfies `Stringable`, so interpolation reaches the lossy display.
 test fn path_is_stringable():
     p := path.Path(b"A\xffB")
-    assert str(p) == p.str()
+    assert "{p}" == p.str()
 
 # ---- the NON-BREAKING fence: a bare `str` literal, no annotation, no turbofish ----
 

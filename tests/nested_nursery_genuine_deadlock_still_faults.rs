@@ -25,7 +25,7 @@ fn genuine_deadlock_two_nurseries_deep_faults_instead_of_hanging() {
                  spawn:\n        \
                      parallel:\n            \
                          spawn:\n                \
-                             print(\"inner got \" + str(ch.recv()))\n",
+                             print(\"inner got \" + \"{ch.recv()}\")\n",
         )
         .expect("write genuine two-deep-nursery deadlock fixture");
 

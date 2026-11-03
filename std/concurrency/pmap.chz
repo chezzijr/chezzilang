@@ -48,7 +48,7 @@ fn pmap[T, U](xs: List[T], f: fn(T) -> U) -> List[U]:
 # is still in submission order — the limiter only bounds concurrency, not the reassembly.
 fn pmap_limited[T, U](xs: List[T], f: fn(T) -> U, limit: int) -> List[U]:
     if limit <= 0:
-        panic("pmap_limited: limit must be > 0, got " + str(limit))
+        panic("pmap_limited: limit must be > 0, got {limit}")
     n := xs.len()
     results := Channel[_PmapCell[U]]()
     # Semaphore: a token bucket seeded with `limit` permits. `recv` acquires, `send` releases.

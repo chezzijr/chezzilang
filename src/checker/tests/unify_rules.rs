@@ -50,7 +50,7 @@ fn grid_programs(protocol: &str, s: &GridSample) -> Vec<(String, String, String,
         )],
         "Stringable" => vec![one(
             "Stringable",
-            "r := str(a)",
+            "r := \"{a}\"",
             "import Stringable from std.string\nfn f[T: Stringable](x: T) -> str:\n    return x.str()\n",
             "f(a)",
             None,

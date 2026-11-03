@@ -47,11 +47,11 @@ fn step(s: State) -> State:
     s.a += 1
     s.log.push(s.a)
     s.seen.insert(s.a)
-    s.by_name["k" + str(s.a % 8)] = Inner("k", b"ab", (s.a, "v"))
+    s.by_name["k" + "{s.a % 8}"] = Inner("k", b"ab", (s.a, "v"))
     if s.a % 2 == 0:
         s.tag = Tag.Even(s.a)
     else:
-        s.tag = Tag.Odd(str(s.a))
+        s.tag = Tag.Odd("{s.a}")
     s.inner.pair = (s.a, "p")
     s.b += 1
     return s
@@ -59,7 +59,7 @@ fn step(s: State) -> State:
 fn tag_n(t: Tag) -> int:
     match t:
         Tag.Even(n): return n
-        Tag.Odd(s): return int(s)
+        Tag.Odd(s): return s.to_int() ?? -1
 
 fn torn(s: State) -> int:
     bad := 0

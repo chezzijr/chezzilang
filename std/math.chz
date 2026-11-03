@@ -17,8 +17,8 @@
 
 pi: const float = 3.141592653589793
 e: const float = 2.718281828459045
-inf: const float = float("inf")
-nan: const float = float("nan")
+inf: const float = 1.0 / 0.0
+nan: const float = 0.0 / 0.0
 
 native fn abs[T: Num](x: T) -> T
 native fn floor(x: float) -> float

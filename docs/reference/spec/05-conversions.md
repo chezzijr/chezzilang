@@ -1,37 +1,45 @@
 ## Type conversions & casting
 
 Chezzi has **no `as` cast operator**, no `Into`/`TryFrom`, and no value-level conversion protocol; a
-**bound-only** `Convert[S]` protocol exists as a generic bound (below). A small fixed set of explicit
-builtins does conversion, and there is no implicit `int`→`float` widening at a slot (rule D3). A
-conversion is therefore always visible in the source.
+**bound-only** `Convert[S]` protocol exists as a generic bound (below). A conversion is a method on the
+source value, display is interpolation, and there is no implicit `int`→`float` widening at a slot
+(rule D3). A conversion is therefore always visible in the source.
 
-**Scalar conversion constructors** (global builtins; see [stdlib §1](../stdlib/01-builtins.md)):
+**A call on a scalar type's name gives its zero value.** A constructor sets fields only, and a scalar
+has none, so `int()` is `0`, `float()` is `0.0`, `str()` is `""`, `bool()` is `false` and `bytes()` is
+`b''` (Python `int()` is `0`, Rust `i64::default()` is `0`). A call with an argument is a type error
+whose help names the form below for the argument's type.
 
 | Form | From → To | Failure |
 |------|-----------|---------|
-| `int(x)` | `int`/`float`/`bool`/`str` → `int` | truncates a float; **faults** (recoverable) on a non-finite float or an unparseable string |
-| `float(x)` | `float`/`int`/`bool`/`str` → `float` | **faults** on an unparseable string |
-| `bool(x)` | `int`/`float`/`bool`/`str` → `bool` | never fails: a truthiness cast (int `0`/float `0.0`/`-0.0`/empty `str` → `false`; `NaN` → `true`; non-empty `str` is `true`, **not** a parse) |
-| `str(x)` | **anything** → `str` | never fails: the `Stringable` display cast (`print`/interpolation use the same path) |
+| `n.to_float()` | `int` → `float` | never fails; past 2^53 it rounds to the nearest float (Rust `n as f64`) |
+| `f.to_int()` | `float` → `int?` | truncates toward zero; `None` for NaN, ±inf and a value outside i64 |
+| `s.to_int()` / `s.to_float()` | `str` → `int?` / `float?` | `None` on bad input (trims first, PEP-515 underscores) |
+| `s.parse_int()` / `s.parse_float()` | `str` → `int!str` / `float!str` | `!msg` names the reason (overflow or malformed) |
+| `"{x}"` | **anything** → `str` | never fails: the `Stringable` display (`print` uses the same path, Go `fmt.Sprint`) |
 | `ord(s)` / `chr(n)` | `str` ↔ codepoint `int` | narrow, single-purpose |
 
-`int()`/`float()`/`bool()` **reject** a `List`/`Map`/`Set`/tuple/struct/enum/function/`T?`/
-`T!E`/`bytes`/`bytearray`/`Shared`/`Channel`/`Atomic`/`AtomicInt`/`RwShared`/`Executor`/`Socket`/
-`Listener`/`Writer`/`Reader`/`ptr` argument at CHECK time: the runtime always faults there, so the
-checker catches it early.
+There is no `bool` conversion (Go, Rust): test the value with `x != 0` or `s.len() > 0` (`if 0:`
+is already a type error). A `bool` does not convert to a number either; write `if b: 1 else: 0`.
 
-**Safe (non-faulting) string parse:** `s.to_int() -> int?`, `s.to_float() -> float?` (`None` on bad
-input). The siblings that carry an error message return a `T!E`: `s.parse_int() -> int!str`,
-`s.parse_float() -> float!str` (`?n` or `!msg`). Use these over `int()`/`float()` for untrusted input.
+| Old call | Type error help |
+|----------|-----------------|
+| `int(x)` on a `str` or a `float` | ``convert with `x.to_int()`, which gives int?`` |
+| `float(x)` on an `int` / a `str` | ``convert with `x.to_float()`, which gives float`` / `float?` |
+| `int(x)` / `float(x)` on a `bool` | ``a bool is not a number; write `if x: 1 else: 0` `` (`1.0`, `0.0` for `float`) |
+| `str(x)` | ``render the value with `"{x}"` `` |
+| `bool(x)` | ``test the value: write `x != 0` `` for a number, `` `x != None` `` for an optional, `` `x.len() > 0` `` for a type with `len` |
+| `T(x)` where `x` is already a `T` | `the argument is already an int` (and so on) |
+| any other argument | `List[int] does not convert to int` (and so on) |
 
-**No implicit `int` → `float` conversion at a slot** (rule D3): write `1.0`, or `float(x)` for a typed
-value (Rust's `let x: f64 = 1;` is E0308 too). The reverse (`float` → `int`) is a lossy type error as
-well. Arithmetic and comparison on VALUES still promote by runtime tag (`2 * 1.5` is `3.0`, `i < f`).
+**No implicit `int` → `float` conversion at a slot** (rule D3): write `1.0`, or `x.to_float()` for a
+typed value (Rust's `let x: f64 = 1;` is E0308 too). The reverse (`float` → `int`) is a lossy type error
+as well. Arithmetic and comparison on VALUES still promote by runtime tag (`2 * 1.5` is `3.0`, `i < f`).
 Full rules: [Numeric semantics](04-semantics.md#numeric-semantics).
 
 **Stringable:** every scalar (`int`/`float`/`bool`/`str`) intrinsically satisfies `Stringable`, so
 `[T: Stringable]` generics accept them (an erased `v.str()` body dispatches to the same native
-`stringify` that `str(x)` uses). Structs/enums opt in with their own `str(self) -> str`.
+`stringify` that `"{x}"` uses). Structs/enums opt in with their own `str(self) -> str`.
 
 **Intrinsic conformance implies a callable method.** Where a built-in satisfies a protocol
 *intrinsically* (no user method), the protocol's method is callable on it inside an erased generic body

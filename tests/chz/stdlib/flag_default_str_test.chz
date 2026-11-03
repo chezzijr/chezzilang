@@ -37,6 +37,6 @@ test fn flags_are_still_parsed_after_the_first_positional():
     # "x","b"])` gives `(Namespace(name='x'), ['a', 'b'])` — this parser keeps CPython's behaviour
     # deliberately (see ## Decisions).
     match fs.parse(["a", "--name", "x", "b"]):
-        ?pos: assert pos == ["a", "b"], str(pos)
+        ?pos: assert pos == ["a", "b"], "{pos}"
         !e: assert false, "unexpected Err(" + e.message() + ")"
     assert fs.get_str("name") == "x", fs.get_str("name")

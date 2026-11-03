@@ -37,7 +37,7 @@ exhaustiveness treat them like a user enum. Any module can import the variants o
   `:`: `{expr:[[fill]align][sign][z][#][0][width][.precision][type]}`, e.g. `{name:>10}`, `{f:.2f}`,
   `{n:04d}`, `{pct:.1%}`, `{255:x}`. Type chars: `d f x X b o e E g G %` (`f` and `e`/`E` are
   CPython-style with default precision 6; `e`/`E`'s exponent is signed and zero-padded to ≥2 digits).
-  Plain float `str()`/`print()` matches CPython `repr` (scientific when the decimal exponent is `< -4`
+  Plain float `print()` and `"{f}"` match CPython `repr` (scientific when the decimal exponent is `< -4`
   or `>= 16`). **Width and precision are capped at 4096** (a larger spec is a parse error). String `.N`
   truncates. An unknown type char or a type/value mismatch is reported before any output
   (runtime-prefixed; `check` does not catch it). A bare interpolated ternary works; parenthesize it to
@@ -214,7 +214,7 @@ struct Point:
     x: int
     y: int
     fn dist(self) -> float:            # struct method (needs: import std.math)
-        return math.sqrt(float(self.x*self.x + self.y*self.y))
+        return math.sqrt((self.x*self.x + self.y*self.y).to_float())
 
 enum Shape:
     Circle(int)
@@ -223,7 +223,7 @@ enum Shape:
 fn area(s: Shape) -> float:
     match s:                           # pattern matching, exhaustive
         Circle(r): return 3.14 * r * r
-        Square(n): return float(n * n)
+        Square(n): return (n * n).to_float()
 
 fn safe_div(a: int, b: int) -> int!:
     if b == 0:

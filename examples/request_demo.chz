@@ -11,11 +11,11 @@ import std.request
 
 match request.get("https://example.com"):
     ?resp:
-        print("status: " + str(resp.status))
+        print("status: {resp.status}")
         # headers is Map[str, str]; use .get for a safe a `T?` value lookup (indexing a missing key errors).
         match resp.headers.get("content-type"):
             ?ct: print("content-type: " + ct)
             None: print("content-type: (none)")
-        print("body bytes: " + str(resp.body.len()))
+        print("body bytes: {resp.body.len()}")
     !e:
         print("request failed: " + e.message())

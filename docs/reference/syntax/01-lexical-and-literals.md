@@ -99,7 +99,7 @@ bytearray.from_iter([1, 2, 3])  # bytearray — MUTABLE byte buffer; no literal,
   (open bounds, `Range` step, `reversed()`, negative). `for x in b` yields `int`. `b.len()` is the
   byte count.
 - `==`/`!=` are structural. `bytes` is `Hashable` (a valid `map`/`set` key). `b[i] = x` is a type error.
-- `str(b)` / `print(b)` / interpolation use the Python `b'...'` repr (printable ASCII literal, others `\xHH`).
+- `print(b)` and interpolation use the Python `b'...'` repr (printable ASCII literal, others `\xHH`).
 
 **Raw strings — `r"..."` / `r'...'` and triple `r"""..."""` / `r'''...'''`.** A raw string is an
 ordinary `str`, lexed verbatim:

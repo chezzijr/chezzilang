@@ -9,9 +9,9 @@ test fn t_roundtrip():
     for ms in [0, 5, 50, 250, 500, 1000, 1500, 90000, 3600000, 5400000, 3661000, -1500, -250, -5400000]:
         match duration.parse(duration.millis(ms).to_string()):
             ?g:
-                assert g.as_millis() == ms, "roundtrip failed for " + str(ms)
+                assert g.as_millis() == ms, "roundtrip failed for {ms}"
             !_e:
-                assert false, "parse errored for " + str(ms)
+                assert false, "parse errored for {ms}"
 
 # Parse-or-sentinel helper (test fn returns None, so no `?`; a parse an error surfaces as -1 and fails the eq).
 fn pm(text: str) -> int:

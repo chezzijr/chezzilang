@@ -309,7 +309,7 @@ fn parity_a_blocking_defer_body_completes_when_the_task_is_cancelled() {
                fn cleanup(s: Shared[int]):\n    print(\"CLEANUP-ENTER\")\n    time.sleep_ms(20)\n    s.set(42)\n    print(\"CLEANUP-DONE\")\n\
                fn consumer(ch: Channel[int], go: Channel[int], s: Shared[int]):\n    defer cleanup(s)\n    go.send(0)\n    ch.recv()\n\
                fn boom(go: Channel[int]):\n    go.recv()\n    xs := [1]\n    print(xs[9])\n\
-               fn main():\n    s := Shared(0)\n    r := recover:\n        ch := Channel[int]()\n        go := Channel[int]()\n        parallel:\n            spawn consumer(ch, go, s)\n            spawn boom(go)\n        0\n    print(\"sentinel=\" + str(s.get()))\nmain()\n";
+               fn main():\n    s := Shared(0)\n    r := recover:\n        ch := Channel[int]()\n        go := Channel[int]()\n        parallel:\n            spawn consumer(ch, go, s)\n            spawn boom(go)\n        0\n    print(\"sentinel=\" + \"{s.get()}\")\nmain()\n";
     let t = TmpDir::new();
     let entry = t.write("main.chz", src);
     let (mn, _me, _mr, _mc) = run_file(&entry);
@@ -339,7 +339,7 @@ fn parity_a_nursery_inside_a_cancelled_tasks_defer_runs_to_completion() {
                fn cleanup(s: Shared[int]):\n    print(\"CLEANUP-ENTER\")\n    parallel:\n        spawn setit(s)\n    print(\"CLEANUP-DONE\")\n\
                fn worker(ch: Channel[int], go: Channel[int], s: Shared[int]):\n    defer cleanup(s)\n    go.send(0)\n    ch.recv()\n\
                fn boom(go: Channel[int]):\n    go.recv()\n    zs := [1]\n    print(zs[9])\n\
-               fn main():\n    s := Shared(0)\n    r := recover:\n        ch := Channel[int]()\n        go := Channel[int]()\n        parallel:\n            spawn worker(ch, go, s)\n            spawn boom(go)\n        0\n    print(\"sentinel=\" + str(s.get()))\nmain()\n";
+               fn main():\n    s := Shared(0)\n    r := recover:\n        ch := Channel[int]()\n        go := Channel[int]()\n        parallel:\n            spawn worker(ch, go, s)\n            spawn boom(go)\n        0\n    print(\"sentinel=\" + \"{s.get()}\")\nmain()\n";
     let s = src.to_string();
     let (mn, _) = run_with_deadline("M:N", move || run_program(&s));
     let s = src.to_string();
@@ -362,7 +362,7 @@ fn parity_a_nursery_inside_a_cancelled_tasks_defer_runs_to_completion() {
 /// 7/8 runs with the veto removed (`B-GOT` replaced by a bogus nursery deadlock error).
 #[test]
 fn parity_a_cancel_wakeable_demoted_fiber_is_not_a_deadlock() {
-    let src = "fn b(ch2: Channel[int]):\n    v := ch2.recv()\n    print(\"B-GOT=\" + str(v))\n\
+    let src = "fn b(ch2: Channel[int]):\n    v := ch2.recv()\n    print(\"B-GOT=\" + \"{v}\")\n\
                fn acleanup(ch2: Channel[int]):\n    ch2.send(7)\n    print(\"A-CLEANUP-DONE\")\n\
                fn a(ch: Channel[int], go: Channel[int], ch2: Channel[int]):\n    defer acleanup(ch2)\n    go.send(0)\n    xs := [1]\n    ys := xs.map(fn(x: int) -> int: ch.recv())\n    print(\"A-NEVER\")\n\
                fn boom(go: Channel[int]):\n    go.recv()\n    zs := [1]\n    print(zs[9])\n\
@@ -430,7 +430,7 @@ fn writer_use_after_close_clean_err_parity() {
         let t = TmpDir::new();
         let f = t.0.join("x.txt");
         let src = format!(
-            "import create from std.io\nfn main():\n    w := create(\"{f}\")?\n    w.close()?\n    match w.write(\"z\"):\n        ?n: print(\"wrote \" + str(n))\n        !e: print(\"ERR:\" + e.message())\nmain()\n",
+            "import create from std.io\nfn main():\n    w := create(\"{f}\")?\n    w.close()?\n    match w.write(\"z\"):\n        ?n: print(\"wrote \" + \"{{n}}\")\n        !e: print(\"ERR:\" + e.message())\nmain()\n",
             f = f.display()
         );
         let entry = t.write("main.chz", &src);
@@ -453,7 +453,7 @@ fn writer_write_bytes_binary_roundtrip_parity() {
         let t = TmpDir::new();
         let f = t.0.join("bin");
         let src = format!(
-            "import create, read_bytes from std.io\nfn main():\n    w := create(\"{f}\")?\n    w.write_bytes(bytes.from_iter([0, 1, 255]))?\n    w.close()?\n    b := read_bytes(\"{f}\")?\n    print(str(b.len()) + \":\" + str(b[0]) + \",\" + str(b[1]) + \",\" + str(b[2]))\nmain()\n",
+            "import create, read_bytes from std.io\nfn main():\n    w := create(\"{f}\")?\n    w.write_bytes(bytes.from_iter([0, 1, 255]))?\n    w.close()?\n    b := read_bytes(\"{f}\")?\n    print(\"{{b.len()}}\" + \":\" + \"{{b[0]}}\" + \",\" + \"{{b[1]}}\" + \",\" + \"{{b[2]}}\")\nmain()\n",
             f = f.display()
         );
         let entry = t.write("main.chz", &src);
@@ -669,7 +669,7 @@ fn reader_read_bytes_chunk_parity() {
         let f = t.0.join("bin");
         std::fs::write(&f, [10u8, 20, 30, 40, 50, 60]).unwrap(); // 6 bytes
         let src = format!(
-            "import open from std.io\nfn main():\n    r := open(\"{f}\")?\n    c1 := r.read_bytes(4)?\n    c2 := r.read_bytes(4)?\n    c3 := r.read_bytes(4)?\n    print(str(c1.len()) + \":\" + str(c1[0]) + \",\" + str(c1[3]))\n    print(str(c2.len()) + \":\" + str(c2[0]) + \",\" + str(c2[1]))\n    print(str(c3.len()))\n    r.close()?\nmain()\n",
+            "import open from std.io\nfn main():\n    r := open(\"{f}\")?\n    c1 := r.read_bytes(4)?\n    c2 := r.read_bytes(4)?\n    c3 := r.read_bytes(4)?\n    print(\"{{c1.len()}}\" + \":\" + \"{{c1[0]}}\" + \",\" + \"{{c1[3]}}\")\n    print(\"{{c2.len()}}\" + \":\" + \"{{c2[0]}}\" + \",\" + \"{{c2[1]}}\")\n    print(\"{{c3.len()}}\")\n    r.close()?\nmain()\n",
             f = f.display()
         );
         let entry = t.write("main.chz", &src);
@@ -688,7 +688,7 @@ fn reader_use_after_close_clean_err_parity() {
         let f = t.0.join("x.txt");
         std::fs::write(&f, "data").unwrap();
         let src = format!(
-            "import open from std.io\nfn main():\n    r := open(\"{f}\")?\n    r.close()?\n    match r.read_bytes(4):\n        ?b: print(\"got \" + str(b.len()))\n        !e: print(\"ERR:\" + e.message())\nmain()\n",
+            "import open from std.io\nfn main():\n    r := open(\"{f}\")?\n    r.close()?\n    match r.read_bytes(4):\n        ?b: print(\"got \" + \"{{b.len()}}\")\n        !e: print(\"ERR:\" + e.message())\nmain()\n",
             f = f.display()
         );
         let entry = t.write("main.chz", &src);
@@ -752,7 +752,7 @@ fn reader_program_type_checks_clean() {
     // `main` must return Result to use `?` (no `fn main` exception — see the try-in-nil-fn soundness fix).
     let src = "import open, Reader from std.io\n\
                fn tag(r: Reader) -> Reader:\n    return r\n\
-               fn main() -> int!:\n    r := tag(open(\"/tmp/x\")?)\n    match r.read_line():\n        ?ln: print(ln)\n        None: print(\"eof\")\n    b := r.read_bytes(8)?\n    print(str(b.len()))\n    r.close()?\n    return ?0\nmain()\n";
+               fn main() -> int!:\n    r := tag(open(\"/tmp/x\")?)\n    match r.read_line():\n        ?ln: print(ln)\n        None: print(\"eof\")\n    b := r.read_bytes(8)?\n    print(\"{b.len()}\")\n    r.close()?\n    return ?0\nmain()\n";
     let t = TmpDir::new();
     let entry = t.write("main.chz", src);
     let graph = crate::resolver::build_graph(&entry).expect("resolve");
@@ -1483,7 +1483,7 @@ fn module_scope_order_grid() {
             label: "field import",
             prelude: "",
             decl: "import std.math as X\n",
-            fns: "fn f() -> int:\n    return int(X.floor(3.9))\n",
+            fns: "fn f() -> int:\n    return X.trunc(3.9)\n",
             print: "print(f())\n",
         },
         Kind {

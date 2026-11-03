@@ -491,7 +491,7 @@ fn rwshared_list_view_methods_accept_on_list_element() {
     );
     // R is not pinned to the element type — a str accumulator folds a list of ints to a str.
     entry_ok(
-        "import std.concurrency\nimport ConcurrentList from std.concurrency.collection\nfn main():\n    box := ConcurrentList(concurrency.RwShared([1, 2, 3]))\n    s := box.fold(\"\", fn(a, x): a + str(x))\n    print(s)\nmain()\n",
+        "import std.concurrency\nimport ConcurrentList from std.concurrency.collection\nfn main():\n    box := ConcurrentList(concurrency.RwShared([1, 2, 3]))\n    s := box.fold(\"\", fn(a, x): a + \"{x}\")\n    print(s)\nmain()\n",
     );
 }
 
@@ -554,7 +554,7 @@ fn rwshared_map_readview_methods() {
     // Map read-view: len/get_key/has/for_each_entry/fold_entries. K/V arm-recovered from the concrete
     // Map[K,V]; fold_entries's R pins from the concrete init.
     entry_ok(
-        "import std.concurrency\nimport ConcurrentMap from std.concurrency.collection\nfn main():\n    box := ConcurrentMap(concurrency.RwShared({\"a\": 1, \"b\": 2}))\n    print(box.len())\n    print(box.contains(\"a\"))\n    box.for_each_entry(fn(k, v): print(k + str(v)))\n    print(box.fold_entries(0, fn(a, k, v): a + v))\nmain()\n",
+        "import std.concurrency\nimport ConcurrentMap from std.concurrency.collection\nfn main():\n    box := ConcurrentMap(concurrency.RwShared({\"a\": 1, \"b\": 2}))\n    print(box.len())\n    print(box.contains(\"a\"))\n    box.for_each_entry(fn(k, v): print(k + \"{v}\"))\n    print(box.fold_entries(0, fn(a, k, v): a + v))\nmain()\n",
     );
     // get_key returns Option[V] — matchable, V concrete (no unbound Param escapes).
     entry_ok(
@@ -610,7 +610,7 @@ fn rwshared_set_readview_methods() {
     );
     // Set fold R not pinned to E — str accumulator over Set[int] folds to str.
     entry_ok(
-        "import std.concurrency\nimport ConcurrentSet from std.concurrency.collection\nfn main():\n    box := ConcurrentSet(concurrency.RwShared(Set.from_iter([1, 2, 3])))\n    s := box.fold(\"\", fn(a, x): a + str(x))\n    print(s)\nmain()\n",
+        "import std.concurrency\nimport ConcurrentSet from std.concurrency.collection\nfn main():\n    box := ConcurrentSet(concurrency.RwShared(Set.from_iter([1, 2, 3])))\n    s := box.fold(\"\", fn(a, x): a + \"{x}\")\n    print(s)\nmain()\n",
     );
 }
 
@@ -645,7 +645,7 @@ fn rwshared_construct_and_methods_ok() {
 fn rwshared_read_returns_closure_result_type() {
     // `read(f: fn(T) -> R) -> R` — R is the closure's return type, distinct from T here (int -> str).
     entry_ok(
-        "import RwShared from std.concurrency\nfn main():\n    r := RwShared(0)\n    msg := r.read(fn(x): str(x)) + \"!\"\n    print(msg)\nmain()\n",
+        "import RwShared from std.concurrency\nfn main():\n    r := RwShared(0)\n    msg := r.read(fn(x): \"{x}\") + \"!\"\n    print(msg)\nmain()\n",
     );
 }
 
@@ -1313,7 +1313,7 @@ fn spawn_callee_shadowed_by_local_ok() {
 #[test]
 fn user_struct_named_ref_is_legal() {
     entry_ok(
-        "struct Ref:\n    val: int\nfn main():\n    r := Ref(5)\n    print(str(r.val))\nmain()\n",
+        "struct Ref:\n    val: int\nfn main():\n    r := Ref(5)\n    print(\"{r.val}\")\nmain()\n",
     );
 }
 

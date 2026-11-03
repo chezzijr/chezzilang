@@ -231,7 +231,7 @@ fn program(prelude: &str, cells: &[Cell]) -> String {
     src.push_str("fn vararg_width() -> float:\n    x: int = v(300)\n    return vsum(\"l\", x)\n\n");
     for (i, c) in cells.iter().enumerate() {
         src.push_str(&format!(
-            "r{i} := recover: {}\nmatch r{i}:\n    ?x: print(\"{} ok \" + str(x))\n    \
+            "r{i} := recover: {}\nmatch r{i}:\n    ?x: print(\"{} ok \" + \"{{x}}\")\n    \
              !e: print(\"{} err \" + e.message())\n",
             c.expr, c.name, c.name
         ));

@@ -7,15 +7,6 @@ pub const OPTION_VALUE_WORD: &str = "an optional value (`T?`)";
 /// How a diagnostic or a fault names a result value.
 pub const RESULT_VALUE_WORD: &str = "a result value (`T!E`)";
 
-/// `word` (one of the two constants above) with `written` as its quoted type, for a reader that
-/// knows the type the user wrote: ``an optional value (`int?`)``.
-pub fn carrier_word_for(word: &str, written: &str) -> String {
-    match (word.find('`'), word.rfind('`')) {
-        (Some(a), Some(b)) if a < b => format!("{}{written}{}", &word[..=a], &word[b..]),
-        _ => word.to_string(),
-    }
-}
-
 /// Maximum structural-recursion depth for value display / equality — a cyclic data structure (e.g.
 /// a struct with a `List[Self]` field forming a cycle) would otherwise recurse unbounded on the
 /// HOST stack and SIGABRT (uncatchable). This bound turns that into a recoverable `RuntimeError`.

@@ -218,7 +218,7 @@ fn a_socket() -> net.Socket:
             panic(e.message())
 
 fn a_reader(name: str) -> io.Reader:
-    p := os.temp_dir().str() + "/chz_t177_" + name + "_" + str(os.getpid())
+    p := os.temp_dir().str() + "/chz_t177_" + name + "_{os.getpid()}"
     match io.write_file(p, "x"):
         ?_:
             pass

@@ -23,7 +23,7 @@ fn ik(i: int) -> int:
     return i * 1000003
 
 fn sk(i: int) -> str:
-    return "k" + str(i)
+    return "k{i}"
 
 # ---- Map: index store, read, contains, get, update, remove, comprehension, equality ----
 

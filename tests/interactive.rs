@@ -1197,7 +1197,7 @@ fn read_all_faults_recoverably_on_non_utf8_stdin() {
     let t = TmpDir::new();
     let entry = t.write(
         "readall.chz",
-        "import std.io\n\nr := recover: io.read_all()\nmatch r:\n    ?v: print(\"ok len \" + str(v.len()))\n    !e: print(\"err: \" + e.message())\n",
+        "import std.io\n\nr := recover: io.read_all()\nmatch r:\n    ?v: print(\"ok len \" + \"{v.len()}\")\n    !e: print(\"err: \" + e.message())\n",
     );
 
     // Invalid UTF-8: 0xff/0xfe can never appear in a well-formed UTF-8 stream.

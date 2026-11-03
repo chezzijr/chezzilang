@@ -24,7 +24,7 @@ import std.os
 import std.fs
 
 fn scratch(name: str) -> str:
-    return os.temp_dir().str() + "/chz_w7_9_" + name + "_" + str(os.getpid()) + ".dat"
+    return os.temp_dir().str() + "/chz_w7_9_" + name + "_{os.getpid()}.dat"
 
 # Write a fixture and hand back its path.
 fn make(name: str, data: bytes) -> str:
@@ -52,7 +52,7 @@ test fn read_line_fault_is_recoverable_and_non_destructive():
     match io.open(p):
         !e: assert false, e.message()
         ?r:
-            assert str(r.read_line()) == "line1", "first line"
+            assert "{r.read_line()}" == "line1", "first line"
             x := recover: r.read_line()
             match x:
                 ?_: assert false, "expected a fault on the undecodable line"
@@ -79,7 +79,7 @@ test fn read_line_fault_is_sticky_not_skipping():
             # so re-faulting is the louder half of `correct > silent > wrong`, not a divergence to fix.
             y := recover: r.read_line()
             match y:
-                ?l: assert false, "the fault must be sticky, got " + str(l)
+                ?l: assert false, "the fault must be sticky, got {l}"
                 !e: assert e.message().contains("read_bytes"), e.message()
             assert eqb(r.read_bytes(100), b"A\xffB\n"), "the bytes were never skipped"
 
@@ -95,8 +95,8 @@ test fn read_bytes_drain_lets_read_line_resume():
                 ?_: assert false, "expected a fault"
                 !e: pass
             assert eqb(r.read_bytes(2), b"A\xff"), "partial carry drain"
-            assert str(r.read_line()) == "B", "the rest of the carry decodes as a line"
-            assert str(r.read_line()) == "line2", "and the fd continues"
+            assert "{r.read_line()}" == "B", "the rest of the carry decodes as a line"
+            assert "{r.read_line()}" == "line2", "and the fd continues"
 
 test fn lines_inherits_the_carry():
     # The N-way arm that is NOT native: `lines()` is a pure-Chezzi generator over read_line, so it
@@ -124,7 +124,7 @@ test fn close_discards_the_carry():
                 !e: pass
             _ := r.close()
             match r.read_bytes(100):
-                ?b: assert false, "a carry must not be served past close, got " + str(b)
+                ?b: assert false, "a carry must not be served past close, got {b}"
                 !e: assert e.message().contains("closed"), e.message()
 
 test fn eof_does_not_resurrect_a_carry():
@@ -133,8 +133,8 @@ test fn eof_does_not_resurrect_a_carry():
     match io.open(p):
         !e: assert false, e.message()
         ?r:
-            assert str(r.read_line()) == "a", "a"
-            assert str(r.read_line()) == "b", "b"
-            assert str(r.read_line()) == "None", "EOF"
+            assert "{r.read_line()}" == "a", "a"
+            assert "{r.read_line()}" == "b", "b"
+            assert "{r.read_line()}" == "None", "EOF"
             assert eqb(r.read_bytes(100), b""), "EOF stays EOF"
-            assert str(r.read_line()) == "None", "and read_line stays None"
+            assert "{r.read_line()}" == "None", "and read_line stays None"

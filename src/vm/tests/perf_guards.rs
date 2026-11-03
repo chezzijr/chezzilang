@@ -1064,8 +1064,8 @@ fn fstring_and_str_render_all_value_shapes() {
         run("m := {\"a\": 1, \"b\": 2}\nprint(\"{m}\")\n"),
         "{'a': 1, 'b': 2}\n"
     );
-    assert_eq!(run("print(str({1, 2}))\n"), "{1, 2}\n");
-    assert_eq!(run("s: Set[int] = Set()\nprint(str(s))\n"), "Set()\n");
+    assert_eq!(run("print(\"{ {1, 2} }\")\n"), "{1, 2}\n");
+    assert_eq!(run("s: Set[int] = Set()\nprint(\"{s}\")\n"), "Set()\n");
     // Struct default repr + a multi-part f-string mixing literal text and several holes.
     assert_eq!(
         run("struct P:\n    x: int\n    y: int\nprint(\"p={P(3, 4)} end\")\n"),

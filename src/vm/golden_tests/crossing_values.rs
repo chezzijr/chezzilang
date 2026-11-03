@@ -837,7 +837,7 @@ fn main():
     ch := Channel[str]()
     f := helper
     fn task():
-        ch.send(str(f))
+        ch.send(\"{f}\")
     parallel:
         spawn task()
     print(ch.recv())

@@ -24,14 +24,14 @@ fn native_process_cmd_arg_must_be_str() {
 #[test]
 fn native_process_run_returns_result_proc_result() {
     entry_ok(
-        "import std.process\nfn main():\n    match process.run(\"echo hi\"):\n        ?r:\n            o: str = r.stdout\n            e: str = r.stderr\n            c: int = r.code\n            print(o + e + str(c))\n        !msg: print(msg)\n",
+        "import std.process\nfn main():\n    match process.run(\"echo hi\"):\n        ?r:\n            o: str = r.stdout\n            e: str = r.stderr\n            c: int = r.code\n            print(o + e + \"{c}\")\n        !msg: print(msg)\n",
     );
 }
 
 #[test]
 fn native_process_run_args_takes_prog_and_list_str() {
     entry_ok(
-        "import std.process\nfn main():\n    match process.run_args(\"echo\", [\"a\", \"b\"]):\n        ?r: print(r.stdout + str(r.code))\n        !msg: print(msg)\n",
+        "import std.process\nfn main():\n    match process.run_args(\"echo\", [\"a\", \"b\"]):\n        ?r: print(r.stdout + \"{r.code}\")\n        !msg: print(msg)\n",
     );
 }
 
@@ -130,7 +130,7 @@ fn native_os_exit_arg_must_be_int() {
 #[test]
 fn native_fs_predicates_are_bool_and_size_is_result_int() {
     entry_ok(
-        "import std.fs\nfn main():\n    b: bool = fs.is_file(\"x\")\n    e: bool = fs.exists(\"x\")\n    match fs.size(\"x\"):\n        ?n: print(str(n))\n        !m: print(m)\n",
+        "import std.fs\nfn main():\n    b: bool = fs.is_file(\"x\")\n    e: bool = fs.exists(\"x\")\n    match fs.size(\"x\"):\n        ?n: print(\"{n}\")\n        !m: print(m)\n",
     );
 }
 
@@ -205,7 +205,7 @@ fn native_fs_mutations_typecheck_as_result_nil() {
 #[test]
 fn native_fs_mutation_wrong_arity_rejected() {
     entry_rejects(
-        "import std.fs\nfn main():\n    print(str(fs.mkdir(\"d\", \"extra\")))\n",
+        "import std.fs\nfn main():\n    print(\"{fs.mkdir(\"d\", \"extra\")}\")\n",
         "mkdir",
     );
 }
@@ -230,7 +230,7 @@ fn native_regex_is_match_returns_result_bool() {
 #[test]
 fn native_regex_find_returns_match_with_typed_fields() {
     entry_ok(
-        "import std.regex\nfn main():\n    match regex.find(\"[0-9]+\", \"a12\"):\n        ?opt:\n            match opt:\n                ?m:\n                    t: str = m.text\n                    st: int = m.start\n                    g: List[str] = m.groups\n                    print(t + str(st) + \",\".join(g))\n                None: print(\"none\")\n        !e: print(e)\n",
+        "import std.regex\nfn main():\n    match regex.find(\"[0-9]+\", \"a12\"):\n        ?opt:\n            match opt:\n                ?m:\n                    t: str = m.text\n                    st: int = m.start\n                    g: List[str] = m.groups\n                    print(t + \"{st}\" + \",\".join(g))\n                None: print(\"none\")\n        !e: print(e)\n",
     );
 }
 
@@ -318,7 +318,7 @@ fn harvest_native_method_own_type_params() {
 fn regex_sig_from_file_not_native_module_sig() {
     // A full graph check that imports std.regex still resolves regex.Match + typed fields.
     entry_ok(
-        "import std.regex\nfn main():\n    m: regex.Match = regex.Match(\"x\", 0, 1, [])\n    t: str = m.text\n    s: int = m.start\n    g: List[str] = m.groups\n    print(t + str(s) + \",\".join(g))\n",
+        "import std.regex\nfn main():\n    m: regex.Match = regex.Match(\"x\", 0, 1, [])\n    t: str = m.text\n    s: int = m.start\n    g: List[str] = m.groups\n    print(t + \"{s}\" + \",\".join(g))\n",
     );
 }
 
@@ -979,14 +979,14 @@ fn net_sig_from_file_not_native_module_sig() {
 #[test]
 fn native_request_get_returns_response_with_typed_fields() {
     entry_ok(
-        "import std.request\nfn main():\n    match request.get(\"http://x\"):\n        ?resp:\n            st: int = resp.status\n            body: str = resp.body\n            h: Map[str, str] = resp.headers\n            print(body + str(st) + h[\"k\"])\n        !e: print(e)\n",
+        "import std.request\nfn main():\n    match request.get(\"http://x\"):\n        ?resp:\n            st: int = resp.status\n            body: str = resp.body\n            h: Map[str, str] = resp.headers\n            print(body + \"{st}\" + h[\"k\"])\n        !e: print(e)\n",
     );
 }
 
 #[test]
 fn native_request_post_takes_url_and_body() {
     entry_ok(
-        "import std.request\nfn main():\n    match request.post(\"http://x\", \"payload\"):\n        ?resp: print(str(resp.status))\n        !e: print(e)\n",
+        "import std.request\nfn main():\n    match request.post(\"http://x\", \"payload\"):\n        ?resp: print(\"{resp.status}\")\n        !e: print(e)\n",
     );
 }
 
@@ -1020,7 +1020,7 @@ fn bare_match_unknown_without_import() {
 #[test]
 fn bare_response_unknown_without_import() {
     entry_rejects(
-        "fn main():\n    r: Response = Response(200, \"\", {})\n    print(str(r.status))\n",
+        "fn main():\n    r: Response = Response(200, \"\", {})\n    print(\"{r.status}\")\n",
         "unknown type 'Response'",
     );
 }
@@ -1028,7 +1028,7 @@ fn bare_response_unknown_without_import() {
 #[test]
 fn bare_procresult_unknown_without_import() {
     entry_rejects(
-        "fn main():\n    p: ProcResult = ProcResult(\"\", \"\", 0)\n    print(str(p.code))\n",
+        "fn main():\n    p: ProcResult = ProcResult(\"\", \"\", 0)\n    print(\"{p.code}\")\n",
         "unknown type 'ProcResult'",
     );
 }
@@ -1093,14 +1093,14 @@ fn from_import_licenses_bare_response() {
 #[test]
 fn user_struct_response_without_import_ok() {
     entry_ok(
-        "struct Response:\n    code: int\nfn main():\n    r := Response(7)\n    print(str(r.code))\n",
+        "struct Response:\n    code: int\nfn main():\n    r := Response(7)\n    print(\"{r.code}\")\n",
     );
 }
 
 #[test]
 fn user_struct_match_without_import_ok() {
     entry_ok(
-        "struct Match:\n    score: int\nfn main():\n    m := Match(3)\n    print(str(m.score))\n",
+        "struct Match:\n    score: int\nfn main():\n    m := Match(3)\n    print(\"{m.score}\")\n",
     );
 }
 
@@ -1146,7 +1146,7 @@ fn import_plus_same_name_struct_decl_rejected() {
 #[test]
 fn import_does_not_over_reject_distinct_struct_name() {
     entry_ok(
-        "import Match from std.regex\nstruct MatchBox:\n    v: int\nfn main():\n    b := MatchBox(5)\n    print(str(b.v))\nmain()\n",
+        "import Match from std.regex\nstruct MatchBox:\n    v: int\nfn main():\n    b := MatchBox(5)\n    print(\"{b.v}\")\nmain()\n",
     );
 }
 
@@ -1155,7 +1155,7 @@ fn import_does_not_over_reject_distinct_struct_name() {
 #[test]
 fn bare_struct_procresult_without_import_ok() {
     entry_ok(
-        "struct ProcResult:\n    x: int\nfn main():\n    r := ProcResult(5)\n    print(str(r.x))\nmain()\n",
+        "struct ProcResult:\n    x: int\nfn main():\n    r := ProcResult(5)\n    print(\"{r.x}\")\nmain()\n",
     );
 }
 
@@ -1164,7 +1164,7 @@ fn bare_struct_procresult_without_import_ok() {
 #[test]
 fn import_alias_native_struct_same_name_ok() {
     entry_ok(
-        "import Match as M from std.regex\nstruct Match:\n    v: int\nfn main():\n    print(str(Match(1).v))\nmain()\n",
+        "import Match as M from std.regex\nstruct Match:\n    v: int\nfn main():\n    print(\"{Match(1).v}\")\nmain()\n",
     );
 }
 
@@ -1623,7 +1623,7 @@ fn native_time_format_arg_must_be_int() {
 #[test]
 fn json_decode_into_struct_is_result_of_struct() {
     entry_ok(
-        "import std.json\nstruct P:\n    x: int\n    y: int\nfn main():\n    match json.decode[P](\"x\"):\n        ?p: print(str(p.x))\n        !e: print(e)\n",
+        "import std.json\nstruct P:\n    x: int\n    y: int\nfn main():\n    match json.decode[P](\"x\"):\n        ?p: print(\"{p.x}\")\n        !e: print(e)\n",
     );
 }
 
@@ -1637,7 +1637,7 @@ fn json_decode_into_typed_map_and_list() {
 #[test]
 fn json_decode_scalar_result_type_flows() {
     entry_ok(
-        "import std.json\nfn main():\n    match json.decode[int](\"3\"):\n        ?n: print(str(n + 1))\n        !e: print(e)\n",
+        "import std.json\nfn main():\n    match json.decode[int](\"3\"):\n        ?n: print(\"{n + 1}\")\n        !e: print(e)\n",
     );
 }
 

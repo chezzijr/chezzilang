@@ -1,5 +1,14 @@
 ## 2. Methods on built-in types
 
+### `int` and `float`
+| Method | Signature | Notes |
+|--------|-----------|-------|
+| `int.to_float` | `() -> float` | Total. Past 2^53 it rounds to the nearest float (Rust `n as f64`): `(9007199254740993).to_float()` is `9007199254740992.0`. |
+| `float.to_int` | `() -> int?` | Truncates toward zero (`(-3.9).to_int()` is `?-3`). `None` for NaN, `inf`, `-inf` and a value outside i64, so no NaN becomes a silent number. `math.trunc(x)` is the faulting form. |
+
+Display is interpolation, `"{n}"`; `n.str()` on a concrete scalar is a type error (the `Stringable`
+hook is bound-only).
+
 ### `str`
 | Method | Signature | Notes |
 |--------|-----------|-------|
@@ -177,7 +186,7 @@ slice** (`b[1..3]`, byte offsets), and a slice keeps the receiver's type: `bytes
 - `==`/`!=` are structural, also across the two types (`bytes == bytearray` compares content, as in
   Python).
 - `bytes` is `Hashable` (a valid map/set key). `bytearray` is **not** (mutable, like `list`).
-- `str(b)` / `print(b)` / interpolation use the Python repr: `b'...'` and `bytearray(b'...')`.
+- `print(b)` and interpolation use the Python repr: `b'...'` and `bytearray(b'...')`.
 - A task gets a `bytearray` by handle, like a `list` (M3.4): a write in the task lands on the parent's buffer.
 - UTF-8 only: there is no encoding-name argument, no `byte`/`u8` scalar and no non-UTF-8 codec
   (latin1/utf16).

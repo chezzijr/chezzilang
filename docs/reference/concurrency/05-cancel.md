@@ -214,7 +214,7 @@ ys: List[List[int]] = []
 fn grow():
     i := 0
     while true:
-        xs.push("x".repeat(100) + str(i))
+        xs.push("x".repeat(100) + "{i}")
         i += 1
 
 fn nap():
@@ -268,7 +268,7 @@ test fn the_test_fn_appends_400_lists_a_job_sleeps():
 test fn three_hundred_jobs_capture_a_megabyte_each():
     ex := Executor()
     for i in 0..300:
-        big := "x".repeat(1000000) + str(i)
+        big := "x".repeat(1000000) + "{i}"
         _ := ex.submit(fn() -> int: hold(big))
     ex.shutdown()
 ```

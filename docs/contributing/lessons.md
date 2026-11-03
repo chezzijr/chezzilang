@@ -125,7 +125,7 @@ check-OK-then-broken program, and a JIT would trust the static type.
   reads (wave 16 K1-K3: a local `ord` lost to the builtin). Do not add another "Mirrors the checker"
   copy. Six of thirteen wave-5 bugs had this shape.
 - **An int never widens into a `float` slot (rule D3, the Rust model).** `x: float = 1` is an error,
-  literal or not, at every sink; write `1.0` or `float(x)`. There is no `Op::CoerceFloat`. Do not join
+  literal or not, at every sink; write `1.0` or `x.to_float()`. There is no `Op::CoerceFloat`. Do not join
   `int`/`float` in an inferred inline-body type (`x / 2` would divide as ints under a `float` type).
   Close int-under-float bugs in the checker; never re-add a runtime coercion. Mixed arithmetic on values
   (`2 * 1.5`, `i < f`) promotes by runtime tag.

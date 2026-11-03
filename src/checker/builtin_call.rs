@@ -77,40 +77,22 @@ impl Checker {
                 }
                 Some(Ty::Unknown)
             }
+            // A call on a scalar type's name sets no field, so it gives the zero value; a
+            // conversion is a method on the source value (`ctor_takes_no_argument` names it).
             Builtin::Int => {
-                self.check_arity("int", 1, args, span);
-                if let Some(a) = args.first() {
-                    let aty = self.infer_value(a);
-                    self.reject_non_scalar_cast("int", &aty, a.span);
-                }
-                self.infer_all(args.get(1..).unwrap_or(&[]));
+                self.ctor_takes_no_argument(b, &Ty::Int, targs, args, span);
                 Some(Ty::Int)
             }
             Builtin::Float => {
-                self.check_arity("float", 1, args, span);
-                if let Some(a) = args.first() {
-                    let aty = self.infer_value(a);
-                    self.reject_non_scalar_cast("float", &aty, a.span);
-                }
-                self.infer_all(args.get(1..).unwrap_or(&[]));
+                self.ctor_takes_no_argument(b, &Ty::Float, targs, args, span);
                 Some(Ty::Float)
             }
             Builtin::Bool => {
-                self.check_arity("bool", 1, args, span);
-                // `bool(x)` is a total truthiness cast over the scalars (int/float/bool/str) —
-                // like `str`, it accepts any SCALAR. But an AGGREGATE arg
-                // is outside the domain and faults at runtime — reject it at check.
-                if let Some(a) = args.first() {
-                    let aty = self.infer_value(a);
-                    self.reject_non_scalar_cast("bool", &aty, a.span);
-                }
-                self.infer_all(args.get(1..).unwrap_or(&[]));
+                self.ctor_takes_no_argument(b, &Ty::Bool, targs, args, span);
                 Some(Ty::Bool)
             }
             Builtin::Str => {
-                self.check_arity("str", 1, args, span);
-                // `str` is the Stringable display cast (accepts anything).
-                self.infer_all(args);
+                self.ctor_takes_no_argument(b, &Ty::Str, targs, args, span);
                 Some(Ty::Str)
             }
             Builtin::Ord => {
@@ -209,8 +191,9 @@ impl Checker {
                         Ty::Unknown
                     }
                 };
-                self.ctor_takes_no_argument(b, targs, args, span);
-                Some(Ty::list(elem))
+                let made = Ty::list(elem);
+                self.ctor_takes_no_argument(b, &made, targs, args, span);
+                Some(made)
             }
             Builtin::Set => {
                 let elem = match targs {
@@ -221,7 +204,7 @@ impl Checker {
                         Ty::Unknown
                     }
                 };
-                self.ctor_takes_no_argument(b, targs, args, span);
+                self.ctor_takes_no_argument(b, &Ty::set(elem.clone()), targs, args, span);
                 if !elem.is_unknown()
                     && let Some(why) = self.key_ty_reject(&elem)
                 {
@@ -238,7 +221,7 @@ impl Checker {
                         (Ty::Unknown, Ty::Unknown)
                     }
                 };
-                self.ctor_takes_no_argument(b, targs, args, span);
+                self.ctor_takes_no_argument(b, &Ty::map(k.clone(), v.clone()), targs, args, span);
                 if !k.is_unknown()
                     && let Some(why) = self.key_ty_reject(&k)
                 {
@@ -248,19 +231,13 @@ impl Checker {
             }
             // `bytearray()` — the MUTABLE byte buffer, empty.
             Builtin::ByteArray => {
-                self.ctor_takes_no_argument(b, targs, args, span);
+                self.ctor_takes_no_argument(b, &Ty::ByteArray, targs, args, span);
                 Some(Ty::ByteArray)
             }
-            // `bytes` — the IMMUTABLE form: the `b"..."` literal, `bytes.from_iter(xs)` or
-            // `bytes.zeroed(n)`.
+            // `bytes()` — the IMMUTABLE form, empty; a value is a `b"..."` literal,
+            // `bytes.from_iter(xs)` or `bytes.zeroed(n)`.
             Builtin::Bytes => {
-                if args.is_empty() {
-                    self.error(
-                        span,
-                        "bytes() needs a source: build one with `bytes.from_iter(xs)` or `bytes.zeroed(n)`",
-                    );
-                }
-                self.ctor_takes_no_argument(b, targs, args, span);
+                self.ctor_takes_no_argument(b, &Ty::Bytes, targs, args, span);
                 Some(Ty::Bytes)
             }
             Builtin::Channel => {
@@ -335,27 +312,109 @@ impl Checker {
         }
     }
 
-    /// `T(x)`, a call on a builtin type's name with an argument: the call makes only an empty
-    /// value, so the help names the static method that builds one (`T.from_iter(xs)`, or
-    /// `T.zeroed(n)` for an int size of `bytes`/`bytearray`).
-    fn ctor_takes_no_argument(&mut self, b: Builtin, targs: &[Ty], args: &[Expr], span: Span) {
+    /// `T(x)`, a call on a builtin type's name with an argument: the call sets no field, so it makes
+    /// only the empty or zero value `made`, and the help names the form that builds one from `x`.
+    fn ctor_takes_no_argument(
+        &mut self,
+        b: Builtin,
+        made: &Ty,
+        targs: &[Ty],
+        args: &[Expr],
+        span: Span,
+    ) {
         let Some(first) = args.first() else {
             return;
         };
-        let size = matches!(self.infer_value(first).scalar(), Ty::Int);
+        let aty = self.infer_value(first);
         self.infer_all(&args[1..]);
         let name = b.name();
-        let head = if targs.is_empty() {
-            name.to_string()
-        } else {
-            format!("{name}[{}]", render_targs(targs))
+        let help = self.no_argument_help(b, made, aty.scalar(), targs);
+        self.error_help(span, format!("{name}() takes no argument"), help);
+    }
+
+    /// The help of `ctor_takes_no_argument`, from the argument's type `aty`:
+    /// - a type with a `from_iter` static builds from an iterable (`T.zeroed(n)` for an int size);
+    /// - an argument of the type itself needs no call;
+    /// - a source type whose decl has a `to_<T>` method converts with it;
+    /// - else the display, truth and bool forms, or no conversion.
+    fn no_argument_help(&self, b: Builtin, made: &Ty, aty: &Ty, targs: &[Ty]) -> Option<String> {
+        let name = b.name();
+        if NativeStatic::from_key(name, "from_iter").is_some() {
+            if matches!(aty, Ty::Int) && NativeStatic::from_key(name, "zeroed").is_some() {
+                return Some(format!("make n zero bytes with `{name}.zeroed(n)`"));
+            }
+            let head = if targs.is_empty() {
+                name.to_string()
+            } else {
+                format!("{name}[{}]", render_targs(targs))
+            };
+            return Some(format!(
+                "build a {name} from an iterable with `{head}.from_iter(xs)`"
+            ));
+        }
+        if aty.is_unknown() {
+            return None;
+        }
+        if aty == made {
+            let article = if name.starts_with(['a', 'e', 'i', 'o', 'u']) {
+                "an"
+            } else {
+                "a"
+            };
+            return Some(format!("the argument is already {article} {name}"));
+        }
+        let conv = format!("to_{name}");
+        if let Some(sig) = super::fn_writes::native_receiver(aty)
+            .and_then(|key| self.structs.get(key))
+            .and_then(|info| info.methods.get(&conv))
+        {
+            return Some(format!(
+                "convert with `x.{conv}()`, which gives {}",
+                sig.ret
+            ));
+        }
+        let numeric = |one: &str, zero: &str| {
+            matches!(aty, Ty::Bool)
+                .then(|| format!("a bool is not a number; write `if x: {one} else: {zero}`"))
         };
-        let zeroed = format!("{name}.zeroed");
-        let help = if size && NativeStatic::from_key(name, "zeroed").is_some() {
-            format!("make n zero bytes with `{zeroed}(n)`")
-        } else {
-            format!("build a {name} from an iterable with `{head}.from_iter(xs)`")
+        let help = match b {
+            Builtin::Str => Some("render the value with `\"{x}\"`".to_string()),
+            Builtin::Bool => self
+                .truth_test(aty)
+                .map(|t| format!("test the value: write `{t}`")),
+            Builtin::Int => numeric("1", "0"),
+            Builtin::Float => numeric("1.0", "0.0"),
+            Builtin::Print
+            | Builtin::Ord
+            | Builtin::Chr
+            | Builtin::Panic
+            | Builtin::Bytes
+            | Builtin::ByteArray
+            | Builtin::List
+            | Builtin::Map
+            | Builtin::Set
+            | Builtin::Channel
+            | Builtin::Shared
+            | Builtin::RwShared
+            | Builtin::Atomic
+            | Builtin::AtomicInt
+            | Builtin::Executor => None,
         };
-        self.error_help(span, format!("{name}() takes no argument"), Some(help));
+        help.or_else(|| Some(format!("{aty} does not convert to {name}")))
+    }
+
+    /// The comparison that tests `x` for a `bool(x)` help, read from the argument's type: a number
+    /// compares with 0, an optional with None, and a type with a `len` method compares its length.
+    fn truth_test(&self, aty: &Ty) -> Option<&'static str> {
+        if matches!(aty, Ty::Int | Ty::Float) {
+            return Some("x != 0");
+        }
+        if matches!(aty, Ty::Option(_)) {
+            return Some("x != None");
+        }
+        super::fn_writes::native_receiver(aty)
+            .and_then(|key| self.structs.get(key))
+            .filter(|info| info.methods.contains_key("len"))
+            .map(|_| "x.len() > 0")
     }
 }

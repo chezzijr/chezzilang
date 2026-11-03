@@ -4,7 +4,7 @@ The library surface (global builtins, methods on the built-in types, the runtime
 `std.*` modules written in Rust and the pure-Chezzi `std.*` modules) is specified in the
 [standard library reference](../stdlib/01-builtins.md). In short:
 
-- **Builtins (no import):** `print`, `Range`, casts (`int()`/`str()`/`float()`/`bool()`), `ord`/`chr`,
+- **Builtins (no import):** `print`, `Range`, the zero values (`int()`/`str()`/`float()`/`bool()`), `ord`/`chr`,
   the container constructors, `panic(msg)`, and the core-type methods (`s.upper()`, `xs.push()`,
   `m.get()`, `set.insert()`).
 - **Native modules** bind Rust functions through the FFI seam (see [Native FFI](#native-ffi)):
@@ -32,8 +32,8 @@ takes the dividend's sign.
 
 **Floats are total IEEE-754.** A `float` op *never* faults: `1.0/0.0` is `inf`, `-1.0/0.0` is `-inf`,
 `0.0/0.0` and `5.0%0.0` are `NaN`, and `math.sqrt(-1.0)` is `NaN`. `inf`/`NaN` are ordinary values;
-inspect them with `math.is_nan` / `math.is_inf` / `math.is_finite`. Casting a non-finite float to `int`
-(`int(1.0/0.0)`) still faults: `inf`/`NaN` have no integer value.
+inspect them with `math.is_nan` / `math.is_inf` / `math.is_finite`. Converting a non-finite float to `int`
+gives `None` (`(1.0/0.0).to_int()`): `inf`/`NaN` have no integer value.
 - **Float `%` is `fmod`: the sign follows the DIVIDEND** (`-7.0 % 3.0` is `-1.0`, `7.0 % -3.0` is
   `1.0`), the rule of integer `%`, C/Rust `%` and Go `math.Mod`. Python's floored `%` follows the
   divisor (`-7.0 % 3.0` is `2.0`) and raises `ZeroDivisionError` on a zero divisor; Chezzi's is total.
@@ -55,7 +55,7 @@ an assignment, an argument (also through a function VALUE and to an `extern` `do
 `return`, a default, a list/map element, a `Channel`/`Shared`/`Atomic` value, a `yield`, a generic
 type-argument binding (`mx(1, 2.5)` with one `T`), or an `if`/`match` join
 (`x := if c: 1 else: 2.5`). The error names the fix: `expected float, found int — write 1.0 (or
-float(x))`; the mixed literal `[1, 2.5]` is `list elements differ: int vs float`. A `float` sink spelled
+x.to_float())`; the mixed literal `[1, 2.5]` is `list elements differ: int vs float`. A `float` sink spelled
 through a type alias (`type F = float`) obeys the same rule.
 - Nothing coerces at runtime, so a `float` slot always holds a real float (`x: float = 3.0` makes
   `x / 2 == 1.5`).

@@ -589,7 +589,7 @@ fn standalone_path_lowers_carrier_patterns_like_the_graph_path() {
 /// or fault message, `recover:` text) names a removed spelling.
 #[test]
 fn runtime_text_names_no_removed_spelling() {
-    let show = "print(x)\nprint(\"{x}\")\nprint(str(x))\nprint([x])\nprint({\"k\": x})\n";
+    let show = "print(x)\nprint(\"{x}\")\nprint(\"{x}\")\nprint([x])\nprint({\"k\": x})\n";
     let progs = [
         format!("x: int? = 1\n{show}"),
         format!("x: int? = None\n{show}"),
@@ -1324,7 +1324,7 @@ fn a_value_with_two_self_edges_renders_fast_on_every_path() {
         ),
     ];
     for (value, shown, fault) in cells {
-        let src = format!("{HDR}v: Any = {value}\nprint(v)\nprint(str(v))\nx := fail(v)?\n");
+        let src = format!("{HDR}v: Any = {value}\nprint(v)\nprint(\"{{v}}\")\nx := fail(v)?\n");
         let got = watch(value.to_string(), move || {
             run_capture(&src).map_err(|e| e.message)
         });
@@ -1334,7 +1334,7 @@ fn a_value_with_two_self_edges_renders_fast_on_every_path() {
             "{value}: fault text {err:?}"
         );
         let out = watch(format!("{value} print"), {
-            let src = format!("{HDR}v: Any = {value}\nprint(v)\nprint(str(v))\n");
+            let src = format!("{HDR}v: Any = {value}\nprint(v)\nprint(\"{{v}}\")\n");
             move || run_capture(&src).expect("prints")
         });
         assert_eq!(out, format!("{shown}\n{shown}\n"), "{value}: print / str");

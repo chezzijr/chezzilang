@@ -53,9 +53,9 @@ fn cmp_max_int_result_widens_into_float_let() {
     // `float(...)` (or `cmp.max(3.0, 5.0)`).
     entry_rejects(
         "import std.cmp\nfn main():\n    x: float = cmp.max(3, 5)\n    print(x)\n",
-        "write 1.0 (or float(x))",
+        "write 1.0 (or x.to_float())",
     );
-    entry_ok("import std.cmp\nfn main():\n    x: float = float(cmp.max(3, 5))\n    print(x)\n");
+    entry_ok("import std.cmp\nfn main():\n    x: float = cmp.max(3, 5).to_float()\n    print(x)\n");
 }
 
 #[test]
@@ -85,7 +85,7 @@ fn cmp_from_import_max_int_widens_into_float_let() {
     // BREAKING, same as `cmp_max_int_result_widens_into_float_let` through the `from`-import path.
     entry_rejects(
         "import max from std.cmp\nfn main():\n    x: float = max(3, 5)\n    print(x)\n",
-        "write 1.0 (or float(x))",
+        "write 1.0 (or x.to_float())",
     );
 }
 

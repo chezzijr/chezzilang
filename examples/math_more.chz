@@ -5,10 +5,10 @@ import std.io
 import std.math
 
 fn main():
-    io.print(str(math.cos(0.0)))
-    io.print(str(math.exp(0.0)))
-    io.print(str(math.log2(8.0)))
-    io.print(str(math.log10(1000.0)))
-    io.print(str(math.log(8.0, 2.0)))
+    io.print("{math.cos(0.0)}")
+    io.print("{math.exp(0.0)}")
+    io.print("{math.log2(8.0)}")
+    io.print("{math.log10(1000.0)}")
+    io.print("{math.log(8.0, 2.0)}")
 
 main()

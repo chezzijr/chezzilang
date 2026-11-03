@@ -296,7 +296,7 @@ main()";
 /// M10-G1: a self-referential `Stringable` `str` must hit the depth guard, not loop forever.
 #[test]
 fn self_referential_stringable_hits_depth_limit() {
-    let src = "struct Loop:\n    n: int\n    fn str(self) -> str:\n        return str(self)\nprint(Loop(1))\n";
+    let src = "struct Loop:\n    n: int\n    fn str(self) -> str:\n        return \"{self}\"\nprint(Loop(1))\n";
     assert!(run_err(src).contains("maximum call depth"));
 }
 
@@ -916,10 +916,11 @@ fn range_slice_of_a_list_with_a_step_vm() {
 
 #[test]
 fn builtin_casts() {
-    assert_eq!(run(r#"print(int("42"))"#), "42\n");
-    assert_eq!(run("print(float(3))"), "3.0\n");
-    assert_eq!(run("print(str(5))"), "5\n");
-    assert!(run_err(r#"print(int("notnum"))"#).contains("cannot parse 'notnum'"));
+    assert_eq!(run(r#"print("42".to_int())"#), "42\n");
+    assert_eq!(run("print((3).to_float())"), "3.0\n");
+    assert_eq!(run("print(\"5\")"), "5\n");
+    assert_eq!(run(r#"print("notnum".to_int())"#), "None\n");
+    assert_eq!(run("print(int(), float(), bool())"), "0 0.0 false\n");
 }
 
 // ----- construction arity / nullary variant -----
@@ -1258,7 +1259,7 @@ fn consteval_matches_vm_arith() {
     let mut src = String::new();
     for (i, (_, sym)) in ops.iter().enumerate() {
         src += &format!(
-            "fn t{i}(a: int, b: int):\n    r := recover: a {sym} b\n    match r:\n        ?v: print(str(v))\n        !e: print(\"F \" + e.message())\n"
+            "fn t{i}(a: int, b: int):\n    r := recover: a {sym} b\n    match r:\n        ?v: print(\"{{v}}\")\n        !e: print(\"F \" + e.message())\n"
         );
     }
     let mut want = Vec::new();
@@ -1579,7 +1580,7 @@ fn int_fault_one_message_per_op_at_every_site() {
             for line in body.split("; ") {
                 defs += &format!("        {line}\n");
             }
-            defs += "    match r:\n        ?v: print(str(v))\n        !e: print(e.message())\n";
+            defs += "    match r:\n        ?v: print(\"{v}\")\n        !e: print(e.message())\n";
             calls += &format!("c{i}({a}, {b})\n");
             want.push((g.clone(), body));
         }

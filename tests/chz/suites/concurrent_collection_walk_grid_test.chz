@@ -124,12 +124,12 @@ test fn list_for_each_and_fold_visit_every_starting_entry_when_the_callback_push
 test fn snapshot_and_display_are_one_whole_view():
     s := six_set()
     assert s.snapshot() == {1, 2, 3, 4, 5, 6}
-    assert str(s.inner) == "RwShared(" + str(s.snapshot()) + ")"
+    assert "{s.inner}" == "RwShared({s.snapshot()})"
     m := six_map()
     assert m.snapshot().len() == 6
     xs := six_list()
     assert xs.snapshot() == [1, 2, 3, 4, 5, 6]
-    assert str(xs.inner) == "RwShared([1, 2, 3, 4, 5, 6])"
+    assert "{xs.inner}" == "RwShared([1, 2, 3, 4, 5, 6])"
 
 # ---- mutator: another task ----
 #
@@ -183,7 +183,7 @@ fn pusher(xs: ConcurrentList[int]):
 fn list_reader(xs: ConcurrentList[int], out: Channel[bool]):
     n := xs.fold(0, fn(acc: int, x: int) -> int: acc + 1)
     total := xs.fold(0, fn(acc: int, x: int) -> int: acc + x)
-    shown := str(xs.inner)
+    shown := "{xs.inner}"
     out.send(n >= 1000 and total >= n * (n - 1) / 2 and shown.starts_with("RwShared([0, 1, 2,"))
 
 test fn a_list_walk_beside_a_pusher_visits_a_whole_prefix():

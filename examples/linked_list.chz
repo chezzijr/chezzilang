@@ -48,7 +48,7 @@ fn show(head: Cell?) -> str:
             ?c:
                 if out != "":
                     out = out + " -> "
-                out = out + str(c.val)
+                out = out + "{c.val}"
                 cur = c.next
 
 fn main():

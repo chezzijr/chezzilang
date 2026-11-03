@@ -5,12 +5,12 @@ import std.io
 fn main():
     n := 0
     match io.read_line():
-        ?l: n = int(l.trim())
+        ?l: n = l.trim().to_int() ?? panic("input is not an int")
         None:    return
     MOD := 1000000007
     r := 1
     for i in 0..n:
         r = (r * 2) % MOD
-    io.print(str(r))
+    io.print("{r}")
 
 main()

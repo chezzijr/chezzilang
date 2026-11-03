@@ -18,15 +18,15 @@ fn read_tokens() -> List[str]:
 
 fn main():
     toks := read_tokens()
-    n := int(toks[0])
+    n := toks[0].to_int() ?? panic("input is not an int")
     p: List[int] = []
     for i in 0..n:
-        p.push(int(toks[1 + i]))
+        p.push(toks[1 + i].to_int() ?? panic("input is not an int"))
     p.sort()
     med := p[n / 2]
     cost := 0
     for v in p:
         cost = cost + math.abs(v - med)
-    io.print(str(cost))
+    io.print("{cost}")
 
 main()

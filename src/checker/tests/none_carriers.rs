@@ -940,7 +940,7 @@ fn carrier_wrap_check_grid() {
     }
 
     // Int where a float is expected: every sink message carries the fix note.
-    let note = " — write 1.0 (or float(x))";
+    let note = " — write 1.0 (or x.to_float())";
     for prog in [
         "x: float? = ?1\n",
         "x: float?? = ?1\n",

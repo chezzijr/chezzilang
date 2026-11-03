@@ -74,7 +74,7 @@ test fn a_static_str_is_an_ordinary_method():
     assert Temp.str(21) == "mild"
     t := Temp(30)
     assert "{t}" == "Temp(deg=30)"
-    assert str(t) == "Temp(deg=30)"
+    assert "{t}" == "Temp(deg=30)"
     assert "{[t]}" == "[Temp(deg=30)]"
     assert seen == [21], "print never called the static method"
 

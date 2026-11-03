@@ -182,7 +182,7 @@ fn program(shape: &str, o: &Operands, stmt: &str) -> String {
             "g[0]",
         ),
         "hook_index_split" => (
-            "struct Split:\n    f: float\n    fn index(self, k: int) -> int:\n        return int(self.f)\n    fn set_index(self, k: int, v: float):\n        self.f = v\n".to_string(),
+            "struct Split:\n    f: float\n    fn index(self, k: int) -> int:\n        return self.f.to_int() ?? 0\n    fn set_index(self, k: int, v: float):\n        self.f = v\n".to_string(),
             "    g := Split(12.0)\n".to_string(),
             "g[0]",
         ),

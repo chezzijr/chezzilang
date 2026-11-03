@@ -43,7 +43,7 @@ fn writer(path: str, share: Channel[io.Writer]):
 
 fn show(w: io.Writer):
     time.sleep_ms(50)
-    s := str(w)
+    s := \"{w}\"
     print(\"printer done\", s.len() > 0)
 
 fn show_cb(w: io.Writer) -> int:
