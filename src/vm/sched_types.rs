@@ -1181,10 +1181,10 @@ pub(super) enum Disp {
     /// to [`MnSched::park_send`], whose gap re-check reads the offer's `Pending` (TICKET-185).
     SendPark(usize),
     /// §6d — the fiber blocked on a multi-channel `wait` (every arm empty/live). Carries
-    /// `(key, core, is_send)` for each live arm, captured WHILE the fiber heap was live (like `Park`);
+    /// `(source arm index, key, core, is_send)` for each live arm, captured WHILE the fiber heap was live (like `Park`);
     /// the worker loop hands it to [`MnSched::park_wait`], which files ONE shared `WaitPark` token in
     /// every arm bucket. `is_send` selects the per-arm gap-recheck readiness predicate.
-    WaitPark(Vec<(usize, Arc<ChannelCore>, bool)>),
+    WaitPark(Vec<(u32, usize, Arc<ChannelCore>, bool)>),
     /// D3 — the fiber exhausted its reduction budget; the worker requeues it at the tail of the global queue.
     Yield,
     /// D5 — the fiber hit a blocking native call; the worker hands the call (and the fiber) to the

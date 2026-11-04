@@ -87,6 +87,9 @@ pub(crate) fn collect_frame_binds(stmts: &[Stmt], out: &mut impl Extend<String>)
             }
             StmtKind::Wait { arms, else_block } => {
                 for arm in arms {
+                    if let Some(g) = &arm.guard {
+                        collect_frame_binds_expr(g, out);
+                    }
                     match &arm.kind {
                         WaitArmKind::Recv { target, chan } => {
                             collect_frame_binds_expr(chan, out);
@@ -193,6 +196,9 @@ pub(super) fn find_boundary_free_block(stmts: &[Stmt], out: &mut HashSet<String>
             StmtKind::Parallel { body } => find_boundary_free_block(body, out),
             StmtKind::Wait { arms, else_block } => {
                 for arm in arms {
+                    if let Some(g) = &arm.guard {
+                        find_boundary_free_expr(g, out);
+                    }
                     match &arm.kind {
                         WaitArmKind::Recv { chan, .. } => find_boundary_free_expr(chan, out),
                         WaitArmKind::Send { call } => find_boundary_free_expr(call, out),
@@ -840,6 +846,10 @@ pub(crate) fn free_names_block(stmts: &[Stmt], bound: &HashSet<String>, out: &mu
             StmtKind::Wait { arms, else_block } => {
                 for arm in arms {
                     let mut b2 = b.clone();
+                    // The guard runs before the arm binds: resolve it against the outer `b`.
+                    if let Some(g) = &arm.guard {
+                        free_names_expr(g, &b, out);
+                    }
                     match &arm.kind {
                         WaitArmKind::Recv { target, chan } => {
                             free_names_expr(chan, &b, out);

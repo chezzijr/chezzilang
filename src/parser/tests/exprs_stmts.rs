@@ -303,6 +303,59 @@ fn wait_arm_recv_with_args_rejected() {
 }
 
 #[test]
+fn parses_wait_arm_guards() {
+    // `if <expr>` after the arm head: recv `:=`, `=`, `_ :=` and send arms. The guard is the
+    // whole expression after `if`; the channel expr stops before it.
+    let src = "wait:\n    v := a.recv() if not paused: f(v)\n    n = b.recv() if ok: g()\n    _ := c.recv() if x > 1: h()\n    out.send(v) if ready: k()\n    w := d.recv(): m()\n";
+    match only(src) {
+        StmtKind::Wait { arms, else_block } => {
+            assert_eq!(arms.len(), 5);
+            assert!(matches!(
+                &arms[0].guard,
+                Some(Expr {
+                    kind: ExprKind::Unary { .. },
+                    ..
+                })
+            ));
+            assert!(
+                matches!(&arms[1].guard, Some(Expr { kind: ExprKind::Ident(n), .. }) if n == "ok")
+            );
+            assert!(matches!(
+                &arms[2].guard,
+                Some(Expr {
+                    kind: ExprKind::Binary { .. },
+                    ..
+                })
+            ));
+            assert!(
+                matches!(&arms[3].guard, Some(Expr { kind: ExprKind::Ident(n), .. }) if n == "ready")
+            );
+            assert!(arms[4].guard.is_none());
+            match &arms[0].kind {
+                WaitArmKind::Recv { chan, .. } => {
+                    assert!(matches!(&chan.kind, ExprKind::Ident(n) if n == "a"))
+                }
+                other => panic!("expected recv arm, got {other:?}"),
+            }
+            // The `=` arm still assigns its `$waitN` as the body's first statement.
+            assert!(matches!(&arms[1].body[0].kind, StmtKind::Assign { .. }));
+            assert!(matches!(arms[3].kind, WaitArmKind::Send { .. }));
+            assert!(else_block.is_none());
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn wait_else_takes_no_guard() {
+    assert!(
+        parse_err("wait:\n    v := a.recv(): f(v)\n    else if c: g()\n")
+            .message
+            .contains("expected")
+    );
+}
+
+#[test]
 fn wait_else_must_be_last() {
     assert!(
         parse_err("wait:\n    else: a()\n    v := ch.recv(): b()\n")

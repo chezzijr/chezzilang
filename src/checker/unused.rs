@@ -254,6 +254,9 @@ impl Scan {
             StmtKind::Wait { arms, else_block } => {
                 for arm in arms {
                     self.scoped(|s| {
+                        if let Some(g) = &arm.guard {
+                            s.expr(g);
+                        }
                         match &arm.kind {
                             WaitArmKind::Recv { target, chan } => {
                                 s.expr(chan);

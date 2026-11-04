@@ -1,0 +1,169 @@
+# A `wait:` arm guard (`x := ch.recv() if g:`, `ch.send(v) if g:`) switches the arm off, the way Go
+# switches a `select` case off with a nil channel (tokio `select!` precondition, Ada `when`).
+# Gated by chz_suite_passes (tests/chz_suite.rs).
+import std.time
+
+fn tick(log: List[str], tag: str, v: bool) -> bool:
+    log.push(tag)
+    return v
+
+fn chan(log: List[str], tag: str, c: Channel[int]) -> Channel[int]:
+    log.push(tag)
+    return c
+
+fn val(log: List[str], tag: str, v: int) -> int:
+    log.push(tag)
+    return v
+
+test fn a_false_guard_lets_the_other_ready_arm_run():
+    a := Channel[int](1)
+    b := Channel[int](1)
+    a.send(1)
+    b.send(2)
+    on := false
+    got := 0
+    wait:
+        v := a.recv() if on: got = v
+        w := b.recv(): got = w
+    assert got == 2, "got: {got}"
+    assert a.recv() == 1
+
+test fn a_false_guard_skips_its_channel_and_value_expressions():
+    log: List[str] = []
+    a := Channel[int](1)
+    b := Channel[int](1)
+    b.send(2)
+    wait:
+        v := chan(log, "a", a).recv() if false: pass
+        chan(log, "s", a).send(val(log, "v", 1)) if false: pass
+        w := b.recv(): pass
+    assert log.len() == 0, "{log}"
+
+test fn guards_and_operands_run_in_source_order():
+    log: List[str] = []
+    a := Channel[int](1)
+    b := Channel[int](1)
+    b.send(7)
+    got := 0
+    wait:
+        v := chan(log, "ch1", a).recv() if tick(log, "g1", true): got = v
+        w := chan(log, "ch2", b).recv() if tick(log, "g2", true): got = w
+    assert log == ["g1", "ch1", "g2", "ch2"], "{log}"
+    assert got == 7
+
+test fn an_earlier_off_arm_does_not_shift_the_parked_arm_that_fires():
+    # Two off arms (a ready recv, a send with room) ahead of two live arms; the wait parks, then the
+    # LAST arm fires. A filtered index would run the wrong body.
+    ready := Channel[int](1)
+    ready.send(1)
+    room := Channel[int](1)
+    never := Channel[int](0)
+    c := Channel[int](0)
+    on := false
+    got := ""
+    parallel:
+        spawn:
+            wait:
+                v := ready.recv() if on: got = "ready {v}"
+                room.send(5) if on: got = "room"
+                n := never.recv(): got = "never {n}"
+                x := c.recv(): got = "c {x}"
+        spawn:
+            time.sleep_ms(20)
+            c.send(42)
+    assert got == "c 42", "got: {got}"
+
+test fn a_guarded_send_arm_on_and_off():
+    out := Channel[int](1)
+    on := true
+    sent := false
+    wait:
+        out.send(5) if on: sent = true
+        else: pass
+    assert sent
+    assert out.recv() == 5
+    took_else := false
+    wait:
+        out.send(6) if not on: sent = false
+        else: took_else = true
+    assert took_else
+    assert sent
+    out.send(9)
+    assert out.recv() == 9
+
+test fn a_guarded_assign_arm():
+    ch := Channel[int](1)
+    ch.send(3)
+    n := 0
+    wait:
+        n = ch.recv() if n == 0: pass
+    assert n == 3
+    ch.send(4)
+    wait:
+        n = ch.recv() if n == 0: pass
+        else: pass
+    assert n == 3
+    assert ch.recv() == 4
+
+test fn all_arms_off_with_else_runs_the_else():
+    a := Channel[int](1)
+    a.send(1)
+    took := ""
+    wait:
+        v := a.recv() if false: took = "a"
+        a.send(2) if false: took = "s"
+        else: took = "else"
+    assert took == "else"
+
+test fn all_arms_off_without_else_faults():
+    a := Channel[int](1)
+    a.send(1)
+    r := recover:
+        wait:
+            v := a.recv() if false: pass
+            a.send(2) if false: pass
+    match r:
+        ?_: assert false, "expected a fault"
+        !e: assert e.message().contains("every arm is off"), e.message()
+
+test fn an_off_arm_is_not_a_closed_arm():
+    a := Channel[int](1)
+    b := Channel[int](1)
+    b.close()
+    r := recover:
+        wait:
+            v := a.recv() if false: pass
+            w := b.recv(): pass
+    match r:
+        ?_: assert false, "expected a fault"
+        !e: assert e.message().contains("all channels closed"), e.message()
+    a.close()
+    r2 := recover:
+        wait:
+            v := a.recv() if false: pass
+            w := b.recv() if false: pass
+    match r2:
+        ?_: assert false, "expected a fault"
+        !e:
+            assert e.message().contains("every arm is off"), e.message()
+            assert not e.message().contains("closed"), e.message()
+
+test fn a_paused_worker_runs_queued_jobs_after_resume_in_order():
+    jobs := Channel[int](0)
+    ctl := Channel[bool](0)
+    got: List[int] = []
+    parallel:
+        spawn:
+            paused := true
+            while got.len() < 4:
+                wait:
+                    j := jobs.recv() if not paused: got.push(j)
+                    p := ctl.recv(): paused = p
+        spawn:
+            for i in 0..4:
+                jobs.send(i)
+        spawn:
+            time.sleep_ms(20)
+            assert got.len() == 0, "ran while paused: {got}"
+            ctl.send(false)
+    assert got == [0, 1, 2, 3], "{got}"

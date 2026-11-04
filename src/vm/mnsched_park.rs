@@ -237,7 +237,13 @@ impl MnSched {
     /// arm's slot under it, in the same `core.q` hold that saw the arm not ready. Readiness ignores
     /// the `wait:`'s own entries ([`ChanState::recv_ready_for`]`(Some(p))`), so a send arm and a recv
     /// arm on one channel never see each other.
-    pub(super) fn park_wait(&self, arms: Vec<(usize, Arc<ChannelCore>, bool)>, mut fiber: Fiber) {
+    /// Each arm is `(SOURCE arm index, key, core, is_send)`: an off arm is not in `arms`, so a slot
+    /// is published under the arm's source index, never its position here.
+    pub(super) fn park_wait(
+        &self,
+        arms: Vec<(u32, usize, Arc<ChannelCore>, bool)>,
+        mut fiber: Fiber,
+    ) {
         let mut c = self.lock();
         c.leave_running();
         let p = fiber.pending.as_ref().map(|op| Arc::clone(&op.p));
@@ -254,7 +260,7 @@ impl MnSched {
         // `all_closed`), or LIVE (empty but still wakeable). `any_live` tracks the third.
         let mut any_live = false;
         if !ready_now {
-            for (i, (_, core, is_send)) in arms.iter().enumerate() {
+            for (i, _, core, is_send) in &arms {
                 if *is_send {
                     // A parked send arm is never dead: a receiver takes its offer, or a close
                     // closes it — both settle the `Pending` read above.
@@ -274,7 +280,7 @@ impl MnSched {
                         && core.cap == Some(0)
                         && let Some(p) = &p
                     {
-                        g.slot(p, i as u32);
+                        g.slot(p, *i);
                     }
                     (ready, g.closed && !ready && core.timer.is_none())
                 };
@@ -306,7 +312,7 @@ impl MnSched {
             return;
         }
         fiber.state = FiberState::Blocked; // running → parked: runnable unchanged
-        let keys: Vec<usize> = arms.iter().map(|(k, _, _)| *k).collect();
+        let keys: Vec<usize> = arms.iter().map(|(_, k, _, _)| *k).collect();
         let wp = Arc::new(WaitPark {
             fiber: Mutex::new(Some(fiber)),
             keys: keys.clone(),

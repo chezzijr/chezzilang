@@ -372,6 +372,25 @@ fn ops() -> Vec<Op> {
             false,
             &[(Sibling, "sent\n"), (Nothing, "")],
         ),
+        // D5: two off arms (a ready recv, a send with room) ahead of the live arm. The live
+        // (third) arm must fire, and with nothing to satisfy it the off arms do not count.
+        op(
+            "wait_guarded",
+            "    cc := Channel[int](1)\n    cc.send(5)\n    wait:\n        v := cc.recv() if n > 0: print(v)\n        cc.send(6) if n > 0: print(\"s\")\n        w := ch.recv(): print(w)",
+            send7,
+            "",
+            false,
+            &[(Sibling, "7\n"), (Nothing, "")],
+        ),
+        // D5: every arm off and no `else`: the same fault at once in every context.
+        op(
+            "wait_all_off",
+            "    cc := Channel[int](1)\n    cc.send(5)\n    wait:\n        v := cc.recv() if n > 0: print(v)\n        cc.send(6) if n > 0: print(\"s\")",
+            "",
+            "",
+            false,
+            &[(Nothing, "")],
+        ),
         op(
             "sleep",
             "    time.sleep_ms(20)\n    print(\"slept\")",
@@ -455,6 +474,15 @@ fn expect(op: &Op, ctx: &Ctx, sat: Sat, out: &'static str) -> Expect {
     // A nested nursery's own verdict judges its children: Go faults, and so does every context.
     if op.name == "nested" && sat == Sat::Nothing {
         return Expect::Fault(DEADLOCK);
+    }
+    // Guards are checked once, so an all-off `wait:` can never finish: it faults before any park.
+    // An Executor job's fault lands in its `Task`, which the job contexts discard.
+    if op.name == "wait_all_off" {
+        return if ctx.name.starts_with("job") {
+            Expect::Out("")
+        } else {
+            Expect::Fault("every arm is off")
+        };
     }
     match sat {
         Sat::Nothing => ctx.nothing,

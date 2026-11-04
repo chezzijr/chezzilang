@@ -1086,7 +1086,9 @@ pub struct Vm {
     /// Each entry is `(arm-channel handle, is_send)` so the park-gap re-check applies the right
     /// readiness predicate per arm: a recv arm wakes when its channel has a value / is closed; a SEND
     /// arm wakes when its bounded channel has a free slot (a receiver popped) / is closed.
-    wait_suspend: Option<Vec<(GcRef, bool)>>,
+    /// The leading `u32` is the arm's SOURCE index (an off arm is left out), so a rendezvous slot
+    /// `park_wait` publishes settles to the right arm.
+    wait_suspend: Option<Vec<(u32, GcRef, bool)>>,
     /// Bounded-channel backpressure — the send-side analogue of `suspend`: set by a blocking `send`
     /// on a FULL `Channel[T](cap)` running inside an active scheduler. Records the channel handle the
     /// running fiber is waiting for SPACE on. Routed by the worker loop to [`MnSched::park_send`],

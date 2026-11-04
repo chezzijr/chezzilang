@@ -434,14 +434,18 @@ impl Vm {
             self.deadline_halt(span)?;
         }
         let mut soonest: Option<(usize, std::time::Instant)> = None;
+        // Over the ENABLED arms only: an off arm (false guard) is neither live nor closed.
         let mut all_closed = true;
+        let mut any_on = false;
         let mut off = 0usize;
         for i in 0..n {
             let slot = base + off;
-            let Some(h) = self.stack[slot].as_obj() else {
-                unreachable!("wait arm operand is not a channel handle");
-            };
             off += slot_width(meta.is_send[i]);
+            // A non-object slot is the off sentinel `compile_wait` pushes for a false guard.
+            let Some(h) = self.stack[slot].as_obj() else {
+                continue;
+            };
+            any_on = true;
             let core = self.channel_core(h);
             if meta.is_send[i] {
                 // SEND arm — `send`'s own decision (`Vm::send_commit`, no offer): the value moves
@@ -491,26 +495,36 @@ impl Vm {
         }
         // TICKET-194 — a ready arm or an `else` never waits, so neither is a cancellation point.
         self.wait_halt(span)?;
+        // D5 — every arm off and no `else`: guards are checked once, so nothing can ever make this
+        // `wait:` ready. Fault before any park, the same recoverable kind as the all-closed fault.
+        if !any_on {
+            return Err(self.err(
+                "wait: every arm is off (its guard is false) and there is no else".to_string(),
+                span,
+            ));
+        }
         // Every arm closed+empty, no `else`, no timer → distinct fault. (A live timer arm set
         // `all_closed = false` above, so this fires only when there is genuinely nothing to wait on.)
         if all_closed {
             return Err(self.err("wait: all channels closed".to_string(), span));
         }
         // Block on all live arms. The arm operands are on the stack (they root the channels + re-supply
-        // the poll on resume). `keys[i]` = (channel handle, is_send), in arm order.
-        let keys: Vec<(GcRef, bool)> = {
+        // the poll on resume). `keys` = (SOURCE arm index, stack slot, channel handle, is_send) per
+        // ENABLED arm, in arm order: an off arm is left out, so an entry's position is not its arm
+        // index — every offer, slot and `Settled` index is the source one (`meta.arm_targets[i]`).
+        let keys: Vec<(u32, usize, GcRef, bool)> = {
             let mut v = Vec::with_capacity(n);
             let mut off = 0usize;
-            for &is_send in &meta.is_send {
-                let h = self.stack[base + off]
-                    .as_obj()
-                    .expect("wait arm operand is not a channel handle");
-                v.push((h, is_send));
+            for (i, &is_send) in meta.is_send.iter().enumerate() {
+                let slot = base + off;
                 off += slot_width(is_send);
+                if let Some(h) = self.stack[slot].as_obj() {
+                    v.push((i as u32, slot, h, is_send));
+                }
             }
             v
         };
-        let has_send = keys.iter().any(|&(_, is_send)| is_send);
+        let has_send = keys.iter().any(|&(.., is_send)| is_send);
         let wait_spec = WaitSpec::Wait {
             deadline: soonest.is_some(),
             has_send,
@@ -540,10 +554,7 @@ impl Vm {
         let mut op = PendingOp::new(Arc::clone(&p), Vec::with_capacity(n));
         let mut offered: Vec<GcRef> = Vec::new();
         let mut ready = false;
-        let mut off = 0usize;
-        for (i, &(h, is_send)) in keys.iter().enumerate() {
-            let slot = base + off;
-            off += slot_width(is_send);
+        for &(i, slot, h, is_send) in &keys {
             let core = self.channel_core(h);
             if is_send {
                 let val = self.stack[slot + 1];
@@ -552,7 +563,7 @@ impl Vm {
                     ready = true;
                     break;
                 }
-                g.offer(&p, i as u32, val);
+                g.offer(&p, i, val);
                 drop(g);
                 offered.push(h);
             } else if wait_mode != BlockMode::Park {
@@ -562,10 +573,10 @@ impl Vm {
                     break;
                 }
                 if !g.closed && core.cap == Some(0) {
-                    g.slot(&p, i as u32);
+                    g.slot(&p, i);
                 }
             }
-            op.at.push((core, i as u32, is_send));
+            op.at.push((core, i, is_send));
         }
         if ready {
             let settled = op.settle();
@@ -600,8 +611,13 @@ impl Vm {
                 // A fiber about to be cancelled must not arm a stray timer — the top-of-fn
                 // cancellation checkpoint already returned in that case (on BOTH engines).
                 let sched = self.mn.clone().unwrap();
-                let key = self.channel_core_ptr(keys[i].0);
-                let core_job = self.channel_core(keys[i].0);
+                // `i` is the timer's SOURCE arm index; an off arm is never `soonest`.
+                let &(_, _, h, _) = keys
+                    .iter()
+                    .find(|k| k.0 as usize == i)
+                    .expect("the timer arm is enabled");
+                let key = self.channel_core_ptr(h);
+                let core_job = self.channel_core(h);
                 let sched_job = Arc::clone(&sched);
                 // Arm ONCE per timer channel: a re-park of this same wait (woken with no consumable
                 // value — e.g. a sibling `close` on another arm) re-runs WaitPoll and re-enters this
@@ -648,12 +664,12 @@ impl Vm {
                 EMPTY_WAIT_DEADLOCK
             };
             self.park_site = Some((msg, span));
-            self.wait_suspend = Some(keys);
+            self.wait_suspend = Some(keys.iter().map(|&(i, _, h, s)| (i, h, s)).collect());
             return Ok(());
         }
         let arms: Vec<(Arc<ChannelCore>, bool)> = keys
             .iter()
-            .map(|&(h, is_send)| (self.channel_core(h), is_send))
+            .map(|&(_, _, h, is_send)| (self.channel_core(h), is_send))
             .collect();
         // M:N inside a native callback (`native_reentry > 0`): a host-stack loop frame sits between the
         // worker loop and here, so we cannot snapshot-park. Demote: block this worker in place until
@@ -705,7 +721,8 @@ impl Vm {
             // it, a lone `wait:`-blocked party would forever see `blocked < live` and never fault.
             // The wait is an OR-set over every arm (§2d's OR-edge: ready on ANY arm is progress),
             // so the verdict declines while any one of them is feedable.
-            let (first, is_send0) = arms[0].clone(); // non-empty: an all-closed arm set returned above
+            // Non-empty: an all-closed or all-off arm set returned above.
+            let (first, is_send0) = arms[0].clone();
             let arm_cores: Vec<Arc<ChannelCore>> =
                 arms.iter().map(|(c, _)| Arc::clone(c)).collect();
             let refs: Vec<&Arc<ChannelCore>> = arm_cores.iter().collect();

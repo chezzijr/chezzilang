@@ -118,8 +118,8 @@ fn rendezvous_wait_recv_arms_do_not_wake_each_other() {
     sched.seed(vec![mk_fiber(0), mk_fiber(1)]);
     let f0 = take_run(&sched);
     let f1 = take_run(&sched);
-    sched.park_wait(vec![(key, Arc::clone(&core), false)], f0);
-    sched.park_wait(vec![(key, Arc::clone(&core), false)], f1);
+    sched.park_wait(vec![(0, key, Arc::clone(&core), false)], f0);
+    sched.park_wait(vec![(0, key, Arc::clone(&core), false)], f1);
     assert_eq!(sched.lock().parked_n, 2);
     assert_eq!(sched.runnable.load(Ordering::Relaxed), 0);
 }
@@ -494,9 +494,9 @@ fn mn_wait_park_first_waker_claims_and_sweeps() {
     let (k1, k2, k3) = (core_key(&c1), core_key(&c2), core_key(&c3));
     sched.park_wait(
         vec![
-            (k1, Arc::clone(&c1), false),
-            (k2, Arc::clone(&c2), false),
-            (k3, Arc::clone(&c3), false),
+            (0, k1, Arc::clone(&c1), false),
+            (1, k2, Arc::clone(&c2), false),
+            (2, k3, Arc::clone(&c3), false),
         ],
         f0,
     );
@@ -558,8 +558,8 @@ fn mn_wait_park_timer_self_send_claims_then_late_send_noop() {
     let (timer_key, data_key) = (core_key(&timer_core), core_key(&data_core));
     sched.park_wait(
         vec![
-            (timer_key, Arc::clone(&timer_core), false),
-            (data_key, Arc::clone(&data_core), false),
+            (0, timer_key, Arc::clone(&timer_core), false),
+            (1, data_key, Arc::clone(&data_core), false),
         ],
         f0,
     );
@@ -609,7 +609,10 @@ fn mn_wait_park_close_wake_claims_and_sweeps() {
     let c2 = empty_core();
     let (k1, k2) = (core_key(&c1), core_key(&c2));
     sched.park_wait(
-        vec![(k1, Arc::clone(&c1), false), (k2, Arc::clone(&c2), false)],
+        vec![
+            (0, k1, Arc::clone(&c1), false),
+            (1, k2, Arc::clone(&c2), false),
+        ],
         f0,
     );
     assert_eq!(sched.lock().parked_n, 1);
@@ -643,8 +646,8 @@ fn mn_wait_park_lone_fiber_is_deadlock() {
     ));
     sched.park_wait(
         vec![
-            (core_key(&c1), Arc::clone(&c1), false),
-            (core_key(&c2), Arc::clone(&c2), false),
+            (0, core_key(&c1), Arc::clone(&c1), false),
+            (1, core_key(&c2), Arc::clone(&c2), false),
         ],
         f0,
     );
@@ -674,8 +677,8 @@ fn mn_park_wait_all_recv_arms_closed_requeues_instead_of_parking() {
     }
     sched.park_wait(
         vec![
-            (core_key(&c1), Arc::clone(&c1), false),
-            (core_key(&c2), Arc::clone(&c2), false),
+            (0, core_key(&c1), Arc::clone(&c1), false),
+            (1, core_key(&c2), Arc::clone(&c2), false),
         ],
         f0,
     );
@@ -715,8 +718,8 @@ fn mn_park_wait_one_closed_one_live_still_parks_and_is_deadlock() {
     ));
     sched.park_wait(
         vec![
-            (core_key(&closed), Arc::clone(&closed), false),
-            (core_key(&live), Arc::clone(&live), false),
+            (0, core_key(&closed), Arc::clone(&closed), false),
+            (1, core_key(&live), Arc::clone(&live), false),
         ],
         f0,
     );

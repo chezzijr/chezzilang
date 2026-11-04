@@ -173,6 +173,29 @@ fn wait_assign_wrong_target_type_rejected() {
 }
 
 #[test]
+fn wait_arm_guard_typechecks() {
+    ok(
+        "fn main():\n    ch := Channel[int](1)\n    paused := false\n    wait:\n        v := ch.recv() if not paused: print(v)\n        ch.send(1) if paused: print(0)\n        else: print(1)\nmain()\n",
+    );
+}
+
+#[test]
+fn wait_arm_non_bool_guard_rejected() {
+    rejects(
+        "fn main():\n    ch := Channel[int](1)\n    wait:\n        v := ch.recv() if 1: print(v)\n        else: print(0)\nmain()\n",
+        "wait guard must be bool, found int",
+    );
+}
+
+#[test]
+fn wait_arm_guard_cannot_see_the_arm_binding() {
+    rejects(
+        "fn main():\n    ch := Channel[int](1)\n    wait:\n        j := ch.recv() if j > 0: print(j)\n        else: print(0)\nmain()\n",
+        "unknown name 'j'",
+    );
+}
+
+#[test]
 fn wait_arm_binding_is_arm_local() {
     // `v` is scoped to its arm — referencing it after the `wait` is undeclared.
     rejects(

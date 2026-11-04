@@ -1553,7 +1553,9 @@ fn stmt_has_bare_spawn(s: &Stmt) -> bool {
                     WaitArmKind::Recv { chan, .. } => expr_has_bare_spawn(chan),
                     WaitArmKind::Send { call } => expr_has_bare_spawn(call),
                 };
-                header || block_has_bare_spawn(&a.body)
+                header
+                    || a.guard.as_ref().is_some_and(expr_has_bare_spawn)
+                    || block_has_bare_spawn(&a.body)
             }) || else_block.as_ref().is_some_and(|b| block_has_bare_spawn(b))
         }
         // Boundaries / non-expression-carrying: a struct/enum declaration's field defaults compile

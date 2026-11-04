@@ -414,9 +414,12 @@ pub enum SpawnTarget {
 /// One arm of a `wait:` — either a recv-arm `<target> (:= | =) <chan>.recv(): <body>` or a send-arm
 /// `<chan>.send(v): <body>`. The parser is lenient (a bare non-`:=`/`=` expr becomes a `Send{call}`);
 /// the CHECKER validates that a send-arm's `call` is exactly `chan.send(value)` with matching types.
+/// An optional `if <guard>` after the head switches the arm off when false (§6d): the guard runs
+/// once on entry, before the arm's operands, and cannot see the arm's binding.
 #[derive(Debug, Clone, PartialEq, borsh::BorshSerialize, borsh::BorshDeserialize)]
 pub struct WaitArm {
     pub kind: WaitArmKind,
+    pub guard: Option<Expr>,
     pub body: Block,
     pub span: Span,
 }
@@ -1764,9 +1767,14 @@ pub fn stmt_expr_recover_blocks<'a>(s: &'a Stmt, out: &mut Vec<&'a Block>) {
         StmtKind::Match { scrutinee, .. } => go(scrutinee),
         StmtKind::Defer(DeferTarget::Call(e)) => go(e),
         StmtKind::Spawn(SpawnTarget::Call(e)) => go(e),
-        StmtKind::Wait { arms, .. } => arms.iter().for_each(|a| match &a.kind {
-            WaitArmKind::Recv { chan, .. } => expr_recover_blocks(chan, out),
-            WaitArmKind::Send { call } => expr_recover_blocks(call, out),
+        StmtKind::Wait { arms, .. } => arms.iter().for_each(|a| {
+            if let Some(g) = &a.guard {
+                expr_recover_blocks(g, out);
+            }
+            match &a.kind {
+                WaitArmKind::Recv { chan, .. } => expr_recover_blocks(chan, out),
+                WaitArmKind::Send { call } => expr_recover_blocks(call, out),
+            }
         }),
         StmtKind::Fn(_)
         | StmtKind::Struct { .. }
@@ -2009,6 +2017,9 @@ fn ids_in_stmt(s: &mut Stmt, f: &mut dyn FnMut(&mut NodeId, Span, u32)) {
         | StmtKind::Parallel { body: b } => ids_in_block(b, f),
         StmtKind::Wait { arms, else_block } => {
             for a in arms {
+                if let Some(g) = &mut a.guard {
+                    ids_in_expr(g, f);
+                }
                 match &mut a.kind {
                     WaitArmKind::Recv { chan, .. } => ids_in_expr(chan, f),
                     WaitArmKind::Send { call } => ids_in_expr(call, f),

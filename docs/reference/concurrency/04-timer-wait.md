@@ -73,6 +73,32 @@ so a `wait` containing an unbounded or closed send-arm never blocks (that arm is
   call — is rejected with the legal-forms error). A send-arm binds nothing.
 - `else:` — optional, at most one, and must be **last**.
 
+**Guards.** A recv-arm or send-arm may end its head with `if <guard>` before the `:` —
+`j := jobs.recv() if not paused:`, `n = c.recv() if ok:`, `_ := c.recv() if g:`,
+`out.send(v) if ready:`. `else` takes no guard (`else if c:` is a parse error). A false guard switches
+the arm **off** for this `wait:`, the way Go switches a `select` case off with a `nil` channel; the
+rule is tokio `select!`'s precondition (`, if cond`) and Ada's `when` guard.
+
+- The guard is a `bool` (`wait guard must be bool` otherwise). It is checked before the arm binds, so
+  it cannot see the arm's own binding (`j := c.recv() if j > 0:` is `unknown name 'j'`).
+- Guards run **once** on entry, top to bottom, interleaved with the operands: arm 1's guard, then
+  (only if true) arm 1's channel and value, then arm 2's guard, and so on. An off arm's channel and
+  value expressions do not run.
+- An off arm is never ready, and it is **not** a closed arm: `"wait: all channels closed"` judges the
+  enabled arms only.
+- With every arm off: an `else` runs; with no `else`, the `wait:` faults at once, before any park,
+  `"wait: every arm is off (its guard is false) and there is no else"` — guards are not re-checked,
+  so nothing could ever finish it (tokio panics here too). The fault is recoverable, like the
+  all-closed fault.
+
+```chezzi
+paused := false
+while true:
+    wait:
+        j := jobs.recv() if not paused: run(j)
+        p := ctl.recv():                paused = p
+```
+
 **`break` and `continue` in an arm** act on the enclosing loop, as in Rust's `select!`: a `wait:` is
 not a loop, so `while true: wait: _ := c.recv(): break` leaves the `while`. With no enclosing loop,
 `break` is the `break outside loop` type error. Go's `break` in a `select` case leaves only the
@@ -84,7 +110,8 @@ is **not** exhaustive (it's a runtime race, not a type match); ≥1 recv or send
 
 **Runtime semantics.**
 
-1. Evaluate each arm's channel handle (and, for a send-arm, its value) once, in source order.
+1. Evaluate each arm's guard, then (if it is true) its channel handle (and, for a send-arm, its
+   value) once, in source order. A false guard switches the arm off (see **Guards**).
 2. Poll arms in **source order**: the first **ready** arm wins. A recv-arm is ready with a queued
    value → pop, bind, run its block. A send-arm is ready when the channel can accept the value
    (bounded-with-space / unbounded / closed) → enqueue (or, if closed, *fault*
@@ -92,6 +119,8 @@ is **not** exhaustive (it's a runtime race, not a type match); ≥1 recv or send
 3. A **closed + empty** channel's *recv*-arm is **skipped**; a closed *send*-arm is instead *selected
    and faults* (asymmetric — Go's panic-on-send-to-closed). If *every* recv-arm is closed+empty,
    there's no ready send-arm, and there's no `else`, the `wait` faults `"wait: all channels closed"`.
+   Off arms do not count; with every arm off and no `else` it faults
+   `"wait: every arm is off (its guard is false) and there is no else"` instead.
 4. If no arm is ready: with an `else`, run it (non-blocking); otherwise **block** — park on *all* live
    arm channels and re-poll on the first wake. A recv-arm wakes on a **sender**; a bounded send-arm
    wakes on a **receiver** freeing a slot.

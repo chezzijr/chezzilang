@@ -195,6 +195,26 @@ fn vm_wait_all_closed_no_else_faults() {
     assert!(err.contains("all channels closed"), "{err}");
 }
 
+/// D5 — every arm switched off by its guard and no `else`: the wait can never finish (guards are
+/// checked once), so it faults at once, before any park, in every context: the top level, a
+/// nursery task (park) and a native callback inside a task (demote).
+#[test]
+fn vm_wait_every_arm_off_no_else_faults_in_every_context() {
+    const OFF: &str = "every arm is off (its guard is false) and there is no else";
+    let wait = "    a := Channel[int](1)\n    a.send(1)\n    wait:\n        v := a.recv() if n > 0: print(v)\n        a.send(2) if n > 0: print(2)\n    return 0\n";
+    for call in [
+        "_ := op(0)\n",
+        "parallel:\n    spawn:\n        _ := op(0)\n",
+        "parallel:\n    spawn:\n        _ := [0].map(op)\n",
+        "_ := [0].map(op)\n",
+    ] {
+        let src = format!("fn op(n: int) -> int:\n{wait}{call}");
+        let err = run_err(&src);
+        assert!(err.contains(OFF), "{call}: {err}");
+        assert!(!err.contains("closed"), "{call}: {err}");
+    }
+}
+
 /// W7-2 contract fence — the observable an ALL-DEAD `park_wait` requeue lands on is this fault, and
 /// it must be byte-identical for a MULTI-arm wait (the single-arm case above only
 /// exercises the poll, never the park-gap re-check).

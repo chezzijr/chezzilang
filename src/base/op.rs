@@ -544,8 +544,10 @@ pub enum Op {
     /// fired timer) wins → pop the N handles, push the value, and jump to that arm's body target. A
     /// closed+empty arm is skipped. Nothing ready → jump to `else_target` if present; else inline-
     /// sleep to the soonest live timer and take it; else fault (all-closed) or block (the
-    /// multi-channel park/block-in-place path: keep the handles, rewind to re-poll on wake). See
-    /// `Vm::op_wait_poll`.
+    /// multi-channel park/block-in-place path: keep the handles, rewind to re-poll on wake). An arm
+    /// switched off by its false guard holds an off sentinel (a non-object `Value`) in each of its
+    /// slots: it is never ready, never closed, never published; with every arm off and no `else`
+    /// the poll faults. See `Vm::op_wait_poll`.
     WaitPoll(Box<WaitMeta>),
     /// `Channel[T]()` / `Channel[T](cap)` — push a fresh empty mailbox (`Obj::Channel`). The bool is
     /// `has_cap`: when `true`, a capacity int is on the operand stack (pop it; `<= 0` faults, else the
@@ -569,6 +571,7 @@ pub enum Op {
 /// bind/assign/discard prologue for recv, or the bare body for send), the optional `else` block
 /// target, and `is_send` per arm. A recv arm leaves ONE handle on the stack (the channel); a SEND arm
 /// leaves TWO (channel THEN value), so the poll walks a per-arm slot cursor (`is_send` → width 2).
+/// An off arm (false guard) keeps the same width, with an off sentinel in each slot.
 #[derive(Debug, Clone)]
 pub struct WaitMeta {
     pub n: usize,

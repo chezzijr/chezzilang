@@ -450,13 +450,20 @@
 # "≥1 arm") are enforced by the parser/checker, not the grammar (like `spawn`'s call-only restriction).
 # Selection is deterministic SOURCE ORDER (first ready arm wins) — Chezzi's one principled divergence
 # from Go's random `select` fairness, required for serial == M:N parity.
+# A recv or send arm may carry an `if <expr>` guard (a bool, checked once on entry before the arm's
+# operands, without the arm's binding in scope); a false guard switches the arm off. `else` takes none.
 <waitStmt> ::= "WAIT" "COLON" "NEWLINE" "INDENT" <waitArms> "DEDENT"
 <waitArms> ::= <waitArm> | <waitArm> <waitArms>
 <waitArm>  ::= <expr> "WALRUS" <expr> <block>
+             | <expr> "WALRUS" <expr> "IF" <expr> <block>
              | <bindList> "WALRUS" <expr> <block>
+             | <bindList> "WALRUS" <expr> "IF" <expr> <block>
              | <groupedName> "WALRUS" <expr> <block>
+             | <groupedName> "WALRUS" <expr> "IF" <expr> <block>
              | <expr> "ASSIGN" <expr> <block>
+             | <expr> "ASSIGN" <expr> "IF" <expr> <block>
              | <expr> <block>
+             | <expr> "IF" <expr> <block>
              | "ELSE" <block>
 
 <matchStmt> ::= "MATCH" <expr> "COLON" "NEWLINE" "INDENT" <arms> "DEDENT"

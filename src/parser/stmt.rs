@@ -771,6 +771,7 @@ impl Parser {
     /// `wait:` — Chezzi's `select` (see [`StmtKind::Wait`]). Indented arms `<target> (:=|=)
     /// <chan>.recv(): <body>`, with an optional non-blocking `else:` that must be the last arm. The
     /// RHS must be a bare `.recv()` (no args); a non-`recv` RHS or `recv(args)` is a parse error.
+    /// A recv or send arm takes an optional guard `if <expr>` before its `:`; `else` takes none.
     fn parse_wait(&mut self) -> PResult<StmtKind> {
         self.expect(&Token::Wait)?;
         self.open_block()?; // ':' Newline Indent
@@ -798,12 +799,18 @@ impl Parser {
             } else {
                 self.parse_wait_arm_head(arm_span, &mut assign_first)?
             };
+            let guard = if self.eat(&Token::If) {
+                Some(self.parse_expr()?)
+            } else {
+                None
+            };
             let mut body = self.parse_block()?;
             if let Some(stmt) = assign_first {
                 body.insert(0, stmt);
             }
             arms.push(WaitArm {
                 kind,
+                guard,
                 body,
                 span: arm_span,
             });

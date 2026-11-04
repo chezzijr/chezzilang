@@ -116,6 +116,9 @@ fn fetch_all(urls: List[str]):
 - A recv arm: `v := ch.recv():` (or `result = ch.recv():`, `_ := ch.recv():`, a tuple target
   `a, (b, c) := ch.recv():` or `a, (x.f, ys[0]) = ch.recv():`).
 - A send arm: `ch.send(v):` binds nothing and is ready when the channel can take the value.
+- A guard switches an arm off: `j := jobs.recv() if not paused:`, `ch.send(v) if ok:`. It is a `bool`,
+  checked once on entry before the arm's operands, and cannot see the arm's binding. Every arm off
+  with no `else` faults `"wait: every arm is off ..."`.
 - An optional non-blocking `else:` (last), and `timer` arms for timeouts (there is no `recv_timeout`).
 - A closed and empty recv arm is skipped. A closed send arm faults `"send on a closed channel"`. All
   arms closed with no ready send and no `else` faults.

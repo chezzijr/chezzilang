@@ -846,6 +846,9 @@ fn overlay_stmt(stmt: &crate::ast::Stmt, map: &mut std::collections::HashMap<(us
         StmtKind::Spawn(SpawnTarget::Block(b)) => overlay_block(b, map),
         StmtKind::Wait { arms, else_block } => {
             for a in arms {
+                if let Some(g) = &a.guard {
+                    overlay_expr(g, map);
+                }
                 match &a.kind {
                     WaitArmKind::Recv { chan, .. } => overlay_expr(chan, map),
                     WaitArmKind::Send { call } => overlay_expr(call, map),

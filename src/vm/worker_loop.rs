@@ -804,9 +804,11 @@ impl Vm {
                 // WHILE the fiber heap is live (the `GcRef`s index into it), exactly as `Disp::Park`
                 // captures the single recv key; `park_wait` re-checks every arm under the sched lock.
                 let handles = self.wait_suspend.take().unwrap();
-                let arms: Vec<(usize, Arc<ChannelCore>, bool)> = handles
+                let arms: Vec<(u32, usize, Arc<ChannelCore>, bool)> = handles
                     .iter()
-                    .map(|&(h, is_send)| (self.channel_core_ptr(h), self.channel_core(h), is_send))
+                    .map(|&(i, h, is_send)| {
+                        (i, self.channel_core_ptr(h), self.channel_core(h), is_send)
+                    })
                     .collect();
                 Disp::WaitPark(arms)
             } else if res.is_ok() && self.yield_now {

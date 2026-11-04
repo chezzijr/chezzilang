@@ -345,7 +345,8 @@ impl Compiler {
     /// on the stack, then a single `Op::WaitPoll` that polls them and jumps to the chosen arm's body
     /// (or `else`), or parks. Each arm body is a lexical sub-scope (like a `match` arm): the selected
     /// value arrives on the stack top and the prologue binds (`:=`) / assigns (`=`) / drops (`_`) it.
-    /// A SEND arm (`ch.send(v):`) instead leaves `[chan, value]` and binds nothing.
+    /// A SEND arm (`ch.send(v):`) instead leaves `[chan, value]` and binds nothing. An arm whose
+    /// `if` guard is false leaves off sentinels in its slots; the poll never takes it.
     fn compile_wait(
         &mut self,
         fc: &mut FnComp,
@@ -356,20 +357,38 @@ impl Compiler {
         // Evaluate each arm's operands once, source order (left on the stack for the poll to re-read
         // on every re-park). A recv arm pushes ONE handle (the channel); a send arm pushes TWO (the
         // channel THEN the value) — the exact top-to-bottom eval order Go's `select` requires.
+        // A guarded arm runs its guard first; a false guard skips the operands and pushes one off
+        // sentinel (`Nil`, never a channel handle) per slot instead, so the slot widths stay fixed.
         let mut is_send = Vec::with_capacity(arms.len());
         for arm in arms {
-            match &arm.kind {
+            let skip = match &arm.guard {
+                Some(g) => {
+                    self.compile_expr(fc, g)?;
+                    Some(fc.emit_jump(Op::JumpIfFalse(0), g.span))
+                }
+                None => None,
+            };
+            let send = match &arm.kind {
                 WaitArmKind::Recv { chan, .. } => {
                     self.compile_expr(fc, chan)?;
-                    is_send.push(false);
+                    false
                 }
                 WaitArmKind::Send { call } => {
                     let (obj, value) = send_arm_parts(call);
                     self.compile_expr(fc, obj)?;
                     self.compile_expr(fc, value)?;
-                    is_send.push(true);
+                    true
                 }
+            };
+            if let Some(skip) = skip {
+                let done = fc.emit_jump(Op::Jump(0), arm.span);
+                fc.patch_jump(skip);
+                for _ in 0..if send { 2 } else { 1 } {
+                    fc.emit(Op::Nil, arm.span);
+                }
+                fc.patch_jump(done);
             }
+            is_send.push(send);
         }
         // Placeholder; back-patched with the arm/else targets once the bodies are laid out.
         let poll_at = fc.emit_jump(

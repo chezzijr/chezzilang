@@ -1152,6 +1152,10 @@ impl Walker<'_> {
                 for arm in arms {
                     // The arm body is its own scope; a `v := ch.recv()` bind lives in it.
                     self.push_scope();
+                    // The guard runs before the arm binds: it cannot see the arm's binding.
+                    if let Some(g) = &mut arm.guard {
+                        self.walk_expr(g)?;
+                    }
                     match &mut arm.kind {
                         WaitArmKind::Recv { target, chan } => {
                             self.walk_expr(chan)?;
