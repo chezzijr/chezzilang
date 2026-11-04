@@ -155,6 +155,19 @@ c := bch.cap()             # capacity: 2 here; 0 for a rendezvous Channel[T](0);
 
   A bare `ch.recv()` statement warns: it discards a `T!E`. Write `_ := ch.recv()` to wait and drop
   the value.
+- **A `wait:` recv arm on a closed channel is ready** and binds the same `!RecvError` (its binding is
+  `T!RecvError`, what `recv` returns). It is picked like any ready arm, in source order, after the
+  buffered values drain; in a loop it fires on every pass until a guard switches it off (Go's `select`
+  picks `<-closed` the same way). Rules and examples:
+  [04-timer-wait.md](04-timer-wait.md#6d-wait--racing-multiple-channel-receives).
+
+  ```chezzi
+  done := Channel[bool](0)
+  done.close()
+  wait:
+      _ := done.recv(): print("closed")   # picked: a closed arm is ready
+      _ := Channel[int](0).recv(): pass
+  ```
 - `try_recv` reads a closed channel as `None`; `try_send` returns `false`.
 - A `Channel[T]` is an `Iterable[T]`: `for v in ch`, a comprehension and `List.from_iter(ch)` / `Set.from_iter(ch)` drain
   it until it is closed and empty (Rust `rx.iter().collect()`, Go `for v := range ch`), so `List.from_iter(ch)`
@@ -263,4 +276,4 @@ channel then reports ready (`recv`/`try_recv`/`wait` → `true`) on **every** ca
 out to any number of receivers — like a passed `timer` deadline, but flipped on demand. (An ordinary
 `Channel[bool]` can't be a fan-out `done()`: one `recv` takes each value, so a value reaches one
 receiver once.) `trip()` is idempotent and reuses `close()`'s wake fan-out (minus the `closed` flag, so a
-`wait:` arm stays *ready* rather than *skipped*). See `examples/channel_trip.chz`.
+`wait:` arm binds `?true` rather than the `!RecvError` of a closed channel). See `examples/channel_trip.chz`.

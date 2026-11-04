@@ -1,5 +1,7 @@
 # `wait:` — Chezzi's `select`. Race several channel `recv`s: block until whichever channel is ready
-# first, bind its value, and run that arm (source-order priority, not Go's random fairness).
+# first, bind its result, and run that arm (source-order priority, not Go's random fairness). An arm
+# binds what `ch.recv()` returns, `T!RecvError`: the value, or `!RecvError` once the channel is closed
+# and drained.
 #
 # This example uses only NON-blocking arms — a value already queued, a fired `timer`, or `else:` —
 # so its output is deterministic at every worker count. (A `wait` that truly blocks until a sibling
@@ -15,17 +17,27 @@ fn main():
     orders.send("a1")
     cancels.send("c1")
     wait:
-        v := orders.recv(): print("order {v}")
-        w := cancels.recv(): print("cancel {w}")
+        v := orders.recv():
+            o := v else: panic("orders closed")
+            print("order {o}")
+        w := cancels.recv():
+            c := w else: panic("cancels closed")
+            print("cancel {c}")
 
     # 2. `orders` is drained now; the buffered `cancels` value is taken.
     wait:
-        v := orders.recv(): print("order {v}")
-        w := cancels.recv(): print("cancel {w}")
+        v := orders.recv():
+            o := v else: panic("orders closed")
+            print("order {o}")
+        w := cancels.recv():
+            c := w else: panic("cancels closed")
+            print("cancel {c}")
 
     # 3. Nothing ready → the non-blocking `else:` fallback runs.
     wait:
-        v := orders.recv(): print("order {v}")
+        v := orders.recv():
+            o := v else: panic("orders closed")
+            print("order {o}")
         else: print("idle")
 
     # 4. A `timer` arm fires once its deadline passes. For a waiter that owns its OS thread (`main`,
@@ -36,19 +48,28 @@ fn main():
     wait:
         _ := timer(1).recv(): print("timeout")
 
-    # 5. `=` assigns an existing outer lvalue instead of binding a fresh name.
+    # 5. `=` assigns an existing outer lvalue (of the recv result type) instead of binding a fresh name.
     nums := Channel[int]()
     nums.send(7)
-    sum := 0
+    last: int!RecvError = ?0
     wait:
-        sum = nums.recv(): print("sum {sum}")
+        last = nums.recv():
+            n := last else: panic("nums closed")
+            print("sum {n}")
 
-    # 6. A closed+empty arm is skipped; a ready sibling wins.
+    # 6. A closed, drained channel is ready: its arm binds `!RecvError`, and the first ready arm in
+    #    source order wins, so `close(done)` works as a stop signal. (A guard, `if open:`, switches
+    #    an arm off.)
     done := Channel[int]()
     done.close()
     nums.send(9)
     wait:
-        d := done.recv(): print("done {d}")
-        n := nums.recv(): print("num {n}")
+        d := done.recv():
+            match d:
+                ?x: print("done {x}")
+                !e: print("done: {e.message()}")
+        n := nums.recv():
+            x := n else: panic("nums closed")
+            print("num {x}")
 
 main()

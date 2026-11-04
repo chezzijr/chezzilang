@@ -217,8 +217,9 @@ pub enum StmtKind {
     /// sequential executor the task is registered here and run at the nursery's dedent.
     Spawn(SpawnTarget),
     /// `wait:` — Chezzi's `select`. Race the `recv`s in `arms`: block until whichever channel has a
-    /// value first, bind it (per the arm's target pattern), and run that arm's body. Source-order
-    /// poll (deterministic, not Go-random); a closed+empty arm is skipped; `else_block` (optional,
+    /// value first, bind what `recv` returns (`T!RecvError`) to the arm's target, and run that arm's
+    /// body. Source-order poll (deterministic, not Go-random); a closed+empty arm is ready and binds
+    /// `!RecvError` (D2); `else_block` (optional,
     /// last) is the non-blocking fallback. Recv-only — unbounded channels never block a `send`. See
     /// `docs/reference/concurrency/ §6d`.
     Wait {

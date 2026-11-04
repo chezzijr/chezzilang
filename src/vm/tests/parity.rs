@@ -1003,7 +1003,7 @@ fn golden_set_chz_matches_expected_and_interp() {
 /// `timer(ms)` golden: a one-shot timeout channel delivers `true`. Byte-identical on the
 /// VM and `.expected` (inline-sleep to the deadline). `--parallel`
 /// §6d golden: `examples/wait_select.chz` (Chezzi's `select` — source-order priority, `else:`,
-/// a `timer` arm, `=` assignment, and a skipped closed+empty arm). Uses only non-blocking arms so
+/// a `timer` arm, `=` assignment, and a closed, drained arm that is picked with `!RecvError`). Uses only non-blocking arms so
 /// the VM AND `--parallel` are byte-identical (a truly-blocking `wait` is a
 /// VM-only capability tested separately in `vm_wait_blocks_then_wakes_on_second_channel`).
 #[test]

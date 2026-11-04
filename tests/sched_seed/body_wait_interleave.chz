@@ -12,7 +12,11 @@ fn main():
                         b.send("b{i}.{j}")
         for _ in 0..12:
             wait:
-                v := a.recv(): out.push(v)
-                w := b.recv(): out.push(w)
+                v := a.recv():
+                    x := v else: panic("a closed")
+                    out.push(x)
+                w := b.recv():
+                    y := w else: panic("b closed")
+                    out.push(y)
     print(" ".join(out))
 main()

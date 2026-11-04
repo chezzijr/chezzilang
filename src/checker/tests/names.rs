@@ -1976,10 +1976,16 @@ fn multi_target_assignment_wraps_each_element() {
     );
 }
 
+/// D2: a recv arm gives `int!RecvError`, which does not fit an `int?` target; bind it, unwrap,
+/// then the plain assignment wraps the `int` into the optional.
 #[test]
-fn wait_recv_assign_wraps_into_an_optional_target() {
+fn wait_recv_bind_then_assign_wraps_into_an_optional_target() {
     ok(
+        "fn main():\n    ch := Channel[int](1)\n    ch.send(5)\n    x: int? = None\n    wait:\n        r := ch.recv():\n            n := r else: panic(\"ch closed\")\n            x = n\n            print(x)\n",
+    );
+    rejects(
         "fn main():\n    ch := Channel[int](1)\n    ch.send(5)\n    x: int? = None\n    wait:\n        x = ch.recv():\n            print(x)\n",
+        "cannot assign int!RecvError to int?",
     );
 }
 

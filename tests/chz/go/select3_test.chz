@@ -12,16 +12,12 @@
 # Left out (Go line: reason):
 #   65  testBlock(always, nilch <- 7): an in-process block is a fatal deadlock in Chezzi; needs an out-of-process golden harness
 #   68  testBlock(always, <-nilch): same (always-blocks)
-#   95  testBlock(never, recv from closedch, comma-ok): D1+D2: Chezzi faults or skips; own plan
 #   113 testBlock(always, <-ch on a non-ready channel): always-blocks, needs an out-of-process golden harness
 #   119 testBlock(always, select {}): always-blocks, needs an out-of-process golden harness (also D4: no empty wait)
 #   124 testBlock(always, select with only a nil recv): always-blocks, needs an out-of-process golden harness
 #   130 testBlock(always, select with only a nil send): always-blocks, needs an out-of-process golden harness
 #   136 testBlock(always, select with nil recv + nil send): always-blocks, needs an out-of-process golden harness
 #   146 testBlock(always, select on a non-ready channel): always-blocks, needs an out-of-process golden harness
-#   195 testBlock(never, select picks <-closedch): D1+D2: Chezzi faults or skips; own plan
-#   200 testBlock(never, select picks x := <-closedch): D1+D2: Chezzi faults or skips; own plan
-#   206 testBlock(never, select picks x, ok := <-closedch): D1+D2: Chezzi faults or skips; own plan
 #   219 testBlock(always, select sends and receives on one channel): always-blocks, needs an out-of-process golden harness
 
 async := 1  # Go: const async = 1 // asynchronous channels
@@ -51,6 +47,13 @@ test fn nil_select_with_default():
 test fn send_with_free_buffer():
     ch := Channel[int](async)  # Go: ch := make(chan int, async)
     ch.send(7)  # Go: ch <- 7
+
+# receiving from a closed channel never blocks
+test fn recv_on_closed_never_blocks():
+    for _ in 0..10:  # Go: for i := 0; i < 10; i++ {
+        match closedch.recv():  # Go: if <-closedch != 0 / x, ok := <-closedch; x != 0 || ok
+            ?x: assert false, "expected an error when reading from closed channel, got {x}"
+            !e: assert e.message() == "receiving on a closed channel"
 
 # sending to a closed channel panics.
 test fn send_on_closed_panics():
@@ -90,6 +93,23 @@ test fn select_with_ready_channels():
             assert false, "control flow shouldn't reach here"
 
 # selects with closed channels behave like ordinary operations
+test fn select_recv_on_closed_never_blocks():
+    wait:  # Go: select {
+        _ := closedch.recv():  # Go: case <-closedch:
+            pass
+
+test fn select_bind_recv_on_closed_never_blocks():
+    wait:  # Go: select {
+        x := closedch.recv():  # Go: case x := (<-closedch):
+            _ = x  # Go: _ = x
+
+test fn select_comma_ok_recv_on_closed_never_blocks():
+    wait:  # Go: select {
+        r := closedch.recv():  # Go: case x, ok := (<-closedch):
+            match r:  # Go: _, _ = x, ok  (ok is false: the `!` side)
+                ?x: assert false, "got {x} from a closed channel"
+                !_: pass
+
 test fn select_send_on_closed_panics():
     r := recover:
         wait:  # Go: select {

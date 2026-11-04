@@ -23,7 +23,9 @@ fn send(c: Channel[int], v: int) -> bool:
 # Receive from c; None once main has tripped the latch.  Go: <-c
 fn recv(c: Channel[int]) -> int?:
     wait:
-        v := c.recv(): return v
+        r := c.recv():
+            v := r else: panic("c closed")
+            return v
         _ := done.recv(): return None
 
 # Send odd numbers, starting from 5, on out.
@@ -61,7 +63,8 @@ fn sendproxy(out: Channel[int], proxy: Channel[int]):
         # Go: c = out; if first == last { c = nil } (buffer empty: disable output); the guard
         # switches the send arm off instead.
         wait:
-            e := proxy.recv():  # Go: case e = <-proxy:
+            r := proxy.recv():  # Go: case e = <-proxy:
+                e := r else: panic("proxy closed")
                 buf.push_back(e)  # Go: last.Value = e; ...; last = last.Next()
             out.send(buf.peek_front() ?? 0) if not buf.is_empty():  # Go: case c <- e:
                 _ := buf.pop_front()  # Go: first = first.Next()

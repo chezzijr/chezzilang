@@ -321,21 +321,46 @@ ex.shutdown()
     assert_eq!(out, "main got 42\n");
 }
 
-/// The process-wide verdict's HANG regression, caught by adversarial review of the change that
-/// introduced it: a `wait:` with a CLOSED arm must still reach its deadlock fault.
+/// D2 — a top-level `wait:` with a CLOSED arm takes that arm (it binds `!RecvError`), as Go's
+/// `select` picks `<-closed`; it neither faults nor hangs.
 ///
-/// `closed` means opposite things at the two blocking sites. A single `recv` on a closed channel makes
-/// progress — it returns `ClosedEmpty`, so a `for v in ch:` ends and a bare `recv` gives `!RecvError`. But the
-/// `wait:` poll SKIPS a closed+empty recv arm (W7-13r(a)), so that arm is not progress at all. Folding
-/// both into one `PartyWait` made the closed arm answer "satisfiable" forever, which vetoed the
-/// verdict permanently: this program faults in 0 ms before the detector and HUNG with the variants
-/// merged (measured on built binaries, both engines, rc 1 → rc 124).
+/// History: before D2 the poll SKIPPED a closed+empty recv arm (W7-13r(a)), and folding it into
+/// `PartyWait` as "satisfiable" vetoed the deadlock verdict forever — this program HUNG (rc 124).
+/// Now closed IS ready, so the arm is taken. The deadlock half of that fence is
+/// [`a_top_level_wait_on_open_empty_arms_still_reports_the_deadlock`].
 #[test]
-fn a_wait_with_a_closed_arm_still_reports_the_deadlock() {
+fn a_top_level_wait_with_a_closed_arm_takes_it() {
     let src = r#"
 c1 := Channel[int](1)
 c2 := Channel[int](1)
 c1.close()
+wait:
+    v := c1.recv():
+        match v:
+            ?x: print("c1 {x}")
+            !e: print("c1 {e.message()}")
+    w := c2.recv():
+        print("c2 {w}")
+"#;
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(run_capture(src));
+    });
+    let out = rx
+        .recv_timeout(std::time::Duration::from_secs(60))
+        .expect("a closed arm is ready: the wait must take it, not hang")
+        .expect("a closed arm is ready: no deadlock");
+    assert_eq!(out, "c1 receiving on a closed channel\n");
+}
+
+/// The deadlock fence kept from the HANG regression above, in the same top-level context: a `wait:`
+/// whose arms are all OPEN, empty and unfeedable (nothing else runs) must still reach its deadlock
+/// fault — counting closed arms as ready must not make an open one look satisfiable.
+#[test]
+fn a_top_level_wait_on_open_empty_arms_still_reports_the_deadlock() {
+    let src = r#"
+c1 := Channel[int](1)
+c2 := Channel[int](1)
 wait:
     v := c1.recv():
         print("c1 {v}")
@@ -344,20 +369,17 @@ wait:
 "#;
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
-        let _ = tx.send((run_capture(src), run_capture(src)));
+        let _ = tx.send(run_capture(src));
     });
-    let (serial, mn) = rx
+    let msg = rx
         .recv_timeout(std::time::Duration::from_secs(60))
-        .expect("a closed arm must not veto the deadlock verdict forever");
-    for (engine, r) in [("serial", serial), ("M:N", mn)] {
-        let msg = r
-            .expect_err("nothing can feed c2 — this is a deadlock")
-            .message;
-        assert!(
-            msg.contains("wait on channels that are all empty: deadlock"),
-            "{engine} fault was: {msg}"
-        );
-    }
+        .expect("an all-open, unfeedable wait must reach the deadlock verdict, not hang")
+        .expect_err("nothing can feed c1 or c2 — this is a deadlock")
+        .message;
+    assert!(
+        msg.contains("wait on channels that are all empty: deadlock"),
+        "fault was: {msg}"
+    );
 }
 
 /// The process-wide verdict's FALSE-FAULT regression, also caught by adversarial review: an
@@ -1565,9 +1587,11 @@ for i in 0..300:
     gate.send(true)
 {skew}    wait:
         v := data.recv():
-            s = s + v
+            n := v else: panic(\"data closed\")
+            s = s + n
         w := other.recv():
-            s = s + w
+            m := w else: panic(\"other closed\")
+            s = s + m
 ex.shutdown()
 print(s)
 "
@@ -1610,39 +1634,35 @@ print(s)
     }
 }
 
-/// W7-13r(a)'s LIVE-LOCK fence — a CLOSED arm 0 beside a live arm must not spin the eager `wait:`.
+/// D2 — an eager `wait:` (an Executor job) with a CLOSED arm 0 beside a live arm takes the closed
+/// arm at once, binding `!RecvError`: Go's `case <-done:` with `done` closed as a broadcast cancel.
+/// With the closed arm switched OFF by its guard, the live arm's value is still delivered.
 ///
-/// Go's most ordinary `select` is `case <-done:` / `case v := <-work:` with `done` closed as a
-/// broadcast cancel. `op_wait_poll` SKIPS a closed+empty recv arm, so "closed" is NOT a ready
-/// condition — but the first version of the arm-0 predicate included `|| g.closed`, so the wait
-/// returned instantly, `ip -= 1` re-polled, the arm was skipped, and round it went at full speed:
+/// History (W7-13r(a)): when the poll SKIPPED a closed+empty arm, an arm-0 predicate that read
+/// `|| g.closed` as ready spun the eager wait at 99% CPU. Under D2 closed is ready AND taken, so a
+/// wake on it ends the wait. The guarded-off case keeps the old shape — a closed arm the poll will
+/// not take, beside a live arm — and pins that it still completes with the live value.
 ///
-/// | | user CPU |
-/// |---|---|
-/// | before (blind sleep) | 0.01 s, **0%** |
-/// | the broken predicate | 3.00 s, **99%** |
-///
-/// `MnSched::park_wait` already documents the rule ("the reverted parity-perf-0 live-lock"), and it
-/// was broken anyway — so this test exists to make the rule executable rather than advisory.
-///
-/// **What this test can and cannot catch.** It pins the SEMANTICS: with arm 0 closed, the live arm's
-/// value must still be delivered, and the run must not hang. It does NOT measure CPU — `cargo test`
-/// asserts verdicts, and every variant of this bug printed the right answer. A future predicate that
-/// spins would still pass here. The honest fence for that is the rule in the comment at the predicate.
+/// **What this test can and cannot catch.** It pins the SEMANTICS (the right arm, no hang). It does
+/// NOT measure CPU: a predicate that spun on the guarded-off closed arm would still print 7.
 #[test]
-fn an_eager_wait_with_a_closed_arm_still_takes_the_live_arm() {
-    let src = "
+fn an_eager_wait_takes_a_closed_arm_and_a_guarded_off_one_yields_the_live_arm() {
+    for (live, expected) in [("true", "-1\n"), ("false", "7\n")] {
+        let src = format!(
+            "
 import Executor from std.concurrency
-import std.time\nimport timer from std.time
+import std.time
 done: Channel[bool] = Channel[bool](1)
 work: Channel[int] = Channel[int](1)
 out: Channel[int] = Channel[int](1)
+DONE_ON: bool = {live}
 fn cons():
     wait:
-        d := done.recv():
+        _ := done.recv() if DONE_ON:
             out.send(-1)
         v := work.recv():
-            out.send(v)
+            n := v else: panic(\"work closed\")
+            out.send(n)
 fn prod():
     _ := time.timer(60).recv()
     work.send(7)
@@ -1651,24 +1671,27 @@ ex := Executor()
 ex.submit(cons)
 ex.submit(prod)
 ex.shutdown()
-print(out.recv())
-";
-    let entry = write_temp_chz("w713a_closed_arm0", src);
-    let (tx, rx) = std::sync::mpsc::channel();
-    let e = entry.clone();
-    std::thread::spawn(move || {
-        let (o, _e2, r, _c) = run_file(&e);
-        let _ = tx.send((o, format!("{r:?}"), r.is_err()));
-    });
-    let outcome = rx.recv_timeout(std::time::Duration::from_secs(30));
-    let _ = std::fs::remove_file(&entry);
-    let (out, rdbg, failed) = outcome
-        .expect("a `wait:` with one closed arm hung — the dead arm is being waited on as if live");
-    assert!(!failed, "the live arm must be taken: out={out:?} r={rdbg}");
-    assert_eq!(
-        out, "7\n",
-        "the closed arm must be SKIPPED (not taken, not blocking) and the live arm's value delivered"
-    );
+r := out.recv() else: panic(\"out closed\")
+print(r)
+"
+        );
+        let entry = write_temp_chz("w713a_closed_arm0", &src);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let e = entry.clone();
+        std::thread::spawn(move || {
+            let (o, _e2, r, _c) = run_file(&e);
+            let _ = tx.send((o, format!("{r:?}"), r.is_err()));
+        });
+        let outcome = rx.recv_timeout(std::time::Duration::from_secs(30));
+        let _ = std::fs::remove_file(&entry);
+        let (out, rdbg, failed) =
+            outcome.expect("a `wait:` with one closed arm hung (DONE_ON={live})");
+        assert!(!failed, "DONE_ON={live}: out={out:?} r={rdbg}");
+        assert_eq!(
+            out, expected,
+            "DONE_ON={live}: an ON closed arm must be taken at once; an OFF one leaves the live arm"
+        );
+    }
 }
 
 /// W7-13r(c)'s ORDERING fence — the closed-check must come AFTER the enqueue retry, never before.

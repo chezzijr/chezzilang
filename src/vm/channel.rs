@@ -29,6 +29,22 @@ impl Vm {
         }
     }
 
+    /// What a receive gives, `T!RecvError`: `Some(v)` → `?v`, `None` (closed and drained) →
+    /// `!RecvError` (the prelude struct). Both `recv` and a `wait:` recv arm build it here.
+    pub(super) fn recv_result(&mut self, got: Option<Value>) -> Value {
+        match got {
+            Some(v) => self.alloc_enum("Result", "Ok", &[v]),
+            None => {
+                let tid = self.struct_tid(&self.program.recv_error_key);
+                let e = self.heap.alloc(Obj::Struct {
+                    tid,
+                    fields: Fields::from_vec(Vec::new()),
+                });
+                self.alloc_enum("Result", "Err", &[Value::obj(e)])
+            }
+        }
+    }
+
     /// `Channel[T]` methods (C2/C4): `send` (the value itself: one word, M3.2), `recv` (FIFO;
     /// empty = wait or a deadlock fault), `len`.
     pub(super) fn channel_method(
@@ -76,22 +92,13 @@ impl Vm {
                 // demoted recv `!RecvError`).
                 match self.recv_step_or_demote(h, span)? {
                     // `recv_step_or_demote` woke a sender for `Got`; a filled slot committed none.
-                    RecvStep::Got(v) | RecvStep::Filled(v) => {
-                        Ok(self.alloc_enum("Result", "Ok", &[v]))
-                    }
+                    RecvStep::Got(v) | RecvStep::Filled(v) => Ok(self.recv_result(Some(v))),
                     // `chan_recv_step` already re-rooted the receiver + set `suspend`; the sentinel is
                     // never observed (`do_method_call` gates the result-push on `suspend`).
                     RecvStep::Parked => Ok(Value::nil()),
-                    // Closed-and-drained: `!RecvError` (the prelude struct), no fault — no producer
-                    // left. Every later `recv` gives it again.
-                    RecvStep::ClosedEmpty => {
-                        let tid = self.struct_tid(&self.program.recv_error_key);
-                        let e = self.heap.alloc(Obj::Struct {
-                            tid,
-                            fields: Fields::from_vec(Vec::new()),
-                        });
-                        Ok(self.alloc_enum("Result", "Err", &[Value::obj(e)]))
-                    }
+                    // Closed-and-drained: `!RecvError`, no fault — no producer left. Every later
+                    // `recv` gives it again.
+                    RecvStep::ClosedEmpty => Ok(self.recv_result(None)),
                 }
             }
             ChannelMethod::TryRecv => {
@@ -136,8 +143,8 @@ impl Vm {
             // `trip()` flips the manual level-trigger latch (the primitive behind `std.cancel`'s
             // `done()`): the channel is then permanently ready (`recv`/`try_recv`/`wait` yield `true`).
             // Idempotent. Reuses `close()`'s exact wake fan-out so a parked `recv`/`wait` re-runs and
-            // observes the latch — but does NOT set `closed` (a closed+empty `wait` arm is *skipped*;
-            // we need it *ready*).
+            // observes the latch — but does NOT set `closed` (a closed+empty arm binds `!RecvError`;
+            // a tripped one must bind `?true`).
             ChannelMethod::Trip => {
                 self.arity_err("trip", args, 0, span)?;
                 let core = self.channel_core(h);

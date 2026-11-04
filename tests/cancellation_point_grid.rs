@@ -401,12 +401,12 @@ fn ops() -> Vec<Op> {
             out: "Channel[int](1)",
             ready: Some((
                 "src.send(7)",
-                "wait:\n    x := src.recv(): got.add(x)",
+                "wait:\n    r := src.recv():\n        x := r else: panic(\"src closed\")\n        got.add(x)",
                 "got.load() == 7",
             )),
             wait: Some((
                 "",
-                "wait:\n    x := src.recv(): got.add(x)",
+                "wait:\n    r := src.recv():\n        x := r else: panic(\"src closed\")\n        got.add(x)",
                 "after.load() == 0",
                 None,
             )),

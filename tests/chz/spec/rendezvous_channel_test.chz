@@ -95,7 +95,9 @@ test fn wait_else_takes_a_parked_rendezvous_sender():
         spawn:
             time.sleep_ms(150)
             wait:
-                v := rz.recv(): got.set(v)
+                v := rz.recv():
+                    x := v else: panic("rz closed")
+                    got.set(x)
                 else: got.set(-1)
     assert got.get() == 7, "wait: recv arm must take a parked rendezvous sender's value"
 
@@ -223,7 +225,8 @@ fn pool_worker(done: Channel[bool], work: Channel[int], n: AtomicInt):
             _ := done.recv():
                 return
             v := work.recv():
-                n.add(v)
+                x := v else: panic("work closed")
+                n.add(x)
 
 # TICKET-185 (H1) — the worker-pool idiom: every rendezvous value reaches a `wait:` worker and none
 # is left in the channel (Go: 0 of 200 runs bad). It used to strand values: a `send` returned while

@@ -33,9 +33,9 @@ fn crunch(tok: Token, out: Shared[int]):
     out.set(i)
 
 # IO-bound: race done() against the work channel in a wait:.
-fn serve(tok: Token, io: Channel[str]):
+fn serve(tok: Token, io: Channel[str]) -> !RecvError:
     wait:
-        v := io.recv():        handle(v)
+        r := io.recv():        handle(r?)       # `r: str!RecvError`; `?` passes a closed `io` up
         _ := tok.done().recv(): cleanup()   # cancelled (timeout or manual) → take this arm
 ```
 

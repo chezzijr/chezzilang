@@ -280,17 +280,21 @@ Each group below is one fact decided in two or more places (grouped 2026-10-16).
     (`j := jobs.recv() if not paused:`, tokio `select!` / Ada `when`); a false guard switches the arm
     off the way Go uses a nil channel, and all arms off with no `else:` faults
     `wait: every arm is off ...`. `tests/chz/go/` holds faithful ports of Go 1.27.0 `test/chan`
-    (license in its `NOTICE`), run at both worker counts. Done: 17 of 20 files (select3 in part).
+    (license in its `NOTICE`), run at both worker counts. Done: 17 of 20 files; select3 has 15 of
+    its 24 cases (95, 195, 200 and 206 came with item 28; the 9 left are always-block cases).
     The powser2 port found that a protocol method could not name its own protocol (fixed).
-    Next: the closed-channel rules (item 28). Not ported: select5 (a generator), perm
+    Not ported: select5 (a generator), perm
     (directional channels), select2's heap check. Grid: `tests/chz/spec/wait_guard_test.chz`.
-28. **`Channel.recv` returns `T!RecvError` on a closed channel (D1, done 2026-11-04).** Buffered
+28. **`Channel.recv` returns `T!RecvError` on a closed channel (D1 and D2, done 2026-11-04).** Buffered
     values come first; then every `recv` of a closed, drained channel gives `!RecvError`, with no
     fault (Rust `recv` -> `Err(RecvError)`, Go `v, ok := <-ch`). `RecvError` is a prelude struct;
     `message()` is `receiving on a closed channel`. A bare `ch.recv()` statement warns; write
     `_ := ch.recv()`. `std.concurrency.broadcast` `Receiver.recv` gives `!BroadcastError.Closed` /
-    `.Lagged(l)` (tokio). Next (D2): a `wait:` recv arm on a closed channel is picked and binds
-    the result. Grid: `tests/chz/spec/channel_closed_recv_test.chz`.
+    `.Lagged(l)` (tokio). D2: a `wait:` recv arm binds the same `T!RecvError`; a closed, drained
+    channel's arm is ready and picked in source order (Go `select` picks `<-closed`, crossbeam gives
+    `RecvError`), so the all-closed fault is gone. In a loop a closed arm fires on
+    every pass; a guard switches it off. Grids: `tests/chz/spec/channel_closed_recv_test.chz`,
+    `tests/chz/spec/wait_closed_arm_test.chz`.
 
 ### Open questions for the owner
 

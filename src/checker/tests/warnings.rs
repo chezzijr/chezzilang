@@ -684,7 +684,7 @@ fn d4_user_method_writing_self_checks_clean_in_a_task() {
             "b",
         ),
         (
-            "struct C:\n    n: int\n    fn receive(self, ch: Channel[int]):\n        wait:\n            self.n = ch.recv():\n                print(self.n)\nfn f():\n    ch := Channel[int](1)\n    ch.send(2)\n    c := C(0)\n    parallel:\n        spawn:\n            c.receive(ch)\nf()\n",
+            "struct C:\n    n: int\n    fn receive(self, ch: Channel[int]):\n        wait:\n            r := ch.recv():\n                n := r else: panic(\"ch closed\")\n                self.n = n\n                print(self.n)\nfn f():\n    ch := Channel[int](1)\n    ch.send(2)\n    c := C(0)\n    parallel:\n        spawn:\n            c.receive(ch)\nf()\n",
             "c",
         ),
     ];

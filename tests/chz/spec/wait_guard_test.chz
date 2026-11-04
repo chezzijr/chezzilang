@@ -21,11 +21,11 @@ test fn a_false_guard_lets_the_other_ready_arm_run():
     a.send(1)
     b.send(2)
     on := false
-    got := 0
+    got: int!RecvError = ?0
     wait:
         v := a.recv() if on: got = v
         w := b.recv(): got = w
-    assert got == 2, "got: {got}"
+    assert got == ?2, "got: {got}"
     assert a.recv() == ?1
 
 test fn a_false_guard_skips_its_channel_and_value_expressions():
@@ -44,12 +44,12 @@ test fn guards_and_operands_run_in_source_order():
     a := Channel[int](1)
     b := Channel[int](1)
     b.send(7)
-    got := 0
+    got: int!RecvError = ?0
     wait:
         v := chan(log, "ch1", a).recv() if tick(log, "g1", true): got = v
         w := chan(log, "ch2", b).recv() if tick(log, "g2", true): got = w
     assert log == ["g1", "ch1", "g2", "ch2"], "{log}"
-    assert got == 7
+    assert got == ?7
 
 test fn an_earlier_off_arm_does_not_shift_the_parked_arm_that_fires():
     # Two off arms (a ready recv, a send with room) ahead of two live arms; the wait parks, then the
@@ -94,15 +94,15 @@ test fn a_guarded_send_arm_on_and_off():
 test fn a_guarded_assign_arm():
     ch := Channel[int](1)
     ch.send(3)
-    n := 0
+    n: int!RecvError = ?0
     wait:
-        n = ch.recv() if n == 0: pass
-    assert n == 3
+        n = ch.recv() if n == ?0: pass
+    assert n == ?3
     ch.send(4)
     wait:
-        n = ch.recv() if n == 0: pass
+        n = ch.recv() if n == ?0: pass
         else: pass
-    assert n == 3
+    assert n == ?3
     assert ch.recv() == ?4
 
 test fn all_arms_off_with_else_runs_the_else():
@@ -127,16 +127,18 @@ test fn all_arms_off_without_else_faults():
         !e: assert e.message().contains("every arm is off"), e.message()
 
 test fn an_off_arm_is_not_a_closed_arm():
+    # A closed, drained arm is ready and binds !RecvError; an off arm never runs.
     a := Channel[int](1)
     b := Channel[int](1)
     b.close()
-    r := recover:
-        wait:
-            v := a.recv() if false: pass
-            w := b.recv(): pass
-    match r:
-        ?_: assert false, "expected a fault"
-        !e: assert e.message().contains("all channels closed"), e.message()
+    took := ""
+    wait:
+        v := a.recv() if false: took = "a"
+        w := b.recv():
+            match w:
+                ?_: took = "b value"
+                !_: took = "b closed"
+    assert took == "b closed", took
     a.close()
     r2 := recover:
         wait:
@@ -157,8 +159,12 @@ test fn a_paused_worker_runs_queued_jobs_after_resume_in_order():
             paused := true
             while got.len() < 4:
                 wait:
-                    j := jobs.recv() if not paused: got.push(j)
-                    p := ctl.recv(): paused = p
+                    r := jobs.recv() if not paused:
+                        j := r else: panic("jobs closed")
+                        got.push(j)
+                    r := ctl.recv():
+                        p := r else: panic("ctl closed")
+                        paused = p
         spawn:
             for i in 0..4:
                 jobs.send(i)

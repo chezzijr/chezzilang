@@ -23,7 +23,8 @@ fn generate(ch: Channel[int]):  # Go: func Generate(ch chan<- int)
 fn filter(inp: Channel[int], out: Channel[int], prime: int):  # Go: func Filter(in <-chan int, out chan<- int, prime int)
     while true:  # Go: for i := range in { // Loop over values received from 'in'.
         wait:
-            i := inp.recv():
+            r := inp.recv():
+                i := r else: return  # Go: the range loop ends when 'in' is closed
                 if i % prime != 0:
                     wait:
                         out.send(i): pass  # Send 'i' to channel 'out'.  Go: out <- i
@@ -38,7 +39,9 @@ fn sieve(primes: Channel[int]):  # Go: func Sieve(primes chan<- int)
         # Note that ch is different on each iteration.
         prime := 0
         wait:
-            prime = ch.recv(): pass  # Go: prime := <-ch
+            r := ch.recv():  # Go: prime := <-ch
+                p := r else: panic("ch closed")
+                prime = p
             _ := done.recv(): return
         wait:
             primes.send(prime): pass  # Go: primes <- prime

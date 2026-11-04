@@ -46,7 +46,8 @@ test fn a_wait_recv_arm_holds_the_handle():
     n := 0
     wait:
         v := ch.recv():
-            n = v.len()
+            got := v else: panic("ch closed")
+            n = got.len()
     assert n == 2
 
 test fn for_over_a_channel_holds_the_handle():

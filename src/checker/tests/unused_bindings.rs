@@ -524,13 +524,14 @@ fn full_path_longest_imported_prefix_wins() {
 
 #[test]
 fn full_path_head_shadowed_by_a_wait_recv_bind_reads_the_field() {
-    // A `wait` recv arm binds `pkg` in the arm scope: `pkg.deep.x` reads the received struct's
-    // field, not module `pkg.deep` (owner rule 5).
+    // A `wait` recv arm binds `pkg` (a `Conf!RecvError`) in the arm scope, and the `?pkg` match arm
+    // rebinds it to the received struct: `pkg.deep.x` reads its field, not module `pkg.deep`
+    // (owner rule 5).
     files_ok(&[
         ("pkg/deep.chz", FP_DEEP),
         (
             "main.chz",
-            "import pkg.deep\nstruct Inner:\n    x: int\nstruct Conf:\n    deep: Inner\nch: Channel[Conf] = Channel(1)\nch.send(Conf(Inner(9)))\nwait:\n    pkg := ch.recv(): print(pkg.deep.x)\n",
+            "import pkg.deep\nstruct Inner:\n    x: int\nstruct Conf:\n    deep: Inner\nch: Channel[Conf] = Channel(1)\nch.send(Conf(Inner(9)))\nwait:\n    pkg := ch.recv():\n        match pkg:\n            ?pkg: print(pkg.deep.x)\n            !e: panic(e.message())\n",
         ),
     ]);
 }
@@ -1168,17 +1169,17 @@ fn ticket184_flow_grid() {
         ),
         (
             "R3",
-            "fn g(c: Channel[int]) -> int:\n    wait:\n        v := c.recv():\n            return v\nprint(g(Channel[int](1)))\n",
+            "fn g(c: Channel[int]) -> int:\n    wait:\n        v := c.recv():\n            n := v else: panic(\"c closed\")\n            return n\nprint(g(Channel[int](1)))\n",
             "ok",
         ),
         (
             "R4",
-            "fn g(c: Channel[int]) -> int:\n    wait:\n        v := c.recv():\n            return v\n        else:\n            return 0\nprint(g(Channel[int](1)))\n",
+            "fn g(c: Channel[int]) -> int:\n    wait:\n        v := c.recv():\n            n := v else: panic(\"c closed\")\n            return n\n        else:\n            return 0\nprint(g(Channel[int](1)))\n",
             "ok",
         ),
         (
             "R5",
-            "fn g(c: Channel[int]) -> int:\n    wait:\n        v := c.recv():\n            return v\n        else:\n            pass\nprint(g(Channel[int](1)))\n",
+            "fn g(c: Channel[int]) -> int:\n    wait:\n        v := c.recv():\n            n := v else: panic(\"c closed\")\n            return n\n        else:\n            pass\nprint(g(Channel[int](1)))\n",
             "fall off the end",
         ),
         (

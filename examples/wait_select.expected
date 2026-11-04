@@ -3,4 +3,4 @@ cancel c1
 idle
 timeout
 sum 7
-num 9
+done: receiving on a closed channel

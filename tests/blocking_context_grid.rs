@@ -334,7 +334,7 @@ fn ops() -> Vec<Op> {
         ),
         op(
             "wait_recv",
-            "    wait:\n        v := ch.recv(): print(v)",
+            "    wait:\n        v := ch.recv(): print(must(v))",
             send7,
             "",
             false,
@@ -350,19 +350,20 @@ fn ops() -> Vec<Op> {
         ),
         op(
             "wait_recv_timer",
-            "    wait:\n        v := ch.recv(): print(v)\n        _ := time.timer(20).recv(): print(\"t\")",
+            "    wait:\n        v := ch.recv(): print(must(v))\n        _ := time.timer(20).recv(): print(\"t\")",
             "",
             "",
             false,
             &[(Deadline, "t\n")],
         ),
+        // A closed drained arm is ready: it is picked ahead of the timer and binds `!RecvError`.
         op(
             "wait_closed_timer",
-            "    cc := Channel[int](1)\n    cc.close()\n    wait:\n        v := cc.recv(): print(v)\n        _ := time.timer(20).recv(): print(\"t\")",
+            "    cc := Channel[int](1)\n    cc.close()\n    wait:\n        v := cc.recv(): print(show(v))\n        _ := time.timer(20).recv(): print(\"t\")",
             "",
             "",
             false,
-            &[(Deadline, "t\n")],
+            &[(Deadline, "err receiving on a closed channel\n")],
         ),
         op(
             "wait_send",
@@ -376,7 +377,7 @@ fn ops() -> Vec<Op> {
         // (third) arm must fire, and with nothing to satisfy it the off arms do not count.
         op(
             "wait_guarded",
-            "    cc := Channel[int](1)\n    cc.send(5)\n    wait:\n        v := cc.recv() if n > 0: print(v)\n        cc.send(6) if n > 0: print(\"s\")\n        w := ch.recv(): print(w)",
+            "    cc := Channel[int](1)\n    cc.send(5)\n    wait:\n        v := cc.recv() if n > 0: print(must(v))\n        cc.send(6) if n > 0: print(\"s\")\n        w := ch.recv(): print(must(w))",
             send7,
             "",
             false,
@@ -385,7 +386,7 @@ fn ops() -> Vec<Op> {
         // D5: every arm off and no `else`: the same fault at once in every context.
         op(
             "wait_all_off",
-            "    cc := Channel[int](1)\n    cc.send(5)\n    wait:\n        v := cc.recv() if n > 0: print(v)\n        cc.send(6) if n > 0: print(\"s\")",
+            "    cc := Channel[int](1)\n    cc.send(5)\n    wait:\n        v := cc.recv() if n > 0: print(must(v))\n        cc.send(6) if n > 0: print(\"s\")",
             "",
             "",
             false,

@@ -159,14 +159,17 @@ fn vm_channel_send_after_close_faults() {
 
 #[test]
 fn vm_wait_picks_first_ready_arm_in_source_order() {
-    let src = "fn main():\n    a := Channel[int]()\n    b := Channel[int]()\n    a.send(1)\n    b.send(2)\n    wait:\n        v := a.recv(): print(10 + v)\n        w := b.recv(): print(20 + w)\nmain()\n";
+    let src = "fn main():\n    a := Channel[int]()\n    b := Channel[int]()\n    a.send(1)\n    b.send(2)\n    wait:\n        v := a.recv():\n            x := v else: panic(\"a closed\")\n            print(10 + x)\n        w := b.recv():\n            y := w else: panic(\"b closed\")\n            print(20 + y)\nmain()\n";
     assert_eq!(run(src), "11\n");
 }
 
+/// D2: a closed, drained arm is READY, so the first ready arm in source order is the closed one —
+/// it is picked over a later arm holding a value and binds `!RecvError` (Go `select` picks
+/// `<-closed`). The value on `b` stays queued.
 #[test]
-fn vm_wait_skips_closed_empty_arm() {
-    let src = "fn main():\n    a := Channel[int]()\n    b := Channel[int]()\n    a.close()\n    b.send(9)\n    wait:\n        v := a.recv(): print(100)\n        w := b.recv(): print(w)\nmain()\n";
-    assert_eq!(run(src), "9\n");
+fn vm_wait_picks_closed_empty_arm_first_in_source_order() {
+    let src = "fn main():\n    a := Channel[int]()\n    b := Channel[int](1)\n    a.close()\n    b.send(9)\n    wait:\n        v := a.recv():\n            match v:\n                ?x: print(\"a {x}\")\n                !e: print(\"a {e.message()}\")\n        w := b.recv(): print(\"b {w}\")\n    print(b.len())\nmain()\n";
+    assert_eq!(run(src), "a receiving on a closed channel\n1\n");
 }
 
 #[test]
@@ -177,7 +180,7 @@ fn vm_wait_runs_else_when_nothing_ready() {
 
 #[test]
 fn vm_wait_assign_arm_mutates_outer_lvalue() {
-    let src = "fn main():\n    ch := Channel[int]()\n    ch.send(5)\n    n := 0\n    wait:\n        n = ch.recv(): print(n)\n    print(n)\nmain()\n";
+    let src = "fn main():\n    ch := Channel[int]()\n    ch.send(5)\n    n: int!RecvError = ?0\n    wait:\n        n = ch.recv(): print(n)\n    print(n)\nmain()\n";
     assert_eq!(run(src), "5\n5\n");
 }
 
@@ -187,12 +190,13 @@ fn vm_wait_timer_arm_fires() {
     assert_eq!(run(src), "tick\n");
 }
 
+/// D2: a lone arm on a closed channel with no `else` is ready, not a fault — it binds `!RecvError`.
 #[test]
-fn vm_wait_all_closed_no_else_faults() {
-    let err = run_err(
+fn vm_wait_lone_closed_arm_binds_recv_error() {
+    let out = run(
         "fn main():\n    ch := Channel[int]()\n    ch.close()\n    wait:\n        v := ch.recv(): print(v)\nmain()\n",
     );
-    assert!(err.contains("all channels closed"), "{err}");
+    assert_eq!(out, "!RecvError()\n");
 }
 
 /// D5 — every arm switched off by its guard and no `else`: the wait can never finish (guards are
@@ -215,19 +219,20 @@ fn vm_wait_every_arm_off_no_else_faults_in_every_context() {
     }
 }
 
-/// W7-2 contract fence — the observable an ALL-DEAD `park_wait` requeue lands on is this fault, and
-/// it must be byte-identical for a MULTI-arm wait (the single-arm case above only
-/// exercises the poll, never the park-gap re-check).
+/// D2: a MULTI-arm wait whose arms are all closed takes the FIRST arm in source order (it binds
+/// `!RecvError`), at the top level and in a nursery task; no fault.
 #[test]
-fn vm_wait_all_closed_multi_arm_faults_both_engines() {
-    let src = "fn main():\n    a := Channel[int]()\n    b := Channel[int]()\n    a.close()\n    b.close()\n    wait:\n        v := a.recv(): print(v)\n        w := b.recv(): print(w)\nmain()\n";
-    let serial = run_err(src);
-    assert!(serial.contains("all channels closed"), "{serial}");
-    let mn = match run_capture(src) {
-        Ok(o) => panic!("expected a fault, got {o:?}"),
-        Err(e) => e.message,
-    };
-    assert_eq!(serial, mn, "serial vs M:N wait all-closed fault divergence");
+fn vm_wait_all_closed_multi_arm_takes_the_first_arm() {
+    let wait = "    wait:\n        v := a.recv():\n            match v:\n                ?x: print(\"a {x}\")\n                !e: print(\"a {e.message()}\")\n        w := b.recv(): print(\"b {w}\")\n";
+    let top = format!(
+        "fn w(a: Channel[int], b: Channel[int]):\n{wait}fn main():\n    a := Channel[int]()\n    b := Channel[int]()\n    a.close()\n    b.close()\n    w(a, b)\nmain()\n"
+    );
+    let task = format!(
+        "fn w(a: Channel[int], b: Channel[int]):\n{wait}fn main():\n    a := Channel[int]()\n    b := Channel[int]()\n    a.close()\n    b.close()\n    parallel:\n        spawn w(a, b)\nmain()\n"
+    );
+    for src in [top, task] {
+        assert_eq!(run(&src), "a receiving on a closed channel\n", "{src}");
+    }
 }
 
 #[test]
@@ -279,7 +284,7 @@ fn vm_wait_sweeps_other_buckets_after_waking() {
 /// the received value must land in the struct field / list slot, identical to the interp.
 #[test]
 fn vm_wait_assign_to_field_and_index_matches_interp() {
-    let src = "struct Box:\n    v: int\nfn main():\n    ch := Channel[int]()\n    ch.send(7)\n    b := Box(0)\n    wait:\n        b.v = ch.recv(): print(b.v)\n    xs := [0, 0]\n    ch.send(9)\n    wait:\n        xs[1] = ch.recv(): print(xs[1])\nmain()\n";
+    let src = "struct Box:\n    v: int!RecvError\nfn main():\n    ch := Channel[int]()\n    ch.send(7)\n    b := Box(?0)\n    wait:\n        b.v = ch.recv(): print(b.v)\n    xs: List[int!RecvError] = [?0, ?0]\n    ch.send(9)\n    wait:\n        xs[1] = ch.recv(): print(xs[1])\nmain()\n";
     let vm = run(src);
     assert_eq!(vm, "7\n9\n");
 }
@@ -381,19 +386,18 @@ fn vm_wait_short_timer_fires_when_no_send_parallel() {
     );
 }
 
-/// Re-park with a live timer arm: a sibling `close`s the channel arm mid-window, which wakes the
-/// waiting fiber WITHOUT a consumable value, so it re-runs WaitPoll and re-enters the snapshot-park
-/// block while the timer is still pending. The timer must still fire correctly ("timeout") and the
-/// run must COMPLETE — no hang. This path (a timer-armed wait that re-parks) was previously
-/// untested; it also guards the arm-once `timer_armed` CAS latch against ever wedging the wake.
+/// D2, a timer-armed wait parked on a channel arm: a sibling `close`s the channel mid-window, which
+/// makes that arm READY — the wake must take it (binding `!RecvError`) rather than re-park until the
+/// long timer fires. A close that stranded the wake would print "timeout" after 2 s; a lost wake
+/// would hang. Looped to catch any straggler ordering.
 #[test]
-fn vm_wait_timer_arm_survives_channel_close_repark_parallel() {
-    let src = "import timer from std.time\nfn consumer(ch: Channel[int], t: Channel[bool]):\n    wait:\n        v := ch.recv(): print(\"got {v}\")\n        _ := t.recv(): print(\"timeout\")\nfn closer(ch: Channel[int]):\n    d := timer(5)\n    _ := d.recv()\n    ch.close()\nfn main():\n    ch := Channel[int]()\n    t := timer(40)\n    parallel:\n        spawn consumer(ch, t)\n        spawn closer(ch)\nmain()\n";
+fn vm_wait_mid_window_close_takes_the_closed_arm_over_the_timer_parallel() {
+    let src = "import timer from std.time\nfn consumer(ch: Channel[int], t: Channel[bool]):\n    wait:\n        v := ch.recv():\n            match v:\n                ?x: print(\"got {x}\")\n                !e: print(\"closed\")\n        _ := t.recv(): print(\"timeout\")\nfn closer(ch: Channel[int]):\n    d := timer(5)\n    _ := d.recv()\n    ch.close()\nfn main():\n    ch := Channel[int]()\n    t := timer(2000)\n    parallel:\n        spawn consumer(ch, t)\n        spawn closer(ch)\nmain()\n";
     for _ in 0..20 {
         assert_eq!(
-            run_capture(src).expect("timer arm must fire after a mid-window close; no hang"),
-            "timeout\n",
-            "a channel close that re-parks the wait stranded the timer arm"
+            run_capture(src).expect("a mid-window close must wake the wait; no hang"),
+            "closed\n",
+            "a channel close mid-window did not take the closed arm"
         );
     }
 }
@@ -404,7 +408,7 @@ fn vm_wait_timer_arm_survives_channel_close_repark_parallel() {
 /// the same path as a `match` arm). byte-identical against the golden.
 #[test]
 fn vm_wait_arm_break_in_loop() {
-    let src = "fn main():\n    found := -1\n    i := 0\n    while i < 3:\n        a := Channel[int]()\n        a.send(i * 10)\n        wait:\n            v := a.recv():\n                if v == 10:\n                    found = v\n                    break\n        i += 1\n    print(found)\nmain()\n";
+    let src = "fn main():\n    found := -1\n    i := 0\n    while i < 3:\n        a := Channel[int]()\n        a.send(i * 10)\n        wait:\n            v := a.recv():\n                n := v else: panic(\"a closed\")\n                if n == 10:\n                    found = n\n                    break\n        i += 1\n    print(found)\nmain()\n";
     let vm = run(src);
     assert_eq!(vm, "10\n");
 }
@@ -412,7 +416,7 @@ fn vm_wait_arm_break_in_loop() {
 /// A `wait` arm body that `continue`s the enclosing loop.
 #[test]
 fn vm_wait_arm_continue_in_loop() {
-    let src = "fn main():\n    total := 0\n    i := 0\n    while i < 3:\n        a := Channel[int]()\n        a.send(i)\n        i += 1\n        wait:\n            v := a.recv():\n                if v == 1:\n                    continue\n                total += v\n    print(total)\nmain()\n";
+    let src = "fn main():\n    total := 0\n    i := 0\n    while i < 3:\n        a := Channel[int]()\n        a.send(i)\n        i += 1\n        wait:\n            v := a.recv():\n                n := v else: panic(\"a closed\")\n                if n == 1:\n                    continue\n                total += n\n    print(total)\nmain()\n";
     let vm = run(src);
     assert_eq!(vm, "2\n");
 }
@@ -420,7 +424,7 @@ fn vm_wait_arm_continue_in_loop() {
 /// A `wait` arm body that `return`s a value from the enclosing function.
 #[test]
 fn vm_wait_arm_return() {
-    let src = "fn pick(a: Channel[int]) -> int:\n    wait:\n        v := a.recv():\n            return v * 100\nfn main():\n    a := Channel[int]()\n    a.send(7)\n    print(pick(a))\nmain()\n";
+    let src = "fn pick(a: Channel[int]) -> int:\n    wait:\n        v := a.recv():\n            n := v else: panic(\"a closed\")\n            return n * 100\nfn main():\n    a := Channel[int]()\n    a.send(7)\n    print(pick(a))\nmain()\n";
     let vm = run(src);
     assert_eq!(vm, "700\n");
 }
@@ -428,7 +432,7 @@ fn vm_wait_arm_return() {
 /// A `wait` arm body containing ANOTHER `wait` (nested select).
 #[test]
 fn vm_wait_nested() {
-    let src = "fn main():\n    a := Channel[int]()\n    b := Channel[int]()\n    a.send(1)\n    b.send(2)\n    wait:\n        v := a.recv():\n            wait:\n                w := b.recv(): print(v + w)\nmain()\n";
+    let src = "fn main():\n    a := Channel[int]()\n    b := Channel[int]()\n    a.send(1)\n    b.send(2)\n    wait:\n        v := a.recv():\n            x := v else: panic(\"a closed\")\n            wait:\n                w := b.recv():\n                    y := w else: panic(\"b closed\")\n                    print(x + y)\nmain()\n";
     let vm = run(src);
     assert_eq!(vm, "3\n");
 }
@@ -437,7 +441,7 @@ fn vm_wait_nested() {
 /// consumer parks on each iteration until the producer feeds it. VM == interp == --parallel.
 #[test]
 fn vm_wait_in_loop_reparks_parallel() {
-    let src = "fn consumer(ch: Channel[int], done: Channel[int]):\n    sum := 0\n    i := 0\n    while i < 3:\n        wait:\n            v := ch.recv(): sum += v\n        i += 1\n    done.send(sum)\nfn producer(ch: Channel[int]):\n    ch.send(10)\n    ch.send(20)\n    ch.send(30)\nfn main():\n    ch := Channel[int]()\n    done := Channel[int]()\n    parallel:\n        spawn consumer(ch, done)\n        spawn producer(ch)\n    print(done.recv())\nmain()\n";
+    let src = "fn consumer(ch: Channel[int], done: Channel[int]):\n    sum := 0\n    i := 0\n    while i < 3:\n        wait:\n            v := ch.recv():\n                n := v else: panic(\"ch closed\")\n                sum += n\n        i += 1\n    done.send(sum)\nfn producer(ch: Channel[int]):\n    ch.send(10)\n    ch.send(20)\n    ch.send(30)\nfn main():\n    ch := Channel[int]()\n    done := Channel[int]()\n    parallel:\n        spawn consumer(ch, done)\n        spawn producer(ch)\n    print(done.recv())\nmain()\n";
     assert_eq!(run(src), "60\n");
     assert_eq!(run_capture(src).expect("parallel repark loop"), "60\n");
 }
@@ -457,7 +461,7 @@ fn vm_wait_arm_bare_spawn() {
 /// bind prologue → VM 65, interp 66). Pins VM == interp on every arm.
 #[test]
 fn vm_wait_arm_body_outer_local_in_binop_matches_interp() {
-    let src = "fn pick(a: Channel[int], b: Channel[int], x: int) -> int:\n    wait:\n        v := a.recv(): return x + v\n        w := b.recv(): return x + w\nfn main():\n    a := Channel[int]()\n    b := Channel[int]()\n    b.send(65)\n    print(pick(a, b, 1))\nmain()\n";
+    let src = "fn pick(a: Channel[int], b: Channel[int], x: int) -> int:\n    wait:\n        v := a.recv():\n            m := v else: panic(\"a closed\")\n            return x + m\n        w := b.recv():\n            n := w else: panic(\"b closed\")\n            return x + n\nfn main():\n    a := Channel[int]()\n    b := Channel[int]()\n    b.send(65)\n    print(pick(a, b, 1))\nmain()\n";
     let vm = run(src);
     assert_eq!(vm, "66\n");
 }

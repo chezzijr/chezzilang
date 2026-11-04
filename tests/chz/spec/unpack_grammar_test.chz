@@ -70,24 +70,27 @@ test fn bare_tuple_ends_a_statement():
     assert y == (5, 6)
     assert divmod(7, 2) == (3, 1)
 
-test fn nested_wait_arm():
+# D2: a wait arm binds one `T!RecvError`, so it takes no tuple target; the body unpacks.
+test fn nested_unpack_in_a_wait_arm_body():
     ch := Channel[(int, (int, int))](1)
     ch.send((4, (5, 6)))
     got := 0
     wait:
-        e, (f, g) := ch.recv():
+        r := ch.recv():
+            e, (f, g) := r else: panic("closed")
             got = e + f + g
     assert got == 15
 
-test fn nested_wait_arm_assigns_places():
+test fn nested_assign_to_places_in_a_wait_arm_body():
     ch := Channel[(int, (int, int))](1)
     ch.send((4, (5, 6)))
     a := 0
     b := 0
     c := 0
     wait:
-        a, (b, c) = ch.recv():
-            pass
+        r := ch.recv():
+            v := r else: panic("closed")
+            a, (b, c) = v
     assert a == 4 and b == 5 and c == 6
 
 fn one() -> (int,):
@@ -114,6 +117,7 @@ test fn one_tuple_type_and_every_unpack():
     ch := Channel[(int,)](1)
     ch.send((9,))
     wait:
-        e, := ch.recv():
+        r := ch.recv():
+            e, := r else: panic("closed")
             got = e
     assert got == 9

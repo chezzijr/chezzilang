@@ -266,9 +266,9 @@ impl Vm {
     /// TICKET-185 — the `wait:`'s offers (send arms) and slots (rendezvous recv arms) are published
     /// under `p` before this is called, so a send arm blocks here like a recv arm (Go blocks it
     /// too). Ready == `p` settled, a recv arm has a value to take (a buffered value or another
-    /// party's live offer) or a `trip()` latch, the timer arm's deadline passed, or every arm is a
-    /// closed recv arm (the re-poll then faults `wait: all channels closed`). Cancel / exit /
-    /// terminate / self-detected deadlock fault in place. Never parks.
+    /// party's live offer), a `trip()` latch or a close (D2: the re-poll takes a closed arm), or the
+    /// timer arm's deadline passed. Cancel / exit / terminate / self-detected deadlock fault in place.
+    /// Never parks.
     ///
     /// The wait holds no width permit ([`Vm::wait_begin`]); each tick detaches from the GC ([`Vm::wait_door`]).
     pub(super) fn demote_wait_block(
@@ -306,7 +306,7 @@ impl Vm {
         let on = Blocked::on(quiesce::PartyWait::Wait(arms.clone(), Some(Arc::clone(p))));
         let mut reg = self.wait_begin(spec, Some(on), "wait", span)?;
         let recv_ready = |core: &Arc<ChannelCore>, g: &crate::vm::core::ChanState| {
-            g.recv_ready_for(Some(p)) || core.done_latch.load(Ordering::Relaxed)
+            g.closed || g.recv_ready_for(Some(p)) || core.done_latch.load(Ordering::Relaxed)
         };
         let out = loop {
             // TICKET-188 — read before core lock A: a child fault's `scope_fault` takes that lock.
@@ -314,20 +314,17 @@ impl Vm {
             {
                 let mut c = sched.lock();
                 let mut ready = !p.is_queued();
-                let mut all_closed = true;
                 for (core, is_send) in &arms {
                     if *is_send {
-                        all_closed = false;
                         continue;
                     }
                     let g = core.q.lock().unwrap_or_else(|e| e.into_inner());
                     ready |= recv_ready(core, &g);
-                    all_closed &= g.closed;
                 }
                 // WAIT-1 (demote path) — a live timer arm is ready once `now >= deadline`; the
                 // re-poll scans the channel arms first, so a real `send` still beats the timer.
                 ready |= timer.is_some_and(|(_, d)| std::time::Instant::now() >= d);
-                if ready || all_closed {
+                if ready {
                     reg.release(&sched, &mut c);
                     break Ok(());
                 }
@@ -367,9 +364,7 @@ impl Vm {
                     None => DEMOTE_POLL_BACKOFF,
                 };
                 // Arm 0 is ready on what the loop above SETTLES on: `p` settled, or (recv arm) a value
-                // to take or a `trip()` latch. `closed` is NOT a ready condition: the re-poll SKIPS a
-                // closed+empty recv arm, so reporting ready would return at once, re-poll, skip, and
-                // spin.
+                // to take, a `trip()` latch or a close (the re-poll takes a closed arm, so no spin).
                 let _ = first.cv.wait_timeout_while(q, backoff, |g| {
                     !(!p.is_queued() || (!is_send0 && recv_ready(first, g))) && !width::reserved()
                 });

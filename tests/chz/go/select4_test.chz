@@ -2,17 +2,17 @@
 # Test that a select statement proceeds when a value is ready.
 
 struct X:
-    a: int
+    a: int!RecvError  # an `=` arm assigns the recv result, `T!RecvError`
 
 struct Int:  # Go: *int
-    v: int
+    v: int!RecvError
 
 fn f() -> Int:
     assert false, "BUG: called f"  # Go: println("BUG: called f")
-    return Int(0)  # Go: return new(int)
+    return Int(?0)  # Go: return new(int)
 
 test fn main_():
-    x := X(0)  # Go: var x struct { a int }
+    x := X(?0)  # Go: var x struct { a int }
     c := Channel[int](1)
     c1 := Channel[int](0)
     c.send(42)
@@ -21,4 +21,4 @@ test fn main_():
             # nothing
             pass
         x.a = c.recv():
-            assert x.a == 42, "BUG: {x.a}"  # Go: println("BUG:", x.a)
+            assert x.a == ?42, "BUG: {x.a}"  # Go: println("BUG:", x.a)

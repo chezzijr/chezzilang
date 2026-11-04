@@ -100,17 +100,28 @@ fn channel_protocol_element_is_sendable() {
 
 // ----- concurrency §6d: `wait` (select) -----
 
+/// D2: a recv arm binds what `ch.recv()` returns, `T!RecvError` — not the element `T`.
 #[test]
-fn wait_binds_element_type_in_arm() {
+fn wait_binds_the_recv_result_type_in_arm() {
     ok(
+        "fn main():\n    ch := Channel[int]()\n    ch.send(1)\n    wait:\n        v := ch.recv():\n            r: int!RecvError = v\n            n := r else: panic(\"ch closed\")\n            print(n + 1)\nmain()\n",
+    );
+    rejects(
         "fn main():\n    ch := Channel[int]()\n    ch.send(1)\n    wait:\n        v := ch.recv(): print(v + 1)\nmain()\n",
+        "cannot apply + to int!RecvError and int",
     );
 }
 
+/// D2: an `=` arm assigns the recv result, `T!RecvError`: a target of that type checks, a bare `T`
+/// target does not (bind with `:=`, then assign the unwrapped value).
 #[test]
 fn wait_assign_target_typechecks() {
     ok(
+        "fn main():\n    ch := Channel[int]()\n    ch.send(1)\n    n: int!RecvError = ?0\n    wait:\n        n = ch.recv(): print(n)\nmain()\n",
+    );
+    rejects(
         "fn main():\n    ch := Channel[int]()\n    ch.send(1)\n    n := 0\n    wait:\n        n = ch.recv(): print(n)\nmain()\n",
+        "cannot assign int!RecvError to int",
     );
 }
 
@@ -157,7 +168,7 @@ fn wait_discard_and_else_ok() {
 
 #[test]
 fn wait_arm_bound_var_wrong_use_rejected() {
-    // `v: int` bound by the arm — using it as a str is a type error.
+    // `v: int!RecvError` bound by the arm — using it as a str is a type error.
     rejects(
         "fn main():\n    ch := Channel[int]()\n    ch.send(1)\n    wait:\n        v := ch.recv(): print(v + \"x\")\nmain()\n",
         "int",

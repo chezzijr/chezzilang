@@ -120,7 +120,8 @@ fn drain(ch: Channel[int]) -> List[int]:
 
 fn rx_wait(ch: Channel[int], never: Channel[int]) -> int:
     wait:
-        v := ch.recv():
+        r := ch.recv():
+            v := r else: panic("ch closed")
             return v
         _ := never.recv():
             return -1
@@ -418,7 +419,8 @@ fn worker(done: Channel[bool], work: Channel[int], n: AtomicInt):
         wait:
             _ := done.recv():
                 return
-            v := work.recv():
+            r := work.recv():
+                v := r else: panic("work closed")
                 n.add(v)
 fn main():
     done := Channel[bool]()

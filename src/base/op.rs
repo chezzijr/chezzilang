@@ -541,9 +541,9 @@ pub enum Op {
     SpawnBlock(ProtoId, Vec<CapEntry>),
     /// `wait:` — Chezzi's `select` (§6d). The N arm channel handles are on the operand stack
     /// (source order; arm 0 deepest). Poll source order: the first channel with a queued value (or a
-    /// fired timer) wins → pop the N handles, push the value, and jump to that arm's body target. A
-    /// closed+empty arm is skipped. Nothing ready → jump to `else_target` if present; else inline-
-    /// sleep to the soonest live timer and take it; else fault (all-closed) or block (the
+    /// fired timer) wins → pop the N handles, push `?value`, and jump to that arm's body target. A
+    /// closed+empty recv arm is ready too and pushes `!RecvError` (D2). Nothing ready → jump to
+    /// `else_target` if present; else inline-sleep to the soonest live timer and take it; else block (the
     /// multi-channel park/block-in-place path: keep the handles, rewind to re-poll on wake). An arm
     /// switched off by its false guard holds an off sentinel (a non-object `Value`) in each of its
     /// slots: it is never ready, never closed, never published; with every arm off and no `else`

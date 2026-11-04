@@ -44,9 +44,9 @@ fn drain_sum(ch: Channel[List[int]], n: int) -> int:
 fn wait_fresh(box: Shared[Channel[List[int]]], other: Channel[List[int]], x: int) -> int:
     wait:
         v := box.get().recv():
-            return v[1] + x
+            return must(v)[1] + x
         w := other.recv():
-            return w[0]
+            return must(w)[0]
 
 fn add_slowly(xs: List[int]) -> List[int]:
     _ := busy(5)

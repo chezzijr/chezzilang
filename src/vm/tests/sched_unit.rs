@@ -599,7 +599,7 @@ fn mn_wait_park_timer_self_send_claims_then_late_send_noop() {
 }
 
 /// §6d M:N wait-park: `close_wake` claims+sweeps a wait fiber identically to `send_wake` (a close
-/// has no value but must still unblock the waiter so it re-polls and skips the closed arm).
+/// has no value but must still unblock the waiter so it re-polls and takes the closed arm, D2).
 #[test]
 fn mn_wait_park_close_wake_claims_and_sweeps() {
     let sched = mk_sched(1);
@@ -658,13 +658,13 @@ fn mn_wait_park_lone_fiber_is_deadlock() {
     );
 }
 
-/// W7-2 — the `close()`-vs-`wait:`-park lost wakeup. `op_wait_poll` treats a closed+EMPTY recv arm
-/// as DEAD (skipped, counted only toward `all_closed`), so if EVERY arm is dead the poll faults
-/// "wait: all channels closed". `park_wait`'s gap re-check must classify arms the SAME way: a
-/// `close()` landing between the empty poll and the park runs `close_wake` against a bucket that is
-/// still empty, so the re-check is the only thing left that can see it. Pre-fix the recv predicate
-/// was `!g.is_empty()` alone → not ready → park on a key nothing will ever wake → the deadlock
-/// detector (correctly) reaps a genuinely unreachable fiber, i.e. a SPURIOUS `deadlock:` fault.
+/// W7-2 — the `close()`-vs-`wait:`-park lost wakeup. `op_wait_poll` takes a closed+EMPTY recv arm
+/// (D2: it is READY and binds `!RecvError`). `park_wait`'s gap re-check must classify arms the SAME
+/// way: a `close()` landing between the empty poll and the park runs `close_wake` against a bucket
+/// that is still empty, so the re-check is the only thing left that can see it. Pre-fix the recv
+/// predicate was `!g.is_empty()` alone → not ready → park on a key nothing will ever wake → the
+/// deadlock detector (correctly) reaps a genuinely unreachable fiber, i.e. a SPURIOUS `deadlock:`
+/// fault.
 #[test]
 fn mn_park_wait_all_recv_arms_closed_requeues_instead_of_parking() {
     let sched = mk_sched(1);
@@ -690,17 +690,18 @@ fn mn_park_wait_all_recv_arms_closed_requeues_instead_of_parking() {
     assert_eq!(
         take_run(&sched).task_index,
         0,
-        "the fiber re-runs WaitPoll, which faults `wait: all channels closed`"
+        "the fiber re-runs WaitPoll, which takes the first closed arm"
     );
 }
 
-/// W7-2 anti-over-fire fence (green before AND after the fix): ONE closed arm among LIVE arms must
-/// still PARK. Treating a closed+empty recv arm as *ready* was tried and reverted (parity-perf-0):
-/// the re-poll SKIPS that arm, finds the live one still empty, and re-parks → requeue→re-poll→re-park
-/// live-lock. Only an ALL-dead wait may requeue (its re-poll terminates in the all-closed fault).
-/// Also pins that the deadlock detector stays sharp on the partially-closed park.
+/// D2 — ONE closed arm among LIVE arms is READY (the re-poll takes it, binding `!RecvError`), so
+/// `park_wait`'s gap re-check requeues the fiber instead of parking it, and nothing reads as
+/// deadlocked. Before D2 the re-poll SKIPPED a closed arm, so reading it as ready live-locked
+/// (requeue→re-poll→re-park, parity-perf-0); now the re-poll ends the wait, so it cannot loop.
+/// The deadlock fence for a wait whose arms are all open, empty and unfeedable in this same
+/// `park_wait` context is [`mn_wait_park_lone_fiber_is_deadlock`].
 #[test]
-fn mn_park_wait_one_closed_one_live_still_parks_and_is_deadlock() {
+fn mn_park_wait_one_closed_one_live_requeues_to_take_the_closed_arm() {
     let sched = mk_sched(1);
     sched.seed(vec![mk_fiber(0)]);
     use crate::vm::core::{Pending, PendingOp};
@@ -723,11 +724,22 @@ fn mn_park_wait_one_closed_one_live_still_parks_and_is_deadlock() {
         ],
         f0,
     );
-    let c = sched.lock();
-    assert_eq!(c.parked_n, 1, "a live arm remains — the fiber parks");
-    assert!(
-        sched.is_deadlocked(&c),
-        "a lone wait-parked fiber with no possible waker is still a deadlock"
+    {
+        let c = sched.lock();
+        assert_eq!(
+            c.parked_n, 0,
+            "a closed arm is ready — the fiber must NOT park"
+        );
+        assert_eq!(c.global.len(), 1, "it is requeued Ready to re-poll");
+        assert!(
+            !sched.is_deadlocked(&c),
+            "a requeued fiber about to take its closed arm is not a deadlock"
+        );
+    }
+    assert_eq!(
+        take_run(&sched).task_index,
+        0,
+        "the fiber re-runs WaitPoll, which takes the closed arm"
     );
 }
 
@@ -1002,8 +1014,8 @@ fn a_tripped_latch_under_a_demoted_recv_vetoes_the_deadlock_verdict() {
     );
 }
 
-/// W15-6 (TICKET-176) — a demoted `wait:` returns "wait: all channels closed" once EVERY arm is
-/// closed, so that state is progress.
+/// W15-6 (TICKET-176) — a demoted `wait:` takes a closed arm (D2: closed is ready), so every arm
+/// closed is progress.
 #[test]
 fn a_demoted_wait_with_every_arm_closed_vetoes_the_deadlock_verdict() {
     let sched = mk_sched(2);
@@ -1024,14 +1036,17 @@ fn a_demoted_wait_with_every_arm_closed_vetoes_the_deadlock_verdict() {
     b.q.lock().unwrap().closed = true;
     assert!(
         !sched.is_deadlocked(&c),
-        "every arm of a demoted wait closed settles it (all channels closed): no deadlock"
+        "every arm of a demoted wait closed settles it (a closed arm is taken): no deadlock"
     );
 }
 
-/// W15-6 (TICKET-176) — a demoted `wait:` SKIPS a closed arm, so one closed arm of two is not
-/// progress. Goes red if the closed veto asks `any` arm instead of `all`, or asks per channel.
+/// W15-6 (TICKET-176), D2 — a demoted `wait:` takes a closed arm, so ONE closed arm of two is
+/// progress: it vetoes the deadlock verdict. Goes red if the closed veto asks `all` arms instead
+/// of `any`. Its deadlock fence, in the same demoted-waiter context: while both arms are still
+/// OPEN, empty and unfeedable, the verdict IS deadlock — a closed arm must not make an open one
+/// look satisfiable.
 #[test]
-fn a_demoted_wait_with_one_arm_still_open_reads_as_deadlocked() {
+fn a_demoted_wait_with_one_arm_closed_vetoes_the_deadlock_verdict() {
     let sched = mk_sched(2);
     let (a, b) = (empty_core(), empty_core());
     let mut c = sched.lock();
@@ -1046,10 +1061,14 @@ fn a_demoted_wait_with_one_arm_still_open_reads_as_deadlocked() {
         scope: None,
         cut: false,
     });
-    a.q.lock().unwrap().closed = true;
     assert!(
         sched.is_deadlocked(&c),
-        "a demoted wait with an open empty arm is still a genuine deadlock"
+        "a demoted wait whose arms are all open and empty is a genuine deadlock"
+    );
+    a.q.lock().unwrap().closed = true;
+    assert!(
+        !sched.is_deadlocked(&c),
+        "one closed arm of a demoted wait is ready (it is taken): no deadlock"
     );
 }
 

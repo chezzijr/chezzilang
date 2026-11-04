@@ -9,11 +9,17 @@ struct Inner:
 struct Conf:
     deep: Inner
 
+# The bind is the recv result `Conf!RecvError`; `?` unwraps it, so the read reaches the field only if
+# the bind hides the import head.
+fn read_limit(ch: Channel[Conf]) -> int!RecvError:
+    got := 0
+    wait:
+        qualified_path_pkg := ch.recv(): got = qualified_path_pkg?.deep.limit
+    return got
+
 test fn wait_recv_bind_hides_the_full_path():
     ch: Channel[Conf] = Channel(1)
     ch.send(Conf(Inner(9)))
-    got := 0
-    wait:
-        qualified_path_pkg := ch.recv(): got = qualified_path_pkg.deep.limit
-    assert got == 9, "got: {got}"
+    got := read_limit(ch)
+    assert got == ?9, "got: {got}"
     assert qualified_path_pkg.deep.limit == 3

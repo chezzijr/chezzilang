@@ -74,15 +74,9 @@ pub(super) enum PartyWait {
     /// channel): its wait is over exactly when the offer's `Pending` settles (taken, or closed).
     Send(Arc<Pending>),
     /// A `wait:` over N arms — an OR-edge (§2d's table): ready on ANY arm. `is_send` marks a SEND
-    /// arm, which is ready on free space rather than on a value.
-    ///
-    /// **Kept separate from [`PartyWait::Recv`] because `closed` means opposite things at the two
-    /// sites**, and conflating them was a measured HANG regression: a single `recv` on a closed
-    /// channel makes progress (it returns `ClosedEmpty` and the `for` loop ends), but the `wait:`
-    /// poll *SKIPS* a closed+empty recv arm (W7-13r(a)) — so treating that arm as satisfiable vetoes
-    /// the verdict forever. `c1.close(); wait: c1.recv() / c2.recv()` with nobody able to feed `c2`
-    /// faulted `wait on channels that are all empty: deadlock` before this detector and hung with the
-    /// two folded into one variant. Fenced by `a_wait_with_a_closed_arm_still_reports_the_deadlock`.
+    /// arm, which is ready on free space rather than on a value; a RECV arm is ready exactly when a
+    /// single `recv` on its channel could resume ([`recv_satisfiable`]), a closed channel included
+    /// (D2: the poll takes a closed arm with `!RecvError`).
     ///
     /// TICKET-185 — the second field is the `wait:`'s ONE `Pending` (its offers and slots).
     Wait(Vec<(Arc<ChannelCore>, bool)>, Option<Arc<Pending>>),
@@ -143,9 +137,7 @@ impl PartyWait {
     /// **Each arm mirrors, condition for condition, what its own blocking site in `netio.rs` actually
     /// SETTLES on** — not what merely "changed". That is the same rule W7-13r(a) had to learn for the
     /// `wait:` wake predicate, and getting it wrong here is not a spin but a permanent wrong answer in
-    /// one direction or the other: too generous hangs forever, too strict faults a live program. The
-    /// one place the two sites genuinely disagree is `closed` on a recv, hence the separate
-    /// [`PartyWait::Wait`] variant.
+    /// one direction or the other: too generous hangs forever, too strict faults a live program.
     pub(super) fn satisfiable(&self) -> bool {
         match self {
             // `Vm::block_recv` settles on a queued value, a `trip()` latch, or `closed` (which
@@ -156,13 +148,9 @@ impl PartyWait {
             // `close()` (it faults `CLOSED_SEND`).
             PartyWait::Send(p) => !p.is_queued(),
             // `Vm::op_wait_poll`, arm kind by arm kind: the `wait:` settles once its `Pending` does
-            // (an offer taken or closed, a slot filled); a RECV arm is also ready on a value it can
-            // take (a buffered value or another party's live offer) or a `trip()` latch — NOT on
-            // `closed`, which the poll SKIPS. A timer arm delivers on its own deadline with nobody
-            // sending, so it is never judged.
-            //
-            // DEC-176 — the poll skips ONE closed recv arm, but a `wait:` whose EVERY arm is a closed
-            // recv arm settles (`wait: all channels closed`), so the group is judged as a whole.
+            // (an offer taken or closed, a slot filled), or on any recv arm a single `recv` would
+            // settle on. A timer arm delivers on its own deadline with nobody sending, so it is
+            // never judged.
             PartyWait::Wait(arms, me) => {
                 wait_satisfiable(arms.iter().map(|(c, s)| (&**c, *s)), me.as_ref())
             }
@@ -216,24 +204,18 @@ pub(super) fn recv_satisfiable(core: &ChannelCore, me: Option<&Arc<Pending>>) ->
 /// TICKET-236 — could a blocked `wait:` over `arms` (`(core, is_send)`) already resume? The one
 /// answer for a blocked party, a demoted waiter and a parked fiber. Takes each arm's `core.q`.
 pub(super) fn wait_satisfiable<'a>(
-    arms: impl Iterator<Item = (&'a ChannelCore, bool)> + Clone,
+    mut arms: impl Iterator<Item = (&'a ChannelCore, bool)>,
     me: Option<&Arc<Pending>>,
 ) -> bool {
     me.is_some_and(|p| !p.is_queued())
-        || arms.clone().any(|(core, is_send)| {
-            let g = core.q.lock().unwrap_or_else(|e| e.into_inner());
+        || arms.any(|(core, is_send)| {
             if is_send {
+                let g = core.q.lock().unwrap_or_else(|e| e.into_inner());
                 me.is_none() && (g.send_ready_for(core.cap, None) || g.closed)
             } else {
-                g.recv_ready_for(me)
-                    || core.done_latch.load(Ordering::Relaxed)
-                    || core.timer.is_some()
+                recv_satisfiable(core, me) || core.timer.is_some()
             }
         })
-        || (arms.clone().next().is_some()
-            && arms.clone().all(|(core, is_send)| {
-                !is_send && core.q.lock().unwrap_or_else(|e| e.into_inner()).closed
-            }))
 }
 
 /// TICKET-188 — one registered blocked party: what it waits for, and the wake set that may cut it.

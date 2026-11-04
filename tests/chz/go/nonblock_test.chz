@@ -46,10 +46,11 @@ fn sleep():
 MAX_TRIES := 10000  # Up to 100ms per test.  Go: const maxTries = 10000
 
 test fn main_():
-    i32 := 0  # Go: var i32 int32
-    i64 := 0  # Go: var i64 int64
-    b := false
-    s := ""
+    # A `wait:` `=` arm assigns the recv result, `T!RecvError`.
+    i32: int!RecvError = ?0  # Go: var i32 int32
+    i64: int!RecvError = ?0  # Go: var i64 int64
+    b: bool!RecvError = ?false
+    s: str!RecvError = ?""
     sync := Channel[bool](0)
     for buffer in 0..2:
         c32 := Channel[int](buffer)  # Go: make(chan int32, buffer)
@@ -96,7 +97,7 @@ test fn main_():
                     try += 1
                     assert try <= MAX_TRIES, "i32sender buffer={buffer}"  # Go: if try > maxTries { ... panic("fail") }
                     sleep()
-        assert i32 == 234, "i32sender value"
+        assert i32 == ?234, "i32sender value"
         if buffer == 0:
             _ := sync.recv()
 
@@ -123,7 +124,7 @@ test fn main_():
                     try += 1
                     assert try <= MAX_TRIES, "i64sender"  # Go: if try > maxTries { ... panic("fail") }
                     sleep()
-        assert i64 == 234567, "i64sender value"
+        assert i64 == ?234567, "i64sender value"
         if buffer == 0:
             _ := sync.recv()
 
@@ -150,7 +151,7 @@ test fn main_():
                     try += 1
                     assert try <= MAX_TRIES, "bsender"  # Go: if try > maxTries { ... panic("fail") }
                     sleep()
-        assert b, "bsender value"
+        assert b == ?true, "bsender value"
         if buffer == 0:
             _ := sync.recv()
 
@@ -177,6 +178,6 @@ test fn main_():
                     try += 1
                     assert try <= MAX_TRIES, "ssender"  # Go: if try > maxTries { ... panic("fail") }
                     sleep()
-        assert s == "hello again", "ssender value"
+        assert s == ?"hello again", "ssender value"
         if buffer == 0:
             _ := sync.recv()

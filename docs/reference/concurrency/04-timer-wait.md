@@ -32,7 +32,8 @@ stranded until the timer fires. [`gaps.md`](../../contributing/gaps.md) **N10** 
 ## 6d. `wait` — racing multiple channel receives
 
 `wait` is Chezzi's `select`: block until **whichever of several channels is ready first**, run that
-arm. Both directions are supported — **recv-arms** (`x := ch.recv():`, bind the received value) and
+arm. Both directions are supported — **recv-arms** (`r := ch.recv():`, bind what `ch.recv()` returns,
+`T!RecvError`) and
 **send-arms** (`ch.send(v):`, no `:=`/`=`, run the body once the send goes through). A send-arm is ready
 when the channel can accept the value: a **bounded** channel with a free slot, an **unbounded** channel
 (always), or a **closed** channel — a send-arm on a closed channel is *selected and faults*
@@ -42,12 +43,53 @@ which is why no separate `recv_timeout` exists. See `examples/wait_select.chz` a
 `examples/wait_send.chz`.
 
 ```chezzi
-wait:
-    v := orders.recv():        handle(v)        # recv-arm: arm-local binding `v: T` (the element type)
-    result = cancels.recv():   result = "x"     # `=` assigns an existing outer lvalue instead
-    outbox.send(next):         sent += 1        # SEND-arm: fires once `outbox` can accept `next`; binds nothing
-    _ := timer(500).recv():    on_timeout()      # `_` discards; a timer arm is just a recv
-    else:                      poll_miss()       # optional, non-blocking; if no arm is ready, run this
+fn step(orders: Channel[Order], cancels: Channel[str], outbox: Channel[Msg], next: Msg) -> !RecvError:
+    wait:
+        r := orders.recv():        handle(r?)       # recv-arm: arm-local `r: Order!RecvError`; `?` passes a close up
+        last = cancels.recv():     n += 1           # `=` assigns an existing outer `last: str!RecvError` instead
+        outbox.send(next):         sent += 1        # SEND-arm: fires once `outbox` can accept `next`; binds nothing
+        _ := timer(500).recv():    on_timeout()     # `_` discards; a timer arm is just a recv
+        else:                      poll_miss()      # optional, non-blocking; if no arm is ready, run this
+```
+
+**A recv-arm binds what `recv` returns, `T!RecvError`.** `?v` is a received value; `!RecvError` means
+the channel is closed and drained. A closed channel's arm is **ready**: it is picked like any ready arm
+(the first ready arm in source order) and binds `!RecvError`. Buffered values drain first.
+
+```chezzi
+c := Channel[int](1)
+c.send(5)
+c.close()
+idle := Channel[int](0)
+for _ in 0..2:
+    wait:
+        r := c.recv():
+            match r:
+                ?v: print("got", v)          # got 5 — the buffered value first
+                !e: print(e.message())       # receiving on a closed channel
+        _ := idle.recv(): print("idle")      # never: the closed arm above is ready
+```
+
+This is Go's rule (`select` picks `case v, ok := <-closed:` with zero and `false`) and crossbeam's
+(`select!` gives a `RecvError`). A `wait:` whose recv channels are all closed does not fault: it
+takes the first one.
+
+**A closed arm in a loop fires on every pass**, as in Go: nothing makes a closed channel un-ready. To
+stop taking it, switch the arm off with a guard (see **Guards**) — Go sets the channel to `nil`:
+
+```chezzi
+a_open := true
+b_open := true
+while a_open or b_open:
+    wait:
+        r := a.recv() if a_open:
+            match r:
+                ?v: use(v)
+                !_: a_open = false           # `a` is closed: switch its arm off
+        r := b.recv() if b_open:
+            match r:
+                ?v: use(v)
+                !_: b_open = false
 ```
 
 **Selection is deterministic SOURCE ORDER** (first ready arm wins, recv OR send), **not** Go's
@@ -56,7 +98,8 @@ already-ready arms gives the same answer on every run and at every worker count,
 `wait:`-using program goldenable. The one shape that is still schedule-sensitive is a live `timer` arm
 reached in an inline outermost-`parallel:` body (N10, above). All arm channel handles and send values
 are evaluated **once**, top to bottom, on entry (Go's rule). `else` runs only if **no** arm is ready —
-so a `wait` containing an unbounded or closed send-arm never blocks (that arm is always ready).
+so a `wait` containing an unbounded or closed send-arm, or a closed recv-arm, never blocks (that arm
+is always ready).
 
 **Surface & grammar.** A compound statement (sibling to `match`/`parallel`):
 `wait : NEWLINE INDENT <arm>+ DEDENT`. An arm is one of:
@@ -65,8 +108,8 @@ so a `wait` containing an unbounded or closed send-arm never blocks (that arm is
   `.recv()` on an expression of type `Channel[T]` (a non-`.recv()` RHS like `v := fn():` is a compile
   error). The `<chanExpr>` can be any expression (`ch`, `chans[i]`, `get_chan()`, `timer(500)`),
   evaluated **once**. The target is `:=` (a fresh arm-scoped binding), `=` (assign an existing outer
-  lvalue — arm bodies are lexical sub-scopes, not closures, so outer mutation is normal), or `_`
-  (discard).
+  lvalue of type `T!RecvError` — arm bodies are lexical sub-scopes, not closures, so outer mutation
+  is normal), or `_` (discard).
 - a **send-arm** — a *bare* `<chanExpr> ".send(" <value> ")" ":" <block>` (no `:=`/`=`). The grammar
   accepts any bare `<expr> <block>`; the **checker** enforces the exact `chan.send(value)` shape with
   `chan: Channel[T]`, `value: T` (a bare arm that isn't a `.send()` — e.g. `try_send`, an arbitrary
@@ -84,19 +127,18 @@ rule is tokio `select!`'s precondition (`, if cond`) and Ada's `when` guard.
 - Guards run **once** on entry, top to bottom, interleaved with the operands: arm 1's guard, then
   (only if true) arm 1's channel and value, then arm 2's guard, and so on. An off arm's channel and
   value expressions do not run.
-- An off arm is never ready, and it is **not** a closed arm: `"wait: all channels closed"` judges the
-  enabled arms only.
+- An off arm is never ready, even when its channel is closed: a guard is how a loop stops taking a
+  closed arm.
 - With every arm off: an `else` runs; with no `else`, the `wait:` faults at once, before any park,
   `"wait: every arm is off (its guard is false) and there is no else"` — guards are not re-checked,
-  so nothing could ever finish it (tokio panics here too). The fault is recoverable, like the
-  all-closed fault.
+  so nothing could ever finish it (tokio panics here too). The fault is recoverable.
 
 ```chezzi
 paused := false
 while true:
     wait:
-        j := jobs.recv() if not paused: run(j)
-        p := ctl.recv():                paused = p
+        j := jobs.recv() if not paused: run(j?)      # in a fn that returns `!RecvError`
+        p := ctl.recv():                paused = p?
 ```
 
 **`break` and `continue` in an arm** act on the enclosing loop, as in Rust's `select!`: a `wait:` is
@@ -104,7 +146,8 @@ not a loop, so `while true: wait: _ := c.recv(): break` leaves the `while`. With
 `break` is the `break outside loop` type error. Go's `break` in a `select` case leaves only the
 `select`, so a Go port drops a `break` that ends a case.
 
-**Type-check.** A recv-arm's `chanExpr: Channel[T]` → the target binds/assigns `T`; a send-arm's
+**Type-check.** A recv-arm's `chanExpr: Channel[T]` → the target binds/assigns `T!RecvError`, the
+type `chanExpr.recv()` returns (use `?`, `match` or `_ :=` on it, as on a bare `recv`); a send-arm's
 `chan: Channel[T]` → its `value` must be assignable to `T` (same check as a plain `ch.send(v)`). `wait`
 is **not** exhaustive (it's a runtime race, not a type match); ≥1 recv or send arm is required.
 
@@ -113,17 +156,16 @@ is **not** exhaustive (it's a runtime race, not a type match); ≥1 recv or send
 1. Evaluate each arm's guard, then (if it is true) its channel handle (and, for a send-arm, its
    value) once, in source order. A false guard switches the arm off (see **Guards**).
 2. Poll arms in **source order**: the first **ready** arm wins. A recv-arm is ready with a queued
-   value → pop, bind, run its block. A send-arm is ready when the channel can accept the value
+   value → pop, bind `?v`, run its block. A send-arm is ready when the channel can accept the value
    (bounded-with-space / unbounded / closed) → enqueue (or, if closed, *fault*
    `"send on a closed channel"`), run its block, bind nothing.
-3. A **closed + empty** channel's *recv*-arm is **skipped**; a closed *send*-arm is instead *selected
-   and faults* (asymmetric — Go's panic-on-send-to-closed). If *every* recv-arm is closed+empty,
-   there's no ready send-arm, and there's no `else`, the `wait` faults `"wait: all channels closed"`.
-   Off arms do not count; with every arm off and no `else` it faults
-   `"wait: every arm is off (its guard is false) and there is no else"` instead.
+3. A **closed + drained** channel's *recv*-arm is **ready** → bind `!RecvError`, run its block (Go's
+   `select` takes `<-closed`). A closed *send*-arm is ready too, and *faults* (Go's
+   panic-on-send-to-closed). An off arm is never ready; with every arm off and no `else` it faults
+   `"wait: every arm is off (its guard is false) and there is no else"`.
 4. If no arm is ready: with an `else`, run it (non-blocking); otherwise **block** — park on *all* live
-   arm channels and re-poll on the first wake. A recv-arm wakes on a **sender**; a bounded send-arm
-   wakes on a **receiver** freeing a slot.
+   arm channels and re-poll on the first wake. A recv-arm wakes on a **sender** or a **close**; a
+   bounded send-arm wakes on a **receiver** freeing a slot.
 
 **Where a blocking `wait:` waits.** The mode depends on the waiter (full table:
 [06-blocking.md](06-blocking.md#blocking-context-table)):

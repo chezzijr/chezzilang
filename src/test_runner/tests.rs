@@ -1650,7 +1650,7 @@ fn a_live_timer_still_delivers_under_a_generous_timeout() {
         // W7-14's shape: a sibling value at 30ms must still beat the 3s timer arm.
         (
             "valuebeatstimer_test.chz",
-            "import std.time\nch: Channel[int] = Channel[int](1)\nfn nap():\n    wait:\n        v := ch.recv(): assert v == 9\n        _ := time.timer(3000).recv(): assert false, \"TIMERWON\"\nfn feed():\n    time.sleep_ms(30)\n    ch.send(9)\ntest fn t():\n    parallel:\n        spawn nap()\n        spawn feed()\n",
+            "import std.time\nch: Channel[int] = Channel[int](1)\nfn nap():\n    wait:\n        v := ch.recv(): assert v == ?9\n        _ := time.timer(3000).recv(): assert false, \"TIMERWON\"\nfn feed():\n    time.sleep_ms(30)\n    ch.send(9)\ntest fn t():\n    parallel:\n        spawn nap()\n        spawn feed()\n",
         ),
     ] {
         let d = TmpDir::new();

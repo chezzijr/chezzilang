@@ -137,14 +137,21 @@ now runs under the 3 s debug `GRID_CEILING` (`tests/shared_update_contention.rs`
 **Implementation notes.** *(Done. A new `Op::WaitPoll` holds the arm operands on the
 operand stack — one slot per recv-arm (the channel), TWO per send-arm (channel THEN value, walked via a
 per-arm slot cursor keyed on `WaitMeta.is_send`) — polls source order, and jumps to the chosen arm's body /
-`else`, handles a live `timer` arm (see below), faults all-closed / send-to-closed, or parks. The M:N
+`else`, handles a live `timer` arm (see below), faults send-to-closed, or parks. The M:N
 park (below) files the fiber under every arm key with an `Arc<WaitPark>` token and sweeps it out of the
 other buckets on resume. The park-gap re-check is **kind-aware**, classifying each arm
-READY / DEAD / LIVE exactly as the poll does: a recv-arm is ready with a queued value (a closed+empty
-recv-arm is **DEAD**, not ready — it is skipped by the re-poll), a send-arm with a **free slot**
-(`queue.len() < cap`, or unbounded) or on close. Using the recv predicate for a full send-arm, or calling a
-dead recv-arm ready, would spin requeue→re-poll→re-park; but an **all-dead** re-check must requeue, or a
-`close()` landing in the poll→park window is a lost wakeup (W7-2).)*
+READY / LIVE exactly as the poll does: a recv-arm is ready with a queued value **or once closed and
+drained** (D2: the poll takes it and binds `!RecvError`, built by `Vm::recv_result`, the same value a
+bare `recv` returns), a send-arm with a **free slot** (`queue.len() < cap`, or unbounded) or on close.
+Using the recv predicate for a full send-arm would spin requeue→re-poll→re-park. A `close()` landing in
+the poll→park window is seen by the re-check (a closed arm is READY), so it is no lost wakeup (W7-2).)*
+
+*Superseded 2026-11-04 by D2 (plan `2026-11-04-closed-channel-recv`):* before D2 the poll **skipped** a
+closed+empty recv arm, which the re-check called **DEAD**; requeueing on one dead arm among live ones
+spun, so a dead arm was never READY, and an all-dead re-check requeued into the all-closed fault. The W7-13r(a) rule "`closed` is not a recv arm's wake condition" and the
+DEC-176 rule "judge an all-closed `wait:` as a whole" served that skip. D2 makes a closed arm a taken
+arm, so `closed` is a ready condition on every wake predicate (park re-check, demote poll, eager
+in-place wait, deadlock verdict), the re-run poll settles on it (no spin), and the fault is gone.
 
 **Send-arm inside a native callback (TICKET-185).** A send-arm that cannot move its value, reached
 *inside a native callback* (a `Shared.update` closure, a list-HOF), DEMOTES and blocks on its offer,
@@ -185,14 +192,12 @@ so a real send still beats the timer).
   `MnSched::park_wait` does the N-key gap re-check and files all N tokens + `parked_n += 1` (ONE fiber)
   under one core-lock hold. The re-check is **kind-aware, with three outcomes per arm** (mirroring
   `op_wait_poll` exactly, or the two disagree — that was **W7-2**): **READY** (a recv arm with a queued
-  value / a tripped `done_latch`; a send arm with a free slot or a close) → requeue; **DEAD** (a
-  closed+empty non-timer recv arm — the re-poll *skips* it, it only counts toward `all_closed`); else
-  **LIVE**. Cancel → requeue. A dead arm is deliberately NOT "ready": requeueing on one dead arm among
-  live ones would spin requeue→re-poll(skip)→re-park. But if **every** arm is dead the fiber must be
-  requeued, because a `close()` landing in the poll→park window wakes an empty bucket and nothing will
-  ever wake that key again — parking there is a stranded fiber the deadlock detector then (correctly)
-  reaps as a spurious `deadlock:` fault. The all-dead requeue terminates: the re-run `WaitPoll` hits
-  `all_closed` and faults `wait: all channels closed`. The
+  value / a tripped `done_latch` / a closed channel (D2); a send arm with a free slot or a close) →
+  requeue; else **LIVE**. Cancel → requeue. The re-run `WaitPoll` takes the ready arm, so a requeue
+  terminates. A `close()` landing in the poll→park window wakes an empty bucket, and nothing would
+  wake that key again; the re-check sees the close and requeues instead of stranding the fiber.
+  (The READY / DEAD / LIVE re-check from before D2 is in the superseded note under
+  **Implementation notes**.) The
   first waker (in
   `send_wake`/`close_wake`/`cancel_drain`/`flag_deadlock`) CASes `claimed`, `take()`s the fiber, and
   removes its token from every other bucket by `Arc::ptr_eq` — all under the one lock, serialized with
@@ -205,7 +210,7 @@ so a real send still beats the timer).
   (the `InlineSleep` cell of `block::mode` for `BlockCtx::Builder { job: false }` — a party that owns
   its OS thread blocks in place with the timer clamped instead, W7-14),
   inline-sleep to the soonest deadline and take that arm; else
-  fault (all-closed or the existing deadlock fault). Deterministic → matches a worker-thread party's
+  fault (the existing deadlock fault; a closed recv arm is ready, D2). Deterministic → matches a worker-thread party's
   behavior **except** when a timer arm races a runnable sibling (`docs/contributing/gaps.md` N10): the inline-sleep runs before the park,
   so this no-worker-loop waiter takes the timer where a worker-thread waiter takes the sibling — a
   known limit (the worker-thread behavior is correct). Proper fix = park first, inline-sleep the timer

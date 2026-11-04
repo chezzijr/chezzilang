@@ -500,12 +500,12 @@ fn slot_cells(cells: &mut Vec<Cell>) {
     }
 }
 
-/// A `wait` arm delivers its channel's plain element into the assigned target.
+/// A `wait` arm binds `T!RecvError`; its element, unwrapped, is assigned into the target.
 fn wait_recv_assign_cells(cells: &mut Vec<Cell>) {
     let slot = Slot {
         name: "wait_recv_assign",
         decls: "",
-        body: "ch := Channel[int](1)\nch.send(5)\nx: {C} = {SEED}\nwait:\n    x = ch.recv():\n        show(x)",
+        body: "ch := Channel[int](1)\nch.send(5)\nx: {C} = {SEED}\nwait:\n    r := ch.recv():\n        v := r else: panic(\"ch closed\")\n        x = v\n        show(x)",
         reject: "cannot assign",
         tail: false,
     };

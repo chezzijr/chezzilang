@@ -1,0 +1,144 @@
+# D2 — a `wait:` recv arm on a closed, drained channel is READY: it is picked like any ready arm
+# (first ready arm in source order wins) and binds `!RecvError`, as Go's `select` picks `<-closed`
+# (zero value, ok false) and crossbeam's `select!` gives an error (`RecvError`). Its binding is
+# `T!RecvError`, the same type `ch.recv()` returns. A guard switches a closed arm off.
+import Executor, Shared from std.concurrency
+import std.time
+
+fn arm_text(c: Channel[int], other: Channel[int]) -> str:
+    wait:
+        r := c.recv():
+            match r:
+                ?v: return "c {v}"
+                !e: return "c {e.message()}"
+        r := other.recv():
+            match r:
+                ?v: return "other {v}"
+                !e: return "other {e.message()}"
+    return ""
+
+fn closed() -> Channel[int]:
+    c := Channel[int](0)
+    c.close()
+    return c
+
+fn close_later(c: Channel[int]):
+    time.sleep_ms(50)
+    c.close()
+
+# A wait parked on the OS thread that runs the module's top level, woken by an Executor job's close.
+fn parked_until_closed_by_a_job() -> str:
+    c := Channel[int](0)
+    other := Channel[int](0)
+    ex := Executor()
+    _ := ex.submit(fn(): close_later(c))
+    got := arm_text(c, other)
+    ex.shutdown()
+    return got
+
+TOP: str = parked_until_closed_by_a_job()
+
+test fn a_closed_arm_beside_an_idle_arm_is_picked_and_binds_the_error():
+    assert arm_text(closed(), Channel[int](0)) == "c receiving on a closed channel"
+
+test fn the_binding_is_the_recv_result_type():
+    c := closed()
+    wait:
+        r := c.recv():
+            res: int!RecvError = r
+            match res:
+                ?v: assert false, "got {v}"
+                !e:
+                    err: RecvError = e
+                    assert err.message() == "receiving on a closed channel"
+
+test fn a_closed_arm_before_a_ready_arm_wins():
+    ready := Channel[int](1)
+    ready.send(7)
+    assert arm_text(closed(), ready) == "c receiving on a closed channel"
+    assert ready.len() == 1, "the ready arm was taken"
+
+test fn a_ready_arm_before_a_closed_arm_wins():
+    ready := Channel[int](1)
+    ready.send(7)
+    assert arm_text(ready, closed()) == "c 7"
+
+test fn a_closed_arm_wins_over_else():
+    c := closed()
+    got := ""
+    wait:
+        r := c.recv(): got = "closed {r}"
+        else: got = "else"
+    assert got.starts_with("closed"), got
+
+test fn buffered_values_drain_through_the_arm_before_the_error():
+    c := Channel[int](3)
+    c.send(1)
+    c.send(2)
+    c.close()
+    other := Channel[int](0)
+    assert arm_text(c, other) == "c 1"
+    assert arm_text(c, other) == "c 2"
+    assert arm_text(c, other) == "c receiving on a closed channel"
+    assert arm_text(c, other) == "c receiving on a closed channel"
+
+fn worker(jobs: Channel[int], done: Channel[int], seen: Shared[int]):
+    while true:
+        wait:
+            j := jobs.recv():
+                match j:
+                    ?_: seen.update(fn(n: int) -> int: n + 1)
+                    !_: return
+            _ := done.recv(): return
+
+test fn closing_done_stops_every_worker():
+    jobs := Channel[int](0)
+    done := Channel[int](0)
+    seen := Shared(0)
+    parallel:
+        for _ in 0..4:
+            spawn worker(jobs, done, seen)
+        spawn:
+            for i in 0..8:
+                jobs.send(i)
+            done.close()
+    assert seen.get() == 8
+
+test fn a_parked_wait_wakes_when_another_task_closes_in_a_fiber():
+    c := Channel[int](0)
+    other := Channel[int](0)
+    got := Shared("")
+    parallel:
+        spawn: got.set(arm_text(c, other))
+        spawn:
+            time.sleep_ms(50)
+            c.close()
+    assert got.get() == "c receiving on a closed channel"
+
+test fn a_parked_wait_wakes_when_another_task_closes_at_top_level():
+    assert TOP == "c receiving on a closed channel"
+
+test fn a_parked_wait_wakes_when_another_task_closes_in_an_executor_job():
+    c := Channel[int](0)
+    other := Channel[int](0)
+    ex := Executor()
+    t := ex.submit(fn() -> str: arm_text(c, other))
+    time.sleep_ms(50)
+    c.close()
+    ex.shutdown()
+    match t.get():
+        ?s: assert s == "c receiving on a closed channel", s
+        !e: assert false, e.message()
+
+test fn a_guard_switches_a_closed_arm_off():
+    c := closed()
+    ready := Channel[int](1)
+    ready.send(3)
+    open := false
+    got := ""
+    wait:
+        _ := c.recv() if open: got = "closed"
+        r := ready.recv():
+            assert r == ?3
+            got = "ready"
+    assert got == "ready", got

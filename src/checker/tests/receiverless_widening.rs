@@ -2436,10 +2436,11 @@ fn nested_unknown_top_level_keeps_the_proven_leaf_types() {
     );
 }
 
+/// D2: a wait arm binds one `T!RecvError`, so the body unpacks it; the leaf types survive.
 #[test]
-fn nested_wait_arm_keeps_the_leaf_types() {
+fn nested_unpack_of_a_wait_arm_binding_keeps_the_leaf_types() {
     rejects(
-        "fn w(ch: Channel[(int, (int, int))]):\n    wait:\n        a, (b, c) := ch.recv():\n            print(a + \"s\", b, c)\n",
+        "fn w(ch: Channel[(int, (int, int))]):\n    wait:\n        r := ch.recv():\n            a, (b, c) := r else: return\n            print(a + \"s\", b, c)\n",
         "int",
     );
 }

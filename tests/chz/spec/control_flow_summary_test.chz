@@ -5,7 +5,7 @@ fn par_ret() -> int:
     parallel:
         return 1
 
-fn first(c: Channel[int]) -> int:
+fn first(c: Channel[int]) -> int!RecvError:
     wait:
         v := c.recv():
             return v
@@ -29,7 +29,7 @@ test fn a_return_inside_parallel_returns_from_the_fn():
 test fn a_wait_whose_every_arm_returns_cannot_fall_off():
     c := Channel[int](1)
     c.send(7)
-    assert first(c) == 7
+    assert first(c) == ?7
 
 test fn a_break_in_a_wait_arm_leaves_while_true():
     c := Channel[int](1)

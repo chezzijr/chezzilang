@@ -30,7 +30,7 @@
 == Phase 4: deterministic wait: / Channel / Atomic / cancel surface sweep ==
   PASS p4.wait_else               = -1
   PASS p4.wait_timer              = 7
-  PASS p4.wait_assign_closedskip  = 9
+  PASS p4.wait_closedfirst_assign = 9
   PASS p4.try_send_open           = 1
   PASS p4.try_send_closed         = 0
   PASS p4.channel_len             = 3

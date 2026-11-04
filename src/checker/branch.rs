@@ -6,8 +6,8 @@ use super::*;
 
 impl Checker {
     /// `wait:` — Chezzi's `select` (§6d). Each arm's channel expr must be a `Channel[T]`; the arm's
-    /// target binds (`:=`)/assigns (`=`)/discards (`_`) the element `T`. `wait` is a runtime race, not
-    /// a type match, so it is **not** exhaustive — no coverage analysis, ≥1 arm is the only structural
+    /// target binds (`:=`)/assigns (`=`)/discards (`_`) what `recv` returns, `T!RecvError`. `wait` is
+    /// a runtime race, not a type match, so it is **not** exhaustive — no coverage analysis, ≥1 arm is the only structural
     /// rule (parser-enforced). Each arm body is its own lexical sub-scope (like a `match` arm). An
     /// arm's `if` guard must be `bool`; it is checked before the arm's target binds.
     pub(super) fn check_wait(&mut self, arms: &[WaitArm], else_block: Option<&Block>) {
@@ -19,8 +19,12 @@ impl Checker {
             }
             match &arm.kind {
                 WaitArmKind::Recv { target, chan } => {
-                    let elem = match self.infer(chan) {
-                        Ty::Channel(e) => *e,
+                    // The binding is what `chan.recv()` returns (`T!RecvError`): the sig harvested
+                    // from `std/prelude.chz`, the same lookup a `.recv()` call makes.
+                    let got = match self.infer(chan) {
+                        Ty::Channel(e) => self
+                            .native_handle_method("Channel", "recv", &[*e])
+                            .map_or(Ty::Unknown, |sig| sig.ret),
                         Ty::Unknown => Ty::Unknown,
                         other @ Ty::Int
                         | other @ Ty::Float
@@ -63,7 +67,7 @@ impl Checker {
                     let mut leaves = Vec::new();
                     self.bind_subpattern(
                         target,
-                        &elem,
+                        &got,
                         chan.span,
                         &mut BindMode::Target(&mut leaves),
                     );

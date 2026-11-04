@@ -73,11 +73,11 @@ fn op_body(op: &str) -> (&'static str, &'static str) {
         ),
         "send" => ("    c.send(1)\n    c.send(2)\n    return 0\n", "drain"),
         "wait" => (
-            "    wait:\n        v := c.recv():\n            return v\n    return 0\n",
+            "    wait:\n        r := c.recv():\n            v := r else: panic(\"c closed\")\n            return v\n    return 0\n",
             "feed",
         ),
         "wait_timer" => (
-            "    t := time.timer(150)\n    wait:\n        v := c.recv():\n            return v\n        _ := t.recv():\n            return 9\n    return 0\n",
+            "    t := time.timer(150)\n    wait:\n        r := c.recv():\n            v := r else: panic(\"c closed\")\n            return v\n        _ := t.recv():\n            return 9\n    return 0\n",
             "feed",
         ),
         "guard" => (

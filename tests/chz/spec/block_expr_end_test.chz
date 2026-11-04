@@ -108,7 +108,8 @@ test fn else_after_an_inline_wait_arm_block_is_the_waits():
         while true:
             wait:
                 v := ch.recv(): _r := recover:
-                    q = 10 / v
+                    d := v else: panic("ch closed")
+                    q = 10 / d
                 else: break
             n += 1
         return n

@@ -400,9 +400,9 @@ impl Vm {
 
     /// `wait:` runtime (§6d) — execute [`Op::WaitPoll`]. The `n` arm channel handles are on the
     /// operand stack (`stack[base..base+n]`, source order). Poll source order: the first channel with
-    /// a queued value (or a fired timer) wins → drop the handles, push the value, jump to that arm's
-    /// body. A closed+empty arm is skipped. Nothing ready → run `else` (jump), else fault (all-closed)
-    /// or block: an M:N snapshot-park, an M:N in-callback demote, or an in-place condvar wait for a
+    /// a queued value (or a fired timer) wins → drop the handles, push `?value`, jump to that arm's
+    /// body. A closed+empty recv arm is ready too and pushes `!RecvError` (D2). Nothing ready → run
+    /// `else` (jump), else block: an M:N snapshot-park, an M:N in-callback demote, or an in-place condvar wait for a
     /// party that owns its OS thread (an eager `Executor` job / top-level `main`, plus — for a TIMED
     /// wait only — either of those inside a native callback). A live timer arm is just another arm on
     /// every one of those; only the inline outermost-`parallel:` builder mid-body with no eager core
@@ -434,8 +434,6 @@ impl Vm {
             self.deadline_halt(span)?;
         }
         let mut soonest: Option<(usize, std::time::Instant)> = None;
-        // Over the ENABLED arms only: an off arm (false guard) is neither live nor closed.
-        let mut all_closed = true;
         let mut any_on = false;
         let mut off = 0usize;
         for i in 0..n {
@@ -459,26 +457,27 @@ impl Vm {
                         return Ok(());
                     }
                     SendOutcome::Closed => return Err(self.err(CLOSED_SEND.to_string(), span)),
-                    SendOutcome::Full | SendOutcome::Offered => {
-                        all_closed = false; // live — a receiver will take its offer
-                        continue;
-                    }
+                    SendOutcome::Full | SendOutcome::Offered => continue,
                 }
             }
             let ready = self.recv_ready(&core, &mut core.q.lock().unwrap());
             match ready {
                 core::RecvReady::Value(v) => {
                     self.wake_senders(h); // a `wait:` arm freed a slot — wake a parked bounded sender
-                    self.take_wait_arm(base, v, meta.arm_targets[i]);
+                    self.take_wait_arm(base, Some(v), meta.arm_targets[i]);
                     return Ok(());
                 }
                 core::RecvReady::Fired => {
-                    self.take_wait_arm(base, Value::bool(true), meta.arm_targets[i]);
+                    self.take_wait_arm(base, Some(Value::bool(true)), meta.arm_targets[i]);
                     return Ok(());
                 }
-                core::RecvReady::Closed => {}
+                // D2 — closed and drained: the arm is ready and binds `!RecvError`, as a bare `recv`
+                // returns (Go's `select` picks `<-closed`; crossbeam gives `Err(RecvError)`).
+                core::RecvReady::Closed => {
+                    self.take_wait_arm(base, None, meta.arm_targets[i]);
+                    return Ok(());
+                }
                 core::RecvReady::Wait => {
-                    all_closed = false;
                     if let Some(deadline) = core.timer
                         && soonest.is_none_or(|(_, d)| deadline < d)
                     {
@@ -496,17 +495,12 @@ impl Vm {
         // TICKET-194 — a ready arm or an `else` never waits, so neither is a cancellation point.
         self.wait_halt(span)?;
         // D5 — every arm off and no `else`: guards are checked once, so nothing can ever make this
-        // `wait:` ready. Fault before any park, the same recoverable kind as the all-closed fault.
+        // `wait:` ready. Fault before any park.
         if !any_on {
             return Err(self.err(
                 "wait: every arm is off (its guard is false) and there is no else".to_string(),
                 span,
             ));
-        }
-        // Every arm closed+empty, no `else`, no timer → distinct fault. (A live timer arm set
-        // `all_closed = false` above, so this fires only when there is genuinely nothing to wait on.)
-        if all_closed {
-            return Err(self.err("wait: all channels closed".to_string(), span));
         }
         // Block on all live arms. The arm operands are on the stack (they root the channels + re-supply
         // the poll on resume). `keys` = (SOURCE arm index, stack slot, channel handle, is_send) per
@@ -568,11 +562,12 @@ impl Vm {
                 offered.push(h);
             } else if wait_mode != BlockMode::Park {
                 let mut g = core.q.lock().unwrap_or_else(|e| e.into_inner());
-                if g.recv_ready_for(Some(&p)) || core.done_latch.load(Ordering::Relaxed) {
+                if g.closed || g.recv_ready_for(Some(&p)) || core.done_latch.load(Ordering::Relaxed)
+                {
                     ready = true;
                     break;
                 }
-                if !g.closed && core.cap == Some(0) {
+                if core.cap == Some(0) {
                     g.slot(&p, i);
                 }
             }
@@ -708,7 +703,7 @@ impl Vm {
                 return r;
             }
             slept?;
-            self.take_wait_arm(base, Value::bool(true), meta.arm_targets[i]);
+            self.take_wait_arm(base, Some(Value::bool(true)), meta.arm_targets[i]);
             return Ok(());
         }
         // A party that owns its OS thread — an eager `Executor` job, or the top-level `main` thread,
@@ -721,7 +716,7 @@ impl Vm {
             // it, a lone `wait:`-blocked party would forever see `blocked < live` and never fault.
             // The wait is an OR-set over every arm (§2d's OR-edge: ready on ANY arm is progress),
             // so the verdict declines while any one of them is feedable.
-            // Non-empty: an all-closed or all-off arm set returned above.
+            // Non-empty: an all-off arm set returned above.
             let (first, is_send0) = arms[0].clone();
             let arm_cores: Vec<Arc<ChannelCore>> =
                 arms.iter().map(|(c, _)| Arc::clone(c)).collect();
@@ -750,7 +745,8 @@ impl Vm {
             //   * any arm is ready once the `wait:`'s `Pending` settled (an offer taken, a slot
             //     filled, an offer closed);
             //   * a RECV arm is also ready on a value it can take (a buffered value or another
-            //     party's live offer) or a `trip()` latch. NOT `closed` (the poll skips a dead arm).
+            //     party's live offer), a `trip()` latch, or `closed` (D2: the poll takes a closed
+            //     arm, so the re-run settles on it — no spin).
             //
             // **The timer clamp — W7-14.** A live timer arm shortens the tick to its deadline, so the
             // re-poll takes the timer arm AT its deadline; before it, a sibling's value wins.
@@ -760,7 +756,9 @@ impl Vm {
             let arm0_ready = |g: &mut crate::vm::core::ChanState| {
                 !p.is_queued()
                     || (!is_send0
-                        && (g.recv_ready_for(Some(&p)) || first.done_latch.load(Ordering::Relaxed)))
+                        && (g.closed
+                            || g.recv_ready_for(Some(&p))
+                            || first.done_latch.load(Ordering::Relaxed)))
             };
             #[cfg(test)]
             WAIT_ARM0_ENTRIES.fetch_add(1, Ordering::Relaxed);
@@ -809,7 +807,7 @@ impl Vm {
                 Some(Ok(()))
             }
             Settled::Got(i, v) => {
-                self.take_wait_arm(base, v, meta.arm_targets[i as usize]);
+                self.take_wait_arm(base, Some(v), meta.arm_targets[i as usize]);
                 Some(Ok(()))
             }
             Settled::Closed => Some(Err(self.err(CLOSED_SEND.to_string(), span))),
@@ -817,9 +815,11 @@ impl Vm {
         }
     }
 
-    /// Commit a chosen `wait` arm: drop the `n` channel handles (`stack[base..]`), push the received
-    /// value, and jump to the arm body's target ip (the bind/assign/discard prologue).
-    pub(super) fn take_wait_arm(&mut self, base: usize, value: Value, target: usize) {
+    /// Commit a chosen `wait` arm: drop the `n` channel handles (`stack[base..]`), push what the
+    /// receive gives (`T!RecvError`, the same value a bare `recv` returns: `got` is `None` for a
+    /// closed, drained arm), and jump to the arm body's target ip (the bind/assign/discard prologue).
+    pub(super) fn take_wait_arm(&mut self, base: usize, got: Option<Value>, target: usize) {
+        let value = self.recv_result(got);
         self.stack.truncate(base);
         self.push(value);
         self.frames.last_mut().unwrap().ip = target;

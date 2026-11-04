@@ -189,8 +189,8 @@ fn wait_send_arm_park_wake_stress_parallel() {
     }
 }
 
-/// A send-arm on a CLOSED channel is SELECTED (ready) and FAULTS `send on a closed channel` — NOT
-/// skipped like a closed recv arm — even with an `else` present (a closed send arm is always ready, so
+/// A send-arm on a CLOSED channel is SELECTED (ready) and FAULTS `send on a closed channel` — a
+/// closed recv arm is selected too, but binds `!RecvError` — even with an `else` present (a closed send arm is always ready, so
 /// `else` never runs). Byte-identical fault.
 #[test]
 fn wait_send_arm_closed_channel_faults_both_engines() {

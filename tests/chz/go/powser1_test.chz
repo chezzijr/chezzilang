@@ -133,10 +133,12 @@ fn getn(inp: List[Dch]) -> List[Rat]:  # Go: func getn(in []*dch) []rat
             (req[1] ?? nil_req()).send(seqno) if req[1] != None:  # Go: case req[1] <- seqno:
                 dat[1] = inp[1].dat
                 req[1] = None  # Go: req[1] = nil
-            it := (dat[0] ?? nil_dat()).recv() if dat[0] != None:  # Go: case it = <-dat[0]:
+            r := (dat[0] ?? nil_dat()).recv() if dat[0] != None:  # Go: case it = <-dat[0]:
+                it := r else: panic("dat[0] closed")
                 out[0] = it
                 dat[0] = None  # Go: dat[0] = nil
-            it := (dat[1] ?? nil_dat()).recv() if dat[1] != None:  # Go: case it = <-dat[1]:
+            r := (dat[1] ?? nil_dat()).recv() if dat[1] != None:  # Go: case it = <-dat[1]:
+                it := r else: panic("dat[1] closed")
                 out[1] = it
                 dat[1] = None  # Go: dat[1] = nil
         n -= 1

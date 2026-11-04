@@ -257,7 +257,7 @@ fn bind(binder: Binder, n: &str, p: &Pos) -> Option<String> {
         Binder::ClosureParam => Some(format!("print((fn({n}: {ty}) -> {ret}: {r})({e}))\n")),
         Binder::ComprehensionVar => Some(format!("print([{r} for {n} in [{e}]][0])\n")),
         Binder::WaitRecv => Some(format!(
-            "fn g() -> {ret}:\n    ch := Channel[{ty}](1)\n    ch.send({e})\n    out := {zero}\n    wait:\n        {n} := ch.recv(): out = {r}\n    return out\nprint(g())\n"
+            "fn g() -> {ret}:\n    ch := Channel[{ty}](1)\n    ch.send({e})\n    out := {zero}\n    wait:\n        {n} := ch.recv():\n            {n} := {n} else: panic(\"ch closed\")\n            out = {r}\n    return out\nprint(g())\n"
         )),
         Binder::NestedFn => (p.tag == "call").then(|| {
             format!(
@@ -592,7 +592,7 @@ fn field_bind(binder: Binder, n: &str, ty: &str, e: &str, r: &str, ctx: &str) ->
             b(8)
         )),
         Binder::WaitRecv => Some(format!(
-            "fn g():\n    ch := Channel[{ty}](1)\n    ch.send({e})\n    wait:\n        {n} := ch.recv():\n{}g()\n",
+            "fn g():\n    ch := Channel[{ty}](1)\n    ch.send({e})\n    wait:\n        {n} := ch.recv():\n            {n} := {n} else: panic(\"ch closed\")\n{}g()\n",
             b(12)
         )),
         Binder::ImportAlias => Some(format!("import lib as {n}\n{}", b(0))),

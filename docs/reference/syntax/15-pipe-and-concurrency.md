@@ -114,15 +114,19 @@ fn fetch_all(urls: List[str]):
 
 **`wait:` (select)** races channel `recv` and `send` arms; the first ready arm wins, in source order.
 
-- A recv arm: `v := ch.recv():` (or `result = ch.recv():`, `_ := ch.recv():`, a tuple target
-  `a, (b, c) := ch.recv():` or `a, (x.f, ys[0]) = ch.recv():`).
+- A recv arm: `r := ch.recv():` (or `result = ch.recv():`, `_ := ch.recv():`). It binds what
+  `ch.recv()` returns, `T!RecvError`: take the value with `?`, `match` or `_ :=`. A tuple target
+  (`a, (b, c) := ch.recv():`) does not type-check, since a `T!RecvError` is not a tuple: bind the
+  result, then unpack it in the body (`r := ch.recv():` then `a, (b, c) := r?`). Go and Rust also
+  bind one value in a select arm.
 - A send arm: `ch.send(v):` binds nothing and is ready when the channel can take the value.
 - A guard switches an arm off: `j := jobs.recv() if not paused:`, `ch.send(v) if ok:`. It is a `bool`,
   checked once on entry before the arm's operands, and cannot see the arm's binding. Every arm off
   with no `else` faults `"wait: every arm is off ..."`.
 - An optional non-blocking `else:` (last), and `timer` arms for timeouts (there is no `recv_timeout`).
-- A closed and empty recv arm is skipped. A closed send arm faults `"send on a closed channel"`. All
-  arms closed with no ready send and no `else` faults.
+- A closed and drained recv arm is ready: it is picked in source order and binds `!RecvError` (Go's
+  `select` picks `<-closed`). In a loop it fires on every pass; a guard switches it off. A closed send
+  arm faults `"send on a closed channel"`.
 - See [`concurrency.md`](../concurrency/01-model.md) §6d,
   [`examples/wait_select.chz`](../../../examples/wait_select.chz) and
   [`examples/wait_send.chz`](../../../examples/wait_send.chz).

@@ -1,5 +1,6 @@
 //! TICKET-261 (U9): one unpacking grammar at `:=`, `=`, `for`, a comprehension, a wait arm and
-//! `match`. Binding site x pattern shape x source of the element, one generated program per cell,
+//! `match`; a wait arm binds one `T!RecvError` (D2), so a tuple target there does not type-check.
+//! Binding site x pattern shape x source of the element, one generated program per cell,
 //! run through the built `chezzi` binary. Every accept cell RUNS and prints; every reject cell names
 //! the rule. The rule: outside `match` only tuples unpack (`_` skips a slot, a nested target takes
 //! parentheses, no outer parentheses); a struct or an enum variant unpacks in `match` only; no list
@@ -166,6 +167,15 @@ impl Shape {
 
     /// What an accepting cell prints. `None`: the rule rejects the cell.
     fn accepts(self, site: Site) -> Option<&'static str> {
+        // D2: a wait arm binds one `T!RecvError`, so no tuple target unpacks there.
+        if matches!(site, Site::Wait | Site::WaitAssign)
+            && matches!(
+                self,
+                Shape::Flat | Shape::Nested | Shape::NestedGroup | Shape::Blank
+            )
+        {
+            return None;
+        }
         match self {
             Shape::Flat => Some("1 (2, 3)"),
             Shape::Nested | Shape::NestedGroup => Some("1 2 3"),
@@ -457,6 +467,12 @@ fn reject_fragment(site: Site, shape: Shape) -> &'static str {
             | Site::Match,
             Shape::ParenBlank,
         ) => "cannot use '_' as a value",
+        (Site::Wait, Shape::Flat | Shape::Nested | Shape::NestedGroup | Shape::Blank) => {
+            "tuple pattern cannot match a value of type"
+        }
+        (Site::WaitAssign, Shape::Flat | Shape::Nested | Shape::NestedGroup | Shape::Blank) => {
+            "!RecvError to 2 targets"
+        }
         (Site::For | Site::Comp, Shape::Struct) => "expected 'in', found '('",
         (Site::For | Site::Comp, Shape::Variant) => "expected 'in', found '.'",
         (Site::For | Site::Comp, Shape::List) => "expected identifier, found '['",
@@ -465,13 +481,7 @@ fn reject_fragment(site: Site, shape: Shape) -> &'static str {
         (Site::Match, Shape::Rest) => "expected identifier, found '*'",
         // The rule accepts these cells, and `unpack_grid` never asks for their rejection.
         (
-            Site::Walrus
-            | Site::Assign
-            | Site::For
-            | Site::Comp
-            | Site::Wait
-            | Site::WaitAssign
-            | Site::Match,
+            Site::Walrus | Site::Assign | Site::For | Site::Comp | Site::Match,
             Shape::Flat | Shape::Nested | Shape::NestedGroup | Shape::Blank,
         )
         | (Site::Match, Shape::Struct | Shape::Variant) => {

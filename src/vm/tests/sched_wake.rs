@@ -1647,8 +1647,12 @@ import std.time
 
 fn pick(a: Channel[int], b: Channel[int], x: int) -> int:
     wait:
-        v := a.recv(): return x + v
-        w := b.recv(): return x + w
+        v := a.recv():
+            m := v else: panic(\"a closed\")
+            return x + m
+        w := b.recv():
+            n := w else: panic(\"b closed\")
+            return x + n
 
 fn use_map(a: Channel[int], b: Channel[int], out: Shared[int]):
     xs := [1]
@@ -1705,7 +1709,9 @@ import std.time
 
 fn pick(a: Channel[int], t: Channel[bool], x: int) -> int:
     wait:
-        v := a.recv(): return x + v
+        v := a.recv():
+            n := v else: panic(\"a closed\")
+            return x + n
         _ := t.recv(): return -1
 
 fn use_map(a: Channel[int], t: Channel[bool], out: Shared[int]):
@@ -1761,8 +1767,12 @@ fn vm_wait_in_native_callback_no_sender_deadlocks() {
     let src = "\
 fn pick(a: Channel[int], b: Channel[int], x: int) -> int:
     wait:
-        v := a.recv(): return x + v
-        w := b.recv(): return x + w
+        v := a.recv():
+            m := v else: panic(\"a closed\")
+            return x + m
+        w := b.recv():
+            n := w else: panic(\"b closed\")
+            return x + n
 
 fn use_map(a: Channel[int], b: Channel[int]):
     xs := [1]
