@@ -73,9 +73,14 @@ so a `wait` containing an unbounded or closed send-arm never blocks (that arm is
   call — is rejected with the legal-forms error). A send-arm binds nothing.
 - `else:` — optional, at most one, and must be **last**.
 
+**`break` and `continue` in an arm** act on the enclosing loop, as in Rust's `select!`: a `wait:` is
+not a loop, so `while true: wait: _ := c.recv(): break` leaves the `while`. With no enclosing loop,
+`break` is the `break outside loop` type error. Go's `break` in a `select` case leaves only the
+`select`, so a Go port drops a `break` that ends a case.
+
 **Type-check.** A recv-arm's `chanExpr: Channel[T]` → the target binds/assigns `T`; a send-arm's
 `chan: Channel[T]` → its `value` must be assignable to `T` (same check as a plain `ch.send(v)`). `wait`
-is **not** exhaustive (it's a runtime race, not a type match); ≥1 arm is required.
+is **not** exhaustive (it's a runtime race, not a type match); ≥1 recv or send arm is required.
 
 **Runtime semantics.**
 

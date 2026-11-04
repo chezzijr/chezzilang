@@ -26,7 +26,7 @@ pure (always structured, always joins) and confines all "outlives-its-scope" wor
 visibly-owned place.
 
 ```chezzi
-import std.concurrency             # Executor (like Shared/RwShared/Atomic) is not a global builtin
+import Executor from std.concurrency   # Executor (like Shared/RwShared/Atomic) is not a global builtin
 
 fn main():
     ex := Executor()                  # a long-lived, explicitly-owned task pool

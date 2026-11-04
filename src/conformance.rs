@@ -766,7 +766,7 @@ const GRAMMAR_LOOSER: &[(&str, &str, &str)] = &[
     ),
     (
         "compoundStmt",
-        "`wait` needs at least one `recv` arm",
+        "`wait` needs at least one `recv` or `send` arm",
         "context: a `wait:` of one `else:` arm has nothing to race",
     ),
     (

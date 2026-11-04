@@ -811,7 +811,7 @@ impl Parser {
         }
         self.expect(&Token::Dedent)?;
         if arms.is_empty() {
-            return Err(self.err("`wait` needs at least one `recv` arm".to_string()));
+            return Err(self.err("`wait` needs at least one `recv` or `send` arm".to_string()));
         }
         Ok(StmtKind::Wait { arms, else_block })
     }

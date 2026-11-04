@@ -331,6 +331,5 @@ Items fixed since the audit are dropped (the generator annotation, `range()` in 
 - The syntax reference says `iter()` on an `Iterator` returns itself; on a struct with only `next`, the
   `iter` method does not exist.
 - False diagnostics: "named arguments are only supported on
-  functions, struct constructors, and struct methods"; "`wait` needs at least one `recv` arm" (a
-  send-only `wait:` is accepted); every parse error is labelled "resolve error"; `t := (1, None)`
+  functions, struct constructors, and struct methods"; every parse error is labelled "resolve error"; `t := (1, None)`
   suggests `(int, int?)`.

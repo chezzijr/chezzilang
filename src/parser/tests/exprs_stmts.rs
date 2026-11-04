@@ -316,7 +316,7 @@ fn wait_requires_at_least_one_arm() {
     assert!(
         parse_err("wait:\n    else: a()\n")
             .message
-            .contains("at least one `recv` arm")
+            .contains("at least one `recv` or `send` arm")
     );
 }
 
