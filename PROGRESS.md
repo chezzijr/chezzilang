@@ -262,6 +262,15 @@ Each group below is one fact decided in two or more places (grouped 2026-10-16).
     8192); `a_native_argument_takes_its_default_from_its_decl` (`tests/owner_guards.rs`) keeps them
     out. Socket and request `timeout_ms` is `int? = None` (None waits, socket `0` polls once).
     Grids: `tests/native_call_binding_grid.rs`, `tests/chz/stdlib/net_timeout_grid_test.chz`.
+    A native's parameter names are now public API: `ord(c="a")` works, where CPython says
+    `ord() takes no keyword arguments` (owner ruling; renaming a decl parameter breaks callers).
+    Open (review, low): the native fn-value cache key `FnKey::Native(name, ptr)` (`src/vm/exec.rs`)
+    has no module, so two modules with one name and one fn pointer would share one defaults row
+    (no such pair today); `native_decl_defaults` (`src/base/builtin_method.rs`) returns
+    `DeclDefaults::NONE` when a defaulted decl finds no row, where it should fail;
+    `print(1, sep=1)` names "argument 2", not `sep` (on base too).
+    Startup: `print(1)` is +1.9% instructions over `5e4033b6` after item 26, so the next prelude
+    decl will probably cross the 2% line.
 26. **An int converts to and from bytes (done 2026-11-04).** `n.to_be_bytes(len, signed = false)` /
     `n.to_le_bytes(...)` give `bytes!`; the statics `int.from_be_bytes(b, signed = false)` /
     `int.from_le_bytes(...)` give `int!` (Rust `to_be_bytes`, Python `to_bytes` / `from_bytes`). `len`
