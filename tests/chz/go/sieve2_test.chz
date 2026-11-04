@@ -1,0 +1,148 @@
+# Port of Go 1.27.0 test/chan/sieve2.go. Copyright 2009 The Go Authors. BSD-style license: NOTICE.
+# Test concurrency primitives: prime sieve of Eratosthenes.
+
+# Generate primes up to 100 using channels, checking the results.
+# This sieve is Eratosthenesque and only considers odd candidates.
+# See discussion at <http://blog.onideas.ws/eratosthenes.go>.
+
+# Go: import ("container/heap"; "container/ring")
+import Heap, Deque from std.collections
+
+# Go returns a channel from a func that starts a goroutine; a fn here joins its spawns at return, so
+# each such spawn is lifted into its caller's body, which makes the channel and spawns the task.
+# Go leaks the never-ending goroutines when main returns; a task here must end, so each blocking
+# channel operation also waits on this trip latch, and main trips it.
+done := Channel[bool]()
+
+# Send v on c; false once main has tripped the latch.  Go: c <- v
+fn send(c: Channel[int], v: int) -> bool:
+    wait:
+        c.send(v): return true
+        _ := done.recv(): return false
+
+# Receive from c; None once main has tripped the latch.  Go: <-c
+fn recv(c: Channel[int]) -> int?:
+    wait:
+        v := c.recv(): return v
+        _ := done.recv(): return None
+
+# Send odd numbers, starting from 5, on out.
+fn odds(out: Channel[int]):  # Go: func odds() chan int { out := make(chan int, 50); go func() {
+    n := 5
+    while true:  # Go: for {
+        if not send(out, n):  # Go: out <- n
+            return
+        n += 2
+
+# Send odd multiples of the prime number p, starting from p*p, on out.
+fn multiples(p: int, out: Channel[int]):  # Go: func multiples(p int) chan int { out := make(chan int, 10); go func() {
+    n := p * p
+    while true:  # Go: for {
+        if not send(out, n):  # Go: out <- n
+            return
+        n += 2 * p
+
+struct PeekCh:
+    head: int
+    ch: Channel[int]
+
+# Go: type PeekChHeap []*PeekCh with Less/Swap/Len/Pop/Push for container/heap; a Heap sorting by
+# head values replaces it.
+fn new_peek_ch_heap() -> Heap[PeekCh]:
+    return Heap([], fn(a: PeekCh, b: PeekCh): a.head < b.head)  # Go: (*h)[i].head < (*h)[j].head
+
+# Receive values on proxy and store them in an expanding buffer, so that sending to out never
+# blocks.  Go: func sendproxy(out chan<- int) chan<- int { proxy := make(chan int, 10); go func() {
+fn sendproxy(out: Channel[int], proxy: Channel[int]):
+    # Go: n := 16; first := ring.New(n); last := first, and the ring doubles when full; a Deque grows
+    # by itself.
+    buf: Deque[int] = Deque([], [])
+    while true:  # Go: for {
+        # Go: c = out; if first == last { c = nil } (buffer empty: disable output); the guard
+        # switches the send arm off instead.
+        wait:
+            e := proxy.recv():  # Go: case e = <-proxy:
+                buf.push_back(e)  # Go: last.Value = e; ...; last = last.Next()
+            out.send(buf.peek_front() ?? 0) if not buf.is_empty():  # Go: case c <- e:
+                _ := buf.pop_front()  # Go: first = first.Next()
+            _ := done.recv(): return
+
+# Merge channels of multiples of 'primes' into 'composites'.
+fn merge(primes: Channel[int], composites: Channel[int]):  # Go: go func() {
+    h := new_peek_ch_heap()  # Go: var h PeekChHeap
+    min := 15
+    while true:  # Go: for {
+        p := recv(primes) else: return
+        m := Channel[int](10)  # Go: m := multiples(<-primes)
+        spawn multiples(p, m)
+        head := recv(m) else: return
+        while min < head:
+            if not send(composites, min):
+                return
+            minchan := h.pop() else: panic("heap.Pop on an empty heap")  # Go: heap.Pop(&h).(*PeekCh)
+            min = minchan.head
+            nh := recv(minchan.ch) else: return  # Go: minchan.head = <-minchan.ch
+            minchan.head = nh
+            h.push(minchan)  # Go: heap.Push(&h, minchan)
+        while min == head:
+            minchan := h.pop() else: panic("heap.Pop on an empty heap")  # Go: heap.Pop(&h).(*PeekCh)
+            min = minchan.head
+            nh := recv(minchan.ch) else: return  # Go: minchan.head = <-minchan.ch
+            minchan.head = nh
+            h.push(minchan)  # Go: heap.Push(&h, minchan)
+        if not send(composites, head):
+            return
+        next := recv(m) else: return
+        h.push(PeekCh(next, m))  # Go: heap.Push(&h, &PeekCh{<-m, m})
+
+# Sieve out 'composites' from 'candidates'.
+fn sift(primes0: Channel[int], composites: Channel[int], out: Channel[int]):  # Go: go func() {
+    # In order to generate the nth prime we only need multiples of
+    # primes ≤ sqrt(nth prime).  Thus, the merging goroutine will
+    # receive from 'primes' much slower than this goroutine
+    # will send to it, making the buffer accumulate and block this
+    # goroutine from sending, causing a deadlock.  The solution is to
+    # use a proxy goroutine to do automatic buffering.
+    primes := Channel[int](10)  # Go: primes := sendproxy(primes)
+    spawn sendproxy(primes0, primes)
+
+    candidates := Channel[int](50)  # Go: candidates := odds()
+    spawn odds(candidates)
+    p := recv(candidates) else: return
+
+    while true:  # Go: for {
+        c := recv(composites) else: return
+        while p < c:
+            if not send(primes, p):
+                return
+            if not send(out, p):
+                return
+            np := recv(candidates) else: return  # Go: p = <-candidates
+            p = np
+        if p == c:
+            np := recv(candidates) else: return  # Go: p = <-candidates
+            p = np
+
+test fn main_():
+    # Go: primes := Sieve(), whose body is lifted here.
+    # The output values.
+    out := Channel[int](10)
+    out.send(2)
+    out.send(3)
+
+    # The channel of all composites to be eliminated in increasing order.
+    composites := Channel[int](50)
+
+    # The feedback loop.
+    feedback := Channel[int](10)  # Go: primes := make(chan int, 10)
+    feedback.send(3)
+
+    spawn merge(feedback, composites)
+    spawn sift(feedback, composites, out)
+
+    primes := out  # Go: return out
+    a := [2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47, 53, 59, 61, 67, 71, 73, 79, 83, 89, 97]
+    for i in 0..a.len():
+        x := primes.recv()
+        assert x == a[i], "{x} != {a[i]}"  # Go: println(x, " != ", a[i]); panic("fail")
+    done.trip()

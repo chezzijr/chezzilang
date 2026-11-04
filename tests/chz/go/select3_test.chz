@@ -1,0 +1,98 @@
+# Port of Go 1.27.0 test/chan/select3.go. Copyright 2010 The Go Authors. BSD-style license: NOTICE.
+# Test the semantics of the select statement
+# for basic empty/non-empty cases.
+#
+# Go's testBlock(never, f) runs f beside a 10 s sleeper and checks f finishes first. Go: the sleeper
+# goroutine leaks when main returns; a Chezzi task cannot leak, so each never-blocking body is called
+# directly: returning at all is the check.
+# Go's testPanic(always, f) -> `recover:` around the body, then match the fault text.
+# Go's nil channel has no Chezzi form: its arm is switched off by an `if false` guard, so the
+# `Channel[int](0)` stand-in is never touched.
+#
+# Left out (Go line: reason):
+#   65  testBlock(always, nilch <- 7): an in-process block is a fatal deadlock in Chezzi; needs an out-of-process golden harness
+#   68  testBlock(always, <-nilch): same (always-blocks)
+#   95  testBlock(never, recv from closedch, comma-ok): D1+D2: Chezzi faults or skips; own plan
+#   113 testBlock(always, <-ch on a non-ready channel): always-blocks, needs an out-of-process golden harness
+#   119 testBlock(always, select {}): always-blocks, needs an out-of-process golden harness (also D4: no empty wait)
+#   124 testBlock(always, select with only a nil recv): always-blocks, needs an out-of-process golden harness
+#   130 testBlock(always, select with only a nil send): always-blocks, needs an out-of-process golden harness
+#   136 testBlock(always, select with nil recv + nil send): always-blocks, needs an out-of-process golden harness
+#   146 testBlock(always, select on a non-ready channel): always-blocks, needs an out-of-process golden harness
+#   195 testBlock(never, select picks <-closedch): D1+D2: Chezzi faults or skips; own plan
+#   200 testBlock(never, select picks x := <-closedch): D1+D2: Chezzi faults or skips; own plan
+#   206 testBlock(never, select picks x, ok := <-closedch): D1+D2: Chezzi faults or skips; own plan
+#   219 testBlock(always, select sends and receives on one channel): always-blocks, needs an out-of-process golden harness
+
+async := 1  # Go: const async = 1 // asynchronous channels
+nilch := Channel[int](0)  # Go: var nilch chan int  (every arm on it is off)
+closedch := Channel[int](0)  # Go: closedch := make(chan int)
+closedch.close()  # Go: close(closedch)
+
+fn expect_fault(r: !, what: str):
+    match r:
+        ?_: assert false, "{what}: expected a fault"
+        !e: assert "send on a closed channel" in e.message(), "{what}: got {e.message()}"
+
+# sending/receiving from a nil channel inside a select is never selected
+test fn nil_select_with_default():
+    wait:  # Go: select {
+        nilch.send(7) if false:  # Go: case nilch <- 7:
+            assert false, "control flow shouldn't reach here"
+        else:
+            pass
+    wait:  # Go: select {
+        _ := nilch.recv() if false:  # Go: case <-nilch:
+            assert false, "control flow shouldn't reach here"
+        else:
+            pass
+
+# sending to an async channel with free buffer space never blocks
+test fn send_with_free_buffer():
+    ch := Channel[int](async)  # Go: ch := make(chan int, async)
+    ch.send(7)  # Go: ch <- 7
+
+# sending to a closed channel panics.
+test fn send_on_closed_panics():
+    r := recover:
+        closedch.send(7)  # Go: closedch <- 7
+    expect_fault(r, "closedch <- 7")
+
+# selects with default cases don't block
+test fn select_with_default_never_blocks():
+    # Go: select { default: }  (an else-only wait: is an error in Chezzi, so the default body stands alone)
+    pass
+    wait:  # Go: select {
+        _ := nilch.recv() if false:  # Go: case <-nilch:
+            assert false, "control flow shouldn't reach here"
+        else:
+            pass
+    wait:  # Go: select {
+        nilch.send(7) if false:  # Go: case nilch <- 7:
+            assert false, "control flow shouldn't reach here"
+        else:
+            pass
+
+# selects with ready channels don't block
+test fn select_with_ready_channels():
+    ch := Channel[int](async)  # Go: ch := make(chan int, async)
+    wait:  # Go: select {
+        ch.send(7):  # Go: case ch <- 7:
+            pass
+        else:
+            assert false, "control flow shouldn't reach here"
+    ch2 := Channel[int](async)  # Go: ch := make(chan int, async)
+    ch2.send(7)  # Go: ch <- 7
+    wait:  # Go: select {
+        _ := ch2.recv():  # Go: case <-ch:
+            pass
+        else:
+            assert false, "control flow shouldn't reach here"
+
+# selects with closed channels behave like ordinary operations
+test fn select_send_on_closed_panics():
+    r := recover:
+        wait:  # Go: select {
+            closedch.send(7):  # Go: case closedch <- 7:
+                pass
+    expect_fault(r, "select closedch <- 7")

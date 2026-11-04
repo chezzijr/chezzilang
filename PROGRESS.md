@@ -276,13 +276,14 @@ Each group below is one fact decided in two or more places (grouped 2026-10-16).
     `int.from_le_bytes(...)` give `int!` (Rust `to_be_bytes`, Python `to_bytes` / `from_bytes`). `len`
     is 1 to 8; each failure is an error that names the cause; `signed` goes by position or by name.
     Grid: `tests/chz/spec/int_bytes_test.chz`.
-27. **Go `test/chan` ports (in progress 2026-11-04).** A `wait:` arm takes a guard
+27. **Go `test/chan` ports (done 2026-11-04).** A `wait:` arm takes a guard
     (`j := jobs.recv() if not paused:`, tokio `select!` / Ada `when`); a false guard switches the arm
     off the way Go uses a nil channel, and all arms off with no `else:` faults
     `wait: every arm is off ...`. `tests/chz/go/` holds faithful ports of Go 1.27.0 `test/chan`
-    (license in its `NOTICE`), run at both worker counts. Done: 13 of 19. Next: sieve2, powser1/2,
-    select3; then a plan for the closed-channel rules (Go/Rust give the receiver a closed value and
-    let select pick that arm; Chezzi faults and skips it). Not ported: select5 (a generator), perm
+    (license in its `NOTICE`), run at both worker counts. Done: 17 of 20 files (select3 in part).
+    The powser2 port found that a protocol method could not name its own protocol (fixed).
+    Next: a plan for the closed-channel rules (Go/Rust give the receiver a closed value and let
+    select pick that arm; Chezzi faults and skips it). Not ported: select5 (a generator), perm
     (directional channels), select2's heap check. Grid: `tests/chz/spec/wait_guard_test.chz`.
 
 ### Open questions for the owner
