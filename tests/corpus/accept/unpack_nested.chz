@@ -7,6 +7,7 @@ for p, (q, r) in [(1, (2, 3))]:
 sums := [i + j + k for i, (j, k) in [(1, (2, 3))]]
 ch := Channel[(int, (int, int))](1)
 wait:
-    d, (e, f) := ch.recv():
+    r := ch.recv():
+        d, (e, f) := r else: panic("closed")
         print(d, e, f)
 a, (b, c) = t

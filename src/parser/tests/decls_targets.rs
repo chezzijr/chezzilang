@@ -498,7 +498,7 @@ fn target_shape(p: &Pattern) -> String {
     }
 }
 
-/// U9: one binding-target parser at `:=`, `for`, a comprehension clause, a wait arm and `=`.
+/// U9: one binding-target parser at `:=`, `for`, a comprehension clause and `=`.
 #[test]
 fn nested_bind_targets_parse_at_every_site() {
     match only("a, (b, c) := t\n") {
@@ -533,25 +533,33 @@ fn nested_bind_targets_parse_at_every_site() {
         }
         other => panic!("{other:?}"),
     }
-    match only("wait:\n    a, (b, c) := ch.recv(): pass\n") {
-        StmtKind::Wait { arms, .. } => match &arms[0].kind {
-            WaitArmKind::Recv { target, .. } => {
-                assert_eq!(target_shape(target), "(a,(b,c))")
-            }
-            other => panic!("{other:?}"),
-        },
-        other => panic!("{other:?}"),
-    }
-    match only("wait:\n    a, (b.f, c[0]) = ch.recv(): pass\n") {
-        StmtKind::Wait { arms, .. } => {
-            assert!(matches!(&arms[0].body[0].kind, StmtKind::Assign { .. }))
-        }
-        other => panic!("{other:?}"),
+}
+
+/// D2: a wait recv arm binds one value, `T!RecvError`, which no tuple target can unpack (Go and
+/// Rust bind one value in a select arm too). A tuple target is a parse error at `:=` and `=`; the
+/// message names the fix.
+#[test]
+fn wait_arm_tuple_target_rejected() {
+    for src in [
+        "wait:\n    a, (b, c) := ch.recv(): pass\n",
+        "wait:\n    a, b := ch.recv(): pass\n",
+        "wait:\n    a, := ch.recv(): pass\n",
+        "wait:\n    a, = ch.recv():\n        print(a)\n",
+        "wait:\n    a, _ := ch.recv(): pass\n",
+        "wait:\n    a, (b.f, c[0]) = ch.recv(): pass\n",
+        "wait:\n    a, (b, c) = ch.recv():\n        pass\n",
+    ] {
+        let e = parse_err(src);
+        assert!(
+            e.message.contains("a wait arm binds one value"),
+            "{src:?}: {}",
+            e.message
+        );
     }
 }
 
 /// U9: `=` takes no outer parentheses either, at a statement and at a wait arm, and a nested
-/// tuple still parses. One function (`ExprKind::is_place`) owns the rule.
+/// tuple still parses at a statement. One function (`ExprKind::is_place`) owns the rule.
 #[test]
 fn assign_outer_parens_rejected_at_every_site() {
     for src in [
@@ -565,12 +573,7 @@ fn assign_outer_parens_rejected_at_every_site() {
             e.message
         );
     }
-    for src in [
-        "a, (b, c) = t\n",
-        "wait:\n    a, (b, c) = ch.recv():\n        pass\n",
-    ] {
-        parse_ok(src);
-    }
+    parse_ok("a, (b, c) = t\n");
 }
 
 /// U9: an unpacking target takes no outer parentheses; `(a, b) :=` keeps its own message.

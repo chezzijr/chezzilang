@@ -7,6 +7,10 @@ use super::pattern::is_compound_assign;
 use super::*;
 use crate::lexer::{Span, Token};
 
+/// D2 — a wait recv arm binds one value, `T!RecvError`; no tuple target can unpack it.
+const WAIT_TUPLE_TARGET: &str =
+    "a wait arm binds one value (T!RecvError); bind it, then unpack it in the body";
+
 impl Parser {
     pub(super) fn parse_module(&mut self) -> PResult<Module> {
         let mut stmts = Vec::new();
@@ -790,8 +794,15 @@ impl Parser {
             }
             let arm_span = self.cur_span();
             let mut assign_first: Option<Stmt> = None;
-            // `a := ch.recv():`, `_ := …`, `a, (b, c) := …`: the one binding-target parse.
+            // `a := ch.recv():`, `_ := …`: the one binding-target parse. A tuple target is
+            // rejected: the arm binds one `T!RecvError`, which no tuple pattern unpacks (D2).
             let kind = if let Some(target) = self.try_parse_walrus_target()? {
+                if matches!(target, Pattern::Tuple(_)) {
+                    return Err(ParseError {
+                        message: WAIT_TUPLE_TARGET.to_string(),
+                        span: arm_span,
+                    });
+                }
                 WaitArmKind::Recv {
                     target,
                     chan: self.parse_recv_chan()?,
@@ -824,8 +835,8 @@ impl Parser {
     }
 
     /// A wait arm whose head is an expression: a `:=` with a target that is not a name list (the
-    /// error path, `bind_target_error` reports it), a `=` recv arm (`y = ch.recv():`, `a, (b.f, c) =
-    /// ch.recv():`), or a bare send arm (`ch.send(v):`).
+    /// error path, `bind_target_error` reports it), a `=` recv arm (`y = ch.recv():`; a tuple of
+    /// places is rejected, D2), or a bare send arm (`ch.send(v):`).
     /// A `=` arm binds a fresh `$waitN` and sets `assign_first` to the assignment `lhs = $waitN`
     /// for the arm body's first statement (TICKET-227), so the assigned value has a node (it can
     /// wrap into a carrier target like any assignment). The parser stays lenient on a send arm: the
@@ -861,6 +872,11 @@ impl Parser {
         }
         let target = if lhs.is_blank() {
             Pattern::Wildcard
+        } else if listed && lhs.kind.is_place(listed) {
+            return Err(ParseError {
+                message: WAIT_TUPLE_TARGET.to_string(),
+                span: lhs_span,
+            });
         } else if lhs.kind.is_place(listed) {
             let id = crate::ast::NodeId::fresh();
             let tmp = format!("$wait{}", id.0);

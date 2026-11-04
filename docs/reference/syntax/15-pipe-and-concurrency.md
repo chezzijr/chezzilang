@@ -116,7 +116,7 @@ fn fetch_all(urls: List[str]):
 
 - A recv arm: `r := ch.recv():` (or `result = ch.recv():`, `_ := ch.recv():`). It binds what
   `ch.recv()` returns, `T!RecvError`: take the value with `?`, `match` or `_ :=`. A tuple target
-  (`a, (b, c) := ch.recv():`) does not type-check, since a `T!RecvError` is not a tuple: bind the
+  (`a, (b, c) := ch.recv():`) is a parse error, since a `T!RecvError` is not a tuple: bind the
   result, then unpack it in the body (`r := ch.recv():` then `a, (b, c) := r?`). Go and Rust also
   bind one value in a select arm.
 - A send arm: `ch.send(v):` binds nothing and is ready when the channel can take the value.

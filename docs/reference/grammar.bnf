@@ -52,7 +52,7 @@
 
 # ===== simple statements =====
 # The third form is a destructuring binding: `a, (b, c) := expr` binds a tuple's elements
-# positionally (U9: one unpacking grammar at `:=`, `for`, a comprehension clause and a wait arm).
+# positionally (U9: one unpacking grammar at `:=`, `for` and a comprehension clause).
 # A nested target takes parentheses and `_` skips a slot; the whole target takes none. Only tuples
 # unpack outside `match`. Only `:=` introduces destructuring binds (`a, b = …` is multi-target
 # *re*assignment — see below). A value list (`x := 1, 2`, `a, b := 1, 2`) is the tuple written
@@ -81,7 +81,7 @@
 # The guard with a binder. On the line of an inline `if` / `elif` it is the only guard (<ifBlock>).
 <errGuard>  ::= "ELSE" "IDENT" <block>
 # A binding target: a comma list of elements, each a name (`_` skips a slot) or a parenthesized
-# nested target. Used at `:=`, `for`, a comprehension clause and a wait arm. One optional trailing
+# nested target. Used at `:=`, `for` and a comprehension clause. One optional trailing
 # comma ends the list; it makes one element a 1-tuple target (`a, := t`, nested `a, (b,) := t`).
 # A one-name group `(x)` is that name, as a sole target and as an element. A tuple target takes no
 # outer parentheses (`(a, b) := t`, `(a,) := t`, `for (a, b) in xs` are errors, owner rule U9).
@@ -446,7 +446,8 @@
 # `<target> (":=" | "=") <chanExpr> ".recv()" <block>`; a SEND-arm is a bare `<chanExpr> ".send(" v ")"
 # <block>` (no `:=`/`=`); the optional `else:` arm is the non-blocking fallback. The grammar accepts any
 # bare `<expr> <block>` for a send-arm — the "send RHS must be `chan.send(value)`" rule (and the recv
-# rules "RHS is a bare `.recv()`", "`:=` LHS is a name / `=` LHS is an lvalue", "`else` is last",
+# rules "RHS is a bare `.recv()`", "`:=` LHS is a name / `=` LHS is an lvalue, never a tuple" (D2: the
+# arm binds one `T!RecvError`; bind it, then unpack it in the body), "`else` is last",
 # "≥1 arm") are enforced by the parser/checker, not the grammar (like `spawn`'s call-only restriction).
 # Selection is deterministic SOURCE ORDER (first ready arm wins) — Chezzi's one principled divergence
 # from Go's random `select` fairness, required for serial == M:N parity.
@@ -456,8 +457,6 @@
 <waitArms> ::= <waitArm> | <waitArm> <waitArms>
 <waitArm>  ::= <expr> "WALRUS" <expr> <block>
              | <expr> "WALRUS" <expr> "IF" <expr> <block>
-             | <bindList> "WALRUS" <expr> <block>
-             | <bindList> "WALRUS" <expr> "IF" <expr> <block>
              | <groupedName> "WALRUS" <expr> <block>
              | <groupedName> "WALRUS" <expr> "IF" <expr> <block>
              | <expr> "ASSIGN" <expr> <block>

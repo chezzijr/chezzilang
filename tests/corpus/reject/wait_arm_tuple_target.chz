@@ -1,0 +1,7 @@
+# rule: waitArm
+# expect: a wait arm binds one value
+# D2: the arm binds one `T!RecvError`; bind it, then unpack it in the body.
+ch := Channel[(int, int)](1)
+wait:
+    a, b := ch.recv():
+        print(a, b)

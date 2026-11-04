@@ -13,5 +13,6 @@ match t:
     (d,): print(d)
 u: (int) = 3
 wait:
-    e, := ch.recv():
+    r := ch.recv():
+        e, := r else: panic("closed")
         print(e)

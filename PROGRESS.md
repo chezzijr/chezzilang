@@ -293,7 +293,8 @@ Each group below is one fact decided in two or more places (grouped 2026-10-16).
     `.Lagged(l)` (tokio). D2: a `wait:` recv arm binds the same `T!RecvError`; a closed, drained
     channel's arm is ready and picked in source order (Go `select` picks `<-closed`, crossbeam gives
     `RecvError`), so the all-closed fault is gone. In a loop a closed arm fires on
-    every pass; a guard switches it off. Grids: `tests/chz/spec/channel_closed_recv_test.chz`,
+    every pass; a guard switches it off. A wait arm takes no tuple target (`a, b := ch.recv():` is a
+    parse error; bind, then unpack in the body). Grids: `tests/chz/spec/channel_closed_recv_test.chz`,
     `tests/chz/spec/wait_closed_arm_test.chz`.
 
 ### Open questions for the owner

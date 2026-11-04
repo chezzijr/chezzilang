@@ -926,17 +926,15 @@ fn one_tuple_loop_and_comprehension_targets_parse() {
     }
 }
 
-/// `a, = t` assigns, and a wait arm takes `a, :=` and `a, =` (S2-7).
+/// `a, = t` assigns (S2-7). A wait arm takes no 1-tuple target: `wait_arm_tuple_target_rejected`.
 #[test]
-fn one_tuple_assignment_and_wait_arm_targets_parse() {
+fn one_tuple_assignment_target_parses() {
     match only("a, = t\n") {
         StmtKind::Assign { target, .. } => {
             assert!(matches!(target.kind, ExprKind::Tuple(ref e) if e.len() == 1));
         }
         other => panic!("{other:?}"),
     }
-    parse_ok("wait:\n    a, := ch.recv():\n        print(a)\n");
-    parse_ok("wait:\n    a, = ch.recv():\n        print(a)\n");
 }
 
 /// `(int,)` is a 1-tuple type in every type position; `(int)` stays `int` (`paren_single_type_unwraps`).

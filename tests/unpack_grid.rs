@@ -1,6 +1,5 @@
-//! TICKET-261 (U9): one unpacking grammar at `:=`, `=`, `for`, a comprehension, a wait arm and
-//! `match`; a wait arm binds one `T!RecvError` (D2), so a tuple target there does not type-check.
-//! Binding site x pattern shape x source of the element, one generated program per cell,
+//! TICKET-261 (U9): one unpacking grammar at `:=`, `=`, `for`, a comprehension and `match`; a wait
+//! arm takes no tuple target (D2: it binds one `T!RecvError`, bind it then unpack in the body). Binding site x pattern shape x source of the element, one generated program per cell,
 //! run through the built `chezzi` binary. Every accept cell RUNS and prints; every reject cell names
 //! the rule. The rule: outside `match` only tuples unpack (`_` skips a slot, a nested target takes
 //! parentheses, no outer parentheses); a struct or an enum variant unpacks in `match` only; no list
@@ -467,12 +466,10 @@ fn reject_fragment(site: Site, shape: Shape) -> &'static str {
             | Site::Match,
             Shape::ParenBlank,
         ) => "cannot use '_' as a value",
-        (Site::Wait, Shape::Flat | Shape::Nested | Shape::NestedGroup | Shape::Blank) => {
-            "tuple pattern cannot match a value of type"
-        }
-        (Site::WaitAssign, Shape::Flat | Shape::Nested | Shape::NestedGroup | Shape::Blank) => {
-            "!RecvError to 2 targets"
-        }
+        (
+            Site::Wait | Site::WaitAssign,
+            Shape::Flat | Shape::Nested | Shape::NestedGroup | Shape::Blank,
+        ) => "a wait arm binds one value",
         (Site::For | Site::Comp, Shape::Struct) => "expected 'in', found '('",
         (Site::For | Site::Comp, Shape::Variant) => "expected 'in', found '.'",
         (Site::For | Site::Comp, Shape::List) => "expected identifier, found '['",
