@@ -709,25 +709,33 @@ impl Checker {
         })
     }
 
-    /// Fill `self.protocols` from the `protocol` declarations in `std/*.chz` (`std_protocol_decls`),
-    /// the one source of which protocols exist and their shapes. Two passes: the first inserts every
-    /// shape, the second re-harvests so an embed declared later in the file order (`Num` embeds
-    /// `Comparable`) resolves. Runs as stdlib, so the declarations resolve names no user module sees.
-    pub(super) fn seed_std_protocols(&mut self) {
-        let outer_std = std::mem::replace(&mut self.current_module_is_stdlib, true);
+    /// Insert a set of `protocol` declarations into `self.protocols` in two passes, so a protocol's
+    /// method signature or embed may name itself or a protocol declared after it (Go
+    /// `type item interface { eq(c item) bool }`). The first pass inserts every protocol and meets
+    /// names not inserted yet, so its diagnostics are dropped; the second pass re-resolves each one
+    /// with all of them in place. The one loop for std protocols and for a user module's protocols.
+    pub(super) fn insert_protocols_in_two_passes(&mut self, mut insert_all: impl FnMut(&mut Self)) {
         for pass in 0..2 {
-            // The first pass meets an embed whose protocol is not inserted yet; the second pass
-            // re-resolves it, so the first pass's diagnostics are dropped.
             let mark = self.diag_mark();
-            for d in super::graph_pass::std_protocol_decls() {
-                if let Some(info) = self.harvest_protocol_stmt(&d.stmt) {
-                    self.protocols.insert(d.name.clone(), info);
-                }
-            }
+            insert_all(self);
             if pass == 0 {
                 self.diag_rollback(mark);
             }
         }
+    }
+
+    /// Fill `self.protocols` from the `protocol` declarations in `std/*.chz` (`std_protocol_decls`),
+    /// the one source of which protocols exist and their shapes. Runs as stdlib, so the declarations
+    /// resolve names no user module sees.
+    pub(super) fn seed_std_protocols(&mut self) {
+        let outer_std = std::mem::replace(&mut self.current_module_is_stdlib, true);
+        self.insert_protocols_in_two_passes(|c| {
+            for d in super::graph_pass::std_protocol_decls() {
+                if let Some(info) = c.harvest_protocol_stmt(&d.stmt) {
+                    c.protocols.insert(d.name.clone(), info);
+                }
+            }
+        });
         self.current_module_is_stdlib = outer_std;
     }
 

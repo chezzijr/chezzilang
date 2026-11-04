@@ -1,0 +1,36 @@
+# A protocol's method signature may name the protocol itself, or a protocol declared after it, the
+# way a struct method may (Go: `type item interface { eq(c item) bool }`, test/chan/powser2.go).
+
+protocol Item:
+    fn pr(self) -> str
+    fn same(self, other: Item) -> bool  # names Item inside Item
+
+protocol Early:
+    fn later(self) -> Late  # names a protocol declared below
+
+protocol Late:
+    fn pr(self) -> str
+
+struct Rat:
+    num: int
+    den: int
+
+    fn pr(self) -> str:
+        return "{self.num}/{self.den}"
+
+    fn same(self, other: Item) -> bool:
+        return self.pr() == other.pr()
+
+    fn later(self) -> Late:
+        return self
+
+test fn a_protocol_method_names_its_own_protocol():
+    ch := Channel[Item](1)
+    ch.send(Rat(1, 2))
+    x := ch.recv()
+    assert x.same(Rat(1, 2))
+    assert not x.same(Rat(1, 3))
+
+test fn a_protocol_method_names_a_later_protocol():
+    e: Early = Rat(3, 4)
+    assert e.later().pr() == "3/4"

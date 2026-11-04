@@ -178,18 +178,21 @@ impl Checker {
     /// mis-type or, for struct methods, panic in pass 2 on a key that no longer exists.
     pub(super) fn hoist(&mut self, stmts: &[Stmt]) {
         // Protocols first: function/struct signatures may reference them in type-parameter bounds.
-        for s in stmts {
-            if let StmtKind::Protocol {
-                name,
-                type_params,
-                methods,
-                embeds,
-                ..
-            } = &s.kind
-            {
-                self.hoist_protocol(name, type_params, methods, embeds, s.span);
+        // Two passes, so a protocol's method signature may name itself or a later protocol.
+        self.insert_protocols_in_two_passes(|c| {
+            for s in stmts {
+                if let StmtKind::Protocol {
+                    name,
+                    type_params,
+                    methods,
+                    embeds,
+                    ..
+                } = &s.kind
+                {
+                    c.hoist_protocol(name, type_params, methods, embeds, s.span);
+                }
             }
-        }
+        });
         // TICKET-202 — resolve every embed's args once, in its own protocol's scope, now that a
         // forward protocol name resolves, and before any reader (validation included) runs.
         for s in stmts {
