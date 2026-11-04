@@ -1,0 +1,18 @@
+# Port of Go 1.27.0 test/chan/sendstmt.go. Copyright 2011 The Go Authors. BSD-style license: NOTICE.
+# Test various parsing cases that are a little
+# different now that send is a statement, not an expression.
+
+test fn chanchan():
+    cc := Channel[Channel[int]](1)
+    c := Channel[int](1)
+    cc.send(c)
+    wait:
+        cc.recv().send(2): pass  # Go: case <-cc <- 2:
+        else:
+            assert false, "nonblock"  # Go: panic("nonblock")
+    assert c.recv() == 2, "bad receive"
+
+test fn sendprec():
+    c := Channel[bool](1)
+    c.send(false or true)  # Go: c <- false || true // not a syntax error: same as c <- (false || true)
+    assert c.recv(), "sent false"

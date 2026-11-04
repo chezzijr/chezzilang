@@ -1,0 +1,24 @@
+# Port of Go 1.27.0 test/chan/select4.go. Copyright 2010 The Go Authors. BSD-style license: NOTICE.
+# Test that a select statement proceeds when a value is ready.
+
+struct X:
+    a: int
+
+struct Int:  # Go: *int
+    v: int
+
+fn f() -> Int:
+    assert false, "BUG: called f"  # Go: println("BUG: called f")
+    return Int(0)  # Go: return new(int)
+
+test fn main_():
+    x := X(0)  # Go: var x struct { a int }
+    c := Channel[int](1)
+    c1 := Channel[int](0)
+    c.send(42)
+    wait:
+        f().v = c1.recv():  # Go: case *f() = <-c1:
+            # nothing
+            pass
+        x.a = c.recv():
+            assert x.a == 42, "BUG: {x.a}"  # Go: println("BUG:", x.a)

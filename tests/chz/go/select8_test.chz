@@ -1,0 +1,54 @@
+# Port of Go 1.27.0 test/chan/select8.go. Copyright 2019 The Go Authors. BSD-style license: NOTICE.
+# Test break statements in a select.
+# Gccgo had a bug in handling this.
+# Test 1,2,3-case selects, so it covers both the general
+# code path and the specialized optimizations for one-
+# and two-case selects.
+#
+# Go's `break` leaves the select; a Chezzi `break` in a wait arm leaves the enclosing loop, so each
+# select sits in a `while true:` that its `break` ends.
+
+ch := Channel[int](0)  # Go: var ch = make(chan int)
+
+# Go leaks the sender goroutine when main returns; a task here must end, so a trip latch stops it.
+done := Channel[bool]()
+
+test fn main_():
+    spawn:
+        while true:  # Go: for {
+            wait:
+                ch.send(5): pass  # Go: ch <- 5
+                _ := done.recv(): break
+
+    while true:  # Go: select {
+        wait:
+            _ := ch.recv():
+                break
+                assert false, "unreachable"  # Go: panic("unreachable")
+
+    while true:  # Go: select {
+        # Go: default:  (an else-only wait: is an error in Chezzi, so the default body stands alone)
+        break
+        assert false, "unreachable"
+
+    while true:  # Go: select {
+        wait:
+            _ := ch.recv():
+                break
+                assert false, "unreachable"
+            else:
+                break
+                assert false, "unreachable"
+
+    while true:  # Go: select {
+        wait:
+            _ := ch.recv():
+                break
+                assert false, "unreachable"
+            ch.send(10):
+                assert false, "unreachable"
+            else:
+                break
+                assert false, "unreachable"
+
+    done.trip()

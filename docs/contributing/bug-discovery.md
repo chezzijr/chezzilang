@@ -31,6 +31,7 @@ The remedy has two parts:
 |---|---|---|
 | Golden suite | `assert_golden_out` / `golden_entry*` (`src/vm/golden_tests/`), golden `examples/*.chz` + `.expected` | a change from a literal expected output |
 | Two-worker-count differential | `tests/chezzi_threads_cli.rs` | a verdict on `tests/chz` that changes between the default worker count and `CHEZZI_THREADS=2` |
+| Ported Go test/chan | `tests/chz/go/` (`NOTICE`) | channel behavior that drifts from Go on Go's own programs |
 | Grammar conformance | `docs/reference/grammar.bnf`, `src/conformance.rs`, `tests/corpus/`, `cargo test conformance` | parser drift from the grammar (syntax only) |
 | Panic-fuzz | `src/panicfuzz/`, `tests/panicfuzz.rs`, `src/bin/panicfuzz.rs` | a Rust panic or signal crash in `chezzi check` |
 | CPython differential | `src/difftest/`, `tests/difftest.rs`, `src/bin/difffuzz.rs` | stdout that differs from CPython on generated programs |

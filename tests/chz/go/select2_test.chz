@@ -1,0 +1,34 @@
+# Port of Go 1.27.0 test/chan/select2.go. Copyright 2010 The Go Authors. BSD-style license: NOTICE.
+# Test that selects do not consume undue memory.
+
+N := 10000  # Go: 100000 in each round
+
+fn sender(c: Channel[int], n: int):
+    for _ in 0..n:  # Go: for i := 0; i < n; i++ {
+        c.send(1)
+
+fn receiver(c: Channel[int], dummy: Channel[int], n: int):
+    for _ in 0..n:  # Go: for i := 0; i < n; i++ {
+        wait:
+            _ := c.recv():
+                # nothing
+                pass
+            _ := dummy.recv():
+                assert false, "dummy"  # Go: panic("dummy")
+
+test fn main_():
+    # Go: runtime.MemProfileRate = 0
+    c := Channel[int](0)
+    dummy := Channel[int](0)
+
+    # warm up
+    spawn sender(c, N)
+    receiver(c, dummy, N)
+    # Go: runtime.GC(); runtime.ReadMemStats(memstats); alloc := memstats.Alloc
+
+    # second time shouldn't increase footprint by much
+    spawn sender(c, N)
+    receiver(c, dummy, N)
+    # Go: runtime.GC(); runtime.ReadMemStats(memstats)
+    # Go: if memstats.Alloc > alloc && memstats.Alloc-alloc > 1.1e5 { println("BUG: too much memory for 100,000 selects:", ...) }
+    # Not ported: Chezzi has no runtime heap-stats API.

@@ -1,0 +1,26 @@
+# Port of Go 1.27.0 test/chan/select6.go. Copyright 2011 The Go Authors. BSD-style license: NOTICE.
+# Test for select: Issue 2075
+# A bug in select corrupts channel queues of failed cases
+# if there are multiple waiters on those channels and the
+# select is the last in the queue. If further waits are made
+# on the channel without draining it first then those waiters
+# will never wake up. In the code below c1 is such a channel.
+
+test fn main_():
+    c1 := Channel[bool](0)
+    c2 := Channel[bool](0)
+    c3 := Channel[bool](0)
+    spawn:
+        c1.recv()
+    spawn:
+        wait:
+            _ := c1.recv():
+                assert false, "dummy"  # Go: panic("dummy")
+            _ := c2.recv():
+                c3.send(true)
+        c1.recv()
+    spawn:
+        c2.send(true)
+    c3.recv()
+    c1.send(true)
+    c1.send(true)

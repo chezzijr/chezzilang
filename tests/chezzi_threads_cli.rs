@@ -100,7 +100,7 @@ fn run_chz_test(
 }
 
 // One test per `tests/chz` subdirectory (TICKET-276): `chz_suite_passes_at_a_second_worker_count::<dir>`.
-grid_tests!(CHZ_DIRS in chz_suite_passes_at_a_second_worker_count: [spec, stdlib, suites] => crate::assert_chz_dir_at_two_worker_counts);
+grid_tests!(CHZ_DIRS in chz_suite_passes_at_a_second_worker_count: [go, spec, stdlib, suites] => crate::assert_chz_dir_at_two_worker_counts);
 
 /// Every subdirectory of `tests/chz` has a row in [`CHZ_DIRS`], and no `.chz` file sits outside one.
 #[test]
@@ -110,7 +110,7 @@ fn every_tests_chz_subdirectory_has_a_worker_count_test() {
 
 /// The differential itself: one `tests/chz` directory must pass identically at the default
 /// (auto-sized) worker count and at `CHEZZI_THREADS=2`. ~550 real behavioural assertions over the
-/// three directories, run twice, each in its own process/pool — the standing second-schedule gate
+/// directories, run twice, each in its own process/pool — the standing second-schedule gate
 /// now that `--serial` is gone. Both runs go at once: measured 32264 ms for `stdlib` against
 /// 30583 ms alone.
 fn assert_chz_dir_at_two_worker_counts(dir: &str) {

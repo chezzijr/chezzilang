@@ -1,0 +1,50 @@
+# Port of Go 1.27.0 test/chan/select.go. Copyright 2009 The Go Authors. BSD-style license: NOTICE.
+# Test simple select.
+
+counter := 0  # Go: var counter uint
+shift := 0  # Go: var shift uint
+
+fn get_value() -> int:  # Go: func GetValue() uint
+    counter += 1
+    return 1 << shift
+
+# Go: a nil channel. A None channel's arm is switched off by its guard, so this never runs.
+fn nil_chan() -> Channel[int]:
+    assert false, "an off arm evaluated its channel"
+    return Channel[int](0)
+
+fn send(a0: Channel[int]?, b0: Channel[int]?) -> int:  # Go: func Send(a, b chan uint) int
+    a := a0
+    b := b0
+    i := 0
+    while true:  # Go: LOOP: for {
+        # Go evaluates every case's send value on entry, a nil channel's too; an off arm skips its
+        # value, so both values are taken first, in Go's order.
+        va := get_value()
+        vb := get_value()
+        stop := false
+        wait:
+            (a ?? nil_chan()).send(va) if a != None:  # Go: case a <- GetValue():
+                i += 1
+                a = None  # Go: a = nil
+            (b ?? nil_chan()).send(vb) if b != None:  # Go: case b <- GetValue():
+                i += 1
+                b = None  # Go: b = nil
+            else:
+                stop = true  # Go: break LOOP
+        if stop:
+            break
+        shift += 1
+    return i
+
+test fn main_():
+    a := Channel[int](1)
+    b := Channel[int](1)
+    v := send(a, b)
+    assert v == 2, "Send returned {v} != 2"
+    av := a.recv()
+    bv := b.recv()
+    assert av | bv == 3, "bad values {av} {bv}"
+    v1 := send(a, None)  # Go: if v := Send(a, nil); v != 1 {
+    assert v1 == 1, "Send returned {v1} != 1"
+    assert counter == 10, "counter is {counter} != 10"

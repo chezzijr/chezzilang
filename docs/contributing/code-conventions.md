@@ -61,7 +61,8 @@ The full text of every convention, moved out of `CLAUDE.md` (which every agent t
 - **Testing is HYBRID — write the test in Chezzi if you can, fall back to Rust only when you can't.**
   A test that asserts a program's **observable behavior** (a value, a collection, a fault message)
   belongs in the native suite **`tests/chz/`** as `test fn` + `assert` (`spec/` = language behavior,
-  `stdlib/` = std modules, `suites/` = struct suites with lifecycle hooks). It runs via `chezzi test`
+  `stdlib/` = std modules, `suites/` = struct suites with lifecycle hooks, `go/` = faithful ports of
+  Go's `test/chan`, license in its `NOTICE`). It runs via `chezzi test`
   and is gated by the `cargo test` gate `chz_suite_passes` (`tests/chz_suite.rs`: one test per
   subdirectory, each runs `chezzi test` as its own process, because `vm::pool` is one process-wide
   `OnceLock`), which together run the whole suite and assert every test passes;

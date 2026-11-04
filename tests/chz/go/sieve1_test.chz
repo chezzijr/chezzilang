@@ -1,0 +1,57 @@
+# Port of Go 1.27.0 test/chan/sieve1.go. Copyright 2009 The Go Authors. BSD-style license: NOTICE.
+# Test concurrency primitives: classical inefficient concurrent prime sieve.
+
+# Generate primes up to 100 using channels, checking the results.
+# This sieve consists of a linear chain of divisibility filters,
+# equivalent to trial-dividing each n by all primes p ≤ n.
+
+# Go leaks the never-ending goroutines when main returns; a task here must end, so each blocking
+# channel operation also waits on this trip latch, and main trips it.
+done := Channel[bool]()
+
+# Send the sequence 2, 3, 4, ... to channel 'ch'.
+fn generate(ch: Channel[int]):  # Go: func Generate(ch chan<- int)
+    i := 2
+    while true:  # Go: for i := 2; ; i++ {
+        wait:
+            ch.send(i): pass  # Send 'i' to channel 'ch'.  Go: ch <- i
+            _ := done.recv(): return
+        i += 1
+
+# Copy the values from channel 'in' to channel 'out',
+# removing those divisible by 'prime'.
+fn filter(inp: Channel[int], out: Channel[int], prime: int):  # Go: func Filter(in <-chan int, out chan<- int, prime int)
+    while true:  # Go: for i := range in { // Loop over values received from 'in'.
+        wait:
+            i := inp.recv():
+                if i % prime != 0:
+                    wait:
+                        out.send(i): pass  # Send 'i' to channel 'out'.  Go: out <- i
+                        _ := done.recv(): return
+            _ := done.recv(): return
+
+# The prime sieve: Daisy-chain Filter processes together.
+fn sieve(primes: Channel[int]):  # Go: func Sieve(primes chan<- int)
+    ch := Channel[int](0)  # Create a new channel.
+    spawn generate(ch)  # Start Generate() as a subprocess.
+    while true:  # Go: for {
+        # Note that ch is different on each iteration.
+        prime := 0
+        wait:
+            prime = ch.recv(): pass  # Go: prime := <-ch
+            _ := done.recv(): return
+        wait:
+            primes.send(prime): pass  # Go: primes <- prime
+            _ := done.recv(): return
+        ch1 := Channel[int](0)
+        spawn filter(ch, ch1, prime)
+        ch = ch1
+
+test fn main_():
+    primes := Channel[int](0)
+    spawn sieve(primes)
+    a := [2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47, 53, 59, 61, 67, 71, 73, 79, 83, 89, 97]
+    for i in 0..a.len():
+        x := primes.recv()
+        assert x == a[i], "{x} != {a[i]}"  # Go: println(x, " != ", a[i]); panic("fail")
+    done.trip()

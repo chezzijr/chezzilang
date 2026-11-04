@@ -11,7 +11,7 @@ mod chz_dirs;
 #[macro_use]
 mod grid_tests;
 
-grid_tests!(CHZ_DIRS in chz_suite_passes: [spec, stdlib, suites] => crate::assert_chz_dir);
+grid_tests!(CHZ_DIRS in chz_suite_passes: [go, spec, stdlib, suites] => crate::assert_chz_dir);
 
 /// One `tests/chz` directory through `chezzi test`, in its own process and its own pool.
 fn assert_chz_dir(dir: &str) {

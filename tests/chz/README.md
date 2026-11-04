@@ -10,6 +10,8 @@ print-and-golden demo programs, `*.chz` + `*.expected`).
   in `src/vm/tests.rs` and `src/vm/golden_tests.rs`.
 - `stdlib/` — stdlib module behavior (math/encoding/crypto/…), ported from `src/native/*`.
 - `suites/` — `struct`-based test suites with lifecycle hooks + shared fixtures.
+- `go/` — ports of ancestor test suites (Go `test/chan`): faithful, one file per source file, the
+  source's license in the dir's `NOTICE`.
 
 ## Run
 

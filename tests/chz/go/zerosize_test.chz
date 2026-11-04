@@ -1,0 +1,11 @@
+# Port of Go 1.27.0 test/chan/zerosize.go. Copyright 2011 The Go Authors. BSD-style license: NOTICE.
+# Test making channels of a zero-sized type.
+
+struct E:  # Go: struct{}
+    pass
+
+test fn main_():
+    _ := Channel[bytes](0)  # Go: _ = make(chan [0]byte)
+    _ := Channel[bytes](1)  # Go: _ = make(chan [0]byte, 1)
+    _ := Channel[E](0)  # Go: _ = make(chan struct{})
+    _ := Channel[E](1)  # Go: _ = make(chan struct{}, 1)

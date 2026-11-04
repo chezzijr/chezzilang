@@ -1,0 +1,34 @@
+# Port of Go 1.27.0 test/chan/fifo.go. Copyright 2009 The Go Authors. BSD-style license: NOTICE.
+# Test that unbuffered channels act as pure fifos.
+
+N := 10
+
+fn asynch_fifo():
+    ch := Channel[int](N)
+    for i in 0..N:
+        ch.send(i)
+    for i in 0..N:
+        assert ch.recv() == i, "bad receive"
+
+fn chain(ch: Channel[int], val: int, inp: Channel[int], out: Channel[int]):  # Go: in <-chan int, out chan<- int
+    inp.recv()
+    assert ch.recv() == val, "{val}"  # Go: panic(val)
+    out.send(1)
+
+# thread together a daisy chain to read the elements in sequence
+fn synch_fifo():
+    ch := Channel[int](0)
+    inp := Channel[int](0)  # Go: in := make(chan int)
+    start := inp
+    for i in 0..N:
+        out := Channel[int](0)
+        spawn chain(ch, i, inp, out)
+        inp = out
+    start.send(0)
+    for i in 0..N:
+        ch.send(i)
+    inp.recv()
+
+test fn main_():
+    asynch_fifo()
+    synch_fifo()

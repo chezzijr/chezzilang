@@ -1,0 +1,182 @@
+# Port of Go 1.27.0 test/chan/nonblock.go. Copyright 2009 The Go Authors. BSD-style license: NOTICE.
+# Test channel operations that test for blocking.
+# Use several sizes and types of operands.
+import std.time
+
+fn i32receiver(c: Channel[int], strobe: Channel[bool]):  # Go: c chan int32
+    assert c.recv() == 123, "i32 value"
+    strobe.send(true)
+
+fn i32sender(c: Channel[int], strobe: Channel[bool]):  # Go: c chan int32
+    c.send(234)
+    strobe.send(true)
+
+fn i64receiver(c: Channel[int], strobe: Channel[bool]):  # Go: c chan int64
+    assert c.recv() == 123456, "i64 value"
+    strobe.send(true)
+
+fn i64sender(c: Channel[int], strobe: Channel[bool]):  # Go: c chan int64
+    c.send(234567)
+    strobe.send(true)
+
+fn breceiver(c: Channel[bool], strobe: Channel[bool]):
+    assert c.recv(), "b value"
+    strobe.send(true)
+
+fn bsender(c: Channel[bool], strobe: Channel[bool]):
+    c.send(true)
+    strobe.send(true)
+
+fn sreceiver(c: Channel[str], strobe: Channel[bool]):
+    assert c.recv() == "hello", "s value"
+    strobe.send(true)
+
+fn ssender(c: Channel[str], strobe: Channel[bool]):
+    c.send("hello again")
+    strobe.send(true)
+
+# Go: var ticker = time.Tick(10 * 1000) // 10 us
+fn sleep():
+    time.sleep_ms(0)  # Go: <-ticker
+    time.sleep_ms(0)  # Go: <-ticker
+    time.sleep_ms(0)  # Go: runtime.Gosched()
+    time.sleep_ms(0)  # Go: runtime.Gosched()
+    time.sleep_ms(0)  # Go: runtime.Gosched()
+
+MAX_TRIES := 10000  # Up to 100ms per test.  Go: const maxTries = 10000
+
+test fn main_():
+    i32 := 0  # Go: var i32 int32
+    i64 := 0  # Go: var i64 int64
+    b := false
+    s := ""
+    sync := Channel[bool](0)
+    for buffer in 0..2:
+        c32 := Channel[int](buffer)  # Go: make(chan int32, buffer)
+        c64 := Channel[int](buffer)  # Go: make(chan int64, buffer)
+        cb := Channel[bool](buffer)
+        cs := Channel[str](buffer)
+        wait:
+            i32 = c32.recv():
+                assert false, "blocked i32sender"
+            else: pass
+        wait:
+            i64 = c64.recv():
+                assert false, "blocked i64sender"
+            else: pass
+        wait:
+            b = cb.recv():
+                assert false, "blocked bsender"
+            else: pass
+        wait:
+            s = cs.recv():
+                assert false, "blocked ssender"
+            else: pass
+
+        spawn i32receiver(c32, sync)
+        try := 0
+        while true:  # Go: Send32: for {
+            wait:
+                c32.send(123):
+                    break  # Go: break Send32
+                else:
+                    try += 1
+                    assert try <= MAX_TRIES, "i32receiver buffer={buffer}"  # Go: if try > maxTries { ... panic("fail") }
+                    sleep()
+        sync.recv()
+        spawn i32sender(c32, sync)
+        if buffer > 0:
+            sync.recv()
+        try = 0
+        while true:  # Go: Recv32: for {
+            wait:
+                i32 = c32.recv():
+                    break  # Go: break Recv32
+                else:
+                    try += 1
+                    assert try <= MAX_TRIES, "i32sender buffer={buffer}"  # Go: if try > maxTries { ... panic("fail") }
+                    sleep()
+        assert i32 == 234, "i32sender value"
+        if buffer == 0:
+            sync.recv()
+
+        spawn i64receiver(c64, sync)
+        try = 0
+        while true:  # Go: Send64: for {
+            wait:
+                c64.send(123456):
+                    break  # Go: break Send64
+                else:
+                    try += 1
+                    assert try <= MAX_TRIES, "i64receiver"  # Go: if try > maxTries { ... panic("fail") }
+                    sleep()
+        sync.recv()
+        spawn i64sender(c64, sync)
+        if buffer > 0:
+            sync.recv()
+        try = 0
+        while true:  # Go: Recv64: for {
+            wait:
+                i64 = c64.recv():
+                    break  # Go: break Recv64
+                else:
+                    try += 1
+                    assert try <= MAX_TRIES, "i64sender"  # Go: if try > maxTries { ... panic("fail") }
+                    sleep()
+        assert i64 == 234567, "i64sender value"
+        if buffer == 0:
+            sync.recv()
+
+        spawn breceiver(cb, sync)
+        try = 0
+        while true:  # Go: SendBool: for {
+            wait:
+                cb.send(true):
+                    break  # Go: break SendBool
+                else:
+                    try += 1
+                    assert try <= MAX_TRIES, "breceiver"  # Go: if try > maxTries { ... panic("fail") }
+                    sleep()
+        sync.recv()
+        spawn bsender(cb, sync)
+        if buffer > 0:
+            sync.recv()
+        try = 0
+        while true:  # Go: RecvBool: for {
+            wait:
+                b = cb.recv():
+                    break  # Go: break RecvBool
+                else:
+                    try += 1
+                    assert try <= MAX_TRIES, "bsender"  # Go: if try > maxTries { ... panic("fail") }
+                    sleep()
+        assert b, "bsender value"
+        if buffer == 0:
+            sync.recv()
+
+        spawn sreceiver(cs, sync)
+        try = 0
+        while true:  # Go: SendString: for {
+            wait:
+                cs.send("hello"):
+                    break  # Go: break SendString
+                else:
+                    try += 1
+                    assert try <= MAX_TRIES, "sreceiver"  # Go: if try > maxTries { ... panic("fail") }
+                    sleep()
+        sync.recv()
+        spawn ssender(cs, sync)
+        if buffer > 0:
+            sync.recv()
+        try = 0
+        while true:  # Go: RecvString: for {
+            wait:
+                s = cs.recv():
+                    break  # Go: break RecvString
+                else:
+                    try += 1
+                    assert try <= MAX_TRIES, "ssender"  # Go: if try > maxTries { ... panic("fail") }
+                    sleep()
+        assert s == "hello again", "ssender value"
+        if buffer == 0:
+            sync.recv()

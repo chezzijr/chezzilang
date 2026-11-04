@@ -1,0 +1,18 @@
+# Port of Go 1.27.0 test/chan/goroutines.go. Copyright 2009 The Go Authors. BSD-style license: NOTICE.
+# Torture test for goroutines.
+# Make a lot of goroutines, threaded together, and tear them down cleanly.
+
+fn f(left: Channel[int], right: Channel[int]):
+    left.send(right.recv())
+
+test fn main_():
+    n := 1000  # Go: var n = 10000, or os.Args[1] parsed by strconv.Atoi
+    leftmost := Channel[int](0)
+    right := leftmost
+    left := leftmost
+    for _ in 0..n:  # Go: for i := 0; i < n; i++
+        right = Channel[int](0)
+        spawn f(left, right)
+        left = right
+    spawn (fn(c: Channel[int]): c.send(1))(right)  # Go: go func(c chan int) { c <- 1 }(right)
+    leftmost.recv()

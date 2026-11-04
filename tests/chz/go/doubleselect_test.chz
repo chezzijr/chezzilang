@@ -1,0 +1,60 @@
+# Port of Go 1.27.0 test/chan/doubleselect.go. Copyright 2009 The Go Authors. BSD-style license: NOTICE.
+# Test the situation in which two cases of a select can
+# both end up running. See http://codereview.appspot.com/180068.
+
+iterations := 10000  # Go: var iterations *int = flag.Int("n", 100000, "number of iterations")
+
+# sender sends a counter to one of four different channels. If two
+# cases both end up running in the same iteration, the same value will be sent
+# to two different channels.
+fn sender(n: int, c1: Channel[int], c2: Channel[int], c3: Channel[int], c4: Channel[int]):  # Go: c1, c2, c3, c4 chan<- int
+    defer c1.close()
+    defer c2.close()
+    defer c3.close()
+    defer c4.close()
+    for i in 0..n:
+        wait:  # Go: select picks a ready case at random; a wait: picks the first ready arm
+            c1.send(i): pass
+            c2.send(i): pass
+            c3.send(i): pass
+            c4.send(i): pass
+
+# mux receives the values from sender and forwards them onto another channel.
+# It would be simpler to just have sender's four cases all be the same
+# channel, but this doesn't actually trigger the bug.
+fn mux(out: Channel[int], inp: Channel[int], done: Channel[bool]):  # Go: out chan<- int, in <-chan int, done chan<- bool
+    for v in inp:
+        out.send(v)
+    done.send(true)
+
+# recver gets a steam of values from the four mux's and checks for duplicates.
+fn recver(inp: Channel[int]):  # Go: in <-chan int
+    seen: Map[int, bool] = {}  # Go: seen := make(map[int]bool)
+    for v in inp:
+        assert not (v in seen), "got duplicate value: {v}"  # Go: if _, ok := seen[v]; ok { println(...); panic("fail") }
+        seen[v] = true
+
+test fn main_():
+    # Go: runtime.GOMAXPROCS(2) (the suite runs at two worker counts)
+    # Go: flag.Parse()
+    c1 := Channel[int](0)
+    c2 := Channel[int](0)
+    c3 := Channel[int](0)
+    c4 := Channel[int](0)
+    done := Channel[bool](0)
+    cmux := Channel[int](0)
+    spawn sender(iterations, c1, c2, c3, c4)
+    spawn mux(cmux, c1, done)
+    spawn mux(cmux, c2, done)
+    spawn mux(cmux, c3, done)
+    spawn mux(cmux, c4, done)
+    spawn:
+        done.recv()
+        done.recv()
+        done.recv()
+        done.recv()
+        cmux.close()
+    # We keep the recver because it might catch more bugs in the future.
+    # However, the result of the bug linked to at the top is that we'll
+    # end up panicking with: "throw: bad g->status in ready".
+    recver(cmux)
