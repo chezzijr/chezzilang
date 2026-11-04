@@ -273,7 +273,7 @@ pub fn resolve_extern_signatures_standalone(stmts: &[Stmt]) -> ExternTable {
     let id = crate::base::module_id::ModuleId(std::path::PathBuf::from("<main>"));
     let graph = ModuleGraph {
         entry: id.clone(),
-        range_used: true,
+        prelude_used: crate::resolver::PreludeUse::ALL,
         skipped_fns: std::collections::HashMap::new(),
         modules: vec![crate::resolver::LoadedModule {
             id,

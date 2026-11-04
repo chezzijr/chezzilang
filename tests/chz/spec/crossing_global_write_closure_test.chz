@@ -24,11 +24,11 @@ test fn call_indirected_global_write_lands_and_every_closure_reads_it():
     fr := Channel[str](1)
     parallel:
         spawn producer_a(c1, c2, fr)
-    fault := fr.recv()
+    fault := fr.recv() else: panic("fr closed")
     assert fault == "no-fault", fault
-    indirect := c1.recv()
+    indirect := c1.recv() else: panic("c1 closed")
     before := indirect()
-    direct := c2.recv()
+    direct := c2.recv() else: panic("c2 closed")
     after := indirect()
     assert before == 100, "indirect (call-indirected) read saw {before} before the unrelated recv"
     assert after == 100, "indirect (call-indirected) read saw {after} after the unrelated recv"
@@ -58,11 +58,11 @@ test fn in_place_mutated_global_write_lands_and_every_closure_reads_it():
     fr2 := Channel[str](1)
     parallel:
         spawn producer_b(c, c2, fr1, fr2)
-    fault1 := fr1.recv()
-    fault2 := fr2.recv()
+    fault1 := fr1.recv() else: panic("fr1 closed")
+    fault2 := fr2.recv() else: panic("fr2 closed")
     assert fault1 == "no-fault", fault1
     assert fault2 == "no-fault", fault2
-    f := c.recv()
-    g := c2.recv()
+    f := c.recv() else: panic("c closed")
+    g := c2.recv() else: panic("c2 closed")
     assert f() == 2, "assigned global via closure saw {f()}"
     assert g() == 2, "in-place-mutated global via closure saw {g()}"

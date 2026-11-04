@@ -79,7 +79,7 @@ fn dosplit(inp: Dch, out: List[Dch], wt: Channel[int]):  # Go: func dosplit(in *
     inp.req.send(seqno)
     release := Channel[int](0)
     _ := ex.submit(fn(): dosplit(inp, out, release))  # Go: go dosplit(in, out, release)
-    dat := inp.dat.recv()
+    dat := inp.dat.recv() else: panic("inp.dat closed")
     out[0].dat.send(dat)
     if not both:
         _ := wt.recv()
@@ -99,7 +99,8 @@ fn put(dat: Rat, out: Dch):
 fn get(inp: Dch) -> Rat:
     seqno += 1
     inp.req.send(seqno)
-    return inp.dat.recv()
+    r := inp.dat.recv() else: panic("inp.dat closed")  # Go: return <-in.dat
+    return r
 
 # Go: a nil channel. A None channel's arm is switched off by its guard, so these never run.
 fn nil_req() -> Channel[int]:

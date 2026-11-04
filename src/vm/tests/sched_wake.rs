@@ -355,7 +355,7 @@ fn producer(ch: Channel[int], lo: int, hi: int):
     ch.send(acc)
 
 fn consumer(ch: Channel[int], sink: Shared[int]):
-    v := ch.recv()
+    v := ch.recv() else: panic(\"ch closed\")
     sink.update(fn(x): x + v)
 
 fn main():
@@ -404,7 +404,7 @@ fn producer(ch: Channel[int], lo: int, hi: int):
     ch.send(acc)
 
 fn consumer(ch: Channel[int], sink: Shared[int]):
-    v := ch.recv()
+    v := ch.recv() else: panic(\"ch closed\")
     sink.update(fn(x): x + v)
 
 fn main():
@@ -945,7 +945,10 @@ fn produce(ch: Channel[int]):
     ch.send(30)
 
 fn consume(ch: Channel[int], out: Shared[int]):
-    ys := iter.map([1, 2, 3], fn(x: int) -> int: x + ch.recv())
+    fn add_recv(x: int) -> int:
+        r := ch.recv() else: panic(\"ch closed\")
+        return x + r
+    ys := iter.map([1, 2, 3], add_recv)
     out.update(fn(a): a + ys[0] + ys[1] + ys[2])
 
 fn main():
@@ -1041,7 +1044,10 @@ import std.time
 
 fn use_map(ch: Channel[int], out: Shared[int]):
     xs := [1, 2, 3]
-    ys := xs.map(fn(x): x + ch.recv())
+    fn add_recv(x: int) -> int:
+        r := ch.recv() else: panic(\"ch closed\")
+        return x + r
+    ys := xs.map(add_recv)
     out.set(ys[0] + ys[1] + ys[2])
 
 fn fill(ch: Channel[int]):
@@ -1491,7 +1497,7 @@ fn w10_1_main_recv_in_generator_resume_with_live_sender_does_not_deadlock() {
     let src = "\
 fn g(ch: Channel[int]) -> Iterator[int]:
     while true:
-        v := ch.recv()
+        v := ch.recv() else: panic(\"ch closed\")
         if v < 0:
             return
         yield v
@@ -1576,7 +1582,10 @@ import Shared from std.concurrency
 
 fn use_map(ch: Channel[int], out: Shared[int]):
     xs := [0]
-    ys := xs.map(fn(x): ch.recv())
+    fn take(x: int) -> int:
+        r := ch.recv() else: panic(\"ch closed\")
+        return r
+    ys := xs.map(take)
     s := 0
     i := 0
     while i < 200000:
@@ -1805,11 +1814,16 @@ fn main():
     a := Channel[int]()
     c := Channel[int]()
     xs := [1]
+    fn add_recv(x: int) -> int:
+        r := a.recv() else: panic(\"a closed\")
+        return x + r
     parallel:
         spawn:
-            xs.map(fn(x): x + a.recv())
+            xs.map(add_recv)
             c.send(7)
-        spawn: print(c.recv())
+        spawn:
+            got := c.recv() else: panic(\"c closed\")
+            print(got)
         spawn: a.send(10)
 
 main()

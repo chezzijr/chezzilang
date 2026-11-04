@@ -21,7 +21,8 @@ fn fan_open() -> int:
                 spawn: burn(1500000)
                 spawn: burn(1500000)
             ch.send(1)
-        got = ch.recv()
+        v := ch.recv() else: panic("ch closed")
+        got = v
     return got
 
 print(fan_open())

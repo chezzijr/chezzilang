@@ -50,7 +50,7 @@ test fn grid_spawn_arg_named():
     out := Channel[str](1)
     parallel:
         spawn t179_row(xs, p, out)
-    assert out.recv() == "ok,ok,ok,ok,ok"
+    assert out.recv() == ?"ok,ok,ok,ok,ok"
     assert xs == [9, 9]
     assert p.x == 9
 
@@ -59,14 +59,14 @@ test fn grid_spawn_arg_fresh_literal():
     parallel:
         spawn t179_row([1], T179G(x=1), out)
     # A struct constructor is fresh (TICKET-190), so its field write runs.
-    assert out.recv() == "ok,ok,ok,ok,ok"
+    assert out.recv() == ?"ok,ok,ok,ok,ok"
 
 test fn grid_spawn_arg_comprehension():
     xs := [1]
     out := Channel[str](1)
     parallel:
         spawn t179_row([v for v in xs], T179G(x=1), out)
-    assert out.recv() == "ok,ok,ok,ok,ok"
+    assert out.recv() == ?"ok,ok,ok,ok,ok"
 
 test fn grid_spawn_arg_copy():
     xs := [1]
@@ -74,7 +74,7 @@ test fn grid_spawn_arg_copy():
     out := Channel[str](1)
     parallel:
         spawn t179_row(xs.copy(), p.copy(), out)
-    assert out.recv() == "ok,ok,ok,ok,ok"
+    assert out.recv() == ?"ok,ok,ok,ok,ok"
     assert xs == [1]
     assert p.x == 1
 
@@ -83,7 +83,7 @@ test fn grid_spawn_arg_call_result():
     out := Channel[str](1)
     parallel:
         spawn t179_row(t179_id(xs), T179G(x=1), out)
-    assert out.recv() == "ok,ok,ok,ok,ok"
+    assert out.recv() == ?"ok,ok,ok,ok,ok"
     assert xs == [9, 9]
 
 test fn grid_spawn_receiver_named():
@@ -107,7 +107,7 @@ test fn grid_module_global():
     parallel:
         spawn:
             t179_row(t179_glist, T179G(x=1), out)
-    assert out.recv() == "ok,ok,ok,ok,ok"
+    assert out.recv() == ?"ok,ok,ok,ok,ok"
     assert t179_glist == [9, 9]
 
 fn t179_call(f: fn() -> None, out: Channel[str]):
@@ -120,7 +120,7 @@ test fn grid_closure_capture():
     out := Channel[str](1)
     parallel:
         spawn t179_call(fn(): xs.push(9), out)
-    assert out.recv() == "ok"
+    assert out.recv() == ?"ok"
     assert xs == [1, 9]
 
 test fn grid_channel_value():
@@ -129,9 +129,9 @@ test fn grid_channel_value():
     out := Channel[str](1)
     parallel:
         spawn:
-            ys := ch.recv()
+            ys := ch.recv() else: panic("ch closed")
             out.send(t179_try(ys, T179G(x=1), "call"))
-    assert out.recv() == "ok"
+    assert out.recv() == ?"ok"
 
 test fn grid_shared_handle():
     s := Shared[int](1)
@@ -154,7 +154,7 @@ test fn grid_map_methods_on_the_parents_map():
     out := Channel[str](1)
     parallel:
         spawn t179_map_row(m, out)
-    assert out.recv() == "ok,ok,ok"
+    assert out.recv() == ?"ok,ok,ok"
     assert m == {"c": 3}
 
 fn t179_gen_ops(op: str) -> Iterator[str]:
@@ -180,7 +180,8 @@ test fn grid_generator_suspended_private_frame():
         _ := g.next()
         parallel:
             spawn t179_second(g, out)
-        parts.push(out.recv())
+        p := out.recv() else: panic("out closed")
+        parts.push(p)
     assert ",".join(parts) == "ok,ok,ok,ok,ok"
 
 fn t179_gen_alias() -> Iterator[List[int]]:
@@ -202,7 +203,7 @@ test fn grid_generator_suspended_yielded_and_held():
     out := Channel[str](1)
     parallel:
         spawn t179_drain_lists(g, out)
-    assert out.recv() == "ok"
+    assert out.recv() == ?"ok"
     assert held == ?[1]
 
 fn t179_pend(xs: List[int]) -> Iterator[int]:
@@ -225,7 +226,7 @@ test fn grid_generator_pending_fresh_arg():
     q := t179_pend([])
     parallel:
         spawn t179_drain_ints(q, out)
-    assert out.recv() == "1"
+    assert out.recv() == ?"1"
 
 test fn grid_generator_pending_parent_arg():
     xs := [1]
@@ -233,7 +234,7 @@ test fn grid_generator_pending_parent_arg():
     q := t179_pend(xs)
     parallel:
         spawn t179_drain_ints(q, out)
-    assert out.recv() == "2"
+    assert out.recv() == ?"2"
     assert xs == [1, 1]
 
 fn t179_gen_count() -> Iterator[int]:
@@ -250,9 +251,9 @@ test fn grid_generator_over_channel_unchanged():
     out := Channel[str](1)
     parallel:
         spawn:
-            h := ch.recv()
+            h := ch.recv() else: panic("ch closed")
             t179_drain_ints(h, out)
-    assert out.recv() == "5"
+    assert out.recv() == ?"5"
 
 test fn grid_generator_is_one_generator_with_the_parent():
     g := t179_gen_count()
@@ -260,5 +261,5 @@ test fn grid_generator_is_one_generator_with_the_parent():
     out := Channel[str](1)
     parallel:
         spawn t179_drain_ints(g, out)
-    assert out.recv() == "5"
+    assert out.recv() == ?"5"
     assert g.next() == None

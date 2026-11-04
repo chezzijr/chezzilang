@@ -114,7 +114,7 @@ test fn grid_a_path_value_read_inside_a_spawned_task_is_one_value():
     parallel:
         spawn:
             r.send(local_cells())
-    bad := r.recv()
+    bad := r.recv() else: panic("r closed")
     assert bad.len() == 0, "red cells: {bad}"
 
 # A captured value crosses into the task by handle (CPython threads: True).
@@ -128,13 +128,13 @@ test fn grid_a_path_value_captured_into_a_spawned_task_is_one_value():
     parallel:
         spawn:
             r.send([f == plainf, i == idt[int], m == P.mk, x == P.name, pa == P.mk, m != P.mk])
-    got := r.recv()
+    got := r.recv() else: panic("r closed")
     assert got == [true, true, true, true, true, false], "plain, turbofish, static, instance, alias, !=: {got}"
 
 test fn grid_a_path_value_through_a_channel_or_an_atomic_is_one_value():
     ch := Channel[fn(str) -> P](1)
     ch.send(P.mk)
-    got := ch.recv()
+    got := ch.recv() else: panic("ch closed")
     at := Atomic[fn(str) -> P](P.mk)
     res := [got == P.mk, at.load() == P.mk, at.load() == at.load()]
     assert res == [true, true, true], "channel, atomic, atomic twice: {res}"
@@ -152,5 +152,8 @@ test fn grid_a_native_or_extern_fn_after_a_crossing_is_one_value():
     ch.send(cos)
     an := Atomic[fn(float) -> float](math.sqrt)
     ac := Atomic[fn(float) -> float](cos)
-    got := r.recv() + [ch.recv() == math.sqrt, ch.recv() == cos, an.load() == math.sqrt, an.load() == an.load(), ac.load() == cos, ac.load() == ac.load()]
+    rv := r.recv() else: panic("r closed")
+    c1 := ch.recv() else: panic("ch closed")
+    c2 := ch.recv() else: panic("ch closed")
+    got := rv + [c1 == math.sqrt, c2 == cos, an.load() == math.sqrt, an.load() == an.load(), ac.load() == cos, ac.load() == ac.load()]
     assert got == [true, true, false, true, true, true, true, true, true], "captured native, captured extern, !=, channel native, channel extern, atomic native, atomic native twice, atomic extern, atomic extern twice: {got}"

@@ -10,12 +10,12 @@ fn main():
     b := Channel[int]()
     parallel:
         spawn:
-            x := a.recv()
+            x := a.recv() else: panic("a closed")
             b.send(x)
             print("O got {x}")
         spawn:
             a.send(1)
-            y := b.recv()
+            y := b.recv() else: panic("b closed")
             print("I got {y}")
     print("done")
 

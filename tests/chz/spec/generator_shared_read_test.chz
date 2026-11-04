@@ -28,5 +28,6 @@ test fn concurrent_reads_of_a_shared_generator_never_fault():
             spawn: out.send(m24_reader(sh))
     total := 0
     for _ in 0..4:
-        total += out.recv()
+        v := out.recv() else: panic("out closed")
+        total += v
     assert total == 0

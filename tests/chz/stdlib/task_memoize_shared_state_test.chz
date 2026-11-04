@@ -22,7 +22,8 @@ fn forty_two() -> int:
     return 42
 
 fn gated(gate: Channel[int]) -> int:
-    return gate.recv() + 41
+    v := gate.recv() else: panic("gate closed")
+    return v + 41
 
 fn boom() -> int:
     panic("boom")
@@ -32,7 +33,8 @@ fn mk_list() -> List[int]:
     return [1, 2]
 
 fn gated_boom(gate: Channel[int]) -> int:
-    if gate.recv() > 0:
+    v := gate.recv() else: panic("gate closed")
+    if v > 0:
         panic("boom")
     return 0
 
@@ -74,7 +76,7 @@ test fn task_get_in_spawned_task_then_parent_get_sees_same_result():
     ch := Channel[str](1)
     parallel:
         spawn _child_get(t, ch)
-    child := ch.recv()
+    child := ch.recv() else: panic("ch closed")
     assert child == "42", child
     r := recover: must(t.get())
     match r:
@@ -100,8 +102,8 @@ test fn task_pending_spawned_and_two_at_once():
         spawn child_show(t, out)
         spawn child_show(t, out)
         gate.send(1)
-    assert out.recv() == "42"
-    assert out.recv() == "42"
+    assert out.recv() == ?"42"
+    assert out.recv() == ?"42"
     assert show(t) == "42"
     assert t.done()
     ex.shutdown()
@@ -130,9 +132,9 @@ test fn task_done_ok_every_caller():
     ex2 := concurrency.Executor()
     _ := ex2.submit(fn(): child_show(t, out))
     ex2.shutdown()
-    assert out.recv() == "42"
-    assert out.recv() == "42"
-    assert out.recv() == "42"
+    assert out.recv() == ?"42"
+    assert out.recv() == ?"42"
+    assert out.recv() == ?"42"
     assert show(t) == "42"
 
 test fn task_done_faulted_every_caller():
@@ -147,9 +149,9 @@ test fn task_done_faulted_every_caller():
     ex2 := concurrency.Executor()
     _ := ex2.submit(fn(): child_show(t, out))
     ex2.shutdown()
-    assert out.recv() == "boom"
-    assert out.recv() == "boom"
-    assert out.recv() == "boom"
+    assert out.recv() == ?"boom"
+    assert out.recv() == ?"boom"
+    assert out.recv() == ?"boom"
     assert show(t) == "boom"
     assert t.done()
 
@@ -173,7 +175,7 @@ test fn task_mutable_result_spawned_copy_writes_the_one_object():
     out := Channel[str](1)
     parallel:
         spawn child_mutate(t, out)
-    got := out.recv()
+    got := out.recv() else: panic("out closed")
     assert got == "push ok [1, 2, 3, 9]", got
     assert "{must(t.get())}" == "[1, 2, 3, 9]", "{must(t.get())}"
 
@@ -187,7 +189,7 @@ test fn task_mutable_result_executor_job_copy_writes_the_one_object():
     ex2 := concurrency.Executor()
     _ := ex2.submit(fn(): child_mutate(t, out))
     ex2.shutdown()
-    got := out.recv()
+    got := out.recv() else: panic("out closed")
     assert got == "push ok [1, 2, 3, 9]", got
     assert "{must(t.get())}" == "[1, 2, 3, 9]", "{must(t.get())}"
 
@@ -198,7 +200,7 @@ test fn task_faulted_first_observer_is_a_spawned_task():
     out := Channel[str](1)
     parallel:
         spawn child_show(t, out)
-    got := out.recv()
+    got := out.recv() else: panic("out closed")
     assert got == "boom", got
     assert show(t) == "boom", show(t)
     assert t.done()
@@ -211,7 +213,7 @@ test fn task_faulted_first_observer_is_an_executor_job():
     ex2 := concurrency.Executor()
     _ := ex2.submit(fn(): child_show(t, out))
     ex2.shutdown()
-    got := out.recv()
+    got := out.recv() else: panic("out closed")
     assert got == "boom", got
     assert show(t) == "boom", show(t)
     assert t.done()
@@ -224,8 +226,8 @@ test fn task_faulted_first_observers_are_two_tasks_at_once():
     parallel:
         spawn child_show(t, out)
         spawn child_show(t, out)
-    a := out.recv()
-    b := out.recv()
+    a := out.recv() else: panic("out closed")
+    b := out.recv() else: panic("out closed")
     assert a == "boom", a
     assert b == "boom", b
     assert show(t) == "boom", show(t)
@@ -239,7 +241,7 @@ test fn task_pending_then_faulted_spawned_waiter_sees_the_fault():
     parallel:
         spawn child_show(t, out)
         gate.send(1)
-    got := out.recv()
+    got := out.recv() else: panic("out closed")
     assert got == "boom", got
     ex.shutdown()
     assert show(t) == "boom", show(t)
@@ -258,7 +260,7 @@ test fn task_done_from_a_spawned_task_in_every_state():
     out := Channel[str](1)
     parallel:
         spawn child_done3(p, ok, bad, out)
-    got := out.recv()
+    got := out.recv() else: panic("out closed")
     assert got == "false true true", got
     gate.send(1)
     ex_p.shutdown()
@@ -280,7 +282,7 @@ test fn task_done_from_an_executor_job_in_every_state():
     ex2 := concurrency.Executor()
     _ := ex2.submit(fn(): child_done3(p, ok, bad, out))
     ex2.shutdown()
-    got := out.recv()
+    got := out.recv() else: panic("out closed")
     assert got == "false true true", got
     gate.send(1)
     ex_p.shutdown()

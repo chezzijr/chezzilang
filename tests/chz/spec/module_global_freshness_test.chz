@@ -117,7 +117,7 @@ test fn in_place_mutation_between_two_spawns_of_one_nursery():
         spawn:
             a.set(aq.len())
             read.send(0)
-        read.recv()
+        _ := read.recv()
         aq.push(2)
         spawn: b.set(aq.len())
     assert a.get() == 1, "first task saw len {a.get()}"
@@ -136,7 +136,7 @@ fn nested_pin_worker(out: Shared[int]):
         spawn:
             out.set(nq.len())
             read.send(0)
-        read.recv()
+        _ := read.recv()
         nq.push(2)
 
 test fn nested_nursery_in_a_task_pins_at_its_first_spawn():
@@ -158,7 +158,7 @@ test fn assignment_between_two_spawns_refreshes_the_view():
         spawn:
             a.set(sg)
             read.send(0)
-        read.recv()
+        _ := read.recv()
         sg = 2
         spawn: b.set(sg)
     assert a.get() == 1, "first task saw {a.get()}"
@@ -263,7 +263,7 @@ fn bare_spawn_pair(a: Shared[int], b: Shared[int]):
     spawn:
         a.set(bsg)
         read.send(0)
-    read.recv()
+    _ := read.recv()
     bsg = 42
     spawn: b.set(bsg)
 
@@ -406,6 +406,7 @@ test fn every_in_place_mutation_door_refreshes_the_next_tasks_view():
     read213(seen)
     got: List[str] = []
     for _ in 0..11:
-        got.push(seen.recv())
+        s := seen.recv() else: panic("seen closed")
+        got.push(s)
     want := ["1 1 1 1 1 1 1 2 1", "2 1 1 1 1 1 1 2 1", "2 2 1 1 1 1 1 2 1", "2 2 2 1 1 1 1 2 1", "2 2 2 2 1 1 1 2 1", "2 2 2 2 2 1 1 2 1", "2 2 2 2 2 2 1 2 1", "2 2 2 2 2 2 2 2 1", "2 2 2 2 2 2 2 1 1", "2 2 2 2 2 2 2 1 2", "2 2 2 2 2 2 2 1 2"]
     assert got == want, "views were {got}"

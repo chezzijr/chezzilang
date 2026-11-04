@@ -60,7 +60,7 @@ fn pmap_limited[T, U](xs: List[T], f: fn(T) -> U, limit: int) -> List[U]:
             x := xs[i]
             spawn:
                 # acquire a permit (blocks while `limit` tasks already run `f`), run, then release
-                token := sem.recv()
+                token := sem.recv() else: panic("pmap semaphore closed")
                 results.send(_PmapCell(idx=i, val=f(x)))
                 sem.send(token)
     return _collect_sorted(results, n)
@@ -70,7 +70,8 @@ fn pmap_limited[T, U](xs: List[T], f: fn(T) -> U, limit: int) -> List[U]:
 fn _collect_sorted[U](results: Channel[_PmapCell[U]], n: int) -> List[U]:
     cells: List[_PmapCell[U]] = []
     for _ in 0..n:
-        cells.push(results.recv())
+        cell := results.recv() else: panic("pmap results closed")
+        cells.push(cell)
     cells.sort_by_key(fn(c: _PmapCell[U]) -> int: c.idx)
     out: List[U] = []
     for c in cells:

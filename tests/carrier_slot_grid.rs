@@ -187,14 +187,14 @@ const SLOTS: &[Slot] = &[
     Slot {
         name: "channel_send",
         decls: "",
-        body: "ch := Channel[{C}](1)\nch.send({v})\nshow(ch.recv())",
+        body: "ch := Channel[{C}](1)\nch.send({v})\nr := ch.recv() else: panic(\"closed\")\nshow(r)",
         reject: "argument 1 of 'send'",
         tail: false,
     },
     Slot {
         name: "wait_send_arm",
         decls: "",
-        body: "ch := Channel[{C}](1)\nwait:\n    ch.send({v}):\n        show(ch.recv())",
+        body: "ch := Channel[{C}](1)\nwait:\n    ch.send({v}):\n        r := ch.recv() else: panic(\"closed\")\n        show(r)",
         reject: "argument 1 of 'send'",
         tail: false,
     },

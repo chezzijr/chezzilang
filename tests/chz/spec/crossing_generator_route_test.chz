@@ -49,7 +49,7 @@ test fn generator_crossing_cost_is_independent_of_parent_heap():
         r := Channel[str](1)
         parallel:
             spawn: r.send(t190_drain(g))
-        assert r.recv() == "5"
+        assert r.recv() == ?"5"
     elapsed := time.now_ms() - t0
     assert big.len() == 200000
     assert elapsed < 1000, "{elapsed} ms"
@@ -181,7 +181,9 @@ fn t190_route(route: str, g: Iterator[int]) -> str:
         ch := Channel[Iterator[int]](1)
         ch.send(g)
         parallel:
-            spawn: out.send(t190_cell(ch.recv()))
+            spawn:
+                it := ch.recv() else: panic("ch closed")
+                out.send(t190_cell(it))
     elif route == "shared":
         sh := concurrency.Shared[Iterator[int]](g)
         parallel:
@@ -194,7 +196,8 @@ fn t190_route(route: str, g: Iterator[int]) -> str:
         sh := concurrency.Atomic[Iterator[int]](g)
         parallel:
             spawn: out.send(t190_cell(sh.load()))
-    return out.recv()
+    v := out.recv() else: panic("out closed")
+    return v
 
 t190_mcells: List[Iterator[int]] = []
 
@@ -206,7 +209,8 @@ fn t190_snapshot_row(named: List[List[int]], sink: List[List[int]]) -> str:
         out := Channel[str](1)
         parallel:
             spawn: out.send(t190_cell(t190_mcells[i]))
-        got.push(out.recv())
+        v := out.recv() else: panic("out closed")
+        got.push(v)
     return ",".join(got)
 
 test fn generator_route_grid():
@@ -238,7 +242,7 @@ test fn module_global_started_generator_runs_in_a_task():
     out := Channel[str](1)
     parallel:
         spawn: out.send(t190_cell(t190_mg))
-    assert out.recv() == "2"
+    assert out.recv() == ?"2"
 
 # A generator callee stores its arguments in the new frame without running its body, so `acc`
 # escapes into `t190_inner`'s frame; the task's push lands on that one list (CPython
@@ -260,7 +264,7 @@ test fn generator_arg_to_a_generator_callee_is_one_list():
     out := Channel[str](1)
     parallel:
         spawn: out.send(t190_cell(x))
-    assert out.recv() == "2"
+    assert out.recv() == ?"2"
     assert t190_cell(s[0]) == "2"
 
 # Review finding (TICKET-190): a local value that shadows a nested generator is a value callee, so
@@ -288,7 +292,7 @@ test fn value_callee_shadowing_a_nested_generator_gets_no_stamp():
     out := Channel[str](1)
     parallel:
         spawn: out.send(t190_cell(g))
-    assert out.recv() == "2"
+    assert out.recv() == ?"2"
     assert named == [1, 2]
 
 # Review round 2 (TICKET-190): the same shadow in the nested fn's OWN scope. The re-declare drops
@@ -307,7 +311,7 @@ test fn same_scope_value_shadowing_a_nested_generator_gets_no_stamp():
     out := Channel[str](1)
     parallel:
         spawn: out.send(t190_cell(g))
-    assert out.recv() == "2"
+    assert out.recv() == ?"2"
     assert named == [1, 2]
 
 # Beside it: the nested generator itself, called by name with a fresh argument, keeps its stamp.
@@ -325,7 +329,7 @@ test fn nested_generator_called_with_a_fresh_argument_runs():
     out := Channel[str](1)
     parallel:
         spawn: out.send(t190_cell(g))
-    assert out.recv() == "2"
+    assert out.recv() == ?"2"
 
 # Review round 3 (TICKET-190): a nested generator's binding that is written anywhere in its scope
 # may hold another function at the call, so the call gets no creation stamp. Three writes: a plain
@@ -365,7 +369,8 @@ fn t190_written_cell(shape: str) -> str:
     out := Channel[str](1)
     parallel:
         spawn: out.send(t190_cell(g))
-    return "{out.recv()} {named}"
+    v := out.recv() else: panic("out closed")
+    return "{v} {named}"
 
 test fn written_nested_generator_binding_gets_no_stamp():
     for shape in ["reassign", "loop", "nested_fn"]:
@@ -386,7 +391,7 @@ test fn task_get_copy_of_frame_local_generator_runs():
             match t.get():
                 ?g: out.send(t190_cell(g))
                 !e: out.send("err: {e.message()}")
-    assert out.recv() == "2"
+    assert out.recv() == ?"2"
 
 # TICKET-220: a copy's memoize1 cache HIT (a key another task filled) runs the frame-local
 # generator too. The first spawn fills key 0 and drains the generator; M3.3: the second reads back
@@ -398,7 +403,8 @@ test fn memoize_copy_hit_of_frame_local_generator_runs():
         out := Channel[str](1)
         parallel:
             spawn: out.send(t190_cell(m(0)))
-        got.push(out.recv())
+        v := out.recv() else: panic("out closed")
+        got.push(v)
     assert ",".join(got) == "2,0"
 
 # M3.4: two tasks share one generator. A second task's `next()` while the first runs the body is
@@ -406,7 +412,7 @@ test fn memoize_copy_hit_of_frame_local_generator_runs():
 # already executing']`).
 fn t340_waiting(started: Channel[int], gate: Channel[int]) -> Iterator[int]:
     started.send(1)
-    _ := gate.recv()
+    _ := gate.recv() else: panic("gate closed")
     yield 7
 
 test fn a_second_task_next_on_a_running_shared_generator_faults():
@@ -418,13 +424,15 @@ test fn a_second_task_next_on_a_running_shared_generator_faults():
         spawn:
             out.send("a {g.next() ?? 0}")
         spawn:
-            _ := started.recv()
+            _ := started.recv() else: panic("started closed")
             res := recover:
                 _ := g.next()
             match res:
                 ?_: out.send("b ok")
                 !e: out.send("b {e.message()}")
             gate.send(1)
-    got := [out.recv(), out.recv()]
+    a := out.recv() else: panic("out closed")
+    b := out.recv() else: panic("out closed")
+    got := [a, b]
     got.sort()
     assert got == ["a 7", "b generator already running"], "{got}"

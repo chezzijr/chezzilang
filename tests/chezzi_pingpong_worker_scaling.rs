@@ -114,10 +114,10 @@ fn pp():\n    \
         spawn:\n            \
             for i in 0..{n}:\n                \
                 ping.send(i)\n                \
-                n := pong.recv()\n        \
+                n := pong.recv() else: panic(\"pong closed\")\n        \
         spawn:\n            \
             for i in 0..{n}:\n                \
-                v := ping.recv()\n                \
+                v := ping.recv() else: panic(\"ping closed\")\n                \
                 pong.send(v)\n\n\
 fn main():\n    \
     pp()\n    \

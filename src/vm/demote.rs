@@ -13,8 +13,8 @@ impl Vm {
     /// so steady-state live workers = N + (fibers currently blocked in a callback) — Go's exact cost.
     ///
     /// Returns [`RecvStep::Got`] (the native callback continues on this thread with the value),
-    /// [`RecvStep::ClosedEmpty`] (the channel was `close()`d while demoted — the caller faults
-    /// "receive on a closed channel"), or a `cancelled` / `deadlock` fault (which unwinds the callback
+    /// [`RecvStep::ClosedEmpty`] (the channel was `close()`d while demoted — a bare `recv` returns
+    /// `!RecvError`), or a `cancelled` / `deadlock` fault (which unwinds the callback
     /// → the fiber faults). Never [`RecvStep::Parked`] — a demoted recv blocks in place, it never
     /// snapshot-parks. Only ever called on the M:N engine inside a native callback (the recv site gates
     /// on `mn.is_some() && native_reentry > 0`).
@@ -121,8 +121,8 @@ impl Vm {
                     Ok(RecvStep::Got(Value::bool(true)))
                 } else {
                     // Closed-and-drained: nothing is waiting here and the channel is closed, so no value
-                    // will ever arrive — signal `ClosedEmpty` (the caller faults "receive on a closed
-                    // channel"). Ranks below a delivered value, above terminate/deadlock.
+                    // will ever arrive — signal `ClosedEmpty` (the caller gives
+                    // `!RecvError`). Ranks below a delivered value, above terminate/deadlock.
                     let closed = qg.closed;
                     drop(qg);
                     // Cancel (a sibling faulted): set `cancelled` BEFORE returning the Err so the

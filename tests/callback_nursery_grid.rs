@@ -71,7 +71,7 @@ const OPS: [(&str, &str); 5] = [
     ),
     (
         "child_recv",
-        "    ch := Channel[int]()\n    v := 0\n    parallel:\n        spawn give(ch)\n        v = ch.recv()\n    return x + v\n",
+        "    ch := Channel[int]()\n    v := 0\n    parallel:\n        spawn give(ch)\n        v = must(ch.recv())\n    return x + v\n",
     ),
     (
         "submit_get",
@@ -265,8 +265,10 @@ fn p1b() -> String {
 /// `p3`: no box. `b` holds a nursery inside `map`, then sends; `a` receives inside `map`.
 fn p3() -> String {
     format!(
-        "{NEST}fn a(ch: Channel[int], t: AtomicInt):\n    \
-         t.store([1].map(fn(x: int) -> int: x + ch.recv())[0])\n\
+        "{NEST}fn take(ch: Channel[int]) -> int:\n    \
+         v := ch.recv() else: panic(\"ch closed\")\n    return v\n\
+         fn a(ch: Channel[int], t: AtomicInt):\n    \
+         t.store([1].map(fn(x: int) -> int: x + take(ch))[0])\n\
          fn b(ch: Channel[int]):\n    ch.send([7].map(body)[0])\n\
          ch := Channel[int]()\nt := AtomicInt(0)\nparallel:\n    spawn b(ch)\n    spawn a(ch, t)\n\
          print(t.load())\n"
@@ -308,13 +310,14 @@ const I6N2: &str = "fn main():
                     parallel:
                         spawn:
                             never := Channel[int](0)
-                            never.recv()
+                            _ := never.recv()
                 match r:
                     ?_: out.send(0)
                     !e: out.send(1)
         t := 0
         for i in 0..2:
-            t = t + out.recv()
+            v := out.recv() else: panic(\"out closed\")
+            t = t + v
         print(\"t {t}\")
 main()
 ";
@@ -324,7 +327,7 @@ const I6N2_IN_CALLBACK: &str = "fn inner(x: int) -> int:
     parallel:
         spawn:
             never := Channel[int](0)
-            never.recv()
+            _ := never.recv()
     return x
 fn main():
     out := Channel[int](0)
@@ -337,7 +340,8 @@ fn main():
                     !e: out.send(1)
         t := 0
         for i in 0..2:
-            t = t + out.recv()
+            v := out.recv() else: panic(\"out closed\")
+            t = t + v
         print(\"t {t}\")
 main()
 ";

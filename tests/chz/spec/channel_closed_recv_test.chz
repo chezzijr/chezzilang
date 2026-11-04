@@ -1,0 +1,89 @@
+# D1 — `Channel[T].recv()` returns `T!RecvError`: a value queued before `close()` is received
+# first, then every receive on the closed, drained channel gives `!RecvError` with no fault, as
+# Rust's `mpsc::Receiver::recv` (a `RecvError`, "receiving on a closed channel") and Go's
+# `v, ok := <-ch` (`ok` false).
+import Executor, Shared from std.concurrency
+import std.time
+
+fn recv_text(c: Channel[int]) -> str:
+    match c.recv():
+        ?v: return "value {v}"
+        !e: return e.message()
+    return ""
+
+# Received on the OS thread that runs the module's top level.
+TOP: str = recv_text(closed_after(9))
+
+fn closed_after(v: int) -> Channel[int]:
+    c := Channel[int](1)
+    c.send(v)
+    c.close()
+    _ := c.recv()
+    return c
+
+test fn a_buffered_value_is_received_before_the_close_is_seen():
+    c := Channel[int](1)
+    c.send(5)
+    c.close()
+    assert c.recv() == ?5
+    match c.recv():
+        ?v: assert false, "got {v} after the close"
+        !e: assert e.message() == "receiving on a closed channel"
+
+test fn repeated_recv_on_a_closed_channel_keeps_returning_the_error():
+    c := Channel[int]()
+    c.close()
+    for _ in 0..10:
+        assert recv_text(c) == "receiving on a closed channel"
+
+test fn match_binds_a_recv_error():
+    c := Channel[str]()
+    c.close()
+    match c.recv():
+        ?v: assert false, "got {v}"
+        !e:
+            err: RecvError = e
+            assert err.message() == "receiving on a closed channel"
+
+test fn a_parked_receiver_wakes_with_the_error_when_another_task_closes():
+    c := Channel[int](0)
+    got := Shared("")
+    parallel:
+        spawn: got.set(recv_text(c))
+        spawn:
+            time.sleep_ms(50)
+            c.close()
+    assert got.get() == "receiving on a closed channel"
+
+test fn top_level_and_executor_job_recv_behave_the_same():
+    assert TOP == "receiving on a closed channel"
+    ex := Executor()
+    t := ex.submit(fn() -> str: recv_text(closed_after(3)))
+    ex.shutdown()
+    match t.get():
+        ?s: assert s == "receiving on a closed channel"
+        !e: assert false, e.message()
+
+test fn for_over_a_channel_still_ends_cleanly_on_close():
+    c := Channel[int](3)
+    c.send(1)
+    c.send(2)
+    c.close()
+    total := 0
+    for v in c:
+        total += v
+    assert total == 3
+
+fn fails() -> int:
+    panic("job failed")
+    return 0
+
+test fn task_get_returns_the_job_value_and_the_job_error():
+    ex := Executor()
+    ok := ex.submit(fn() -> int: 7)
+    bad := ex.submit(fails)
+    ex.shutdown()
+    assert ok.get() == ?7
+    match bad.get():
+        ?v: assert false, "got {v}"
+        !e: assert e.message().contains("job failed"), e.message()

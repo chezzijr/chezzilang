@@ -196,7 +196,7 @@ fn prog(reader: Reader, wait: Wait, end: End, cutter: Cutter, rounds: usize) -> 
             "    h := inner.submit(fn() -> int: job(gate))\n    started.send(1)\n    match h.get():\n        ?v: return v\n        !e: return -1\n"
         }
         Wait::Plain => {
-            "    _ := inner.submit(fn(): jobp(gate, plain))\n    started.send(1)\n    return plain.recv()\n"
+            "    _ := inner.submit(fn(): jobp(gate, plain))\n    started.send(1)\n    v := plain.recv() else: panic(\"plain closed\")\n    return v\n"
         }
     };
     let mut s = String::from("import std.concurrency\nimport std.time\n");
@@ -278,7 +278,7 @@ fn prog(reader: Reader, wait: Wait, end: End, cutter: Cutter, rounds: usize) -> 
                 b.push(SPAWN_STOPPER.into());
             }
             b.extend(main_cut.iter().map(|m| format!("    {m}")));
-            b.push("    v := out.recv()".into());
+            b.push("    v := out.recv() else: panic(\"out closed\")".into());
             b.push(format!("    {PRINT}"));
         }
         Reader::OtherExec | Reader::SameExec => {
@@ -291,11 +291,11 @@ fn prog(reader: Reader, wait: Wait, end: End, cutter: Cutter, rounds: usize) -> 
             if cutter == Cutter::Sibling {
                 b.push("parallel:".into());
                 b.push(SPAWN_STOPPER.into());
-                b.push("    v := out.recv()".into());
+                b.push("    v := out.recv() else: panic(\"out closed\")".into());
                 b.push(format!("    {PRINT}"));
             } else {
                 b.extend(main_cut.iter().map(|m| m.to_string()));
-                b.push("v := out.recv()".into());
+                b.push("v := out.recv() else: panic(\"out closed\")".into());
                 b.push(PRINT.into());
             }
         }
@@ -472,7 +472,8 @@ fn feeder(plain: Channel[int]):
     plain.send(1)
 
 fn reader(plain: Channel[int], out: Channel[int]):
-    out.send(plain.recv())
+    v := plain.recv() else: panic("plain closed")
+    out.send(v)
 
 fn stopper(inner: Executor):
     inner.cancel()
@@ -485,7 +486,7 @@ fn main():
     parallel:
         spawn reader(plain, out)
         spawn stopper(inner)
-        v := out.recv()
+        v := out.recv() else: panic("out closed")
         print("got {v}")
 
 main()

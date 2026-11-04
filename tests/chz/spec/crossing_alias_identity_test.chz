@@ -21,7 +21,7 @@ test fn container_alias_write_through_one_alias_lands():
             match res:
                 ?_: r.send("no-fault")
                 !e: r.send(e.message())
-    got := r.recv()
+    got := r.recv() else: panic("r closed")
     assert got == "no-fault", got
     assert inner == [1, 99]
     assert outer[1] == [1, 99]
@@ -44,7 +44,7 @@ test fn struct_alias_write_through_one_alias_lands():
             match res:
                 ?_: r.send("no-fault")
                 !e: r.send(e.message())
-    got := r.recv()
+    got := r.recv() else: panic("r closed")
     assert got == "no-fault", got
     assert box.n == 9
     assert pair[1].n == 9

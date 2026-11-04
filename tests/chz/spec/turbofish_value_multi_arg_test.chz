@@ -53,4 +53,4 @@ test fn type_path_values_are_fns():
     parallel:
         spawn:
             ch.send('{R2[int, str].L(7)}')
-    assert ch.recv() == "L(7)"
+    assert ch.recv() == ?"L(7)"

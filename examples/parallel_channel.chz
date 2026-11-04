@@ -10,7 +10,8 @@ fn produce(ch: Channel[int], v: int):
 fn collect(ch: Channel[int], out: Channel[int], n: int):
     nums: List[int] = []
     for _ in 0..n:
-        nums.push(ch.recv())            # blocks on an empty channel until a producer sends
+        v := ch.recv() else: panic("ch closed")  # blocks on an empty channel until a producer sends
+        nums.push(v)
     nums.sort_by(fn(a: int, b: int) -> int: a - b)
     for x in nums:
         out.send(x)
@@ -24,6 +25,7 @@ fn main():
         spawn produce(ch, 10)
         spawn produce(ch, 20)
     for _ in 0..3:
-        print(out.recv())               # 10, 20, 30 — sorted by the collector
+        v := out.recv() else: panic("out closed")
+        print(v)                        # 10, 20, 30 — sorted by the collector
 
 main()

@@ -393,7 +393,7 @@ pub fn run(graph: &mut ModuleGraph) -> Result<(), ResolveError> {
         let ast: &mut Module = &mut graph.modules[mi].ast;
         walker.walk_block(&mut ast.stmts)?;
         if walker.builds_range && graph.modules[mi].dotted != ["std", "prelude"] {
-            graph.range_used = true;
+            graph.prelude_used.mark(crate::resolver::RANGE_STRUCT);
         }
     }
     Ok(())
@@ -880,7 +880,7 @@ struct Walker<'a> {
     /// or native-struct method) enclose the statement being walked. See [`MAX_FN_NESTING`].
     fn_depth: usize,
     /// TICKET-255 — true once a range literal that builds a `Range` value was walked (a counting-loop
-    /// iterand builds none). Feeds [`ModuleGraph::range_used`].
+    /// iterand builds none). Feeds [`ModuleGraph::prelude_used`].
     builds_range: bool,
     /// Set by the `For` arm just before it walks its iterand: that iterand is a counting loop
     /// ([`crate::ast::counting_range`]), so the `Range` arm must not record a use.
@@ -1880,7 +1880,7 @@ mod tests {
         let id = ModuleId(PathBuf::from("<test>"));
         let mut graph = ModuleGraph {
             entry: id.clone(),
-            range_used: true,
+            prelude_used: crate::resolver::PreludeUse::ALL,
             skipped_fns: std::collections::HashMap::new(),
             modules: vec![LoadedModule {
                 id,
@@ -1900,7 +1900,7 @@ mod tests {
         let id = ModuleId(PathBuf::from("<test>"));
         let mut graph = ModuleGraph {
             entry: id.clone(),
-            range_used: true,
+            prelude_used: crate::resolver::PreludeUse::ALL,
             skipped_fns: std::collections::HashMap::new(),
             modules: vec![LoadedModule {
                 id,

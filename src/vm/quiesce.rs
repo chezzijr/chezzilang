@@ -149,7 +149,7 @@ impl PartyWait {
     pub(super) fn satisfiable(&self) -> bool {
         match self {
             // `Vm::block_recv` settles on a queued value, a `trip()` latch, or `closed` (which
-            // returns `ClosedEmpty` — the `for v in ch:` ends, a bare `recv` faults; either is
+            // returns `ClosedEmpty` — the `for v in ch:` ends, a bare `recv` gives `!RecvError`; either is
             // progress).
             PartyWait::Recv(core, me) => recv_satisfiable(core, me.as_ref()),
             // The blocking `send` settles once its offer does — taken by a receiver, or closed by

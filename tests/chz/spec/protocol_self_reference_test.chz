@@ -27,7 +27,7 @@ struct Rat:
 test fn a_protocol_method_names_its_own_protocol():
     ch := Channel[Item](1)
     ch.send(Rat(1, 2))
-    x := ch.recv()
+    x := ch.recv() else: panic("ch closed")
     assert x.same(Rat(1, 2))
     assert not x.same(Rat(1, 3))
 

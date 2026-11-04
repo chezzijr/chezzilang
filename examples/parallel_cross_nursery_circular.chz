@@ -20,7 +20,7 @@
 fn inner(a: Channel[int], b: Channel[int]):
     spawn:
         a.send(1)
-        y := b.recv()
+        y := b.recv() else: panic("b closed")
         print("I got {y}")
 
 fn main():
@@ -28,7 +28,7 @@ fn main():
     b := Channel[int]()
     parallel:                        # OUTER nursery
         spawn:                       # O: child of OUTER
-            x := a.recv()
+            x := a.recv() else: panic("a closed")
             b.send(x)
             print("O got {x}")
         inner(a, b)                  # inner's spawn → NESTED nursery, joins at fn return

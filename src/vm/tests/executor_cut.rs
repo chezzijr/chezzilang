@@ -342,7 +342,7 @@ fn a_finished_executor_job_no_longer_vetoes_a_parked_nursery_task() {
 #[test]
 fn sequential_executor_round_trips_reuse_their_runner() {
     let vm = ran_program(
-        "import Executor from std.concurrency\nex := Executor()\nch := Channel[int](0)\nn := 0\nfor i in 0..200:\n    ex.submit(fn(): ch.send(1))\n    n = n + ch.recv()\n",
+        "import Executor from std.concurrency\nex := Executor()\nch := Channel[int](0)\nn := 0\nfor i in 0..200:\n    ex.submit(fn(): ch.send(1))\n    v := ch.recv() else: panic(\"ch closed\")\n    n = n + v\n",
     );
     let entry = vm.entry_home();
     let Obj::Module(m) = vm.heap.get(entry) else {
@@ -614,7 +614,7 @@ fn runtime_text_names_no_removed_spelling() {
 
 #[test]
 fn spawn_one_line_native_call_that_waits_does_not_panic() {
-    let src = "fn main():\n    ch := Channel[int](1)\n    n := 0\n    parallel:\n        for _ in 0..50:\n            spawn ch.send(1)\n        for _ in 0..50:\n            n += ch.recv()\n    print(n)\nmain()\n";
+    let src = "fn main():\n    ch := Channel[int](1)\n    n := 0\n    parallel:\n        for _ in 0..50:\n            spawn ch.send(1)\n        for _ in 0..50:\n            v := ch.recv() else: panic(\"ch closed\")\n            n += v\n    print(n)\nmain()\n";
     assert_eq!(run_capture(src).expect("spawn ch.send"), "50\n");
 }
 

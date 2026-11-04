@@ -11,7 +11,8 @@
 import std.concurrency
 
 fn slow(hold: Channel[int]) -> int:
-    return hold.recv()
+    v := hold.recv() else: panic("hold closed")
+    return v
 
 test fn cancel_does_not_strand_a_submitted_task():
     hold := Channel[int](1)

@@ -126,9 +126,14 @@ fn rx_wait(ch: Channel[int], never: Channel[int]) -> int:
             return -1
     return -2
 
+fn rx_plain(ch: Channel[int]) -> int:
+    v := ch.recv() else: panic("ch closed")
+    return v
+
 fn rx_one(rk: int, ch: Channel[int], never: Channel[int]) -> int:
     if rk == 0:
-        return ch.recv()
+        v := ch.recv() else: panic("ch closed")
+        return v
     if rk == 1:
         while true:
             match ch.try_recv():
@@ -141,7 +146,7 @@ fn rx_one(rk: int, ch: Channel[int], never: Channel[int]) -> int:
     if rk == 3:
         return rx_wait(ch, never)
     if rk == 4:
-        return [0].map(fn(_: int) -> int: ch.recv())[0]
+        return [0].map(fn(_: int) -> int: rx_plain(ch))[0]
     return [0].map(fn(_: int) -> int: rx_wait(ch, never))[0]
 
 fn receiver(rk: int, ch: Channel[int], never: Channel[int], order: int, close: int, got: Channel[int]):
@@ -442,7 +447,10 @@ const H3: &str = r#"fn main():
                 _ := never.recv():
                     pass
         spawn:
-            print([0].map(fn(_: int) -> int: ch.recv()))
+            fn take(_: int) -> int:
+                v := ch.recv() else: panic("ch closed")
+                return v
+            print([0].map(take))
 main()
 "#;
 
@@ -452,14 +460,16 @@ const OWN: &str = r#"fn main():
     ch := Channel[int](0)
     parallel:
         spawn:
-            print("got", ch.recv())
+            g := ch.recv() else: panic("ch closed")
+            print("got", g)
             ch.send(2)
         spawn:
             spin := 0
             for i in 0..200000:
                 spin += i
             ch.send(1)
-            print("back", ch.recv())
+            b := ch.recv() else: panic("ch closed")
+            print("back", b)
 main()
 "#;
 

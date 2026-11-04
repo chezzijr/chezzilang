@@ -108,10 +108,10 @@ fn pp():\n    \
         spawn:\n            \
             for i in 0..{n}:\n                \
                 ping.send(i)\n                \
-                n := pong.recv()\n        \
+                n := pong.recv() else: panic(\"pong closed\")\n        \
         spawn:\n            \
             for i in 0..{n}:\n                \
-                v := ping.recv()\n                \
+                v := ping.recv() else: panic(\"ping closed\")\n                \
                 pong.send(v)\n\n\
 fn pp_then(done: Channel[int]):\n    \
     pp()\n    \
@@ -122,7 +122,7 @@ fn main():\n    \
     ex.submit(fn(): pp_then(done))\n    \
     parallel:\n        \
         spawn:\n            \
-            done.recv()\n    \
+            _ := done.recv()\n    \
     ex.shutdown()\n    \
     print(\"done\")\n\n\
 main()\n",

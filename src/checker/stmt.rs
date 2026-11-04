@@ -307,8 +307,8 @@ impl Checker {
                 // The type's runtime key — the table the members' stored `witness_params` live under.
                 let host_key = self.bare_key(name);
                 for m in methods {
-                    // TICKET-255 — a graph that builds no `Range` skips the prelude `Range` bodies.
-                    if self.skip_range_bodies && name == crate::resolver::RANGE_STRUCT {
+                    // TICKET-255 — a graph that builds no value of a prelude struct skips its bodies.
+                    if self.skipped_prelude_structs.contains(&name.as_str()) {
                         continue;
                     }
                     if m.is_test {

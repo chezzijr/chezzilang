@@ -23,7 +23,7 @@ fn cousin_fed_recovered_deadlock_is_fatal_not_a_hang_at_two_and_four_workers() {
                 r := recover:\n                \
                     parallel:\n                        \
                         spawn:\n                            \
-                            never.recv()\n            \
+                            _ := never.recv()\n            \
                 match r:\n                \
                     ?_: print(\"inner ok\")\n                \
                     !e: print(\"inner err\")\n            \
@@ -31,8 +31,10 @@ fn cousin_fed_recovered_deadlock_is_fatal_not_a_hang_at_two_and_four_workers() {
             spawn:\n            \
                 parallel:\n                \
                     spawn:\n                    \
-                        y.send(x.recv() + 1)\n                \
-                    print(\"F got {y.recv()}\")\n    \
+                        got_x := x.recv() else: panic(\"x closed\")\n                    \
+                        y.send(got_x + 1)\n                \
+                    got_y := y.recv() else: panic(\"y closed\")\n                \
+                    print(\"F got {got_y}\")\n    \
         print(\"done\")\n\
         main()\n";
 

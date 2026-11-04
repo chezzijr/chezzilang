@@ -14,8 +14,8 @@ test fn channel_send_recv_len_cap():
     ch.send(1)
     ch.send(2)
     assert ch.len() == 2
-    assert ch.recv() == 1
-    assert ch.recv() == 2
+    assert ch.recv() == ?1
+    assert ch.recv() == ?2
     assert ch.len() == 0
 
 # ---- Channel: try_send / try_recv ----

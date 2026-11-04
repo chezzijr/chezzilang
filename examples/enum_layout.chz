@@ -157,8 +157,8 @@ fn main():
     ch := Channel[int?]()
     parallel:
         spawn producer(ch)
-    a := ch.recv()
-    b := ch.recv()
+    a := ch.recv() else: panic("ch closed")
+    b := ch.recv() else: panic("ch closed")
     match a:
         ?v: print("recv Some {v}")
         None: print("recv None")

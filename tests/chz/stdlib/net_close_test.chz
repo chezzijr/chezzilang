@@ -22,9 +22,9 @@ fn accept_racing_close(timeout_ms: int) -> str!:
             else:
                 out.send(err_text(ln.accept(timeout_ms)))
         spawn:
-            ready.recv()
+            _ := ready.recv()
             ln.close()
-    return ?out.recv()
+    return ?out.recv()?
 
 # `op` picks the socket call parked when the sibling closes. The peer end is accepted but never
 # read or written, so a read parks on an empty socket and a 16 MiB write parks once the kernel
@@ -56,11 +56,11 @@ fn socket_op_racing_close(op: str, timeout_ms: int) -> str!:
             else:
                 out.send(err_text(c.write_bytes(big.encode(), timeout_ms)))
         spawn:
-            ready.recv()
+            _ := ready.recv()
             c.close()
     peer.close()
     ln.close()
-    return ?out.recv()
+    return ?out.recv()?
 
 test fn closing_a_listener_wakes_a_parked_accept_with_an_err():
     for t in [0, 60000]:

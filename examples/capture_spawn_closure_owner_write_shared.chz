@@ -8,12 +8,15 @@ fn work():
     x := [0]
     gate := Channel[int](1)
     seen := Channel[int](1)
-    f := fn(): seen.send(gate.recv() + x[0])
+    f := fn(): match gate.recv():
+        ?g: seen.send(g + x[0])
+        !e: panic("gate closed")
     parallel:
         spawn f()
         x[0] = 5
         gate.send(0)
-    print(seen.recv())          # 5
+    got := seen.recv() else: panic("seen closed")
+    print(got)                  # 5
 
 fn main():
     parallel:

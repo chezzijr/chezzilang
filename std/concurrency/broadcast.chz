@@ -5,8 +5,9 @@
 # every value sent after its `subscribe` (the sent object itself, by handle, as from a channel), in
 # send order, in its own mailbox: a channel of capacity
 # `cap`. `send` does not wait for receivers. A receiver whose mailbox is full loses its oldest value,
-# and its next receive reports the count it missed as `!Lagged(missed)`, then continues with the
-# oldest value still held (tokio `RecvError::Lagged(n)`).
+# and its next receive reports the count it missed (`!BroadcastError.Lagged(l)` from `recv`,
+# `!Lagged(missed)` from `try_recv` and `for`), then continues with the oldest value still held
+# (tokio `RecvError::Lagged(n)`). Once closed and drained, `recv` gives `!BroadcastError.Closed`.
 #
 # ORDER: `send`, `subscribe` and `close` run inside the hub's one update guard, so every receiver
 # sees the sends of every publisher in one order, and a subscribe falls between two sends. Each
@@ -32,6 +33,19 @@ struct Lagged:
     fn message(self) -> str:
         return "receiver lagged by {self.missed} values"
 
+# The error `Receiver.recv` returns (tokio `broadcast::error::RecvError`): `Closed` once the broadcast
+# is closed and the receiver drained, on every later receive too; `Lagged(l)` when `l.missed` values
+# were dropped before the value the next receive returns.
+enum BroadcastError:
+    Closed
+    Lagged(Lagged)
+
+    fn message(self) -> str:
+        match self:
+            BroadcastError.Closed: return "receiving on a closed channel"
+            BroadcastError.Lagged(l): return l.message()
+        return ""
+
 # One value in a receiver's mailbox, with its send number.
 struct _Stamped[T]:
     seq: int
@@ -53,12 +67,17 @@ struct Receiver[T]:
     # take each value once and move the cursor in mailbox order.
     _lock: Channel[int]
 
-    # Block until a value arrives: `?v`, or `!Lagged(missed)` when values were dropped before it.
-    # On a closed and drained broadcast it faults `receive on a closed channel`, as `Channel.recv`.
-    fn recv(self) -> T!Lagged:
+    # Block until a value arrives: `?v`, or `!BroadcastError.Lagged(l)` when values were dropped
+    # before it. On a closed and drained broadcast it gives `!BroadcastError.Closed`, with no fault,
+    # as `Channel.recv` gives `!RecvError`.
+    fn recv(self) -> T!BroadcastError:
         match self._step(true):
-            ?r: return r
-            None: panic("receive on a closed channel")
+            ?r:
+                match r:
+                    ?v: return ?v
+                    !l: return !BroadcastError.Lagged(l)
+            None: return !BroadcastError.Closed
+        return !BroadcastError.Closed
 
     # Never blocks: `None` when no value waits, when another task is inside a receive on this
     # receiver, or when the broadcast is closed and drained; else what `recv` returns.
@@ -77,7 +96,8 @@ struct Receiver[T]:
     fn _step(self, park: bool) -> (T!Lagged)?:
         tok := 0
         if park:
-            tok = self._lock.recv()
+            t := self._lock.recv() else: panic("broadcast lock closed")
+            tok = t
         else:
             match self._lock.try_recv():
                 ?t: tok = t

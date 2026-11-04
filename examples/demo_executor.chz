@@ -18,7 +18,8 @@ fn main():
     ex.shutdown()                          # waits: every submitted job has finished after this
     total := 0
     for _ in 0..5:
-        total += ch.recv()
+        v := ch.recv() else: panic("ch closed")
+        total += v
     print("executor: sum of squares 1..5 = {total}")
 
 main()

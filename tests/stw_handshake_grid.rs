@@ -47,14 +47,14 @@ fn program(mode: &str) -> (String, &'static str) {
     out := Channel[int](1)
     parallel:
         spawn:
-            xs := [1, 2, 3].map(fn(n: int) -> int: n + ch.recv())
+            xs := [1, 2, 3].map(fn(n: int) -> int: n + must(ch.recv()))
             out.send(xs[0] + xs[1] + xs[2])
         spawn:
             _ := busy(1)
             ch.send(10)
             ch.send(20)
             ch.send(30)
-    print(out.recv())
+    print(must(out.recv()))
 main()
 ",
             "66\n",
@@ -66,7 +66,7 @@ main()
     ch := Channel[int]()
     ex := Executor()
     ex.submit(fn(): ch.send(busy(1)))
-    print(ch.recv())
+    print(must(ch.recv()))
     ex.shutdown()
 main()
 ",
@@ -83,7 +83,7 @@ fn main():
         spawn work(1, out)
         spawn work(2, out)
         spawn work(3, out)
-    print(out.recv() + out.recv() + out.recv())
+    print(must(out.recv()) + must(out.recv()) + must(out.recv()))
 main()
 ",
             "7350\n",
@@ -97,7 +97,7 @@ main()
     ex.submit(fn(): out.send(busy(2)))
     time.sleep_ms(30)
     _ := time.timer(10).recv()
-    print(out.recv())
+    print(must(out.recv()))
     ex.shutdown()
 main()
 ",
@@ -116,7 +116,7 @@ fn pong(a: Channel[int], b: Channel[int], out: Channel[int]):
     s := 0
     i := 0
     while i < 20:
-        s = s + a.recv()
+        s = s + must(a.recv())
         b.send(0)
         i = i + 1
     out.send(s)
@@ -127,7 +127,7 @@ fn main():
     parallel:
         spawn ping(a, b)
         spawn pong(a, b, out)
-    print(out.recv())
+    print(must(out.recv()))
 main()
 ",
             "190\n",
@@ -141,7 +141,7 @@ main()
     ex.submit(fn(): out.send(busy(1)))
     ex.submit(fn(): out.send(busy(2)))
     ex.shutdown()
-    print(out.recv() + out.recv())
+    print(must(out.recv()) + must(out.recv()))
 main()
 ",
             "3675\n",
@@ -158,7 +158,7 @@ fn main():
             parallel:
                 spawn work(1, out)
                 spawn work(2, out)
-    print(out.recv() + out.recv())
+    print(must(out.recv()) + must(out.recv()))
 main()
 ",
             "3675\n",
@@ -178,7 +178,7 @@ main()
             _ := busy(1)
             c := must(net.connect(addr))
             _ := c.write(\"hello\")
-    print(out.recv())
+    print(must(out.recv()))
 main()
 ",
             "hello\n",
@@ -231,8 +231,8 @@ fn main():
         spawn reader(out, fin)
         spawn writer(fin)
         spawn allocer(fin, done)
-    print(out.recv())
-    print(done.recv())
+    print(must(out.recv()))
+    print(must(done.recv()))
 main()
 ",
             "hi\nallocer done\n",
@@ -259,8 +259,8 @@ fn main():
     parallel:
         spawn sleeper(a)
         spawn allocer(b)
-    print(b.recv())
-    print(a.recv())
+    print(must(b.recv()))
+    print(must(a.recv()))
 main()
 ",
             "allocer done\nsleeper done\n",
@@ -299,9 +299,9 @@ fn main():
         spawn first(once, a)
         spawn second(once, b)
         spawn allocer(b, c)
-    print(c.recv())
-    print(a.recv())
-    print(b.recv())
+    print(must(c.recv()))
+    print(must(a.recv()))
+    print(must(b.recv()))
 main()
 ",
             "allocer done\nfirst done\nsecond done\n",
@@ -331,9 +331,9 @@ fn main():
         spawn reader(r, a)
         spawn printer(r, b)
         spawn allocer(b, c)
-    print(c.recv())
-    print(b.recv())
-    print(a.recv())
+    print(must(c.recv()))
+    print(must(b.recv()))
+    print(must(a.recv()))
 main()
 ",
             "allocer done\nReader(open)\nhi\n",

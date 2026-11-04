@@ -33,6 +33,6 @@ test fn cross_heap_resolves_name():
     ch.send(p)
     parallel:
         spawn:
-            q := ch.recv()
+            q := ch.recv() else: panic("ch closed")
             result.set("{q}|{q.sum()}")
     assert result.get() == "Point(x=1, y=2)|3"

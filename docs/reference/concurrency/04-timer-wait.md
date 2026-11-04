@@ -1,6 +1,6 @@
 ## 6c. `timer(ms)` — the one-shot timeout channel
 
-`timer(ms)` returns a `Channel[bool]` that becomes ready (`recv()` → `true`) once `ms` milliseconds have
+`timer(ms)` returns a `Channel[bool]` that becomes ready (`recv()` → `?true`) once `ms` milliseconds have
 elapsed. It is the **composable timeout primitive**: instead of a bespoke timeout argument on `recv`, a
 timeout is another channel you can receive from — and race against real channels in a `wait:`
 ([§6d](#6d-wait--racing-multiple-channel-receives)).
@@ -11,10 +11,10 @@ timeout is another channel you can receive from — and race against real channe
 ```chezzi
 import timer from std.time
 t := timer(500)
-print(t.recv())            # true — blocks ~500ms, then delivers
+print(t.recv())            # true — blocks ~500ms; recv gives `?true`, which prints as `true`
 ```
 
-It is **level-triggered**: any `recv` at or after the deadline yields `true` (the typical use recvs it
+It is **level-triggered**: any `recv` at or after the deadline yields `?true` (the typical use recvs it
 once). Delivery is handled at `recv` time, in the receiver's own engine, so a `timer` created at the top
 level can be `recv`'d inside a spawned task. A fiber receiver parks and a background job (on the
 netpoller timer thread) `send`s `true` at the deadline, accounted so it can't trip a false deadlock. A

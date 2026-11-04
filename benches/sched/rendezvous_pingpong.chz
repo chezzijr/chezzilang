@@ -6,10 +6,12 @@ fn main():
     parallel:
         spawn:
             for _ in 0..200000:
-                pong.send(ping.recv() + 1)
+                v := ping.recv() else: panic("ping closed")
+                pong.send(v + 1)
         n := 0
         for _ in 0..200000:
             ping.send(n)
-            n = pong.recv()
+            r := pong.recv() else: panic("pong closed")
+            n = r
         print(n)
 main()

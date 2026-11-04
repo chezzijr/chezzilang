@@ -26,7 +26,7 @@ test fn a_false_guard_lets_the_other_ready_arm_run():
         v := a.recv() if on: got = v
         w := b.recv(): got = w
     assert got == 2, "got: {got}"
-    assert a.recv() == 1
+    assert a.recv() == ?1
 
 test fn a_false_guard_skips_its_channel_and_value_expressions():
     log: List[str] = []
@@ -81,7 +81,7 @@ test fn a_guarded_send_arm_on_and_off():
         out.send(5) if on: sent = true
         else: pass
     assert sent
-    assert out.recv() == 5
+    assert out.recv() == ?5
     took_else := false
     wait:
         out.send(6) if not on: sent = false
@@ -89,7 +89,7 @@ test fn a_guarded_send_arm_on_and_off():
     assert took_else
     assert sent
     out.send(9)
-    assert out.recv() == 9
+    assert out.recv() == ?9
 
 test fn a_guarded_assign_arm():
     ch := Channel[int](1)
@@ -103,7 +103,7 @@ test fn a_guarded_assign_arm():
         n = ch.recv() if n == 0: pass
         else: pass
     assert n == 3
-    assert ch.recv() == 4
+    assert ch.recv() == ?4
 
 test fn all_arms_off_with_else_runs_the_else():
     a := Channel[int](1)

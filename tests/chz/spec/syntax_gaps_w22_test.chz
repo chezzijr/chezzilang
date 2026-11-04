@@ -88,7 +88,10 @@ test fn inline_spawn_call_inside_parallel():
     parallel:
         if on: spawn put(c, 1)
         for i in 0..2: spawn put(c, i + 2)
-    assert c.recv() + c.recv() + c.recv() == 6
+    a := c.recv() else: panic("c closed")
+    b := c.recv() else: panic("c closed")
+    d := c.recv() else: panic("c closed")
+    assert a + b + d == 6
 
 test fn inline_spawn_call_in_a_match_arm():
     c := Channel[int](1)
@@ -96,18 +99,18 @@ test fn inline_spawn_call_in_a_match_arm():
         match 1:
             1: spawn put(c, 7)
             _: pass
-    assert c.recv() == 7
+    assert c.recv() == ?7
 
 test fn inline_spawn_call_outside_parallel():
     c := Channel[int](1)
     on := true
     if on: spawn put(c, 9)
-    assert c.recv() == 9
+    assert c.recv() == ?9
 
 test fn inline_parallel_body_is_a_spawn_call():
     c := Channel[int](1)
     parallel: spawn put(c, 4)
-    assert c.recv() == 4
+    assert c.recv() == ?4
 
 fn sum_blank(n: int) -> int:
     a, b := r2(n) else _:

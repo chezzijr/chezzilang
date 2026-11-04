@@ -38,7 +38,8 @@ fn main():
             spawn task(limit, ch)
     total := 0
     for _ in 0..workers:
-        total += ch.recv()
+        v := ch.recv() else: panic("ch closed")
+        total += v
     dt := time.monotonic() - t0
 
     print("workers={workers}  primes<{limit} per worker={total / workers}  elapsed={dt}s")

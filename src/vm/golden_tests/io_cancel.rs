@@ -1183,8 +1183,8 @@ fn main():
         spawn:
             ci.send(4611686018427387905)
             cf.send(1.5)
-    x := ci.recv()
-    f := cf.recv()
+    x := ci.recv() else: panic(\"ci closed\")
+    f := cf.recv() else: panic(\"cf closed\")
     print(x)
     print(x == 4611686018427387905)
     print(f)

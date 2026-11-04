@@ -970,7 +970,7 @@ fn golden_parallel_deadlock_still_faults() {
 /// suspend/resume cycles, which order-insensitive comparison still catches.
 #[test]
 fn fibers_ping_pong_interleaves() {
-    let src = "fn ping(a: Channel[int], b: Channel[int]):\n    i := 0\n    while i < 3:\n        b.send(i)\n        x := a.recv()\n        print(\"ping {x}\")\n        i = i + 1\nfn pong(a: Channel[int], b: Channel[int]):\n    i := 0\n    while i < 3:\n        y := b.recv()\n        print(\"pong {y}\")\n        a.send(y + 100)\n        i = i + 1\nfn main():\n    a := Channel[int]()\n    b := Channel[int]()\n    parallel:\n        spawn ping(a, b)\n        spawn pong(a, b)\nmain()\n";
+    let src = "fn ping(a: Channel[int], b: Channel[int]):\n    i := 0\n    while i < 3:\n        b.send(i)\n        x := a.recv() else: panic(\"a closed\")\n        print(\"ping {x}\")\n        i = i + 1\nfn pong(a: Channel[int], b: Channel[int]):\n    i := 0\n    while i < 3:\n        y := b.recv() else: panic(\"b closed\")\n        print(\"pong {y}\")\n        a.send(y + 100)\n        i = i + 1\nfn main():\n    a := Channel[int]()\n    b := Channel[int]()\n    parallel:\n        spawn ping(a, b)\n        spawn pong(a, b)\nmain()\n";
     let expected = "pong 0\nping 100\npong 1\nping 101\npong 2\nping 102\n";
     crate::vm::assert_same_lines(&run(src), expected);
     // Same result under GC stress — parked fibers' frames/locals are rooted while they wait.
@@ -1137,7 +1137,7 @@ fn fibers_many_producers_one_consumer() {
     let n = 200;
     let src = format!(
         "import Shared from std.concurrency\nfn produce(ch: Channel[int]):\n    ch.send(1)\n\
-             fn consume(ch: Channel[int], k: int, s: Shared[int]):\n    total := 0\n    for _ in 0..k:\n        total += ch.recv()\n    s.set(total)\n\
+             fn consume(ch: Channel[int], k: int, s: Shared[int]):\n    total := 0\n    for _ in 0..k:\n        v := ch.recv() else: panic(\"ch closed\")\n        total += v\n    s.set(total)\n\
              fn main():\n    ch := Channel[int]()\n    s := Shared(0)\n    parallel:\n        spawn consume(ch, {n}, s)\n        for _ in 0..{n}:\n            spawn produce(ch)\n    print(s.get())\nmain()\n"
     );
     assert_eq!(

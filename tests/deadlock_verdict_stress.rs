@@ -17,14 +17,15 @@ use std::time::{Duration, Instant};
 const PROG: &str = r#"import Shared from std.concurrency
 fn hold(x: int, ready: Channel[int], c: Channel[int]) -> int:
     ready.send(1)
-    return x + c.recv()
+    got_c := c.recv() else: panic("c closed")
+    return x + got_c
 fn main():
     s := Shared(0)
     c := Channel[int](0)
     ready := Channel[int](1)
     parallel:
         spawn: s.update(fn(x: int) -> int: hold(x, ready, c))
-        ready.recv()
+        _ := ready.recv()
         s.update(fn(x: int) -> int: x + 1)
         print("AFTER")
 main()

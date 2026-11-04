@@ -125,7 +125,7 @@ main()
 /// rejected pre-change: `Channel[Drawable]` "must be sendable".)
 #[test]
 fn protocol_value_crosses_channel_three_engine() {
-    let src = "protocol Drawable:\n    fn draw(self) -> str\nstruct Sq:\n    s: int\n    fn draw(self) -> str:\n        return \"sq\"\nfn main():\n    ch := Channel[Drawable]()\n    d: Drawable = Sq(1)\n    ch.send(d)\n    parallel:\n        spawn:\n            print(ch.recv().draw())\nmain()\n";
+    let src = "protocol Drawable:\n    fn draw(self) -> str\nstruct Sq:\n    s: int\n    fn draw(self) -> str:\n        return \"sq\"\nfn main():\n    ch := Channel[Drawable]()\n    d: Drawable = Sq(1)\n    ch.send(d)\n    parallel:\n        spawn:\n            d2 := ch.recv() else: panic(\"ch closed\")\n            print(d2.draw())\nmain()\n";
     assert_golden_out(src, "sq\n");
 }
 
@@ -144,7 +144,7 @@ fn ffi_handle_crosses_spawn_arg() {
 #[test]
 fn ffi_handle_crosses_channel_send() {
     assert_golden_out(
-        "extern \"libm.so.6\":\n    fn sqrt(x: float) -> float\nch := Channel[fn(float) -> float]()\nch.send(sqrt)\nprint(ch.recv()(9.0))\n",
+        "extern \"libm.so.6\":\n    fn sqrt(x: float) -> float\nch := Channel[fn(float) -> float]()\nch.send(sqrt)\nf := ch.recv() else: panic(\"ch closed\")\nprint(f(9.0))\n",
         "3.0\n",
     );
 }
@@ -183,7 +183,7 @@ fn ffi_handle_send_succeeds() {
 #[test]
 fn positive_shared_handle_crosses_channel() {
     assert_golden_out(
-        "import Shared from std.concurrency\ns := Shared(42)\nch := Channel[Shared[int]]()\nch.send(s)\nprint(ch.recv().get())\n",
+        "import Shared from std.concurrency\ns := Shared(42)\nch := Channel[Shared[int]]()\nch.send(s)\nt := ch.recv() else: panic(\"ch closed\")\nprint(t.get())\n",
         "42\n",
     );
 }
@@ -651,7 +651,7 @@ fn imported_struct_crosses_channel_from_task() {
         ("geo.chz", "struct Point:\n    x: int\n    y: int\n"),
         (
             "main.chz",
-            "import geo\nch := Channel[geo.Point]()\nparallel:\n    spawn:\n        ch.send(geo.Point(3, 4))\np := ch.recv()\nprint(p.x + p.y)\n",
+            "import geo\nch := Channel[geo.Point]()\nparallel:\n    spawn:\n        ch.send(geo.Point(3, 4))\np := ch.recv() else: panic(\"ch closed\")\nprint(p.x + p.y)\n",
         ),
     ];
     let t = TmpDir::new();
@@ -867,7 +867,7 @@ fn collision_struct_sent_across_task() {
         ("b.chz", "struct Point:\n    y: int\n"),
         (
             "main.chz",
-            "import a\nimport b\nch := Channel[b.Point]()\nparallel:\n    spawn:\n        ch.send(b.Point(9))\np := ch.recv()\nprint(p)\nprint(p.y)\n",
+            "import a\nimport b\nch := Channel[b.Point]()\nparallel:\n    spawn:\n        ch.send(b.Point(9))\np := ch.recv() else: panic(\"ch closed\")\nprint(p)\nprint(p.y)\n",
         ),
     ];
     let t = TmpDir::new();

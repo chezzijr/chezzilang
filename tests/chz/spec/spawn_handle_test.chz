@@ -19,7 +19,7 @@ test fn a_spawn_block_and_a_spawned_call_write_the_parents_values():
     done := Channel[int](1)
     parallel:
         spawn:
-            _ := done.recv()
+            _ := done.recv() else: panic("done closed")
             xs[1] = 1
             n = 5
         spawn fill(xs, done)
@@ -43,7 +43,7 @@ test fn spawned_loop_tasks_each_see_their_own_iteration():
             spawn:
                 got.send((i, i * 10))
     for _k in 0..3:
-        p := got.recv()
+        p := got.recv() else: panic("got closed")
         out[p.0] = p.1
     assert out == {0: 0, 1: 10, 2: 20}
 

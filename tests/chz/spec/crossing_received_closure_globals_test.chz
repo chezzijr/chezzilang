@@ -24,7 +24,7 @@ fn alias_case(fr: Channel[str]) -> str:
                 ?_: fr.send("no-fault")
                 !e: fr.send(e.message())
             c.send(fn() -> str: "{g}")
-    f := c.recv()
+    f := c.recv() else: panic("c closed")
     before := "{f()} {a}"
     a.push(3)
     return "{before} {f()} {a}"
@@ -32,7 +32,7 @@ fn alias_case(fr: Channel[str]) -> str:
 test fn received_closure_reads_the_live_global_and_keeps_alias():
     fr := Channel[str](1)
     got := alias_case(fr)
-    fault := fr.recv()
+    fault := fr.recv() else: panic("fr closed")
     assert fault == "no-fault", fault
     assert got == "[1, 2] [1, 2] [1, 2, 3] [1, 2, 3]", "got {got}"
 
@@ -68,13 +68,13 @@ fn w_case(fr: Channel[str]) -> str:
                 ?_: fr.send("no-fault")
                 !e: fr.send(e.message())
             c.send(fn() -> str: "{w}")
-    f := c.recv()
+    f := c.recv() else: panic("c closed")
     return "{f()} {w}"
 
 test fn received_closure_reads_the_live_in_place_write():
     fr := Channel[str](1)
     got := w_case(fr)
-    fault := fr.recv()
+    fault := fr.recv() else: panic("fr closed")
     assert fault == "no-fault", fault
     assert got == "[1, 2] [1, 2]", "got {got}"
 
@@ -90,7 +90,8 @@ fn rhelper() -> int:
     parallel:
         spawn:
             c.send(rg.next() ?? -7)
-    return c.recv()
+    v := c.recv() else: panic("c closed")
+    return v
 
 # The task drives the run's one `rg` while the parent is inside it. CPython:
 # `ValueError('generator already executing')`.

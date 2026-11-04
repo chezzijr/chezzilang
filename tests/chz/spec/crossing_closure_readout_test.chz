@@ -63,7 +63,7 @@ fn route(name: str, f: fn() -> None) -> fn() -> fn() -> None:
         "Channel.recv":
             ch := Channel[fn() -> None](1)
             ch.send(f)
-            return fn(): ch.recv()
+            return fn(): ok(ch.recv())
         "Atomic.load":
             a := Atomic(f)
             return fn(): a.load()
@@ -80,7 +80,8 @@ fn in_task(read: fn() -> fn() -> None) -> str:
     parallel:
         spawn:
             r.send(outcome(read()))
-    return r.recv()
+    v := r.recv() else: panic("r closed")
+    return v
 
 fn list_writer() -> fn() -> None:
     xs := [1]
@@ -149,7 +150,7 @@ test fn a_task_reads_back_its_own_stored_closure_and_the_write_lands():
     parallel:
         spawn:
             r.send(outcome(route("Shared.get", list_writer())()))
-    assert r.recv() == "no-fault"
+    assert r.recv() == ?"no-fault"
 
 # A closure a task built and stored, read by main after the join.
 test fn task_built_closure_read_by_main_lands():
@@ -189,7 +190,7 @@ test fn relay_restore_through_shared_is_the_one_closure():
             h := c.get()[0]
             c.set([h])
             r.send(outcome(c.get()[0]))
-    assert r.recv() == "no-fault"
+    assert r.recv() == ?"no-fault"
 
 # M3.2: a relay through two channels hands on the one closure (Go `closures.go`: `relay 2`).
 test fn relay_through_channels_is_the_one_closure():
@@ -197,9 +198,10 @@ test fn relay_through_channels_is_the_one_closure():
     ch := Channel[fn() -> None](1)
     ch2 := Channel[fn() -> None](1)
     ch.send(g)
-    h := ch.recv()
+    h := ch.recv() else: panic("ch closed")
     ch2.send(h)
-    assert outcome(ch2.recv()) == "no-fault"
+    h2 := ch2.recv() else: panic("ch2 closed")
+    assert outcome(h2) == "no-fault"
 
 # C4: a closure received inside a box closure is the sender's closure.
 test fn recv_inside_box_closure_is_the_senders_closure():
@@ -214,8 +216,8 @@ test fn recv_inside_box_closure_is_the_senders_closure():
                 pass
             r.send(outcome(b.get()[0]))
         spawn:
-            b.update(fn(s): s + [ch.recv()])
-    assert r.recv() == "no-fault"
+            b.update(fn(s): s + [ok(ch.recv())])
+    assert r.recv() == ?"no-fault"
 
 # C3: a closure the box closure builds over FRESH state loses no write, so it must not fault.
 fn make_logger() -> fn() -> None:
@@ -250,7 +252,8 @@ fn relay(name: str, read: fn() -> fn() -> None) -> str:
     parallel:
         spawn:
             r.send(outcome(route(name, read())()))
-    return r.recv()
+    v := r.recv() else: panic("r closed")
+    return v
 
 fn cell(name: str, reader: str, capture: str) -> str:
     read := route(name, writer(capture))

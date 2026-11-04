@@ -338,6 +338,7 @@ main()";
 #[test]
 fn generator_sent_over_channel_into_task_both() {
     let src = "\
+import Iterator from std.iter
 fn gen() -> Iterator[int]:
     yield 10
     yield 20
@@ -348,11 +349,13 @@ fn main():
     gench.send(it)
     parallel:
         spawn:
-            g := gench.recv()
+            g := gench.recv() else: panic(\"gench closed\")
             for x in g:
                 out.send(x)
-    print(out.recv())
-    print(out.recv())
+    got := out.recv() else: panic(\"out closed\")
+    print(got)
+    got2 := out.recv() else: panic(\"out closed\")
+    print(got2)
     for x in it:
         print(x)
 main()";
@@ -860,7 +863,7 @@ fn main():
     ch := Channel[fn() -> int]()
     parallel:
         spawn producer(ch)
-    f := ch.recv()
+    f := ch.recv() else: panic(\"ch closed\")
     print(f())
 main()";
     assert_golden_out(src, "42\n");
@@ -880,7 +883,7 @@ fn main():
     ch := Channel[fn(int) -> int]()
     parallel:
         spawn producer(ch)
-    f := ch.recv()
+    f := ch.recv() else: panic(\"ch closed\")
     print(f(5))
 main()";
     assert_golden_out(src, "105\n");
@@ -898,7 +901,7 @@ fn main():
     fn calc() -> int:
         return n * 2 + nums[0]
     ch.send(calc)
-    f := ch.recv()
+    f := ch.recv() else: panic(\"ch closed\")
     print(f())
 main()";
     assert_golden_out(src, "43\n");

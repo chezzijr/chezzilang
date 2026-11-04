@@ -11,7 +11,7 @@ test fn owner_parked_recv_reports_the_child_fault():
         parallel:
             spawn:
                 panic("task died")
-            ch.recv()
+            _ := ch.recv()
     match r:
         ?_: assert false, "expected the child fault, got Ok"
         !e: assert e.message() == "task died", "got: {e.message()}"
@@ -40,25 +40,30 @@ test fn owner_blocked_bounded_send_reports_the_child_fault():
         ?_: assert false, "expected the child fault, got Ok"
         !e: assert e.message() == "task died", "got: {e.message()}"
 
+# Receive inside a callback: the `else` form needs a statement, so the callback calls this.
+fn take(ch: Channel[int]) -> int:
+    v := ch.recv() else: panic("ch closed")
+    return v
+
 test fn main_recv_in_a_native_map_callback_with_a_live_sender():
     ch := Channel[int]()
     parallel:
         spawn: ch.send(66)
-        assert [1].map(fn(x: int) -> int: x + ch.recv()) == [67]
+        assert [1].map(fn(x: int) -> int: x + take(ch)) == [67]
 
 test fn main_recv_in_a_shared_update_closure_with_a_live_sender():
     ch := Channel[int]()
     s := Shared(0)
     parallel:
         spawn: ch.send(7)
-        s.update(fn(x: int) -> int: x + ch.recv())
+        s.update(fn(x: int) -> int: x + take(ch))
     assert s.get() == 7
 
 test fn main_recv_in_a_generator_resume_with_live_sender():
     ch := Channel[int]()
     fn g() -> Iterator[int]:
         while true:
-            v := ch.recv()
+            v := ch.recv() else: panic("ch closed")
             if v < 0:
                 return
             yield v

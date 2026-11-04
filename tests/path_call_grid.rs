@@ -588,7 +588,7 @@ fn param_cells(out: &mut Vec<Cell>) {
         ),
         (
             "spawn",
-            "fn f[T: Getter](v: T) -> int:\n    r := Channel[int](1)\n    parallel:\n        spawn:\n            r.send(T.get(v))\n    return r.recv()\nprint(f(P(5)))",
+            "fn f[T: Getter](v: T) -> int:\n    r := Channel[int](1)\n    parallel:\n        spawn:\n            r.send(T.get(v))\n    got := r.recv() else: panic(\"r closed\")\n    return got\nprint(f(P(5)))",
             prints("5"),
         ),
         (

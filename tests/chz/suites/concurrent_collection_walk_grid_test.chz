@@ -170,7 +170,7 @@ test fn a_walk_beside_a_remover_visits_every_entry_present_throughout():
     parallel:
         spawn remover(s, m)
         spawn reader(s, m, out)
-    assert out.recv() == [2000, 2000, 2000, 2000, 2000]
+    assert out.recv() == ?[2000, 2000, 2000, 2000, 2000]
     assert s.len() == 2000
     assert m.len() == 2000
 
@@ -194,6 +194,6 @@ test fn a_list_walk_beside_a_pusher_visits_a_whole_prefix():
     parallel:
         spawn pusher(xs)
         spawn list_reader(xs, out)
-    assert out.recv()
+    assert out.recv() == ?true
     assert xs.len() == 2000
     assert xs.fold(0, fn(acc: int, x: int) -> int: acc + x) == 1999 * 2000 / 2

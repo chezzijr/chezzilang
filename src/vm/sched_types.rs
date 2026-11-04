@@ -1248,7 +1248,7 @@ pub(super) enum SockPoll {
 
 /// The outcome of one blocking-`recv` step ([`Vm::chan_recv_step`] / [`Vm::demote_recv_block`]):
 /// a value was dequeued, the channel is closed-and-drained, or the fiber parked (re-runs on wake).
-/// Shared by bare `recv` (`Got` → value, `ClosedEmpty` → "receive on a closed channel" fault) and
+/// Shared by bare `recv` (`Got` → `Ok(v)`, `ClosedEmpty` → `Err(RecvError)`, no fault) and
 /// the `ChanRecvOrClosed` op driving `for v in ch:` (`Got` → `Some(v)`, `ClosedEmpty` → `None`).
 ///
 /// TICKET-185 — `Filled` is a value a sender's `give` put into this receiver's own slot. That

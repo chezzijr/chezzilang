@@ -166,4 +166,4 @@ test fn a_decode_inside_a_spawned_task_takes_its_defaults():
     out := Channel[int](1)
     parallel:
         spawn decode_in_task(out)
-    assert out.recv() == 11, "task decode failed"
+    assert out.recv() == ?11, "task decode failed"

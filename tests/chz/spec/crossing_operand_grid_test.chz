@@ -102,14 +102,14 @@ test fn grid_policy_r1_fn_fresh_literal():
     out := Channel[str](4)
     parallel:
         spawn t189_w([1], out)
-    assert out.recv() == "ok 2"
+    assert out.recv() == ?"ok 2"
 
 test fn grid_policy_r2_fn_copy():
     xs := [1]
     out := Channel[str](4)
     parallel:
         spawn t189_w(xs.copy(), out)
-    assert out.recv() == "ok 2"
+    assert out.recv() == ?"ok 2"
     assert xs == [1]
 
 test fn grid_policy_r3_fn_call_result():
@@ -117,7 +117,7 @@ test fn grid_policy_r3_fn_call_result():
     out := Channel[str](4)
     parallel:
         spawn t189_w(t189_id(xs), out)
-    assert out.recv() == "ok 2"
+    assert out.recv() == ?"ok 2"
     assert xs == [1, 3]
 
 test fn grid_policy_r4_fn_fresh_holding_named():
@@ -125,27 +125,27 @@ test fn grid_policy_r4_fn_fresh_holding_named():
     out := Channel[str](4)
     parallel:
         spawn t189_nested([xs], out)
-    assert out.recv() == "ok 2"
-    assert out.recv() == "ok 2"
+    assert out.recv() == ?"ok 2"
+    assert out.recv() == ?"ok 2"
     assert xs == [1, 3]
 
 test fn grid_policy_r5_fn_keyword_fresh():
     out := Channel[str](4)
     parallel:
         spawn t189_w(out=out, xs=[1])
-    assert out.recv() == "ok 2"
+    assert out.recv() == ?"ok 2"
 
 test fn grid_policy_r6_fn_default_fill():
     out := Channel[str](4)
     parallel:
         spawn t189_dflt(out)
-    assert out.recv() == "ok 1"
+    assert out.recv() == ?"ok 1"
 
 test fn grid_policy_r7_fn_variadic():
     out := Channel[str](4)
     parallel:
         spawn t189_pack(out, 1, 2)
-    assert out.recv() == "ok 3"
+    assert out.recv() == ?"ok 3"
 
 fn t189_pack_elem(out: Channel[str], ...rest: List[int]):
     out.send(t189_try(rest[0]))
@@ -156,7 +156,7 @@ test fn grid_policy_r8_fn_variadic_element_named():
     out := Channel[str](4)
     parallel:
         spawn t189_pack_elem(out, xs)
-    assert out.recv() == "ok 2"
+    assert out.recv() == ?"ok 2"
     assert xs == [1, 3]
 
 fn t189_rebind(ys: List[int], out: Channel[str]):
@@ -169,7 +169,7 @@ test fn grid_policy_r23_fn_rebound_param():
     out := Channel[str](4)
     parallel:
         spawn t189_rebind(xs, out)
-    assert out.recv() == "ok 3"
+    assert out.recv() == ?"ok 3"
     assert xs == [1]
 
 t189_dg: List[int] = [1]
@@ -185,7 +185,7 @@ test fn grid_policy_r53_fn_provider_default_is_the_global():
     out := Channel[str](4)
     parallel:
         spawn t189_dprov(out)
-    assert out.recv() == "ok 2"
+    assert out.recv() == ?"ok 2"
     assert t189_dg == [1, 3]
 
 test fn grid_policy_r14_fn_conditional_named():
@@ -193,14 +193,14 @@ test fn grid_policy_r14_fn_conditional_named():
     out := Channel[str](4)
     parallel:
         spawn t189_cond(xs, out, true)
-    assert out.recv() == "ok 2"
+    assert out.recv() == ?"ok 2"
     assert xs == [1, 3]
 
 test fn grid_policy_r15_fn_conditional_fresh():
     out := Channel[str](4)
     parallel:
         spawn t189_cond([1], out, true)
-    assert out.recv() == "ok 2"
+    assert out.recv() == ?"ok 2"
 
 # ---- spawn obj.m() ----
 
@@ -209,28 +209,28 @@ test fn grid_policy_r13_method_fresh_literal():
     out := Channel[str](4)
     parallel:
         spawn r.w([1], out)
-    assert out.recv() == "ok 2"
+    assert out.recv() == ?"ok 2"
 
 test fn grid_policy_r24_method_default_fill():
     r := T189R(n=1)
     out := Channel[str](4)
     parallel:
         spawn r.dflt(out)
-    assert out.recv() == "ok 1"
+    assert out.recv() == ?"ok 1"
 
 test fn grid_policy_r25_method_variadic():
     r := T189R(n=1)
     out := Channel[str](4)
     parallel:
         spawn r.pack(out, 1, 2)
-    assert out.recv() == "ok 3"
+    assert out.recv() == ?"ok 3"
 
 test fn grid_policy_r26_method_keyword_fresh():
     r := T189R(n=1)
     out := Channel[str](4)
     parallel:
         spawn r.w(out=out, xs=[1])
-    assert out.recv() == "ok 2"
+    assert out.recv() == ?"ok 2"
 
 test fn grid_policy_r27_method_named():
     xs := [1]
@@ -238,7 +238,7 @@ test fn grid_policy_r27_method_named():
     out := Channel[str](4)
     parallel:
         spawn r.w(xs, out)
-    assert out.recv() == "ok 2"
+    assert out.recv() == ?"ok 2"
     assert xs == [1, 3]
 
 # ---- the receiver: named, constructed or a call result, the task holds it by handle (M3.4) ----
@@ -248,14 +248,14 @@ test fn grid_policy_r28_receiver_named():
     out := Channel[str](4)
     parallel:
         spawn c.bump(out)
-    assert out.recv() == "ok 2"
+    assert out.recv() == ?"ok 2"
     assert c.n == 2
 
 test fn grid_policy_r29_receiver_constructor():
     out := Channel[str](4)
     parallel:
         spawn T189C(n=1).bump(out)
-    assert out.recv() == "ok 2"
+    assert out.recv() == ?"ok 2"
 
 # A NAMED list in a constructed field is the parent's list (M3.4).
 struct T190H:
@@ -272,14 +272,14 @@ test fn grid_policy_r29b_constructor_holding_a_named_list():
     out := Channel[str](4)
     parallel:
         spawn T190H(xs=xs).push_inner(out)
-    assert out.recv() == "ok 2"
+    assert out.recv() == ?"ok 2"
     assert xs == [1, 2]
 
 test fn grid_policy_r30_receiver_call_result():
     out := Channel[str](4)
     parallel:
         spawn t189_mk().bump(out)
-    assert out.recv() == "ok 2"
+    assert out.recv() == ?"ok 2"
 
 # ---- spawn lib.f() ----
 
@@ -287,32 +287,32 @@ test fn grid_policy_r10_qualified_fresh_literal():
     out := Channel[str](4)
     parallel:
         spawn lib.push_len([1], out)
-    assert out.recv() == "ok 2"
+    assert out.recv() == ?"ok 2"
 
 test fn grid_policy_r31_qualified_default_fill():
     out := Channel[str](4)
     parallel:
         spawn lib.dflt(out)
-    assert out.recv() == "ok 1"
+    assert out.recv() == ?"ok 1"
 
 test fn grid_policy_r32_qualified_variadic():
     out := Channel[str](4)
     parallel:
         spawn lib.pack(out, 1, 2)
-    assert out.recv() == "ok 3"
+    assert out.recv() == ?"ok 3"
 
 test fn grid_policy_r33_qualified_keyword_fresh():
     out := Channel[str](4)
     parallel:
         spawn lib.push_len(out=out, xs=[1])
-    assert out.recv() == "ok 2"
+    assert out.recv() == ?"ok 2"
 
 test fn grid_policy_r34_qualified_named():
     xs := [1]
     out := Channel[str](4)
     parallel:
         spawn lib.push_len(xs, out)
-    assert out.recv() == "ok 2"
+    assert out.recv() == ?"ok 2"
     assert xs == [1, 3]
 
 # ---- spawn lib.K.f() ----
@@ -321,32 +321,32 @@ test fn grid_policy_r11_static_fresh_literal():
     out := Channel[str](4)
     parallel:
         spawn lib.PolicyK.push_len([1], out)
-    assert out.recv() == "ok 2"
+    assert out.recv() == ?"ok 2"
 
 test fn grid_policy_r35_static_default_fill():
     out := Channel[str](4)
     parallel:
         spawn lib.PolicyK.dflt(out)
-    assert out.recv() == "ok 1"
+    assert out.recv() == ?"ok 1"
 
 test fn grid_policy_r36_static_variadic():
     out := Channel[str](4)
     parallel:
         spawn lib.PolicyK.pack(out, 1, 2)
-    assert out.recv() == "ok 3"
+    assert out.recv() == ?"ok 3"
 
 test fn grid_policy_r37_static_keyword_fresh():
     out := Channel[str](4)
     parallel:
         spawn lib.PolicyK.push_len(out=out, xs=[1])
-    assert out.recv() == "ok 2"
+    assert out.recv() == ?"ok 2"
 
 test fn grid_policy_r38_static_named():
     xs := [1]
     out := Channel[str](4)
     parallel:
         spawn lib.PolicyK.push_len(xs, out)
-    assert out.recv() == "ok 2"
+    assert out.recv() == ?"ok 2"
     assert xs == [1, 3]
 
 # ---- spawn value() ----
@@ -356,7 +356,7 @@ test fn grid_policy_r9_value_fresh_literal():
     out := Channel[str](4)
     parallel:
         spawn g([1], out)
-    assert out.recv() == "ok 2"
+    assert out.recv() == ?"ok 2"
 
 test fn grid_policy_r39_value_default_fill():
     # The omitted slot is filled by the callee, inside the task.
@@ -364,14 +364,14 @@ test fn grid_policy_r39_value_default_fill():
     out := Channel[str](4)
     parallel:
         spawn g(out)
-    assert out.recv() == "ok 1"
+    assert out.recv() == ?"ok 1"
 
 test fn grid_policy_r40_value_variadic():
     g := t189_pack
     out := Channel[str](4)
     parallel:
         spawn g(out, 1, 2)
-    assert out.recv() == "ok 3"
+    assert out.recv() == ?"ok 3"
 
 test fn grid_policy_r41_value_named():
     xs := [1]
@@ -379,7 +379,7 @@ test fn grid_policy_r41_value_named():
     out := Channel[str](4)
     parallel:
         spawn g(xs, out)
-    assert out.recv() == "ok 2"
+    assert out.recv() == ?"ok 2"
     assert xs == [1, 3]
 
 test fn grid_policy_r42_value_keyword_named():
@@ -388,7 +388,7 @@ test fn grid_policy_r42_value_keyword_named():
     out := Channel[str](4)
     parallel:
         spawn g(out=out, xs=xs)
-    assert out.recv() == "ok 2"
+    assert out.recv() == ?"ok 2"
     assert xs == [1, 3]
 
 # ---- spawn: block (a capture is the parent's binding, M3.4) ----
@@ -398,14 +398,14 @@ test fn grid_policy_r43_block_fresh_literal():
     out := Channel[str](4)
     parallel:
         spawn: t189_w([1], out)
-    assert out.recv() == "ok 2"
+    assert out.recv() == ?"ok 2"
 
 test fn grid_policy_r44_block_copy():
     xs := [1]
     out := Channel[str](4)
     parallel:
         spawn: t189_w(xs.copy(), out)
-    assert out.recv() == "ok 2"
+    assert out.recv() == ?"ok 2"
     assert xs == [1]
 
 test fn grid_policy_r45_block_named_capture():
@@ -414,7 +414,7 @@ test fn grid_policy_r45_block_named_capture():
     out := Channel[str](4)
     parallel:
         spawn: h(xs, out)
-    assert out.recv() == "ok 2"
+    assert out.recv() == ?"ok 2"
     assert xs == [1, 3]
 
 # ---- Executor (the job holds its captures by handle, M3.4) ----
@@ -424,7 +424,7 @@ test fn grid_policy_r16_executor_submit_fresh():
     ex := concurrency.Executor()
     _ := ex.submit(fn(): t189_w([1], out))
     ex.shutdown()
-    assert out.recv() == "ok 2"
+    assert out.recv() == ?"ok 2"
 
 test fn grid_policy_r17_executor_submit_named():
     xs := [1]
@@ -433,7 +433,7 @@ test fn grid_policy_r17_executor_submit_named():
     ex := concurrency.Executor()
     _ := ex.submit(fn(): h(xs, out))
     ex.shutdown()
-    assert out.recv() == "ok 2"
+    assert out.recv() == ?"ok 2"
     assert xs == [1, 3]
 
 test fn grid_policy_r46_executor_submit_get_named():
@@ -460,8 +460,10 @@ test fn grid_policy_r18_channel_named_send():
     out := Channel[str](4)
     ch.send(ys)
     parallel:
-        spawn: out.send(t189_try(ch.recv()))
-    assert out.recv() == "ok 2"
+        spawn:
+            v := ch.recv() else: panic("ch closed")
+            out.send(t189_try(v))
+    assert out.recv() == ?"ok 2"
     assert ys == [1, 3]
 
 test fn grid_policy_r48_channel_fresh_send():
@@ -469,8 +471,10 @@ test fn grid_policy_r48_channel_fresh_send():
     out := Channel[str](4)
     ch.send([1])
     parallel:
-        spawn: out.send(t189_try(ch.recv()))
-    assert out.recv() == "ok 2"
+        spawn:
+            v := ch.recv() else: panic("ch closed")
+            out.send(t189_try(v))
+    assert out.recv() == ?"ok 2"
 
 # The task's `xs` is the parent's list (M3.4), and the channel hands it back, so the parent's push
 # lands. Go (`m34go/policy/main.go`): `r49_channel_task_to_parent ok 2 [1 3]`.
@@ -479,7 +483,8 @@ test fn grid_policy_r49_channel_task_to_parent():
     ch := Channel[List[int]](1)
     parallel:
         spawn: ch.send(xs)
-    assert t189_try(ch.recv()) == "ok 2"
+    v := ch.recv() else: panic("ch closed")
+    assert t189_try(v) == "ok 2"
     assert xs == [1, 3]
 
 # ---- Shared / RwShared / Atomic (a read is never marked) ----
@@ -490,7 +495,7 @@ test fn grid_policy_r21_shared_get():
     out := Channel[str](4)
     parallel:
         spawn: out.send(t189_try(s.get()))
-    assert out.recv() == "ok 2"
+    assert out.recv() == ?"ok 2"
     assert s.get() == [1, 3]
 
 test fn grid_policy_r50_rwshared_get():
@@ -498,7 +503,7 @@ test fn grid_policy_r50_rwshared_get():
     out := Channel[str](4)
     parallel:
         spawn: out.send(t189_try(s.get()))
-    assert out.recv() == "ok 2"
+    assert out.recv() == ?"ok 2"
     assert s.get() == [1, 3]
 
 # M3.2: an `Atomic` holds the list itself (Go `policy.go`: `r51 ok 2 [1 3]`).
@@ -507,7 +512,7 @@ test fn grid_policy_r51_atomic_load():
     out := Channel[str](4)
     parallel:
         spawn: out.send(t189_try(a.load()))
-    assert out.recv() == "ok 2"
+    assert out.recv() == ?"ok 2"
     assert a.load() == [1, 3]
 
 test fn grid_policy_r52_shared_store():
@@ -528,14 +533,14 @@ test fn grid_policy_r22_module_global():
     out := Channel[str](4)
     parallel:
         spawn h(out)
-    assert out.recv() == "ok 2"
+    assert out.recv() == ?"ok 2"
     assert t189_g == [1, 3]
 
 # ---- closure capture through a channel (M3.2: the closure itself, so its push lands; Go
 # `policy.go`: `r19 ok 2 [1 2]`, `r20 2 [1 2]`) ----
 
 fn t189_call(c: Channel[fn() -> int], out: Channel[str]):
-    f := c.recv()
+    f := c.recv() else: panic("c closed")
     got := 0
     res := recover:
         got = f()
@@ -548,13 +553,13 @@ test fn grid_policy_r19_closure_other_heap():
     c.send(fn() -> int: t189_add(xs))
     parallel:
         spawn t189_call(c, out)
-    assert out.recv() == "ok 2"
+    assert out.recv() == ?"ok 2"
     assert xs == [1, 2]
 
 test fn grid_policy_r20_closure_same_heap():
     xs := [1]
     c := Channel[fn() -> int](1)
     c.send(fn() -> int: t189_add(xs))
-    f := c.recv()
+    f := c.recv() else: panic("c closed")
     assert f() == 2
     assert xs == [1, 2]

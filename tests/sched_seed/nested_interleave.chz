@@ -7,7 +7,8 @@ fn work() -> str:
                     ch.send("t{i}.{j}")
     out: List[str] = []
     for _ in 0..12:
-        out.push(ch.recv())
+        v := ch.recv() else: panic("ch closed")
+        out.push(v)
     return " ".join(out)
 
 fn main():
@@ -15,5 +16,6 @@ fn main():
     parallel:
         spawn:
             res.send(work())
-    print(res.recv())
+    r := res.recv() else: panic("res closed")
+    print(r)
 main()

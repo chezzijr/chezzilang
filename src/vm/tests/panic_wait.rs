@@ -473,12 +473,12 @@ fn vm_wait_single_arm_recv_park_unchanged_under_parallel() {
     assert_eq!(run(src), "got 7\n");
 }
 
+/// A `recv` on a closed, drained channel answers `!RecvError` and does not fault, and every later
+/// `recv` answers it again (Rust `mpsc::Receiver::recv`; Go's `v, ok := <-ch` gives `ok` false).
 #[test]
-fn vm_channel_recv_on_closed_empty_faults() {
-    let err = run_err(
-        "fn main():\n    ch := Channel[int]()\n    ch.close()\n    print(ch.recv())\nmain()\n",
-    );
-    assert!(err.contains("receive on a closed channel"), "{err}");
+fn vm_channel_recv_on_closed_empty_gives_recv_error() {
+    let src = "fn main():\n    ch := Channel[int]()\n    ch.close()\n    match ch.recv():\n        ?v: print(\"got {v}\")\n        !e: print(e.message())\n    print(ch.recv())\nmain()\n";
+    assert_eq!(run(src), "receiving on a closed channel\n!RecvError()\n");
 }
 
 #[test]
@@ -562,7 +562,8 @@ fn main():
             ch.close()
     total := 0
     for i in 0..3:
-        total = total + done.recv()
+        got := done.recv() else: panic(\"done closed\")
+        total = total + got
     print(total)
 main()
 ";
@@ -664,8 +665,8 @@ fn main():
     parallel:
         spawn send_one(ch, 1)
         spawn send_one(ch, 2)
-    a := ch.recv()
-    b := ch.recv()
+    a := ch.recv() else: panic(\"ch closed\")
+    b := ch.recv() else: panic(\"ch closed\")
     print(a + b)
 main()
 ";
@@ -762,7 +763,7 @@ fn executor_submitted_closure_captures_by_value() {
 /// submitter makes before the gate opens (Go `m34go/captures/main.go`: `job_reads_submitter_push 2`).
 #[test]
 fn executor_cooperative_submit_shares_captures_by_handle() {
-    let src = "import Executor from std.concurrency\nfn main():\n    xs := [1]\n    gate := Channel[int](1)\n    ex := Executor()\n    ex.submit(fn(): print(gate.recv() + xs.len()))\n    xs.push(2)\n    gate.send(0)\n    ex.shutdown()\nmain()\n";
+    let src = "import Executor from std.concurrency\nfn main():\n    xs := [1]\n    gate := Channel[int](1)\n    ex := Executor()\n    fn job():\n        g := gate.recv() else: panic(\"gate closed\")\n        print(g + xs.len())\n    ex.submit(job)\n    xs.push(2)\n    gate.send(0)\n    ex.shutdown()\nmain()\n";
     assert_eq!(
         run_capture(src).expect("vm run"),
         "2\n",

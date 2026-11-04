@@ -928,7 +928,7 @@ impl Checker {
         let outer_std = std::mem::replace(&mut self.current_module_is_stdlib, true);
         self.carrier_seeds = self.harvest_native_enums(&module);
         self.seed_carrier_enums();
-        self.seed_range_struct(&module);
+        self.seed_prelude_structs(&module);
         self.seed_std_protocols();
         for s in &module.stmts {
             if let StmtKind::Native(decl) = &s.kind {
@@ -949,22 +949,26 @@ impl Checker {
         self.seed_carrier_enums();
     }
 
-    /// TICKET-253 — `Range` is a struct of the prelude that every module sees with no `import`
-    /// (the resolver adds `import Range from std.prelude` on the graph path). The graph-less path
-    /// hoists its declaration straight into this checker so `Range(0, 3)` resolves here too.
+    /// TICKET-253 — the [`crate::resolver::PRELUDE_STRUCTS`] (`Range`, `RecvError`) are structs of
+    /// the prelude that every module sees with no `import` (the resolver adds
+    /// `import Range, RecvError from std.prelude` on the graph path). The graph-less path hoists
+    /// their declarations straight into this checker so `Range(0, 3)` resolves here too.
     #[cfg(any(test, feature = "test-api"))]
-    pub(super) fn seed_range_struct(&mut self, module: &crate::ast::Module) {
-        let range_decl: Vec<Stmt> = module
+    pub(super) fn seed_prelude_structs(&mut self, module: &crate::ast::Module) {
+        let names = crate::resolver::PRELUDE_STRUCTS.map(|p| p.name);
+        let decls: Vec<Stmt> = module
             .stmts
             .iter()
-            .filter(|s| matches!(&s.kind, StmtKind::Struct { name, .. } if name == "Range"))
+            .filter(|s| matches!(&s.kind, StmtKind::Struct { name, .. } if names.contains(&name.as_str())))
             .cloned()
             .collect();
         let outer = std::mem::replace(&mut self.current_module_is_stdlib, true);
-        self.hoist(&range_decl);
+        self.hoist(&decls);
         self.current_module_is_stdlib = outer;
-        if let Some(info) = self.structs.get("Range").cloned() {
-            self.bind_imported_struct_name("Range", "Range", &info, true);
+        for name in names {
+            if let Some(info) = self.structs.get(name).cloned() {
+                self.bind_imported_struct_name(name, name, &info, true);
+            }
         }
     }
 

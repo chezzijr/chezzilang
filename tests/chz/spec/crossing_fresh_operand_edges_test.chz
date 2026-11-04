@@ -21,7 +21,7 @@ test fn fresh_literal_holding_a_parent_list_writes_the_parents_list():
     out := Channel[str](1)
     parallel:
         spawn t179e_nested([xs], out)
-    assert out.recv() == "ok,ok"
+    assert out.recv() == ?"ok,ok"
     assert xs == [1, 9]
 
 fn t179e_kw(xs: List[int], out: Channel[str]):
@@ -35,10 +35,10 @@ test fn keyword_spawn_passes_by_handle():
     f := t179e_kw
     parallel:
         spawn f(out=out, xs=[1])
-    assert out.recv() == "ok"
+    assert out.recv() == ?"ok"
     parallel:
         spawn f(out=out, xs=named)
-    assert out.recv() == "ok"
+    assert out.recv() == ?"ok"
     assert named == [1, 9]
 
 fn t179e_wide30(a0: int, a1: int, a2: int, a3: int, a4: int, a5: int, a6: int, a7: int, a8: int, a9: int, a10: int, a11: int, a12: int, a13: int, a14: int, a15: int, a16: int, a17: int, a18: int, a19: int, a20: int, a21: int, a22: int, a23: int, a24: int, a25: int, a26: int, a27: int, a28: int, a29: int, xs: List[int], out: Channel[str]):
@@ -48,7 +48,7 @@ test fn a_fresh_arg_at_bit_31_is_writable():
     out := Channel[str](1)
     parallel:
         spawn t179e_wide30(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, [1], out)
-    assert out.recv() == "ok"
+    assert out.recv() == ?"ok"
 
 fn t179e_gen() -> Iterator[int]:
     acc: List[int] = []
@@ -66,7 +66,7 @@ test fn started_generator_captured_by_a_spawn_block_runs():
             for v in g:
                 n += v
             out.send(n)
-    assert out.recv() == 5
+    assert out.recv() == ?5
     assert g.next() == None
 
 struct T179eSink:
@@ -90,4 +90,4 @@ test fn started_generator_arg_of_a_method_spawn_runs():
     s := T179eSink(tag=1)
     parallel:
         spawn s.drain(g, out)
-    assert out.recv() == "5"
+    assert out.recv() == ?"5"

@@ -282,9 +282,15 @@ Each group below is one fact decided in two or more places (grouped 2026-10-16).
     `wait: every arm is off ...`. `tests/chz/go/` holds faithful ports of Go 1.27.0 `test/chan`
     (license in its `NOTICE`), run at both worker counts. Done: 17 of 20 files (select3 in part).
     The powser2 port found that a protocol method could not name its own protocol (fixed).
-    Next: a plan for the closed-channel rules (Go/Rust give the receiver a closed value and let
-    select pick that arm; Chezzi faults and skips it). Not ported: select5 (a generator), perm
+    Next: the closed-channel rules (item 28). Not ported: select5 (a generator), perm
     (directional channels), select2's heap check. Grid: `tests/chz/spec/wait_guard_test.chz`.
+28. **`Channel.recv` returns `T!RecvError` on a closed channel (D1, done 2026-11-04).** Buffered
+    values come first; then every `recv` of a closed, drained channel gives `!RecvError`, with no
+    fault (Rust `recv` -> `Err(RecvError)`, Go `v, ok := <-ch`). `RecvError` is a prelude struct;
+    `message()` is `receiving on a closed channel`. A bare `ch.recv()` statement warns; write
+    `_ := ch.recv()`. `std.concurrency.broadcast` `Receiver.recv` gives `!BroadcastError.Closed` /
+    `.Lagged(l)` (tokio). Next (D2): a `wait:` recv arm on a closed channel is picked and binds
+    the result. Grid: `tests/chz/spec/channel_closed_recv_test.chz`.
 
 ### Open questions for the owner
 

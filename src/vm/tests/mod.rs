@@ -18,6 +18,21 @@ fn assert_mc_parity(src: &str, expected: &str) {
     assert_eq!(run(src), expected);
 }
 
+/// The value inside the `?v` (`Ok`) that `recv` answers, read off `vm`'s heap; panics on `!e`.
+fn recv_ok(vm: &Vm, got: Value) -> Value {
+    let (variant, payload) = vm
+        .heap
+        .get(got.as_obj().expect("recv answers an enum"))
+        .as_enum()
+        .expect("recv answers an enum");
+    assert_eq!(
+        variant,
+        crate::base::op::VID_OK,
+        "recv answered `!e`, not `?v`"
+    );
+    payload.get(0)
+}
+
 /// A rendezvous (cap-0) channel core (TICKET-028).
 fn cap0_core() -> Arc<ChannelCore> {
     Arc::new(ChannelCore {
@@ -51,6 +66,7 @@ pub(crate) fn empty_program() -> Program {
         protos: vec![],
         structs: Default::default(),
         range_key: "Range".to_string(),
+        recv_error_key: "RecvError".to_string(),
         // What the compiler reads from the `native fn print` declaration in `std/prelude.chz`
         // (`print_defaults_come_from_the_prelude_declaration` compares the two).
         print_defaults: [" ".to_string(), "\n".to_string()],

@@ -742,7 +742,7 @@ fn d4_rule3_declines() {
     for src in [
         "fn run(g: fn() -> None):\n    print(\"not called\")\nfn f():\n    xs := [1]\n    g := fn(): xs.push(3)\n    parallel:\n        spawn run(g)\n    print(xs)\nf()\n",
         "fn run(g: fn() -> None):\n    print(\"not called\")\nfn f():\n    xs := [1]\n    parallel:\n        spawn run(fn(): xs.push(3))\n    print(xs)\nf()\n",
-        "fn f():\n    xs := [1]\n    ch := Channel[fn() -> None](1)\n    ch.send(fn(): xs.push(2))\n    g := ch.recv()\n    print(xs)\n    print(g)\nf()\n",
+        "fn f():\n    xs := [1]\n    ch := Channel[fn() -> None](1)\n    ch.send(fn(): xs.push(2))\n    g := ch.recv() else: panic(\"ch closed\")\n    print(xs)\n    print(g)\nf()\n",
         "fn f():\n    xs := [1]\n    g := fn(): print(xs[0])\n    parallel:\n        spawn g()\nf()\n",
         "fn f():\n    xs := [1]\n    parallel:\n        spawn:\n            g := fn(): xs.push(2)\n            g()\n    print(xs)\nf()\n",
         "fn f():\n    xs := [1]\n    g := fn(): xs.push(2)\n    g = fn(): print(1)\n    parallel:\n        spawn g()\n    print(xs)\nf()\n",
@@ -760,7 +760,7 @@ fn d4_rule3_declines() {
 #[test]
 fn a_module_global_written_in_a_task_is_legal_where_a_received_closure_reads_it() {
     ok(
-        "import Atomic, AtomicInt, Executor, RwShared, Shared from std.concurrency\ng: List[int] = [1]\nfn main():\n    c := Channel[fn() -> str](1)\n    parallel:\n        spawn:\n            g.push(2)\n            c.send(fn() -> str: \"{g}\")\n    f := c.recv()\n    print(\"{f()} {g}\")\nmain()\n",
+        "import Atomic, AtomicInt, Executor, RwShared, Shared from std.concurrency\ng: List[int] = [1]\nfn main():\n    c := Channel[fn() -> str](1)\n    parallel:\n        spawn:\n            g.push(2)\n            c.send(fn() -> str: \"{g}\")\n    f := c.recv() else: panic(\"c closed\")\n    print(\"{f()} {g}\")\nmain()\n",
     );
 }
 
@@ -811,7 +811,7 @@ fn a_granular_read_of_a_granular_task_write_declines() {
     // the value out on a Channel. A warning that fires after its own fix is applied is the worst
     // possible outcome for the rule's credibility.
     ok(
-        "struct P:\n    count: int\n    name: str\nfn f(p: P, ch: Channel[int]):\n    parallel:\n        spawn:\n            p.count = p.count + 1\n            ch.send(p.count)\n    print(p.name)\n    print(ch.recv())\nf(P(0, \"bob\"), Channel[int](4))\n",
+        "struct P:\n    count: int\n    name: str\nfn f(p: P, ch: Channel[int]):\n    parallel:\n        spawn:\n            p.count = p.count + 1\n            ch.send(p.count)\n    print(p.name)\n    v := ch.recv() else: panic(\"ch closed\")\n    print(v)\nf(P(0, \"bob\"), Channel[int](4))\n",
     );
     // Different map key — the write side's own stated example, now answered the same way on the read
     // side. Correctly prints 7.
@@ -1027,7 +1027,7 @@ fn a_projected_write_through_a_handle_a_task_local_or_before_the_nursery_stays_s
     );
     // H4 — Channel (a global reserved type, no import needed).
     no_warn(
-        "fn main():\n    chs := [Channel[int](1)]\n    parallel:\n        spawn:\n            chs[0].send(7)\n    print(chs[0].recv())\nmain()\n",
+        "fn main():\n    chs := [Channel[int](1)]\n    parallel:\n        spawn:\n            chs[0].send(7)\n    v := chs[0].recv() else: panic(\"chs[0] closed\")\n    print(v)\nmain()\n",
     );
     // H5 — a Shared behind a struct field.
     entry_no_warn(
@@ -1079,7 +1079,7 @@ fn a_write_through_a_handle_type_checks_clean() {
         "import Shared from std.concurrency\nfn f():\n    s := Shared(0)\n    parallel:\n        spawn:\n            s.update(fn(x: int) -> int: x + 1)\n    print(s.get())\nf()\n",
     );
     entry_no_warn(
-        "fn f():\n    ch := Channel[int](1)\n    parallel:\n        spawn:\n            ch.send(7)\n    print(ch.recv())\nf()\n",
+        "fn f():\n    ch := Channel[int](1)\n    parallel:\n        spawn:\n            ch.send(7)\n    v := ch.recv() else: panic(\"ch closed\")\n    print(v)\nf()\n",
     );
     entry_no_warn(
         "import RwShared from std.concurrency\nfn f():\n    s := RwShared(0)\n    parallel:\n        spawn:\n            s.set(3)\n    print(s.get())\nf()\n",

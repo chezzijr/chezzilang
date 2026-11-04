@@ -38,7 +38,7 @@ fn drain_sum(ch: Channel[List[int]], n: int) -> int:
     s := 0
     for _ in 0..n:
         _ := busy(1)
-        s = s + ch.recv()[1]
+        s = s + must(ch.recv())[1]
     return s
 
 fn wait_fresh(box: Shared[Channel[List[int]]], other: Channel[List[int]], x: int) -> int:
@@ -89,7 +89,7 @@ test fn a_demoted_recv_on_a_fresh_handle_gets_its_list():
     out := Shared([0])
     parallel:
         spawn:
-            out.set([1, 2, 3].map(fn(x: int) -> int: box.get().recv()[1] + x))
+            out.set([1, 2, 3].map(fn(x: int) -> int: must(box.get().recv())[1] + x))
         spawn feed(ch, 3)
     assert out.get() == [11, 22, 33]
 
@@ -109,8 +109,8 @@ test fn main_recv_in_place_on_a_fresh_handle_gets_its_list():
     box := Shared(ch)
     ex := Executor()
     _ := ex.submit(fn(): feed(ch, 2))
-    assert box.get().recv() == [1, 10]
-    assert box.get().recv() == [2, 20]
+    assert box.get().recv() == ?[1, 10]
+    assert box.get().recv() == ?[2, 20]
     ex.shutdown()
 
 test fn a_demoted_wait_with_arms_gets_its_list():
@@ -143,10 +143,10 @@ test fn a_guard_wait_holds_the_only_handle_of_its_box():
     out := Shared([0])
     parallel:
         spawn:
-            ch.recv().update(add_slowly)
+            must(ch.recv()).update(add_slowly)
         spawn:
             _ := busy(1)
-            out.set(ch.recv().read(same))
+            out.set(must(ch.recv()).read(same))
     assert out.get() == [0, 1]
 
 test fn main_send_in_place_on_a_fresh_handle_delivers_its_list():
@@ -204,7 +204,7 @@ test fn a_helping_join_keeps_the_joiners_values():
             out.send(["{busy(2)}"])
         spawn:
             out.send(["{busy(3)}"])
-    got := [out.recv()[0], out.recv()[0]]
+    got := [must(out.recv())[0], must(out.recv())[0]]
     assert keep == ["19900", "k"]
     assert got.contains("39800") and got.contains("59700")
 

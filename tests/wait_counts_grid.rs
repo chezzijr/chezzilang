@@ -41,8 +41,12 @@ fn started(g: Channel[int]) -> int:
     g.send(1)
     return 0
 
+fn take(c: Channel[int]) -> int:
+    v := c.recv() else: panic(\"c closed\")
+    return v
+
 fn hold(s: Shared[int], c: Channel[int], g: Channel[int]):
-    s.update(fn(x: int) -> int: x + started(g) + c.recv())
+    s.update(fn(x: int) -> int: x + started(g) + take(c))
 
 fn blockr(c: Channel[int]):
     _ := c.recv()
@@ -63,7 +67,10 @@ fn runner_cb(c: Channel[int], s: Shared[int], g: Channel[int]):
 /// The body of `fn op` for each wait kind, and the feeder that ends it in a live cell.
 fn op_body(op: &str) -> (&'static str, &'static str) {
     match op {
-        "recv" => ("    return c.recv()\n", "feed"),
+        "recv" => (
+            "    v := c.recv() else: panic(\"c closed\")\n    return v\n",
+            "feed",
+        ),
         "send" => ("    c.send(1)\n    c.send(2)\n    return 0\n", "drain"),
         "wait" => (
             "    wait:\n        v := c.recv():\n            return v\n    return 0\n",

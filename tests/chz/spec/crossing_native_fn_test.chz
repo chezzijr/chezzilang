@@ -9,7 +9,7 @@ import Shared from std.concurrency
 test fn native_crosses_channel():
     ch := Channel[fn(float) -> float](1)
     ch.send(math.sqrt)
-    f := ch.recv()
+    f := ch.recv() else: panic("ch closed")
     assert f(25.0) == 5.0
 
 # Store a native fn in a Shared box, read it back, call it.

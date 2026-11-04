@@ -89,7 +89,7 @@ test fn channel_send_keeps_one_binding():
     assert c.get() == 1
     ch := Channel[Ctr](1)
     ch.send(c)
-    d := ch.recv()
+    d := ch.recv() else: panic("ch closed")
     assert d.get() == 1
     d.inc()
     assert d.get() == 2
@@ -104,7 +104,7 @@ test fn channel_send_keeps_one_binding():
 test fn struct_field_keeps_one_binding():
     ch := Channel[Ctr](1)
     ch.send(make())
-    d := ch.recv()
+    d := ch.recv() else: panic("ch closed")
     d.inc()
     assert d.get() == 1
     e := concurrency.Shared(0).read(fn(s): make())
@@ -119,7 +119,8 @@ test fn cursor_keeps_one_binding():
     ch := Channel[Iterator[fn() -> int]](1)
     ch.send(pair_cursor())
     fs: List[fn() -> int] = []
-    for f in ch.recv():
+    cur := ch.recv() else: panic("ch closed")
+    for f in cur:
         fs.push(f)
     fs[0]()
     assert fs[1]() == 1
@@ -147,14 +148,14 @@ test fn channel_send_to_a_different_task_shares_the_binding():
     done := Channel[str](1)
     parallel:
         spawn:
-            d := ch.recv()
+            d := ch.recv() else: panic("ch closed")
             res := recover:
                 d.inc()
             match res:
                 ?_: done.send("no-fault")
                 !e: done.send(e.message())
         ch.send(c)
-    msg := done.recv()
+    msg := done.recv() else: panic("done closed")
     assert msg == "no-fault", msg
     assert c.get() == 1
 
@@ -171,7 +172,7 @@ test fn spawn_named_args_keep_one_binding():
             !e: out.send(e.message())
     parallel:
         spawn work(c.inc, c.get, r)
-    got := r.recv()
+    got := r.recv() else: panic("r closed")
     assert got == "no-fault", got
     assert c.get() == 1
 
@@ -188,7 +189,7 @@ test fn spawn_block_two_captures_keeps_one_binding():
             match res:
                 ?_: r.send("no-fault")
                 !e: r.send(e.message())
-    got := r.recv()
+    got := r.recv() else: panic("r closed")
     assert got == "no-fault", got
     assert gg() == 1
 
@@ -206,9 +207,10 @@ test fn module_global_snapshot_keeps_one_binding():
                 ?_: r.send("no-fault")
                 !e: r.send(e.message())
             seen.send(_w74g())
-    got := r.recv()
+    got := r.recv() else: panic("r closed")
     assert got == "no-fault", got
-    assert seen.recv() == before + 1, "the sibling global closure missed the write"
+    s := seen.recv() else: panic("seen closed")
+    assert s == before + 1, "the sibling global closure missed the write"
     assert _w74g() == before + 1, "the parent missed the task's write"
 
 # W7-4 — a module global beside a cycle-parked generator (see `_w74mk` above): the task calls the
@@ -218,7 +220,7 @@ test fn discarded_snapshot_walk_rolls_back_its_cell_ids():
     parallel:
         spawn:
             r.send(_w74size())
-    assert r.recv() == 1
+    assert r.recv() == ?1
 
 # FENCE — TICKET-100 inverted the DATA DAG rule: an acyclic alias reached twice is now ONE object on
 # the far side, same as a cell (docs/reference/concurrency/). Goes red if a store ever stops back-referencing
@@ -228,7 +230,7 @@ test fn data_dag_alias_is_one_object():
     pair := [xs, xs]
     ch := Channel[List[List[int]]](1)
     ch.send(pair)
-    p := ch.recv()
+    p := ch.recv() else: panic("ch closed")
     p[0].push(2)
     assert p[0].len() == 2
     assert p[1].len() == 2
@@ -249,9 +251,9 @@ test fn separate_tasks_share_the_parents_binding():
     parallel:
         spawn:
             r2.send(c.get())
-    got := r.recv()
+    got := r.recv() else: panic("r closed")
     assert got == "no-fault", got
-    assert r2.recv() == 1
+    assert r2.recv() == ?1
     assert c.get() == 1
 
 # W7-4c — a task-local binding of a module global's closure and the global itself are one
@@ -269,9 +271,9 @@ test fn module_global_plus_local_capture_shares_its_binding():
                 ?_: r.send("no-fault")
                 !e: r.send(e.message())
             r.send("{gg()}")
-    got := r.recv()
+    got := r.recv() else: panic("r closed")
     assert got == "no-fault", got
-    read := r.recv()
+    read := r.recv() else: panic("r closed")
     assert read == "{before + 1}", "read after the write saw {read}"
 
 # W7-4 REGRESSION — the `RwShared` read views once drained one stored wire through many rebuilds and
@@ -327,7 +329,7 @@ test fn data_dag_alias_across_spawn_args_lands():
             !e: out.send(e.message())
     parallel:
         spawn work(xs, xs, r)
-    got := r.recv()
+    got := r.recv() else: panic("r closed")
     assert got == "no-fault", got
     assert xs == [1, 2]
 
@@ -362,7 +364,9 @@ test fn rwshared_view_survives_a_concurrent_writer():
                     ?f: hits = hits + f()
                     None: assert false, "the writer always stores a 2-element list"
             d.send(2)
-    assert d.recv() + d.recv() == 3
+    a := d.recv() else: panic("d closed")
+    b := d.recv() else: panic("d closed")
+    assert a + b == 3
 
 # W7-4 REVIEW (charge 3) — M3.4: a spawn walks none of its values, so an arg deeper than the
 # structural cap and a callee capture that is a generator in a reference cycle both pass by handle

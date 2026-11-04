@@ -7,6 +7,7 @@ fn main():
                 for j in 0..3:
                     ch.send("t{i}.{j}")
         for _ in 0..12:
-            out.push(ch.recv())
+            v := ch.recv() else: panic("ch closed")
+            out.push(v)
     print(" ".join(out))
 main()

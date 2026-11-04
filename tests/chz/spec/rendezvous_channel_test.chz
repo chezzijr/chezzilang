@@ -44,7 +44,7 @@ test fn try_recv_sees_a_parked_rendezvous_sender():
                     got.set(-1)
                     # bug present: the value is still parked with the sender — drain it with a
                     # blocking recv so the nursery can finish instead of deadlocking.
-                    rz.recv()
+                    _ := rz.recv()
     assert got.get() == 7, "try_recv missed a parked rendezvous sender"
 
 test fn rendezvous_try_send_declines_with_no_receiver():
@@ -63,7 +63,7 @@ test fn rendezvous_send_hands_off_to_a_waiting_receiver():
         spawn:
             i := 0
             while i < 5:
-                v := ch.recv()
+                v := ch.recv() else: panic("ch closed")
                 total.update(fn(t: int) -> int: t + v)
                 i = i + 1
     assert total.get() == 10
@@ -81,7 +81,7 @@ test fn rendezvous_send_never_queues_ahead():
         spawn:
             i := 0
             while i < 5:
-                ch.recv()
+                _ := ch.recv()
                 i = i + 1
     assert max_len.get() <= 1
 
@@ -109,7 +109,7 @@ test fn len_is_zero_while_a_rendezvous_sender_is_parked():
         spawn:
             time.sleep_ms(150)
             observed_len.set(rz.len())
-            rz.recv()
+            _ := rz.recv()
     assert observed_len.get() == 0, "len() must exclude a parked rendezvous sender's deposit"
 
 # TICKET-042(a) — a taken deposit must not re-enter the normal send path and enqueue a second
@@ -181,7 +181,9 @@ test fn rendezvous_send_in_a_callback_blocks_until_a_receiver_takes_it():
     parallel:
         spawn:
             out.set("{[1].map(fn(x: int) -> int: send_one(rz, x))}")
-        spawn: got.set(rz.recv())
+        spawn:
+            v := rz.recv() else: panic("rz closed")
+            got.set(v)
     assert out.get() == "[1]", out.get()
     assert got.get() == 1
 
@@ -200,7 +202,8 @@ test fn a_parked_bounded_sender_completes_when_the_receiver_takes_then_closes():
             i := 0
             while i < 200000:
                 i += 1
-            out.send(ch.recv())
+            v := ch.recv() else: panic("ch closed")
+            out.send(v)
             ch.close()
             for v in ch:
                 out.send(v)
@@ -247,7 +250,9 @@ test fn try_send_hands_off_to_a_parked_receiver():
     got := Shared(0)
     tries := Shared(0)
     parallel:
-        spawn: got.set(ch.recv())
+        spawn:
+            v := ch.recv() else: panic("ch closed")
+            got.set(v)
         spawn:
             n := 1
             while not ch.try_send(5):

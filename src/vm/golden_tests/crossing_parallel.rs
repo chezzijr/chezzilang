@@ -20,7 +20,7 @@ fn mk() -> fn(int) -> int:
     return r
 ch := Channel[fn(int) -> int](2)
 ch.send(mk())
-k := ch.recv()
+k := ch.recv() else: panic("ch closed")
 n = 42
 print("direct : {k(3)}")
 "#;
@@ -49,15 +49,17 @@ fn mk() -> fn() -> fn() -> int:
 ch := Channel[fn() -> fn() -> int](1)
 parallel:
     spawn:
-        o := ch.recv()
+        o := ch.recv() else: panic("ch closed")
         _ := recover:
             n = 100
         d := o()
         res.send(d())
         res.send(n)
     ch.send(mk())
-print("nested closure sees : {res.recv()}")
-print("plain global read   : {res.recv()}")
+got := res.recv() else: panic("res closed")
+print("nested closure sees : {got}")
+got2 := res.recv() else: panic("res closed")
+print("plain global read   : {got2}")
 "#;
     let out = golden_entry(src);
     assert_eq!(
@@ -86,15 +88,16 @@ res := Channel[int](1)
 parallel:
     spawn: ch1.send(mk())
     spawn:
-        k := ch1.recv()
+        k := ch1.recv() else: panic("ch1 closed")
         _ := recover:
             n = 999
         ch2.send(k)
     spawn:
-        k2 := ch2.recv()
+        k2 := ch2.recv() else: panic("ch2 closed")
         res.send(k2(3))
 
-print("result: {res.recv()}")
+got := res.recv() else: panic("res closed")
+print("result: {got}")
 "#;
     let out = golden_entry(src);
     assert_eq!(
@@ -123,14 +126,16 @@ parallel:
     spawn:
         _ := recover:
             n = 5
-        k := ch.recv()
+        k := ch.recv() else: panic("ch closed")
         res.send(k())
         res.send(n)
     spawn:
         ch.send(mk())
 
-print("closure sees : {res.recv()}")
-print("task read    : {res.recv()}")
+got := res.recv() else: panic("res closed")
+print("closure sees : {got}")
+got2 := res.recv() else: panic("res closed")
+print("task read    : {got2}")
 "#;
     let out = golden_entry(src);
     assert_eq!(
@@ -161,14 +166,16 @@ parallel:
     spawn:
         _ := recover:
             n = 5
-        k := ch.recv()
+        k := ch.recv() else: panic("ch closed")
         res.send(k())
         res.send(n)
     spawn:
         ch.send(mk())
 
-print("closure sees : {res.recv()}")
-print("task read    : {res.recv()}")
+got := res.recv() else: panic("res closed")
+print("closure sees : {got}")
+got2 := res.recv() else: panic("res closed")
+print("task read    : {got2}")
 "#;
     let out = golden_entry(src);
     assert_eq!(
@@ -198,12 +205,13 @@ fn mk() -> fn() -> int:
 parallel:
     spawn:
         _ := recover: xs.push(9)
-        k := ch.recv()
+        k := ch.recv() else: panic("ch closed")
         res.send("{xs} len {k()}")
     spawn:
         ch.send(mk())
 
-print(res.recv())
+got := res.recv() else: panic("res closed")
+print(got)
 "#;
     let out = golden_entry(src);
     assert_eq!(
@@ -230,11 +238,14 @@ fn mk() -> fn() -> int:
     return r
 
 parallel:
-    spawn: res.send(ch.recv()())
+    spawn:
+        f := ch.recv() else: panic("ch closed")
+        res.send(f())
     n = 7
     spawn: ch.send(mk())
 
-print("closure sees : {res.recv()}")
+got := res.recv() else: panic("res closed")
+print("closure sees : {got}")
 "#;
     let out = golden_entry(src);
     assert_eq!(
@@ -265,13 +276,14 @@ parallel:
             n = 999
         ch1.send(mk())
     spawn:
-        k := ch1.recv()
+        k := ch1.recv() else: panic("ch1 closed")
         ch2.send(k)
     spawn:
-        k2 := ch2.recv()
+        k2 := ch2.recv() else: panic("ch2 closed")
         res.send(k2(3))
 
-print("result: {res.recv()}")
+got := res.recv() else: panic("res closed")
+print("result: {got}")
 "#;
     let out = golden_entry(src);
     assert_eq!(
@@ -296,7 +308,8 @@ fn mk() -> fn() -> None:
     return f
 ch := Channel[fn() -> None](2)
 ch.send(mk())
-ch.recv()()
+got := ch.recv() else: panic("ch closed")
+got()
 print("module xs: {xs}")
 "#;
     let out = golden_entry(src);
@@ -329,9 +342,9 @@ fn producer():
 fn main():
     parallel:
         spawn producer()
-    indirect := c1.recv()
+    indirect := c1.recv() else: panic("c1 closed")
     print("indirect before: {indirect()}")
-    direct := c2.recv()
+    direct := c2.recv() else: panic("c2 closed")
     print("indirect after : {indirect()}")
     print("direct         : {direct()}")
 main()
@@ -366,7 +379,7 @@ fn producer():
 fn main():
     parallel:
         spawn producer()
-    f := c.recv()
+    f := c.recv() else: panic("c closed")
     print("late load: {f()}")
 main()
 "#;
@@ -397,7 +410,8 @@ fn producer():
 fn main():
     parallel:
         spawn producer()
-    print("nested-fn indirect: {c.recv()()}")
+    got := c.recv() else: panic("c closed")
+    print("nested-fn indirect: {got()}")
 main()
 "#;
     let out = golden_entry(src);
@@ -428,8 +442,8 @@ fn producer():
 fn main():
     parallel:
         spawn producer()
-    f := c.recv()
-    g := c2.recv()
+    f := c.recv() else: panic("c closed")
+    g := c2.recv() else: panic("c2 closed")
     print("assigned global via closure : {f()}")
     print("in-place global via closure : {g()}")
 main()
@@ -466,8 +480,8 @@ fn producer():
 fn main():
     parallel:
         spawn producer()
-    f := c.recv()
-    g := c2.recv()
+    f := c.recv() else: panic("c closed")
+    g := c2.recv() else: panic("c2 closed")
     print("index-assigned global via closure : {f()}")
     print("field-assigned global via closure : {g()}")
 main()
@@ -501,7 +515,8 @@ fn producer():
 fn main():
     parallel:
         spawn producer()
-    print("user-method mutation via closure: {c.recv()()}")
+    got := c.recv() else: panic("c closed")
+    print("user-method mutation via closure: {got()}")
 main()
 "#;
     let out = golden_entry(src);
@@ -526,12 +541,13 @@ fn main():
     done := Channel[str](1)
     parallel:
         spawn:
-            f := c.recv()
+            f := c.recv() else: panic("c closed")
             done.send(f())
         xs := g
         xs.push(2)
         c.send(fn() -> str: "{g}")
-    print("main-as-sender alias: {done.recv()}")
+    got := done.recv() else: panic("done closed")
+    print("main-as-sender alias: {got}")
 main()
 "#;
     let out = golden_entry(src);
@@ -565,7 +581,8 @@ fn producer():
 fn main():
     parallel:
         spawn producer()
-    print("struct alias: {c.recv()()}")
+    got := c.recv() else: panic("c closed")
+    print("struct alias: {got()}")
 main()
 "#;
     let out = golden_entry(src);
@@ -599,7 +616,8 @@ fn producer():
 fn main():
     parallel:
         spawn producer()
-    print("grandchild alias: {c.recv()()}")
+    got := c.recv() else: panic("c closed")
+    print("grandchild alias: {got()}")
 main()
 "#;
     let out = golden_entry(src);
@@ -626,11 +644,12 @@ fn main():
     inner := gl[0]
     parallel:
         spawn:
-            f := c.recv()
+            f := c.recv() else: panic("c closed")
             done.send(f())
         inner.push(2)
         c.send(fn() -> str: "{inner} {gl[0]}")
-    print("sender-push alias: {done.recv()}")
+    got := done.recv() else: panic("done closed")
+    print("sender-push alias: {got}")
 main()
 "#;
     let out = golden_entry(src);
@@ -658,12 +677,13 @@ fn main():
     parallel:
         spawn:
             _ := recover: xs[0].push(9)
-            k := ch.recv()
+            k := ch.recv() else: panic("ch closed")
             res.send("{xs} len {k()}")
         a := xs
         n := a.len()
         ch.send(fn() -> int: xs.len() + n)
-    print(res.recv())
+    got := res.recv() else: panic("res closed")
+    print(got)
 main()
 "#;
     let out = golden_entry(src);
@@ -697,10 +717,11 @@ fn main():
             !_: return "fault"
     parallel:
         spawn:
-            f := c.recv()
+            f := c.recv() else: panic("c closed")
             done.send(f())
         c.send(work)
-    print("channel capture alias: {done.recv()}")
+    got := done.recv() else: panic("done closed")
+    print("channel capture alias: {got}")
 main()
 "#;
     let out = golden_entry(src);
@@ -788,8 +809,8 @@ fn main():
         x := inner.pop()
         spawn:
             r.send("{inner} {gl} {y}")
-    a := r.recv()
-    b := r.recv()
+    a := r.recv() else: panic("r closed")
+    b := r.recv() else: panic("r closed")
     print(if a == "first": b else: a)
 main()
 "#;
@@ -818,12 +839,13 @@ fn main():
     r := Channel[str](1)
     parallel:
         spawn:
-            m := c.recv()
+            m := c.recv() else: panic("c closed")
             m[0].push(5)
             _ := recover: inner.push(2)
             r.send("{m} {inner} {gl[0]}")
         c.send([[7]])
-    print(r.recv())
+    got := r.recv() else: panic("r closed")
+    print(got)
 main()
 "#;
     let out = golden_entry(src);

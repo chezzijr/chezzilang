@@ -14,7 +14,7 @@ test fn send_then_write_is_seen_by_the_receiver():
     m := {"a": 1}
     ch.send(m)
     m["b"] = 2
-    got := ch.recv()
+    got := ch.recv() else: panic("ch closed")
     assert got.len() == 2
     got["c"] = 3
     assert m.len() == 3
@@ -35,7 +35,8 @@ test fn a_wait_send_arm_holds_the_handle():
         ch.send(m):
             pass
     m["b"] = 2
-    assert ch.recv().len() == 2
+    got := ch.recv() else: panic("ch closed")
+    assert got.len() == 2
 
 test fn a_wait_recv_arm_holds_the_handle():
     ch := Channel[Map[str, int]](1)
@@ -67,7 +68,7 @@ test fn list_of_a_channel_holds_the_handle():
     assert xs[0].len() == 2
 
 fn m32_take(rv: Channel[Map[str, int]], done: Channel[bool]):
-    r := rv.recv()
+    r := rv.recv() else: panic("rv closed")
     r["b"] = 2
     done.send(true)
 
@@ -78,7 +79,7 @@ test fn a_rendezvous_hand_off_holds_the_handle():
     parallel:
         spawn m32_take(rv, done)
         rv.send(m)
-        _ := done.recv()
+        _ := done.recv() else: panic("done closed")
     assert m.len() == 2
 
 test fn atomic_init_and_store_hold_the_handle():
@@ -132,7 +133,7 @@ struct M32Pair:
 
 fn m32_hold_body(v: int, ready: Channel[int], release: Channel[int]) -> int:
     ready.send(1)
-    _ := release.recv()
+    _ := release.recv() else: panic("release closed")
     return v
 
 fn m32_hold(b: Shared[int], ready: Channel[int], release: Channel[int]):
@@ -155,7 +156,7 @@ test fn a_print_snapshots_an_atomic_before_it_waits():
     parallel:
         spawn m32_hold(b, ready, release)
         spawn m32_swap(root, b, release)
-        _ := ready.recv()
+        _ := ready.recv() else: panic("ready closed")
         got = "{root}"
     old := "Shared(M32Pair(a=Atomic(['x7']), b=Shared(1)))"
     new := "Shared(M32Pair(a=Atomic(['new']), b=Shared(1)))"
@@ -167,11 +168,13 @@ test fn a_print_snapshots_an_atomic_before_it_waits():
 fn m32_leaf(lc: Channel[List[Channel[int]]], out: Channel[int]):
     parallel:
         spawn:
-            c := lc.recv()[0]
-            out.send(c.recv())
+            cs := lc.recv() else: panic("lc closed")
+            c := cs[0]
+            v := c.recv() else: panic("c closed")
+            out.send(v)
 
 fn m32_feed(lc: Channel[List[Channel[int]]]):
-    xs := lc.recv()
+    xs := lc.recv() else: panic("lc closed")
     n := 0
     for i in 0..200000:
         n = n + i % 7
@@ -186,4 +189,4 @@ test fn a_shared_channel_slot_is_no_deadlock():
     parallel:
         spawn m32_leaf(lc, out)
         spawn m32_feed(lc)
-    assert out.recv() == 5
+    assert out.recv() == ?5

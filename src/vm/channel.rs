@@ -2,7 +2,6 @@
 //! Split out of `src/vm/netio.rs`. `super::*` is the parent module.
 
 use super::core::{ChanState, Pending, PendingOp, RecvReady, SendOutcome, Settled};
-use super::netio::CLOSED_RECV;
 use super::netio::CLOSED_SEND;
 use super::netio::EMPTY_RECV_DEADLOCK;
 use super::netio::FULL_SEND_DEADLOCK;
@@ -73,16 +72,26 @@ impl Vm {
                 // D5 owe #3 (Path C) — a `recv` reached INSIDE a native callback on the M:N engine
                 // can't snapshot-park, so `recv_step_or_demote` DEMOTES the worker thread: block in
                 // place on the channel condvar + spin a replacement, resuming on a sibling `send`
-                // (Go's `handoffp`). `demote_recv_block` is itself closed-aware (a `close` faults the
-                // demoted recv).
+                // (Go's `handoffp`). `demote_recv_block` is itself closed-aware (a `close` gives the
+                // demoted recv `!RecvError`).
                 match self.recv_step_or_demote(h, span)? {
                     // `recv_step_or_demote` woke a sender for `Got`; a filled slot committed none.
-                    RecvStep::Got(v) | RecvStep::Filled(v) => Ok(v),
+                    RecvStep::Got(v) | RecvStep::Filled(v) => {
+                        Ok(self.alloc_enum("Result", "Ok", &[v]))
+                    }
                     // `chan_recv_step` already re-rooted the receiver + set `suspend`; the sentinel is
                     // never observed (`do_method_call` gates the result-push on `suspend`).
                     RecvStep::Parked => Ok(Value::nil()),
-                    // Closed-and-drained: a distinct fault (not the deadlock fault) — no producer left.
-                    RecvStep::ClosedEmpty => Err(self.err(CLOSED_RECV.to_string(), span)),
+                    // Closed-and-drained: `!RecvError` (the prelude struct), no fault — no producer
+                    // left. Every later `recv` gives it again.
+                    RecvStep::ClosedEmpty => {
+                        let tid = self.struct_tid(&self.program.recv_error_key);
+                        let e = self.heap.alloc(Obj::Struct {
+                            tid,
+                            fields: Fields::from_vec(Vec::new()),
+                        });
+                        Ok(self.alloc_enum("Result", "Err", &[Value::obj(e)]))
+                    }
                 }
             }
             ChannelMethod::TryRecv => {
@@ -112,7 +121,7 @@ impl Vm {
             }
             // `close()` marks the channel closed (idempotent) and wakes every parked / demoted
             // receiver so each re-runs and observes the close: a `for v in ch:` ends, a bare `recv`
-            // faults. Mirrors `send`'s wake fan-out but delivers no value.
+            // gives `!RecvError`. Mirrors `send`'s wake fan-out but delivers no value.
             ChannelMethod::Close => {
                 self.arity_err("close", args, 0, span)?;
                 let core = self.channel_core(h);

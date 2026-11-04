@@ -80,7 +80,8 @@ fn wait_for_a_sibling(x: int) -> int:
     parallel:
         spawn feed(ch, 7)
         spawn:
-            got.store(ch.recv())
+            v := ch.recv() else: panic("ch closed")
+            got.store(v)
     return x + got.load()
 
 # A channel wait and a timed wait inside the closure; the nursery joins inside the box.
@@ -235,7 +236,7 @@ test fn a_reader_waits_for_a_slow_writer_and_a_print_does_not():
             gate.send(1)
             gate.send(1)
             shown.send(before + ["{s.get()}", "{w.get()}", "{w.read(fn(x): x)}"])
-    got := shown.recv()
+    got := shown.recv() else: panic("shown closed")
     assert got == ["Shared(0)", "RwShared(0)", "1", "1", "1"], "{got}"
 
 struct Pair:

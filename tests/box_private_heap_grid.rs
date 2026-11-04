@@ -299,7 +299,7 @@ fn a_write_through_get_lands_and_does_not_warn() {
 fn a_guard_and_channel_cycle_gets_the_deadlock_verdict() {
     let path = write_program(
         "guard-chan-cycle",
-        "import Shared from std.concurrency\n\nfn take(ch: Channel[int], held: Channel[bool], n: int) -> int:\n    held.send(true)\n    return n + ch.recv()\n\nfn holder(s: Shared[int], ch: Channel[int], held: Channel[bool]):\n    s.update(fn(n): take(ch, held, n))\n\nfn inc(n: int) -> int:\n    return n + 1\n\nfn sender(s: Shared[int], ch: Channel[int]):\n    s.update(inc)\n    ch.send(1)\n\ns := Shared(0)\nch := Channel[int](0)\nheld := Channel[bool](1)\nparallel:\n    spawn holder(s, ch, held)\n    spawn:\n        _ := held.recv()\n        sender(s, ch)\nprint(s.get())\n",
+        "import Shared from std.concurrency\n\nfn take(ch: Channel[int], held: Channel[bool], n: int) -> int:\n    held.send(true)\n    v := ch.recv() else: panic(\"ch closed\")\n    return n + v\n\nfn holder(s: Shared[int], ch: Channel[int], held: Channel[bool]):\n    s.update(fn(n): take(ch, held, n))\n\nfn inc(n: int) -> int:\n    return n + 1\n\nfn sender(s: Shared[int], ch: Channel[int]):\n    s.update(inc)\n    ch.send(1)\n\ns := Shared(0)\nch := Channel[int](0)\nheld := Channel[bool](1)\nparallel:\n    spawn holder(s, ch, held)\n    spawn:\n        _ := held.recv()\n        sender(s, ch)\nprint(s.get())\n",
     );
     for threads in [Some("1"), Some("2"), None] {
         let r = chezzi(&["run", path.to_str().unwrap()], threads, 30);

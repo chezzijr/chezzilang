@@ -37,9 +37,9 @@ test fn an_aliased_box_constructs_and_annotates():
 
 test fn timer_is_an_ordinary_function():
     f := time.timer
-    assert f(1).recv()
-    assert after(1).recv()
-    assert time.timer(1).recv()
+    assert f(1).recv() == ?true
+    assert after(1).recv() == ?true
+    assert time.timer(1).recv() == ?true
 
 # An FFI type marshals as the type it names under every spelling: imported, aliased, qualified.
 extern "libc":

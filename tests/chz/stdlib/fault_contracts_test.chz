@@ -217,7 +217,7 @@ test fn atomic_add_sub_overflow_faults():
         ?_: assert false, "AtomicInt.sub overflow must fault"
         !e: assert e.message() == "integer overflow in Sub"
 
-test fn channel_send_recv_closed_faults():
+test fn channel_send_closed_faults_recv_closed_errors():
     ch := Channel[int]()
     ch.close()
     r1 := recover: ch.send(1)
@@ -226,10 +226,10 @@ test fn channel_send_recv_closed_faults():
         !e: assert e.message() == "send on a closed channel"
     ch2 := Channel[int]()
     ch2.close()
-    r2 := recover: ch2.recv()
-    match r2:
-        ?_: assert false, "recv on a closed+drained channel must fault"
-        !e: assert e.message() == "receive on a closed channel"
+    # recv on a closed+drained channel does not fault: it returns `!RecvError` (Rust gives a `RecvError`).
+    match ch2.recv():
+        ?_: assert false, "recv on a closed+drained channel must give !RecvError"
+        !e: assert e.message() == "receiving on a closed channel"
 
 test fn json_stringify_faults():
     r1 := recover: json.stringify(json.Json.Num(math.nan))

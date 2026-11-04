@@ -6,13 +6,15 @@ test fn chanchan():
     cc := Channel[Channel[int]](1)
     c := Channel[int](1)
     cc.send(c)
+    # Go evaluates `<-cc` on entering the select; `recv` returns `T!RecvError`, so bind it first.
+    got := cc.recv() else: panic("cc closed")
     wait:
-        cc.recv().send(2): pass  # Go: case <-cc <- 2:
+        got.send(2): pass  # Go: case <-cc <- 2:
         else:
             assert false, "nonblock"  # Go: panic("nonblock")
-    assert c.recv() == 2, "bad receive"
+    assert c.recv() == ?2, "bad receive"
 
 test fn sendprec():
     c := Channel[bool](1)
     c.send(false or true)  # Go: c <- false || true // not a syntax error: same as c <- (false || true)
-    assert c.recv(), "sent false"
+    assert c.recv() == ?true, "sent false"

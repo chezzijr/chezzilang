@@ -164,7 +164,7 @@ fn _grid[K: Hashable + Eq](keys: List[K]) -> str:
         spawn _child_rw(b1, keys, ch)
         spawn _child_cm(c1, keys, ch)
     for _ in 0..3:
-        got := ch.recv()
+        got := ch.recv() else: panic("ch closed")
         if got != want:
             bad = bad + "spawn: " + got + " != " + want + "\n"
     for seen in [_map_items(s1.get()), _rw_items(b1), _map_items(c1.snapshot())]:
@@ -220,7 +220,7 @@ fn _memo_grid[K: Hashable + Eq](keys: List[K]) -> str:
     ch := Channel[str](1)
     parallel:
         spawn _child_memo(m1, keys, ch)
-    got := ch.recv()
+    got := ch.recv() else: panic("ch closed")
     if got != want or _call_all(m1, keys) != want or c1.load() != keys.len():
         bad = bad + "spawn: " + got + " calls={c1.load()}\n"
     c2 := concurrency.AtomicInt(0)
@@ -359,5 +359,5 @@ test fn colliding_key_lookup_never_misses_under_concurrent_churn():
     parallel:
         spawn _churn(b, stop)
         spawn _look(b, stop, ch)
-    misses := ch.recv()
+    misses := ch.recv() else: panic("ch closed")
     assert misses == 0, "P(14) reported missing {misses} times"

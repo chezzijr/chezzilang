@@ -98,14 +98,16 @@ fn two_jobs_with_nested_nurseries_feeding_each_other_complete_at_t1() {
                 spawn:\n            \
                     parallel:\n                \
                         spawn:\n                    \
-                            b.send(a.recv() + 1)\n\
+                            got_a := a.recv() else: panic(\"a closed\")\n                    \
+                            b.send(got_a + 1)\n\
         fn j2():\n    \
             parallel:\n        \
                 spawn:\n            \
                     parallel:\n                \
                         spawn:\n                    \
                             a.send(1)\n                    \
-                            print(\"j2 got {b.recv()}\")\n\
+                            got_b := b.recv() else: panic(\"b closed\")\n                    \
+                            print(\"j2 got {got_b}\")\n\
         fn main():\n    \
             ex := Executor()\n    \
             ex.submit(fn(): j1())\n    \
@@ -148,7 +150,8 @@ fn a_job_that_submits_back_from_depth_three_completes_at_t1() {
             ex := Executor()\n    \
             out := Channel[int](0)\n    \
             ex.submit(fn(): deep(ex, out))\n    \
-            print(\"got {out.recv()}\")\n    \
+            got := out.recv() else: panic(\"out closed\")\n    \
+            print(\"got {got}\")\n    \
             ex.shutdown()\n    \
             print(\"done\")\n\
         fn deep(ex: Executor, out: Channel[int]):\n    \
@@ -160,7 +163,8 @@ fn a_job_that_submits_back_from_depth_three_completes_at_t1() {
                                 spawn:\n                            \
                                     r := Channel[int](0)\n                            \
                                     ex.submit(fn(): r.send(7))\n                            \
-                                    out.send(r.recv())\n\
+                                    got_r := r.recv() else: panic(\"r closed\")\n                            \
+                                    out.send(got_r)\n\
         main()\n";
     let dir = std::env::temp_dir().join(format!("chz-w13-7-h3-t1-{}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("create fixture dir");

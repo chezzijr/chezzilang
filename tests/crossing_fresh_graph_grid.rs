@@ -233,7 +233,8 @@ fn w_call(r: Channel[str], tag: str, d: int, x: List[List[List[int]]]? = mk_l())
             GenFrame => "",
             ChannelSend => {
                 "fn w_@S(r: Channel[str], tag: str, d: int, ch: Channel[@T]):
-    poke_@S(r, tag, d, ch.recv())
+    got_ch := ch.recv() else: panic(\"ch closed\")
+    poke_@S(r, tag, d, got_ch)
 "
             }
         }
@@ -470,7 +471,7 @@ fn program(w: Wrapper, cells: &[(Inner, usize)]) -> (String, String) {
     src += &post;
     src += "    ex.shutdown()\n    out: List[str] = []\n";
     src += &format!(
-        "    for _i in 0..{}:\n        out.push(r.recv())\n",
+        "    for _i in 0..{}:\n        got_r := r.recv() else: panic(\"r closed\")\n        out.push(got_r)\n",
         cells.len()
     );
     src += "    out.sort()\n    for s in out:\n        print(s)\n    print(\"parent\", named, nn)\nmain()\n";
@@ -541,7 +542,10 @@ fn main():
         spawn w2(r, \"list last\", [xs, []], 1)
         spawn w2(r, \"list first\", [[], xs], 0)
         spawn wtup(r, \"tuple\", (xs, []))
-    out := [r.recv(), r.recv(), r.recv()]
+    r1 := r.recv() else: panic(\"r closed\")
+    r2 := r.recv() else: panic(\"r closed\")
+    r3 := r.recv() else: panic(\"r closed\")
+    out := [r1, r2, r3]
     out.sort()
     print(out, xs)
 main()
@@ -581,7 +585,10 @@ fn main():
         spawn b0.copy().go(r, \"d0\", 0)
         spawn b1.copy().go(r, \"d1\", 1)
         spawn b2.copy().go(r, \"d2\", 2)
-    out := [r.recv(), r.recv(), r.recv()]
+    r1 := r.recv() else: panic(\"r closed\")
+    r2 := r.recv() else: panic(\"r closed\")
+    r3 := r.recv() else: panic(\"r closed\")
+    out := [r1, r2, r3]
     out.sort()
     print(out, b0, b1, b2)
 main()
@@ -647,7 +654,8 @@ fn main():
     r := Channel[str](1)
     parallel:
         spawn drain(r, g)
-    print(r.recv(), held)
+    got_r := r.recv() else: panic(\"r closed\")
+    print(got_r, held)
 main()
 "
             .to_string(),
@@ -668,7 +676,8 @@ fn main():
     r := Channel[str](1)
     parallel:
         spawn drive(r, \"gen\", g)
-    print(r.recv(), named)
+    got_r := r.recv() else: panic(\"r closed\")
+    print(got_r, named)
 main()
 "
             .to_string(),
@@ -695,7 +704,8 @@ fn main():
     r := Channel[str](1)
     parallel:
         spawn drain(r, g)
-    print(r.recv(), held)
+    got_r := r.recv() else: panic(\"r closed\")
+    print(got_r, held)
 main()
 "
             .to_string(),
@@ -716,7 +726,8 @@ fn main():
     r := Channel[str](1)
     parallel:
         spawn drive(r, \"gen\", g)
-    print(r.recv(), named)
+    got_r := r.recv() else: panic(\"r closed\")
+    print(got_r, named)
 main()
 "
             .to_string(),
@@ -736,7 +747,8 @@ fn main():
     r := Channel[str](1)
     parallel:
         spawn w(r, S(b=[], a=named))
-    print(r.recv(), named)
+    got_r := r.recv() else: panic(\"r closed\")
+    print(got_r, named)
 main()
 "
             .to_string(),
@@ -753,7 +765,8 @@ fn main():
     r := Channel[str](1)
     parallel:
         spawn w(r, {\"a\": [], \"a\": named})
-    print(r.recv(), named)
+    got_r := r.recv() else: panic(\"r closed\")
+    print(got_r, named)
 main()
 "
             .to_string(),
@@ -767,11 +780,13 @@ main()
     r := Channel[str](2)
     parallel:
         spawn w(r, [named[0]])
-    print(r.recv(), named)
+    got_r := r.recv() else: panic(\"r closed\")
+    print(got_r, named)
     xs := [0]
     parallel:
         spawn w(r, [xs])
-    print(r.recv(), xs)
+    got_r2 := r.recv() else: panic(\"r closed\")
+    print(got_r2, xs)
 main()
 "
             ),
@@ -827,7 +842,8 @@ fn main():
         spawn w2(r, "k copy-child 0", [xk].copy(), 0)
     out: List[str] = []
     for _i in 0..9:
-        out.push(r.recv())
+        got_r := r.recv() else: panic("r closed")
+        out.push(got_r)
     out.sort()
     for s in out:
         print(s)
@@ -855,7 +871,8 @@ k copy-child 0 runs
     r := Channel[str](1)
     parallel:
         spawn w(r, {{k: []}})
-    print(r.recv(), k.log)
+    got_r := r.recv() else: panic(\"r closed\")
+    print(got_r, k.log)
 main()
 "
             ),
@@ -870,7 +887,8 @@ main()
     r := Channel[str](1)
     parallel:
         spawn w(r, {{x: [] for x in ks}})
-    print(r.recv(), k.log)
+    got_r := r.recv() else: panic(\"r closed\")
+    print(got_r, k.log)
 main()
 "
             ),
@@ -892,7 +910,8 @@ fn main():
     r := Channel[str](1)
     parallel:
         spawn drive(r, \"key\", g)
-    print(r.recv(), k.log)
+    got_r := r.recv() else: panic(\"r closed\")
+    print(got_r, k.log)
 main()
 "
             ),
@@ -915,7 +934,8 @@ fn main():
     r := Channel[str](1)
     parallel:
         spawn drive(r, \"key\", g)
-    print(r.recv(), k.log)
+    got_r := r.recv() else: panic(\"r closed\")
+    print(got_r, k.log)
 main()
 "
             ),

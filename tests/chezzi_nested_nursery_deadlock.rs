@@ -34,8 +34,10 @@ fn nested_nursery_owner_blocked_on_channel_op_completes_at_threads_1() {
                      parallel:\n                \
                          spawn:\n                    \
                              inner.send(1)\n                \
-                         out.send(inner.recv() + 1)\n        \
-                 print(\"got {out.recv()}\")\n\
+                         got_inner := inner.recv() else: panic(\"inner closed\")\n                \
+                         out.send(got_inner + 1)\n        \
+                 got_out := out.recv() else: panic(\"out closed\")\n        \
+                 print(\"got {got_out}\")\n\
          main()\n",
     )
     .expect("write fixture");
@@ -95,8 +97,10 @@ const OWNER_BLOCKED: &str = r#"fn main():
             parallel:
                 spawn:
                     inner.send(1)
-                out.send(inner.recv() + 1)
-        print("got {out.recv()}")
+                got_inner := inner.recv() else: panic("inner closed")
+                out.send(got_inner + 1)
+        got_out := out.recv() else: panic("out closed")
+        print("got {got_out}")
 main()
 "#;
 
@@ -107,13 +111,15 @@ const RECURSIVE: &str = r#"fn level(n: int, out: Channel[int]):
     inner := Channel[int](0)
     parallel:
         spawn level(n - 1, inner)
-        out.send(inner.recv() + 1)
+        got_inner := inner.recv() else: panic("inner closed")
+        out.send(got_inner + 1)
 
 fn main():
     out := Channel[int](0)
     parallel:
         spawn level(DEPTH, out)
-        print("depth {out.recv()}")
+        got_out := out.recv() else: panic("out closed")
+        print("depth {got_out}")
 main()
 "#;
 
@@ -125,11 +131,12 @@ const RECOVERED: &str = r#"fn main():
             r := recover:
                 parallel:
                     spawn:
-                        ch.recv()
+                        _ := ch.recv()
             match r:
                 ?_: print("inner ok")
                 !e: print("inner err")
-            print("task got {out.recv()}")
+            got_out := out.recv() else: panic("out closed")
+            print("task got {got_out}")
         spawn:
             out.send(1)
     print("done")
@@ -144,13 +151,14 @@ const RECOVERED_SWAPPED: &str = r#"fn main():
             r := recover:
                 parallel:
                     spawn:
-                        ch.recv()
+                        _ := ch.recv()
             match r:
                 ?_: print("inner ok")
                 !e: print("inner err")
             out.send(1)
         spawn:
-            print("task got {out.recv()}")
+            got_out := out.recv() else: panic("out closed")
+            print("task got {got_out}")
     print("done")
 main()
 "#;
@@ -162,9 +170,10 @@ const LATE_FEED: &str = r#"fn main():
         spawn:
             parallel:
                 spawn:
-                    print("inner got {gate.recv()}")
+                    got_gate := gate.recv() else: panic("gate closed")
+                    print("inner got {got_gate}")
                 started.send(1)
-        started.recv()
+        _ := started.recv()
         spawn:
             gate.send(5)
             print("late sibling done")
@@ -181,13 +190,14 @@ const LATE_RECOVER: &str = r#"fn main():
             r := recover:
                 parallel:
                     spawn:
-                        ch.recv()
+                        _ := ch.recv()
                     started.send(1)
             match r:
                 ?_: print("inner ok")
                 !e: print("inner err")
-            print("task got {out.recv()}")
-        started.recv()
+            got_out := out.recv() else: panic("out closed")
+            print("task got {got_out}")
+        _ := started.recv()
         spawn:
             out.send(1)
     print("done")
@@ -202,9 +212,11 @@ const NOFEED: &str = r#"fn main():
             inner := Channel[int](0)
             parallel:
                 spawn:
-                    never.recv()
-                out.send(inner.recv() + 1)
-        print("got {out.recv()}")
+                    _ := never.recv()
+                got_inner := inner.recv() else: panic("inner closed")
+                out.send(got_inner + 1)
+        got_out := out.recv() else: panic("out closed")
+        print("got {got_out}")
 main()
 "#;
 
@@ -216,12 +228,13 @@ const RECSTUCK: &str = r#"fn main():
             r := recover:
                 parallel:
                     spawn:
-                        ch.recv()
+                        _ := ch.recv()
             match r:
                 ?_: print("inner ok")
                 !e: print("inner err")
             print("after recover")
-            print("task got {out.recv()}")
+            got_out := out.recv() else: panic("out closed")
+            print("task got {got_out}")
     print("done")
 main()
 "#;
@@ -238,7 +251,7 @@ const COUSIN_FED: &str = r#"fn main():
             r := recover:
                 parallel:
                     spawn:
-                        never.recv()
+                        _ := never.recv()
             match r:
                 ?_: print("inner ok")
                 !e: print("inner err")
@@ -246,8 +259,10 @@ const COUSIN_FED: &str = r#"fn main():
         spawn:
             parallel:
                 spawn:
-                    y.send(x.recv() + 1)
-                print("F got {y.recv()}")
+                    got_x := x.recv() else: panic("x closed")
+                    y.send(got_x + 1)
+                got_y := y.recv() else: panic("y closed")
+                print("F got {got_y}")
     print("done")
 main()
 "#;
@@ -266,8 +281,10 @@ const PANIC_COUSIN: &str = r#"fn main():
         spawn:
             parallel:
                 spawn:
-                    y.send(x.recv() + 1)
-                print("F got {y.recv()}")
+                    got_x := x.recv() else: panic("x closed")
+                    y.send(got_x + 1)
+                got_y := y.recv() else: panic("y closed")
+                print("F got {got_y}")
     print("done")
 main()
 "#;
@@ -284,8 +301,8 @@ const PANIC_BODY_PARKED: &str = r#"fn main():
         spawn:
             parallel:
                 spawn:
-                    x.recv()
-                y.recv()
+                    _ := x.recv()
+                _ := y.recv()
     print("done")
 main()
 "#;
@@ -300,10 +317,12 @@ const NOFEED_JOIN: &str = r#"fn main():
             inner := Channel[int](0)
             parallel:
                 spawn:
-                    never.recv()
-                out.send(inner.recv() + 1)
+                    _ := never.recv()
+                got_inner := inner.recv() else: panic("inner closed")
+                out.send(got_inner + 1)
         spawn:
-            print("got {out.recv()}")
+            got_out := out.recv() else: panic("out closed")
+            print("got {got_out}")
     print("done")
 main()
 "#;
@@ -322,8 +341,8 @@ fn job():
                     spawn:
                         parallel:
                             spawn:
-                                never.recv()
-                    x.recv()
+                                _ := never.recv()
+                    _ := x.recv()
     match r:
         ?_: print("job ok")
         !e: print("job err")
@@ -339,13 +358,15 @@ main()
 const DD6: &str = r#"ch := Channel[int](0)
 fn f():
     spawn:
-        print(ch.recv())
+        got_ch := ch.recv() else: panic("ch closed")
+        print(got_ch)
 spawn f()
 "#;
 
 const DD6_FED: &str = r#"fn f(ch: Channel[int]):
     spawn:
-        print("f got {ch.recv()}")
+        got_ch := ch.recv() else: panic("ch closed")
+        print("f got {got_ch}")
 
 fn main():
     ch := Channel[int](0)
@@ -358,7 +379,8 @@ main()
 
 const RET_FED: &str = r#"fn f(ch: Channel[int]) -> int:
     spawn:
-        print("f got {ch.recv()}")
+        got_ch := ch.recv() else: panic("ch closed")
+        print("f got {got_ch}")
     return 3
 
 fn main():
@@ -373,7 +395,8 @@ main()
 
 const TRY_FED: &str = r#"fn g(ch: Channel[int]) -> int!str:
     spawn:
-        print("g got {ch.recv()}")
+        got_ch := ch.recv() else: panic("ch closed")
+        print("g got {got_ch}")
     r: int!str = !"bail"
     v := r?
     return ?v

@@ -101,7 +101,7 @@ pub fn compile_entry_file(
 /// Compile a whole resolved module graph in dependency order.
 pub fn compile_graph(graph: &ModuleGraph) -> Result<Program, CompileError> {
     let mut c = Compiler::new();
-    c.range_free = !graph.range_used;
+    c.unused_prelude_structs = graph.prelude_used.unused();
     // FFI ROOT FIX (fix4): resolve every extern fn's C signature ONCE in the checker (module-scoped,
     // every alias spelling), then lower each extern from that table — never re-resolving alias names
     // in the backend's flat bare map (the collision whack-a-mole's root). Keyed by graph module idx.
@@ -163,7 +163,9 @@ pub fn compile_graph(graph: &ModuleGraph) -> Result<Program, CompileError> {
     c.program.field_ic_sites = c.field_ic_next;
     c.program.task_entry = c.spawn_entry_proto("<task entry>", None, 0, Span::RUNTIME);
     c.program.method_ic_sites = c.method_ic_next;
-    c.program.range_key = crate::resolver::range_key(graph);
+    c.program.range_key = crate::resolver::prelude_struct_key(graph, crate::resolver::RANGE_STRUCT);
+    c.program.recv_error_key =
+        crate::resolver::prelude_struct_key(graph, crate::resolver::RECV_ERROR_STRUCT);
     // Module 0 of a graph is the prelude.
     let prelude = graph.modules.first().map(|lm| &lm.ast.stmts[..]);
     c.program.print_defaults = call::prelude_print_defaults(prelude.unwrap_or_default())?;
@@ -198,9 +200,15 @@ pub fn compile_source(src: &str) -> Result<Program, CompileError> {
 pub fn compile_module_standalone(module: &Module) -> Result<Program, CompileError> {
     // Mirror the file-backed path: normalize named/default call arguments before compiling.
     let mut module = module.clone();
-    // TICKET-253: every module sees the prelude's `Range` struct; a standalone module has no graph,
-    // so it carries the declaration itself (unless it declares one).
-    let is_range = |s: &Stmt| matches!(&s.kind, StmtKind::Struct { name, .. } if name == "Range");
+    // TICKET-253: every module sees the prelude's structs (`resolver::PRELUDE_STRUCTS`); a standalone
+    // module has no graph, so it carries each declaration itself (unless it declares one).
+    let struct_name = |s: &Stmt| {
+        if let StmtKind::Struct { name, .. } = &s.kind {
+            Some(name.clone())
+        } else {
+            None
+        }
+    };
     let prelude = crate::resolver::std_source(&["std".to_string(), "prelude".to_string()])
         .ok()
         .and_then(|src| crate::lexer::tokenize(&src).ok())
@@ -208,9 +216,12 @@ pub fn compile_module_standalone(module: &Module) -> Result<Program, CompileErro
         .map(|m| m.stmts)
         .unwrap_or_default();
     let print_defaults = call::prelude_print_defaults(&prelude)?;
-    if !module.stmts.iter().any(is_range) {
-        module.stmts.extend(prelude.into_iter().filter(is_range));
-    }
+    let declared: Vec<String> = module.stmts.iter().filter_map(struct_name).collect();
+    module.stmts.extend(prelude.into_iter().filter(|s| {
+        struct_name(s).is_some_and(|n| {
+            crate::resolver::PRELUDE_STRUCTS.iter().any(|p| p.name == n) && !declared.contains(&n)
+        })
+    }));
     crate::desugar::run_standalone(&mut module).map_err(|e| CompileError {
         message: e.message,
         span: e.span,
@@ -273,8 +284,11 @@ pub fn compile_module_standalone(module: &Module) -> Result<Program, CompileErro
     c.program.field_ic_sites = c.field_ic_next;
     c.program.task_entry = c.spawn_entry_proto("<task entry>", None, 0, Span::RUNTIME);
     c.program.method_ic_sites = c.method_ic_next;
+    let graph = crate::checker::standalone_graph(&module.stmts);
     c.program.range_key =
-        crate::resolver::range_key(&crate::checker::standalone_graph(&module.stmts));
+        crate::resolver::prelude_struct_key(&graph, crate::resolver::RANGE_STRUCT);
+    c.program.recv_error_key =
+        crate::resolver::prelude_struct_key(&graph, crate::resolver::RECV_ERROR_STRUCT);
     c.program.print_defaults = print_defaults;
     c.program.rebuild_struct_names(&c.field_widths);
     c.build_provider_table()?;
@@ -303,9 +317,10 @@ fn decode_fn_name(pid: ProtoId) -> String {
 
 struct Compiler {
     program: Program,
-    /// TICKET-255 — the graph recorded no `Range` value ([`ModuleGraph::range_used`] is false): the prelude
-    /// `Range` methods are not compiled, and [`Compiler::emit_new_struct`] stops a build that emits one.
-    range_free: bool,
+    /// TICKET-255 — the prelude structs the graph records no use of ([`ModuleGraph::prelude_used`]):
+    /// their prelude methods are not compiled, and [`Compiler::emit_new_struct`] stops a build that
+    /// emits one.
+    unused_prelude_structs: Vec<&'static str>,
     /// TICKET-265 — set per module from [`ModuleGraph::fn_skips`]: the top-level fns of a std module
     /// that the program does not reach. They get no proto and their global slot stays unset.
     skip_fns: crate::resolver::SkippedFns,
@@ -560,7 +575,8 @@ impl Compiler {
         let mut program = Program {
             protos: Vec::new(),
             structs: HashMap::new(),
-            range_key: "Range".to_string(),
+            range_key: crate::resolver::RANGE_STRUCT.to_string(),
+            recv_error_key: crate::resolver::RECV_ERROR_STRUCT.to_string(),
             print_defaults: [String::new(), String::new()],
             enum_methods: HashMap::new(),
             enum_home: HashMap::new(),
@@ -636,7 +652,7 @@ impl Compiler {
         }
         Compiler {
             program,
-            range_free: false,
+            unused_prelude_structs: Vec::new(),
             skip_fns: crate::resolver::SkippedFns::default(),
             hook_table: crate::checker::HookTable::new(),
             hook_calls: crate::checker::HookCallTable::new(),
@@ -969,9 +985,8 @@ impl Compiler {
                 if let Some(set) = self.hook_table.get(&(module_idx, key.clone())) {
                     self.hook_sets.insert(key.clone(), *set);
                 }
-                // TICKET-255 — `Range` methods are compiled only for a graph that builds a `Range` value.
-                let skip =
-                    self.range_free && module_idx == 0 && name == crate::resolver::RANGE_STRUCT;
+                // TICKET-255 — a prelude struct's methods are compiled only for a graph that uses it.
+                let skip = module_idx == 0 && self.unused_prelude_structs.contains(&name.as_str());
                 for m in methods.iter().filter(|_| !skip) {
                     self.pending_witnesses = self.member_witnesses(module_idx, &key, &m.name);
                     let pid = self.compile_fn(m, false)?;
@@ -1173,8 +1188,9 @@ impl Compiler {
         Ok(self.finish(fc))
     }
 
-    /// TICKET-255 — the one emit of `Op::NewStruct`. A `Range` built in a graph that recorded none stops the
-    /// build: the skipped methods would otherwise fault at run time with a missing method.
+    /// TICKET-255 — the one emit of `Op::NewStruct`. A prelude struct built in a graph that recorded no
+    /// use of it stops the build: the skipped methods would otherwise fault at run time with a missing
+    /// method.
     fn emit_new_struct(
         &self,
         fc: &mut FnComp,
@@ -1182,10 +1198,15 @@ impl Compiler {
         argc: usize,
         span: Span,
     ) -> Result<(), CompileError> {
-        if self.range_free && key == self.type_key(0, crate::resolver::RANGE_STRUCT) {
+        if let Some(name) = self
+            .unused_prelude_structs
+            .iter()
+            .find(|n| key == self.type_key(0, n))
+        {
             return Err(CompileError {
-                message: "internal error: this program builds a Range, and ModuleGraph::range_used recorded none"
-                    .into(),
+                message: format!(
+                    "internal error: this program builds a {name}, and ModuleGraph::prelude_used recorded none"
+                ),
                 span,
             });
         }

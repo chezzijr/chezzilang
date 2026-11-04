@@ -119,7 +119,7 @@ fn nested_executors_complete_deeper_than_the_worker_count() {
 
 #[test]
 fn a_blocked_guard_and_a_blocked_recv_do_not_starve_the_job_that_frees_them() {
-    let src = "import Executor, Shared from std.concurrency\nch := Channel[int]()\nsh := Shared(0)\nfn bump(v: int) -> int:\n    return v + ch.recv()\nex := Executor()\n_ := ex.submit(fn(): sh.update(bump))\n_ := ex.submit(fn(): sh.set(5))\n_ := ex.submit(fn(): ch.send(1))\nex.shutdown()\nprint(\"ok\")\n";
+    let src = "import Executor, Shared from std.concurrency\nch := Channel[int]()\nsh := Shared(0)\nfn bump(v: int) -> int:\n    r := ch.recv() else: panic(\"ch closed\")\n    return v + r\nex := Executor()\n_ := ex.submit(fn(): sh.update(bump))\n_ := ex.submit(fn(): sh.set(5))\n_ := ex.submit(fn(): ch.send(1))\nex.shutdown()\nprint(\"ok\")\n";
     let (status, stdout, _) = run(src, Some("1"), 30);
     let status = status.unwrap_or_else(|| {
         panic!(

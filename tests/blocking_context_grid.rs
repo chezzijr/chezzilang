@@ -215,9 +215,9 @@ fn hold(v: int) -> int:
     time.sleep_ms(50)
     return v
 fn recv_job() -> None:
-    print(ch.recv())
+    print(must(ch.recv()))
 fn recv7() -> int:
-    return ch.recv()
+    return must(ch.recv())
 fn main():
     parallel:
 {BODY}main()
@@ -318,7 +318,7 @@ fn ops() -> Vec<Op> {
     vec![
         op(
             "recv",
-            "    print(ch.recv())",
+            "    print(must(ch.recv()))",
             send7,
             "",
             false,
@@ -434,14 +434,14 @@ fn ops() -> Vec<Op> {
         op(
             "bare_timer",
             "    _ := time.timer(20).recv()\n    ch.send(3)",
-            "            print(ch.recv())\n",
+            "            print(must(ch.recv()))\n",
             "",
             false,
             &[(Deadline, "3\n")],
         ),
         op(
             "nested",
-            "    parallel:\n        spawn:\n            print(ch.recv())",
+            "    parallel:\n        spawn:\n            print(must(ch.recv()))",
             send7,
             "",
             false,

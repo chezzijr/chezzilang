@@ -80,7 +80,7 @@ fn read_case(op: str, form: str) -> str!:
     c.close()
     peer.close()
     ln.close()
-    return ?out.recv()
+    return ?out.recv()?
 
 fn drain(peer: net.Socket) -> int:
     total := 0
@@ -150,7 +150,7 @@ fn write_case(op: str, form: str) -> str!:
     peer.close()
     ln.close()
     _ := got.recv()
-    return ?out.recv()
+    return ?out.recv()?
 
 fn accept_with(ln: net.Listener, form: str) -> net.Socket!:
     if form == "omitted":
@@ -183,7 +183,7 @@ fn accept_case(form: str) -> str!:
                     out.send("ok")
                 !e: out.send(e.message())
     ln.close()
-    return ?out.recv()
+    return ?out.recv()?
 
 fn get_with(url: str, form: str) -> request.Response!:
     if form == "omitted":
@@ -220,7 +220,7 @@ fn get_case(form: str) -> str!:
                 ?resp: out.send("ok {resp.status}")
                 !_: out.send("error")
     ln.close()
-    return ?out.recv()
+    return ?out.recv()?
 
 test fn a_socket_read_waits_on_none_and_polls_on_zero():
     for op in ["read", "read_bytes"]:

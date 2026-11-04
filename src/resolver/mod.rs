@@ -107,17 +107,90 @@ impl LoadedModule {
 /// TICKET-255 — the name of the prelude struct every module sees. The one spelling the resolver, checker and
 /// compiler share.
 pub const RANGE_STRUCT: &str = "Range";
+/// The prelude struct `Channel.recv` returns on a closed, drained channel; the VM builds it.
+pub const RECV_ERROR_STRUCT: &str = "RecvError";
+
+/// One struct of `std.prelude` that every module sees with no `import` line.
+pub struct PreludeStruct {
+    pub name: &'static str,
+    /// TICKET-255 — the words whose presence in a non-prelude source marks the graph as able to
+    /// build this struct ([`PreludeUse::named_in`]).
+    pub words: &'static [&'static str],
+}
+
+/// The structs of `std.prelude` that every module sees with no `import` line: the one list the
+/// resolver's implicit import, the graph-less checker seed, the standalone compile and the
+/// TICKET-255 method gate ([`PreludeUse`]) read. `RecvError` is built by `Channel.recv`, so a
+/// `recv` in the source (a call or a `wait:` recv arm) uses it.
+pub const PRELUDE_STRUCTS: [PreludeStruct; 2] = [
+    PreludeStruct {
+        name: RANGE_STRUCT,
+        words: &[RANGE_STRUCT],
+    },
+    PreludeStruct {
+        name: RECV_ERROR_STRUCT,
+        words: &[RECV_ERROR_STRUCT, "recv"],
+    },
+];
+
+/// TICKET-255 — which [`PRELUDE_STRUCTS`] a graph can build, by position in that list. The checker
+/// and the compiler skip the method bodies of every prelude struct the graph does not use.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PreludeUse([bool; PRELUDE_STRUCTS.len()]);
+
+impl PreludeUse {
+    /// Every prelude struct used: the graph-less and test graphs, and a run of the prelude itself.
+    pub const ALL: Self = Self([true; PRELUDE_STRUCTS.len()]);
+
+    /// The prelude structs whose [`PreludeStruct::words`] `source` holds.
+    fn named_in(source: &str) -> Self {
+        Self(PRELUDE_STRUCTS.map(|p| p.words.iter().any(|w| source.contains(w))))
+    }
+
+    /// Record a use of prelude struct `name`.
+    pub fn mark(&mut self, name: &str) {
+        for (used, p) in self.0.iter_mut().zip(&PRELUDE_STRUCTS) {
+            *used |= p.name == name;
+        }
+    }
+
+    /// Add every use `other` records.
+    fn add(&mut self, other: Self) {
+        for (used, o) in self.0.iter_mut().zip(other.0) {
+            *used |= o;
+        }
+    }
+
+    /// True when prelude struct `name` is used.
+    pub fn uses(&self, name: &str) -> bool {
+        self.0
+            .iter()
+            .zip(&PRELUDE_STRUCTS)
+            .any(|(used, p)| *used && p.name == name)
+    }
+
+    /// The names of the prelude structs not used.
+    pub fn unused(&self) -> Vec<&'static str> {
+        self.0
+            .iter()
+            .zip(&PRELUDE_STRUCTS)
+            .filter(|(used, _)| !**used)
+            .map(|(_, p)| p.name)
+            .collect()
+    }
+}
 
 /// The whole dependency graph: modules in load order (dependencies first, entry last).
 #[derive(Debug, Clone)]
 pub struct ModuleGraph {
     pub entry: ModuleId,
     pub modules: Vec<LoadedModule>,
-    /// TICKET-255 — the one answer to "can this graph build a `Range` value". True when a module other
-    /// than the prelude spells `Range` in its source, or when `desugar::run` walks a range literal that
-    /// is not a counting-loop iterand, or when the entry IS the prelude. When false, the checker and the
-    /// compiler skip the bodies of the prelude `Range` methods.
-    pub range_used: bool,
+    /// TICKET-255 — the one answer to "can this graph build prelude struct X" for each of
+    /// [`PRELUDE_STRUCTS`]. X is used when a module other than the prelude holds one of its words in
+    /// its source, when the entry IS the prelude, or (for `Range`) when `desugar::run` walks a range
+    /// literal that is not a counting-loop iterand. For an unused X, the checker and the compiler
+    /// skip the bodies of its prelude methods.
+    pub prelude_used: PreludeUse,
     /// TICKET-265 — per file id, the top-level fns of a std module that the program does not reach
     /// ([`unreached_std_fns`]). Desugar, the checker and the compiler skip their bodies; each reads
     /// its module's entry through [`ModuleGraph::fn_skips`].
@@ -143,21 +216,26 @@ pub const JSON_MODULE: &[&str] = &["std", "json"];
 /// never spells it, so the reach set roots it.
 pub const JSON_DECODE_PARSE: &str = "parse";
 
-/// The runtime key of the `Range` struct `a..b` builds: the `Range` that graph module 0 declares.
-/// Module 0 is the prelude (the resolver visits it first), and a std type keeps its bare name. The
-/// test-only standalone graph has one module, which carries the prelude's declaration.
-pub fn range_key(graph: &ModuleGraph) -> String {
+/// The runtime key of the prelude struct `name` (one of [`PRELUDE_STRUCTS`]): the struct of that name
+/// graph module 0 declares. Module 0 is the prelude (the resolver visits it first), and a std type
+/// keeps its bare name. The test-only standalone graph has one module, which carries the prelude's
+/// declaration.
+pub fn prelude_struct_key(graph: &ModuleGraph, name: &str) -> String {
     user_type_keys(graph)
         .into_iter()
-        .find(|k| k.module == 0 && k.name == RANGE_STRUCT)
-        .map_or_else(|| RANGE_STRUCT.to_string(), |k| k.key)
+        .find(|k| k.module == 0 && k.name == name)
+        .map_or_else(|| name.to_string(), |k| k.key)
 }
 
 impl ModuleGraph {
-    /// TICKET-255 — true when `lm` is the prelude of a graph that builds no `Range` value: the checker
-    /// and the compiler skip the bodies of its `Range` methods (the struct, fields and signatures stay).
-    pub fn skips_range_methods(&self, lm: &LoadedModule) -> bool {
-        !self.range_used && lm.dotted == ["std", "prelude"]
+    /// TICKET-255 — the prelude structs whose method bodies the checker skips in `lm`: the unused
+    /// ones when `lm` is the prelude, else none (the struct, fields and signatures stay).
+    pub fn skipped_prelude_structs(&self, lm: &LoadedModule) -> Vec<&'static str> {
+        if lm.dotted == ["std", "prelude"] {
+            self.prelude_used.unused()
+        } else {
+            Vec::new()
+        }
     }
 
     /// TICKET-265 — the top-level fns of `lm` whose bodies are skipped; empty for a module the reach
@@ -696,7 +774,7 @@ fn build_graph_impl(
         entry_override,
         max_depth: MAX_IMPORT_DEPTH,
         file_seq: std::cell::Cell::new(STD_FILE_IDS),
-        range_named: std::cell::Cell::new(false),
+        prelude_named: std::cell::Cell::new(PreludeUse::default()),
         words: std::cell::RefCell::new(HashMap::new()),
     };
     // ALWAYS-LINK std.prelude: the eight universe builtins' SIGNATURES (`ord`/`chr`/`panic`/`int`/
@@ -714,12 +792,16 @@ fn build_graph_impl(
     let prelude_id = ModuleId(canonical_or_abs(&prelude_file));
     b.visit(&prelude_id, &prelude_path, Span::RUNTIME)?;
     b.visit(&entry_id, &[], Span::RUNTIME)?;
-    let range_used = b.range_named.get() || entry_id == prelude_id;
+    let prelude_used = if entry_id == prelude_id {
+        PreludeUse::ALL
+    } else {
+        b.prelude_named.get()
+    };
     let skipped_fns = unreached_std_fns(&b.order, &entry_id, &b.words.take());
     let mut graph = ModuleGraph {
         entry: entry_id,
         modules: b.order,
-        range_used,
+        prelude_used,
         skipped_fns,
     };
     // ENTRY-LAST BACKSTOP: every positional-entry consumer (compiler `entry_idx = modules.len()-1`,
@@ -778,8 +860,9 @@ struct Builder {
     /// Monotonic source of [`LoadedModule::file`] ids. A `Cell` because `parse` runs from `&self`
     /// contexts; the first module lexed gets 1, so 0 stays the synthesized/standalone sentinel.
     file_seq: std::cell::Cell<u32>,
-    /// TICKET-255 — a non-prelude module's source holds the text [`RANGE_STRUCT`]. Feeds [`ModuleGraph::range_used`].
-    range_named: std::cell::Cell<bool>,
+    /// TICKET-255 — the prelude structs whose words a non-prelude module's source holds. Feeds
+    /// [`ModuleGraph::prelude_used`].
+    prelude_named: std::cell::Cell<PreludeUse>,
     /// TICKET-265 — each parsed module's identifier words with their lines ([`lexer::ident_words`]),
     /// keyed by file id. Feeds [`ModuleGraph::skipped_fns`].
     words: std::cell::RefCell<HashMap<u32, Words>>,
@@ -1025,10 +1108,11 @@ impl Builder {
                 });
             }
         }
-        // TICKET-253: `Range` is a struct of `std.prelude` that every module sees with no `import`
-        // line. The one seam that makes it so: each module but the prelude itself resolves the import
-        // `import Range from std.prelude`, so the checker, compiler and VM carry the type through the
-        // ordinary from-import path. `Span::NOWHERE` marks it as written by no one.
+        // TICKET-253: the [`PRELUDE_STRUCTS`] (`Range`, `RecvError`) are structs of `std.prelude` that
+        // every module sees with no `import` line. The one seam that makes it so: each module but the
+        // prelude itself resolves the import `import Range, RecvError from std.prelude`, so the checker,
+        // compiler and VM carry the types through the ordinary from-import path. `Span::NOWHERE` marks
+        // it as written by no one.
         if dotted != ["std".to_string(), "prelude".to_string()] {
             let prelude_path = vec!["std".to_string(), "prelude".to_string()];
             let file = module_file(&prelude_path, &self.project_root, &self.std_root);
@@ -1036,8 +1120,8 @@ impl Builder {
                 target: ModuleId(canonical_or_abs(&file)),
                 import: Import::From {
                     path: prelude_path,
-                    names: vec![(RANGE_STRUCT.to_string(), None)],
-                    name_spans: vec![Span::NOWHERE],
+                    names: PRELUDE_STRUCTS.map(|p| (p.name.to_string(), None)).to_vec(),
+                    name_spans: vec![Span::NOWHERE; PRELUDE_STRUCTS.len()],
                 },
                 span: Span::NOWHERE,
             });
@@ -1120,6 +1204,13 @@ impl Builder {
         Ok(())
     }
 
+    /// TICKET-255 — add the prelude-struct uses one non-prelude module's source records.
+    fn note_prelude_named(&self, named: PreludeUse) {
+        let mut all = self.prelude_named.get();
+        all.add(named);
+        self.prelude_named.set(all);
+    }
+
     /// Lex + parse a module's source, wrapping failures with the module label (a `Span` carries a
     /// module id, not a path, so the label is still what a human reads).
     ///
@@ -1136,9 +1227,7 @@ impl Builder {
         // An embedded std module is decoded once per process: every graph that loads it
         // takes a copy of the shared parse, under the file id the shared parse was stamped with.
         if std_file && let Some(shared) = shared_std_parse(dotted, source) {
-            if shared.range_named {
-                self.range_named.set(true);
-            }
+            self.note_prelude_named(shared.prelude_named);
             self.words
                 .borrow_mut()
                 .insert(shared.file, shared.words.clone());
@@ -1147,8 +1236,8 @@ impl Builder {
         // `Cell`, not `&mut self`: `parse` is called from `&self` contexts.
         let file = self.file_seq.get() + 1;
         self.file_seq.set(file);
-        if dotted != ["std", "prelude"] && source.contains(RANGE_STRUCT) {
-            self.range_named.set(true);
+        if dotted != ["std", "prelude"] {
+            self.note_prelude_named(PreludeUse::named_in(source));
         }
         let (ast, words) = lex_and_parse(source, dotted, file, &|x: &str| {
             !std_file && module_file(&[x.to_string()], &self.project_root, &self.std_root).exists()
@@ -1239,8 +1328,8 @@ fn lex_and_parse(
 struct SharedStdParse {
     module: Module,
     words: Words,
-    /// Whether the source names [`RANGE_STRUCT`] (always false for the prelude).
-    range_named: bool,
+    /// The prelude structs whose words the source holds (none for the prelude).
+    prelude_named: PreludeUse,
     file: u32,
 }
 
@@ -1305,7 +1394,11 @@ fn shared_std_parse_at(index: usize, dotted: &[String]) -> Option<&'static Share
             Some(SharedStdParse {
                 module,
                 words,
-                range_named: dotted != ["std", "prelude"] && source.contains(RANGE_STRUCT),
+                prelude_named: if dotted == ["std", "prelude"] {
+                    PreludeUse::default()
+                } else {
+                    PreludeUse::named_in(source)
+                },
                 file,
             })
         })
@@ -2055,7 +2148,7 @@ mod tests {
             entry_override: None,
             max_depth,
             file_seq: std::cell::Cell::new(STD_FILE_IDS),
-            range_named: std::cell::Cell::new(false),
+            prelude_named: std::cell::Cell::new(PreludeUse::default()),
             words: std::cell::RefCell::new(HashMap::new()),
         }
     }

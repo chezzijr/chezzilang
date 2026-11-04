@@ -10,7 +10,7 @@ rch := Channel[int](0)     # RENDEZVOUS: send blocks until a receiver is already
                             # but a parked sender's value is visible to try_recv/wait: polls, not just recv
 bch := Channel[int](2)     # BOUNDED: holds ≤2 queued messages; a 3rd `send` blocks until a `recv` frees a slot
 ch.send(x)                 # x itself → channel queue (one word; an object is shared, not copied)
-v := ch.recv()             # the sender's value itself
+v := ch.recv()?            # the sender's value itself; `!RecvError` once closed and drained
 opt := ch.try_recv()       # non-blocking poll: v if queued, None if empty
 n := ch.len()              # current queued count
 c := bch.cap()             # capacity: 2 here; 0 for a rendezvous Channel[T](0); -1 for an unbounded Channel[T]()
@@ -20,7 +20,7 @@ c := bch.cap()             # capacity: 2 here; 0 for a rendezvous Channel[T](0);
 |--------|-----------|-------|
 | `send` | `send(self, v: T) -> None` | enqueue the value itself (M3.2); the sender MAY keep using it, and its later writes ARE seen by the receiver (one object, Go). On a **bounded** channel a `send` **blocks/parks** while the queue is at capacity (backpressure), resuming once a `recv` frees a slot. On a **rendezvous** channel (`cap == 0`) a `send` blocks until a receiver is already waiting. A blocked sender (rendezvous or full bounded) publishes its value as an OFFER, so a poll can take it, and `send` returns only once a receiver took it; `len()` does not count it |
 | `try_send` | `try_send(self, v: T) -> bool` | **non-blocking** send: `true` once queued, `false` if the send can't proceed — the channel is **closed**, a **bounded** channel is **full**, or a **rendezvous** channel has no receiver already waiting. Never blocks/parks |
-| `recv` | `recv(self) -> T` | dequeue (FIFO); blocking surface (see below) |
+| `recv` | `recv(self) -> T!RecvError` | dequeue (FIFO); blocking surface (see below). `?v`, or `!RecvError` on every call once the channel is closed and drained, with no fault (see "Closing a channel") |
 | `try_recv` | `try_recv(self) -> T?` | **non-blocking** poll: `?v` if queued, `None` if empty (or closed), or a value handed over by a parked rendezvous sender — never blocks, never faults, never suspends a fiber. Drain a mailbox without guarding on `len()` |
 | `len`  | `len(self) -> int` | queued count — use to guard a `recv` |
 | `cap`  | `cap(self) -> int` | capacity: `-1` for an unbounded `Channel[T]()`, `0` for a rendezvous `Channel[T](0)`, or the bound passed to `Channel[T](cap)` |
@@ -117,7 +117,7 @@ c := bch.cap()             # capacity: 2 here; 0 for a rendezvous Channel[T](0);
   the write). Two tasks that write one object with no lock race: a race is the user's bug, as in Go.
 - **A `Channel` is a value like any other** — pass a `Channel` over a `Channel` for reply channels.
 - **`try_recv() -> T?`** is the non-blocking sibling of `recv`: it pops or returns `None` and never
-  blocks, faults, or suspends a fiber. `recv -> T` stays primary; reach for `try_recv` to poll
+  blocks, faults, or suspends a fiber. `recv -> T!RecvError` stays primary; reach for `try_recv` to poll
   without guarding on `len()`. On a rendezvous channel, `try_recv` also takes a value handed over by a
   parked rendezvous sender — matching Go's `select`/`default` against a parked sender — and the same
   is true of a `wait:` recv arm.
@@ -127,8 +127,34 @@ c := bch.cap()             # capacity: 2 here; 0 for a rendezvous Channel[T](0);
 - **`for v in ch:`** — blocking iteration; drains buffered + future values, ends cleanly when
   closed-and-drained (Go's `for v := range ch`).
 - **`close()`** — idempotent, wakes every parked/demoted receiver.
-- **`send` after close → faults** `"send on a closed channel"`; **`recv` on closed-and-empty →
-  faults** `"receive on a closed channel"` (drains buffered first).
+- **`send` after close → faults** `"send on a closed channel"`.
+- **`recv` on a closed channel drains buffered values first**, then returns `!RecvError` on every
+  later call, with no fault. `RecvError` is a prelude struct (no import); its `message()` is
+  `receiving on a closed channel`. This is Rust's `Receiver::recv` returning a `RecvError` and Go's
+  `v, ok := <-ch` → zero, `false`. Handle it like any `T!E`:
+
+  ```chezzi
+  fn take(ch: Channel[int]) -> int!RecvError:
+      v := ch.recv()?              # pass the close up
+      return v * 2
+
+  fn drain(ch: Channel[int]) -> int:
+      n := 0
+      while true:
+          v := ch.recv() else: break   # leave on close
+          n += v
+      return n
+
+  done := Channel[bool](1)
+  done.close()
+  match done.recv():
+      ?v: print("got", v)
+      !e: print(e.message())       # receiving on a closed channel
+  _ := done.recv()                 # wait for a signal (a close also ends the wait)
+  ```
+
+  A bare `ch.recv()` statement warns: it discards a `T!E`. Write `_ := ch.recv()` to wait and drop
+  the value.
 - `try_recv` reads a closed channel as `None`; `try_send` returns `false`.
 - A `Channel[T]` is an `Iterable[T]`: `for v in ch`, a comprehension and `List.from_iter(ch)` / `Set.from_iter(ch)` drain
   it until it is closed and empty (Rust `rx.iter().collect()`, Go `for v := range ch`), so `List.from_iter(ch)`
@@ -194,7 +220,7 @@ determinism.
 
 `Broadcast[T]` is a pub/sub channel with the tokio `broadcast` contract. It is written in Chezzi
 over `Channel`, `Shared` and `AtomicInt`; the runtime has no broadcast code.
-`import Broadcast, Receiver, Lagged from std.concurrency.broadcast`.
+`import Broadcast, BroadcastError, Receiver, Lagged from std.concurrency.broadcast`.
 
 | Call | Signature | Behaviour |
 |---|---|---|
@@ -202,9 +228,9 @@ over `Channel`, `Shared` and `AtomicInt`; the runtime has no broadcast code.
 | `subscribe` | `subscribe(self) -> Receiver[T]` | A receiver for every value sent after this call, in send order. After `close` it is closed and empty |
 | `send` | `send(self, v: T) -> None` | Does not wait for receivers; it waits only while another `send`, `subscribe` or `close` holds the hub guard. Every receiver gets `v` itself, by handle (M3.3), as from a channel. A full mailbox drops its oldest value. With no receiver the value is dropped. After `close` it faults `send on a closed Broadcast` |
 | `close` | `close(self) -> None` | Idempotent. Every receiver's `for` ends after the values already sent |
-| `Receiver.recv` | `recv(self) -> T!Lagged` | Blocks. `?v`, or `!Lagged(missed)` when the broadcast dropped `missed` values before the next one. On a closed and drained broadcast it faults `receive on a closed channel` |
+| `Receiver.recv` | `recv(self) -> T!BroadcastError` | Blocks. `?v`, or `!BroadcastError.Lagged(l)` when the broadcast dropped `l.missed` values before the next one. On a closed and drained broadcast it gives `!BroadcastError.Closed` on every call, with no fault (tokio `RecvError::{Closed, Lagged}`). `message()` is `receiving on a closed channel` for `Closed` and the `Lagged` message for `Lagged` |
 | `Receiver.try_recv` | `try_recv(self) -> (T!Lagged)?` | Never blocks. `None` when no value waits, when another task is inside a receive on this receiver, or when the broadcast is closed and drained |
-| `for r in rx:` | `r: T!Lagged` | What `recv` gives, until the broadcast is closed and drained. `Receiver[T]` is an `Iterable[T!Lagged]` |
+| `for r in rx:` | `r: T!Lagged` | `?v` or `!Lagged(missed)`, until the broadcast is closed and drained. `Receiver[T]` is an `Iterable[T!Lagged]` |
 
 A receiver that falls behind loses its oldest values. Its next receive reports the count, then
 continues with the oldest value still held (tokio `RecvError::Lagged(n)`):
@@ -214,8 +240,11 @@ b := Broadcast[int].new(2)
 rx := b.subscribe()
 for i in 1..6:
     b.send(i)
-print(rx.recv())     # !Lagged(missed=3)
+print(rx.recv())     # !Lagged(Lagged(missed=3))
 print(rx.recv())     # 4
+b.close()
+_ := rx.recv()       # 5
+print(rx.recv())     # !Closed
 ```
 
 `Broadcast` and `Receiver` cross `spawn`, `parallel:` and an `Executor` job as shared handles, as a

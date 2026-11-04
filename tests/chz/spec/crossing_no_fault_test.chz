@@ -11,14 +11,14 @@ test fn a_task_reading_a_captured_list_is_silent():
     parallel:
         spawn:
             r.send("{gl_read}")
-    assert r.recv() == "[1, 2]"
+    assert r.recv() == ?"[1, 2]"
 
 test fn a_task_reading_a_module_global_is_silent():
     r := Channel[int](1)
     parallel:
         spawn:
             r.send(gl_read.len())
-    assert r.recv() == 2
+    assert r.recv() == ?2
 
 test fn a_task_pushing_to_its_own_new_list_is_silent():
     r := Channel[str](1)
@@ -27,7 +27,7 @@ test fn a_task_pushing_to_its_own_new_list_is_silent():
             ys := [1]
             ys.push(2)
             r.send("{ys}")
-    assert r.recv() == "[1, 2]"
+    assert r.recv() == ?"[1, 2]"
 
 test fn copy_then_push_in_a_task_is_silent():
     xs := [1]
@@ -37,7 +37,7 @@ test fn copy_then_push_in_a_task_is_silent():
             ys := xs.copy()
             ys.push(2)
             r.send("{ys}")
-    assert r.recv() == "[1, 2]"
+    assert r.recv() == ?"[1, 2]"
 
 test fn a_shared_set_from_a_task_is_silent():
     s := concurrency.Shared(1)
@@ -46,7 +46,7 @@ test fn a_shared_set_from_a_task_is_silent():
         spawn:
             s.set(9)
             r.send("ok")
-    r.recv()
+    _ := r.recv()
     assert s.get() == 9
 
 test fn a_shared_update_from_a_task_is_silent():
@@ -56,7 +56,7 @@ test fn a_shared_update_from_a_task_is_silent():
         spawn:
             s.update(fn(v: int) -> int: v + 1)
             r.send("ok")
-    r.recv()
+    _ := r.recv()
     assert s.get() == 2
 
 test fn an_rw_shared_write_from_a_task_is_silent():
@@ -66,7 +66,7 @@ test fn an_rw_shared_write_from_a_task_is_silent():
         spawn:
             s.write(fn(v: int) -> int: v + 1)
             r.send("ok")
-    r.recv()
+    _ := r.recv()
     assert s.get() == 2
 
 test fn an_atomic_store_from_a_task_is_silent():
@@ -76,7 +76,7 @@ test fn an_atomic_store_from_a_task_is_silent():
         spawn:
             a.store(9)
             r.send("ok")
-    r.recv()
+    _ := r.recv()
     assert a.load() == 9
 
 test fn an_atomic_int_add_from_a_task_is_silent():
@@ -86,7 +86,7 @@ test fn an_atomic_int_add_from_a_task_is_silent():
         spawn:
             a.add(1)
             r.send("ok")
-    r.recv()
+    _ := r.recv()
     assert a.load() == 1
 
 test fn a_channel_send_from_a_task_is_silent():
@@ -96,8 +96,8 @@ test fn a_channel_send_from_a_task_is_silent():
         spawn:
             c.send(5)
             r.send("ok")
-    r.recv()
-    assert c.recv() == 5
+    _ := r.recv()
+    assert c.recv() == ?5
 
 test fn closing_a_listener_from_a_task_is_silent():
     ln := net.listen("127.0.0.1:0")
@@ -111,7 +111,7 @@ test fn closing_a_listener_from_a_task_is_silent():
                     match res:
                         ?_: r.send("no-fault")
                         !e: r.send(e.message())
-            assert r.recv() == "no-fault"
+            assert r.recv() == ?"no-fault"
         !_: assert false, "setup failed: could not bind a listener"
 
 gl_before_after := [1, 2]
@@ -123,7 +123,7 @@ test fn a_root_task_writes_its_globals_before_and_after_a_nursery_is_silent():
     parallel:
         spawn:
             done.send(true)
-    done.recv()
+    _ := done.recv()
     gl_before_after.push(4)
     assert gl_before_after == [1, 2, 3, 4]
 
@@ -135,7 +135,7 @@ test fn a_channel_received_list_pushed_by_the_receiver_is_silent():
     c := Channel[List[int]](1)
     parallel:
         spawn produce(c)
-    xs := c.recv()
+    xs := c.recv() else: panic("c closed")
     xs.push(2)
     assert xs == [1, 2]
 
@@ -153,7 +153,7 @@ test fn an_outer_task_pushing_after_an_inner_nursery_read_is_silent():
             parallel:
                 spawn:
                     r.send("{ys}")
-            r.recv()
+            _ := r.recv()
             ys.push(2)
             assert ys == [1, 2]
 
@@ -176,7 +176,7 @@ test fn a_copied_struct_set_index_writing_through_a_shared_field_is_silent():
             match res:
                 ?_: r.send("no-fault")
                 !e: r.send(e.message())
-    assert r.recv() == "no-fault"
+    assert r.recv() == ?"no-fault"
     assert t.s.get() == 5
 
 # A tuple (xs, f), f capturing xs, sent over a Channel: M3.2 moves the tuple itself, so neither
@@ -192,7 +192,7 @@ test fn a_list_visited_first_in_one_channel_send_shares_the_capture():
     r2 := Channel[str](1)
     parallel:
         spawn:
-            p := ch.recv()
+            p := ch.recv() else: panic("ch closed")
             res1 := recover:
                 p.1()
             match res1:
@@ -203,6 +203,6 @@ test fn a_list_visited_first_in_one_channel_send_shares_the_capture():
             match res2:
                 ?_: r2.send("no-fault")
                 !e: r2.send(e.message())
-    assert r1.recv() == "no-fault"
-    assert r2.recv() == "no-fault"
+    assert r1.recv() == ?"no-fault"
+    assert r2.recv() == ?"no-fault"
     assert xs == [1, 2, 3]

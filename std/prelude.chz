@@ -161,13 +161,13 @@ native struct Channel[T]:
     # channel (`Channel[T](0)`) has no receiver already waiting — and `true` once the value is queued.
     # (An unbounded channel is never full, so its only `false` there is closed.)
     native fn try_send(self, v: T) -> bool
-    # Faults `receive on a closed channel` once closed AND drained — a distinct fault from deadlock
-    # detection. Go's `v, ok := <-ch` returns the zero value + `false` instead, no panic: a divergence.
-    # `try_recv` (below) is the non-faulting, `T?`-returning sibling.
-    native fn recv(self) -> T
+    # `?v` for the next value; `!RecvError` once the channel is closed AND drained, on every later
+    # receive too, with no fault (Rust `mpsc::Receiver::recv` gives a `RecvError`, Go's
+    # `v, ok := <-ch` gives `ok` false). `try_recv` (below) is the non-blocking, `T?` sibling.
+    native fn recv(self) -> T!RecvError
     native fn try_recv(self) -> Option[T]
-    # `close()` marks the channel closed (idempotent); a later `send` faults, `recv` drains then faults,
-    # and `for v in ch:` ends cleanly once drained.
+    # `close()` marks the channel closed (idempotent); a later `send` faults, `recv` drains then gives
+    # `!RecvError`, and `for v in ch:` ends cleanly once drained.
     native fn close(self) -> None
     # `trip()` flips a permanent level-trigger latch: the channel then reports ready (`true`) on every
     # `recv`/`try_recv`/`wait`, fanning out to any number of receivers (the primitive behind
@@ -311,6 +311,12 @@ protocol Any:
 
 protocol Error:
     fn message(self) -> str
+
+# `RecvError` — what `Channel.recv` returns once the channel is closed and drained (Rust std
+# `mpsc::RecvError`, same message). Like `Range`, every module sees it with no import.
+struct RecvError:
+    fn message(self) -> str:
+        return "receiving on a closed channel"
 
 # `Range` — a range of ints as a VALUE (TICKET-253). `a..b`, `a..=b`, `..b`, `a..` and `..` build one; so
 # does `Range(a, b)` / `Range(a, b, step)` (the constructor is the only place for a step; a negative step

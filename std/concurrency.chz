@@ -150,7 +150,7 @@ native fn is_settled(ch) -> bool
 # MODEL (TICKET-219): the channel is written once by a seal: the job body seals the value of
 # `recover: f()`, or the job transition seals the cancel `!e` (or the message of a fault `recover:`
 # cannot catch) when it drops or cuts the job. A sealed channel's receive reads the one outcome
-# (by handle, M3.2) and takes nothing, so `get()` is `_ch.recv()` and every copy of the handle and
+# (by handle, M3.2) and takes nothing, so `get()` is `_ch.recv()?` and every copy of the handle and
 # every second waiter reads the same outcome: one future, many readers (CPython `Future`). `done()` never blocks and
 # never reads false after true. The work STARTS at the submit and is waited for by `shutdown()` (or
 # the program-exit join). The canonical shape: submit every task, `shutdown()`, then `get()` each.
@@ -167,7 +167,7 @@ struct Task[T]:
     # Block until the outcome is available, then return it: `?value`, or `!message` when the job
     # faulted or `cancel()` cut it (a `T!E` in place of a raise). Idempotent.
     fn get(self) -> T!:
-        return self._ch.recv()
+        return self._ch.recv()?
 
     # True once the job has finished, faulted or been cancelled. Never blocks, and never reads
     # false after true.

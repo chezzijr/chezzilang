@@ -1153,7 +1153,7 @@ fn a_recv_settled_from_its_own_filled_slot_wakes_no_sender() {
     assert!(matches!(out, SendOutcome::Sent), "the give fills the slot");
     vm.pending = Some(PendingOp::new(p, vec![(Arc::clone(&core), 0, false)]));
     let v = vm.channel_method(h, "recv", &[], Span::RUNTIME).unwrap();
-    assert_eq!(v.as_int(), 5);
+    assert_eq!(recv_ok(&vm, v).as_int(), 5);
     assert_eq!(
         sched.recv_side_wakes.load(Ordering::Relaxed),
         0,
@@ -1174,7 +1174,7 @@ fn a_recv_that_takes_an_offer_still_wakes_its_sender() {
     let q = Pending::new();
     core.q.lock().unwrap().offer(&q, 0, Value::int(7));
     let v = vm.channel_method(h, "recv", &[], Span::RUNTIME).unwrap();
-    assert_eq!(v.as_int(), 7);
+    assert_eq!(recv_ok(&vm, v).as_int(), 7);
     assert_eq!(q.state(), PENDING_DONE, "the recv committed the offer");
     assert_eq!(
         sched.recv_side_wakes.load(Ordering::Relaxed),

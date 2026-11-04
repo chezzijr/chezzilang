@@ -41,6 +41,10 @@ fn writer(path: str, share: Channel[io.Writer]):
         ?_: pass
         !e: panic(e.message())
 
+fn next_writer(share: Channel[io.Writer]) -> io.Writer:
+    w := share.recv() else: panic(\"share closed\")
+    return w
+
 fn show(w: io.Writer):
     time.sleep_ms(50)
     s := \"{w}\"
@@ -69,16 +73,16 @@ got := Channel[int](1)
 fn body(op: &str, ctx: &str) -> &'static str {
     match (op, ctx) {
         ("print", "fiber") => {
-            "parallel:\n    spawn writer(\"@FIFO@\", share)\n    spawn:\n        show(share.recv())\n    spawn reader(\"@FIFO@\", got)\nprint(\"reader got\", got.recv())\n"
+            "parallel:\n    spawn writer(\"@FIFO@\", share)\n    spawn:\n        show(next_writer(share))\n    spawn reader(\"@FIFO@\", got)\nn := got.recv() else: panic(\"got closed\")\nprint(\"reader got\", n)\n"
         }
         ("print", "fiber_cb") => {
-            "parallel:\n    spawn writer(\"@FIFO@\", share)\n    spawn:\n        _ := [share.recv()].map(show_cb)\n    spawn reader(\"@FIFO@\", got)\nprint(\"reader got\", got.recv())\n"
+            "parallel:\n    spawn writer(\"@FIFO@\", share)\n    spawn:\n        _ := [next_writer(share)].map(show_cb)\n    spawn reader(\"@FIFO@\", got)\nn := got.recv() else: panic(\"got closed\")\nprint(\"reader got\", n)\n"
         }
         ("print", "main") => {
-            "ex := Executor()\n_ := ex.submit(fn(): writer(\"@FIFO@\", share))\n_ := ex.submit(fn(): reader(\"@FIFO@\", got))\nshow(share.recv())\nprint(\"reader got\", got.recv())\nex.shutdown()\n"
+            "ex := Executor()\n_ := ex.submit(fn(): writer(\"@FIFO@\", share))\n_ := ex.submit(fn(): reader(\"@FIFO@\", got))\nshow(next_writer(share))\nn := got.recv() else: panic(\"got closed\")\nprint(\"reader got\", n)\nex.shutdown()\n"
         }
         ("print", "job") => {
-            "ex := Executor()\n_ := ex.submit(fn(): show(share.recv()))\nparallel:\n    spawn writer(\"@FIFO@\", share)\n    spawn reader(\"@FIFO@\", got)\nex.shutdown()\nprint(\"reader got\", got.recv())\n"
+            "ex := Executor()\n_ := ex.submit(fn(): show(next_writer(share)))\nparallel:\n    spawn writer(\"@FIFO@\", share)\n    spawn reader(\"@FIFO@\", got)\nex.shutdown()\nn := got.recv() else: panic(\"got closed\")\nprint(\"reader got\", n)\n"
         }
         (op, ctx) => panic!("unknown cell {op}/{ctx}"),
     }

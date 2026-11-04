@@ -55,7 +55,7 @@ test fn grid_a_path_value_read_in_two_modules_inside_a_spawned_task_is_one_value
             for c in module_cells():
                 bad.push(c)
             r.send(bad)
-    bad := r.recv()
+    bad := r.recv() else: panic("r closed")
     assert bad.len() == 0, "red cells: {bad}"
 
 test fn grid_an_imported_path_value_captured_into_a_spawned_task_is_one_value():
@@ -66,5 +66,5 @@ test fn grid_an_imported_path_value_captured_into_a_spawned_task_is_one_value():
     parallel:
         spawn:
             r.send([t == top, q == Q.mk, l == path_value_identity_lib.Q.mk, q != Q.mk])
-    got := r.recv()
+    got := r.recv() else: panic("r closed")
     assert got == [true, true, true, false], "from-import fn, from-import type, lib.T.m, !=: {got}"

@@ -92,15 +92,16 @@ fn fetch_all(urls: List[str]):
 
 | Name | From | Use |
 |---|---|---|
-| `Channel[T]` | global | buffered FIFO: `send`, `recv`, `try_recv() -> T?`, `try_send(v) -> bool`, `len`, `close`, `trip()`; `for v in ch:` drains until closed |
+| `Channel[T]` | global | buffered FIFO: `send`, `recv() -> T!RecvError` (`!RecvError` once closed and drained), `try_recv() -> T?`, `try_send(v) -> bool`, `len`, `close`, `trip()`; `for v in ch:` drains until closed |
 | `Shared[T]` | `std.concurrency` | cross-task mutable box: `get`, `set`, `update(fn)` |
 | `RwShared[T]` | `std.concurrency` | reader-writer sibling of `Shared` |
 | `Atomic[T]` | `std.concurrency` | atomic box: `load`, `store`, `exchange`, `cas`, numeric `add`/`sub` |
 | `AtomicInt` | `std.concurrency` | lock-free int atomic, same methods, about 2.7× faster than `Atomic` on a contended counter |
-| `timer(ms) -> Channel[bool]` | `std.time` | one-shot timeout channel: `time.timer(500).recv()` yields `true` after about 500 ms; use it in a `wait:` arm |
+| `timer(ms) -> Channel[bool]` | `std.time` | one-shot timeout channel: `time.timer(500).recv()` yields `?true` after about 500 ms; use it in a `wait:` arm |
 | `Token` | `std.cancel` | cancellation token from `cancel.manual()` / `cancel.timeout(ms)`: `cancelled()`, `done() -> Channel[bool]`, `cancel()`, `reason()`, `deadline_at()`, `derive()` (a child; cancelling a parent cancels its children, never the reverse). Cooperative: poll it |
 
-- After `close()`: `send` faults, `recv` drains then faults, `try_send` returns `false`.
+- After `close()`: `send` faults, `recv` drains then returns `!RecvError` on every call (no fault),
+  `try_send` returns `false`.
 - A channel hands over the value itself (Go `chan T`): the sender and the receiver share one object.
 - `std.concurrency` members import like any other: `import Shared from std.concurrency` (also with
   `as`), or `import std.concurrency` then `concurrency.Shared(0)` / `std.concurrency.Shared(0)`. A

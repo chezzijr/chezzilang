@@ -78,7 +78,7 @@ test fn a_blocking_update_closure_waits():
     parallel:
         spawn hold_and_wait(s, held, ch)
         spawn:
-            _ := held.recv()
+            _ := held.recv() else: panic("held closed")
             ch.send(7)
     assert s.get() == 7
 
@@ -90,7 +90,8 @@ fn wait_for_guard(s: Shared[int]):
 
 fn signal_then_take(held: Channel[bool], ch: Channel[int], n: int) -> int:
     held.send(true)
-    return n + ch.recv()
+    v := ch.recv() else: panic("ch closed")
+    return n + v
 
 # A guard holder that waits on a channel another task sends to later is no deadlock: the guard
 # waiter is blocked, the sender is not.
@@ -101,7 +102,7 @@ test fn a_guard_waiter_behind_a_holder_that_waits_on_a_channel_is_no_deadlock():
     parallel:
         spawn hold_and_wait(s, held, ch)
         spawn:
-            _ := held.recv()
+            _ := held.recv() else: panic("held closed")
             parallel:
                 spawn wait_for_guard(s)
                 spawn:
@@ -153,7 +154,7 @@ test fn a_memoize_result_is_one_object_across_two_tasks():
     done := Channel[bool](1)
     parallel:
         spawn write_memo(f, done)
-    _ := done.recv()
+    _ := done.recv() else: panic("done closed")
     assert a.len() == 2
     assert f(1).len() == 2
 
@@ -199,12 +200,12 @@ fn hold_read(go: Channel[bool], n: int) -> int:
     return n
 
 fn writer_after(r: RwShared[int], go: Channel[bool], wsig: Channel[bool]):
-    _ := go.recv()
+    _ := go.recv() else: panic("go closed")
     wsig.send(true)
     r.write(fn(n): n * 10)
 
 fn reader_after(r: RwShared[int], wsig: Channel[bool], seen: Channel[int]):
-    _ := wsig.recv()
+    _ := wsig.recv() else: panic("wsig closed")
     time.sleep_ms(30)
     seen.send(r.read(fn(n): n))
 
@@ -221,17 +222,17 @@ test fn a_reader_behind_a_waiting_writer_reads_after_it():
             _ := r.read(fn(n): hold_read(go, n))
         spawn writer_after(r, go, wsig)
         spawn reader_after(r, wsig, seen)
-    assert seen.recv() == 10
+    assert seen.recv() == ?10
     assert r.get() == 10
 
 fn read_again(r: RwShared[int], go: Channel[bool], wsig: Channel[bool], n: int) -> int:
     go.send(true)
-    _ := wsig.recv()
+    _ := wsig.recv() else: panic("wsig closed")
     time.sleep_ms(30)
     return n + r.read(fn(m): m)
 
 fn writer_signal(r: RwShared[int], go: Channel[bool], wsig: Channel[bool]):
-    _ := go.recv()
+    _ := go.recv() else: panic("go closed")
     wsig.send(true)
     r.write(fn(n): n * 10)
 
@@ -252,7 +253,7 @@ test fn a_nested_read_past_a_waiting_writer_faults():
             res := recover: r.read(fn(n): read_again(r, go, wsig, n))
             out.send(outcome_of(res))
         spawn writer_signal(r, go, wsig)
-    got := out.recv()
+    got := out.recv() else: panic("out closed")
     assert got.contains("a lock cycle"), got
     assert r.get() == 10
 
@@ -281,8 +282,8 @@ test fn back_to_back_writers_do_not_starve_a_reader():
         spawn writer_loop(r, started, false)
         spawn writer_loop(r, started, false)
         spawn:
-            _ := started.recv()
+            _ := started.recv() else: panic("started closed")
             out.send(r.read(fn(n): n))
-    got := out.recv()
+    got := out.recv() else: panic("out closed")
     assert got >= 1 and got < 900, "reader saw {got} of 900"
     assert r.get() == 900

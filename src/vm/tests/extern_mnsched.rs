@@ -441,7 +441,8 @@ fn main():
         spawn work(50000, 100000, out)
     total := 0
     for _ in 0..2:
-        total += out.recv()
+        got := out.recv() else: panic(\"out closed\")
+        total += got
     print(total)
 
 main()
@@ -1904,7 +1905,7 @@ fn mn_many_blocked_consumers_complete_without_starving() {
 fn producer(ch: Channel[int], i: int):
     ch.send(i)
 fn consumer(ch: Channel[int], acc: Shared[int]):
-    v := ch.recv()
+    v := ch.recv() else: panic(\"ch closed\")
     acc.update(fn(x): x + v)
 fn main():
     ch := Channel[int]()
@@ -1931,7 +1932,8 @@ fn producer(ch: Channel[int], i: int):
 fn consumer(ch: Channel[int], acc: Shared[int]):
     total := 0
     for _ in 0..1000:
-        total = total + ch.recv()
+        got := ch.recv() else: panic(\"ch closed\")
+        total = total + got
     acc.update(fn(x): x + total)
 fn main():
     ch := Channel[int]()

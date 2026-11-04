@@ -1025,7 +1025,8 @@ fn gen() -> Iterator[int]:
 g := gen()
 h.g = ?g
 print("orig", g.next())
-match ch.recv().g:
+got := ch.recv() else: panic("ch closed")
+match got.g:
     ?x: print("copy", x.next(), x.next())
     None: print("none")
 "#;

@@ -27,7 +27,7 @@ test fn local_alias_of_global_element_write_through_alias_lands():
             match res:
                 ?_: r.send("no-fault")
                 !e: r.send(e.message())
-    got := r.recv()
+    got := r.recv() else: panic("r closed")
     assert got == "no-fault", got
     assert gl == [[1, 2]]
 
@@ -47,9 +47,9 @@ test fn write_through_local_alias_of_global_lands_and_the_received_closure_reads
     fr := Channel[str](1)
     parallel:
         spawn producer_alias(c, fr)
-    fault := fr.recv()
+    fault := fr.recv() else: panic("fr closed")
     assert fault == "no-fault", fault
-    f := c.recv()
+    f := c.recv() else: panic("c closed")
     got := f()
     assert got == "[1, 2]", "received closure missed the sender's alias write: {got}"
 
@@ -71,9 +71,9 @@ test fn write_through_param_alias_of_global_lands_and_the_received_closure_reads
     fr := Channel[str](1)
     parallel:
         spawn producer_param(c, fr)
-    fault := fr.recv()
+    fault := fr.recv() else: panic("fr closed")
     assert fault == "no-fault", fault
-    f := c.recv()
+    f := c.recv() else: panic("c closed")
     got := f()
     assert got == "[1, 2]", "received closure missed the sender's param-alias write: {got}"
 
@@ -90,7 +90,7 @@ test fn local_alias_of_a_whole_global_write_through_alias_lands():
             match res:
                 ?_: r.send("no-fault")
                 !e: r.send(e.message())
-    got := r.recv()
+    got := r.recv() else: panic("r closed")
     assert got == "no-fault", got
     assert gw == [[1, 2]]
 
@@ -114,7 +114,7 @@ test fn local_alias_of_a_struct_in_a_global_map_write_through_alias_lands():
             match res:
                 ?_: r.send("no-fault")
                 !e: r.send(e.message())
-    got := r.recv()
+    got := r.recv() else: panic("r closed")
     assert got == "no-fault", got
     assert gm["k"].n == 5
 
@@ -134,7 +134,7 @@ test fn local_alias_of_a_global_generator_is_one_generator():
             a := it.next()
             b := gg[0].next()
             r.send("{a} {b}")
-    got := r.recv()
+    got := r.recv() else: panic("r closed")
     assert got == "1 2", "generator alias is two live copies: {got}"
 
 # W13-1 (docs/contributing/gaps.md) — a spawn-ADOPTED alias of a module global (`a := gl` in the parent,
@@ -152,7 +152,7 @@ test fn write_through_spawn_adopted_alias_lands():
             match res:
                 ?_: c.send("no-fault")
                 !e: c.send(e.message())
-    got := c.recv()
+    got := c.recv() else: panic("c closed")
     assert got == "no-fault", got
     assert gl2 == [1, 2]
 
@@ -171,7 +171,7 @@ test fn element_alias_write_lands():
             match res:
                 ?_: c.send("no-fault")
                 !e: c.send(e.message())
-    got := c.recv()
+    got := c.recv() else: panic("c closed")
     assert got == "no-fault", got
     assert gl3 == [[1, 2]]
 
@@ -188,7 +188,7 @@ test fn spawn_arg_alias_write_lands():
     c := Channel[str](1)
     parallel:
         spawn w4(gl4[0], c)
-    got := c.recv()
+    got := c.recv() else: panic("c closed")
     assert got == "no-fault", got
     assert gl4 == [[1, 2]]
 
@@ -211,7 +211,7 @@ test fn struct_in_map_alias_write_lands():
             match res:
                 ?_: c.send("no-fault")
                 !e: c.send(e.message())
-    got := c.recv()
+    got := c.recv() else: panic("c closed")
     assert got == "no-fault", got
     assert gm116["k"].n == 5
 
@@ -229,7 +229,7 @@ test fn closure_built_before_the_alias_push_lands():
             match res:
                 ?_: c.send("no-fault")
                 !e: c.send(e.message())
-    got := c.recv()
+    got := c.recv() else: panic("c closed")
     assert got == "no-fault", got
     assert gl5 == [1, 2]
 
@@ -249,7 +249,7 @@ test fn nested_nursery_send_lands():
             parallel:
                 spawn:
                     pass
-    got := c.recv()
+    got := c.recv() else: panic("c closed")
     assert got == "no-fault", got
     assert gl6 == [1, 2]
 
@@ -267,9 +267,9 @@ test fn executor_job_reads_the_tasks_alias_write():
                 ?_: r.send("no-fault")
                 !e: r.send(e.message())
             _ := ex.submit(fn(): r.send("{gl8}"))
-    fault := r.recv()
+    fault := r.recv() else: panic("r closed")
     assert fault == "no-fault", fault
-    got := r.recv()
+    got := r.recv() else: panic("r closed")
     assert got == "[1, 2]", "executor job read {got}"
 
 gl9: List[int] = [1]
@@ -289,11 +289,12 @@ test fn two_hop_closure_alias_write_lands():
                 !e: c.send(e.message())
             fc.send(fn() -> str: "{gl9}")
         spawn:
-            f := fc.recv()
+            f := fc.recv() else: panic("fc closed")
             d.send(f)
-    fault := c.recv()
+    fault := c.recv() else: panic("c closed")
     assert fault == "no-fault", fault
-    got := d.recv()()
+    g := d.recv() else: panic("d closed")
+    got := g()
     assert got == "[1, 2]", "two-hop forwarded closure read {got}"
 
 # W13-2 (docs/contributing/gaps.md) — a receiver's OWN in-place mutation of a module global used to be silently
@@ -316,10 +317,11 @@ test fn receiver_own_write_survives_arriving_closure_write():
     fault := ""
     parallel:
         spawn producer_w13_2(c, fr)
-        fault = fr.recv()
+        msg := fr.recv() else: panic("fr closed")
+        fault = msg
         g2.push(9)
     assert fault == "no-fault", fault
-    f := c.recv()
+    f := c.recv() else: panic("c closed")
     got := "{f()} {g2}"
     assert got == "[1, 2, 9] [1, 2, 9]", "receiver's own write to the global was lost: {got}"
 
@@ -342,10 +344,11 @@ test fn receiver_index_assign_survives_arriving_closure():
     fault := ""
     parallel:
         spawn producer_w13_2_index(c, fr)
-        fault = fr.recv()
+        msg := fr.recv() else: panic("fr closed")
+        fault = msg
         g18[1] = 9
     assert fault == "no-fault", fault
-    f := c.recv()
+    f := c.recv() else: panic("c closed")
     got := "{f()} {g18}"
     assert got == "[1, 9, 2] [1, 9, 2]", "receiver's own index write was lost: {got}"
 
@@ -369,10 +372,11 @@ test fn receiver_field_write_survives_arriving_closure():
     fault := ""
     parallel:
         spawn producer_w13_2_field(c, fr)
-        fault = fr.recv()
+        msg := fr.recv() else: panic("fr closed")
+        fault = msg
         g22.b = 9
     assert fault == "no-fault", fault
-    f := c.recv()
+    f := c.recv() else: panic("c closed")
     got := "{f()} {g22.a} {g22.b}"
     assert got == "2 2 9", "receiver's own field write was lost: {got}"
 
@@ -387,7 +391,7 @@ fn producer_w13_2_sibling(c: Channel[fn() -> str], fr: Channel[str]):
     c.send(fn() -> str: "{g21}")
 
 fn consumer_w13_2_sibling(c: Channel[fn() -> str], r: Channel[str], fr: Channel[str]):
-    f := c.recv()
+    f := c.recv() else: panic("c closed")
     res := recover:
         g21.push(9)
     match res:
@@ -405,11 +409,11 @@ test fn sibling_task_receiver_own_write_lands():
     parallel:
         spawn producer_w13_2_sibling(c, fr1)
         spawn consumer_w13_2_sibling(c, r, fr2)
-    fault1 := fr1.recv()
-    fault2 := fr2.recv()
+    fault1 := fr1.recv() else: panic("fr1 closed")
+    fault2 := fr2.recv() else: panic("fr2 closed")
     assert fault1 == "no-fault", fault1
     assert fault2 == "no-fault", fault2
-    got := r.recv()
+    got := r.recv() else: panic("r closed")
     assert got == "[1, 2, 9] [1, 2, 9]", "a sibling's write is lost: {got}"
 
 g20: List[int] = [1]
@@ -430,9 +434,9 @@ test fn receiver_push_before_the_nursery_and_the_senders_push_both_land():
     fr := Channel[str](1)
     parallel:
         spawn producer_w13_2_control(c, fr)
-    fault := fr.recv()
+    fault := fr.recv() else: panic("fr closed")
     assert fault == "no-fault", fault
-    f := c.recv()
+    f := c.recv() else: panic("c closed")
     got := f()
     assert got == "[1, 9, 2]", "received closure read {got}"
     assert "{g20}" == "[1, 9, 2]", "the parent read {g20}"

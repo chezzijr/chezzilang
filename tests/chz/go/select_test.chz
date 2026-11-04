@@ -42,8 +42,8 @@ test fn main_():
     b := Channel[int](1)
     v := send(a, b)
     assert v == 2, "Send returned {v} != 2"
-    av := a.recv()
-    bv := b.recv()
+    av := a.recv() else: panic("a closed")
+    bv := b.recv() else: panic("b closed")
     assert av | bv == 3, "bad values {av} {bv}"
     v1 := send(a, None)  # Go: if v := Send(a, nil); v != 1 {
     assert v1 == 1, "Send returned {v1} != 1"

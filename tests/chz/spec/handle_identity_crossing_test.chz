@@ -25,13 +25,13 @@ test fn channel_equal_to_its_alias_inside_a_spawned_task():
     parallel:
         spawn:
             out.send(c1 == c2)
-    assert out.recv() == true
+    assert out.recv() == ?true
 
 test fn channel_received_back_over_a_channel_equals_the_original():
     c1 := Channel[int]()
     cc := Channel[Channel[int]](1)
     cc.send(c1)
-    back := cc.recv()
+    back := cc.recv() else: panic("cc closed")
     assert back == c1
 
 test fn channel_in_a_list_inside_a_spawned_task():
@@ -41,7 +41,7 @@ test fn channel_in_a_list_inside_a_spawned_task():
     parallel:
         spawn:
             out.send(c1 in xs)
-    assert out.recv() == true
+    assert out.recv() == ?true
 
 test fn shared_of_a_channel_get_equals_the_original():
     c1 := Channel[int]()
@@ -81,7 +81,8 @@ struct HKey[T]:
 fn via_channel[T](x: T) -> T:
     c := Channel[T](1)
     c.send(x)
-    return c.recv()
+    v := c.recv() else: panic("c closed")
+    return v
 
 fn via_shared[T](x: T) -> T:
     return Shared(x).get()
@@ -115,8 +116,10 @@ fn grid[T: StructuralEq](kind: str, a: T, c: T, ops: fn(T, T, T) -> List[str]) -
         spawn:
             out.send(ops(a, b, c))
         spawn run_ops(a, b, c, ops, out)
-    tag(bad, kind, "task", out.recv())
-    tag(bad, kind, "task", out.recv())
+    t1 := out.recv() else: panic("out closed")
+    tag(bad, kind, "task", t1)
+    t2 := out.recv() else: panic("out closed")
+    tag(bad, kind, "task", t2)
     tag(bad, kind, "channel-send", ops(a, via_channel(a), c))
     tag(bad, kind, "shared", ops(a, via_shared(a), c))
     tag(bad, kind, "rwshared", ops(a, via_rwshared(a), c))

@@ -1455,7 +1455,7 @@ fn generic_fn_over_native_handles_infers_param() {
         "import Shared from std.concurrency\nfn peek[T](s: Shared[T]) -> T:\n    return s.get()\nx := peek(Shared(9))\nprint(x)\n",
     );
     entry_ok(
-        "import std.concurrency\nfn first[T](c: Channel[T]) -> T:\n    return c.recv()\nch := Channel[int]()\nch.send(1)\nprint(first(ch))\n",
+        "import std.concurrency\nfn first[T](c: Channel[T]) -> T:\n    v := c.recv() else: panic(\"c closed\")\n    return v\nch := Channel[int]()\nch.send(1)\nprint(first(ch))\n",
     );
     entry_ok(
         "import Atomic, StructuralEq from std.concurrency\nfn look[T: StructuralEq](a: Atomic[T]) -> T:\n    return a.load()\nprint(look(Atomic(3)))\n",
@@ -1470,7 +1470,7 @@ fn generic_fn_over_native_handles_infers_param() {
 #[test]
 fn generic_wrapper_struct_holding_channel_substitutes() {
     entry_ok(
-        "import std.concurrency\nstruct Box[T]:\n    ch: Channel[T]\nfn main():\n    b := Box(Channel[int]())\n    b.ch.send(7)\n    x: int = b.ch.recv()\n    print(x)\nmain()\n",
+        "import std.concurrency\nstruct Box[T]:\n    ch: Channel[T]\nfn main():\n    b := Box(Channel[int]())\n    b.ch.send(7)\n    x: int = b.ch.recv() else: panic(\"ch closed\")\n    print(x)\nmain()\n",
     );
 }
 

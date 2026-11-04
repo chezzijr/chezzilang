@@ -940,7 +940,7 @@ struct Checker {
     /// TICKET-187 — the `std.json` module's id, when the graph holds it. `decode[T](s)` on this
     /// module (and only this one) is JSON decode (`Resolution::Decode`).
     json_module: Option<ModuleId>,
-    /// The runtime key of the `Range` struct `a..b` builds ([`crate::resolver::range_key`]).
+    /// The runtime key of the `Range` struct `a..b` builds ([`crate::resolver::prelude_struct_key`]).
     range_key: String,
     /// Every dotted (2+ segment) whole-module import in the current module, as `(path, bound name,
     /// full path bound)` (TICKET-175). The third field is `false` for `import a.b as c`, which binds
@@ -1264,9 +1264,10 @@ struct Checker {
     /// prelude), where `builtin_sig` returns `None` for these names — the same as before this table for
     /// hover-only queries; every real program goes through `check_graph` with the prelude linked.
     native_prelude_sigs: HashMap<String, FnSig>,
-    /// TICKET-255 — set per module by `run_graph_pass` from [`ModuleGraph::skips_range_methods`]: the
-    /// prelude `Range` method bodies are not checked, because the graph builds no `Range` value.
-    skip_range_bodies: bool,
+    /// TICKET-255 — set per module by `run_graph_pass` from [`ModuleGraph::skipped_prelude_structs`]:
+    /// the prelude structs whose method bodies are not checked, because the graph builds no value
+    /// of them.
+    skipped_prelude_structs: Vec<&'static str>,
     /// TICKET-265 — set per module by `run_graph_pass` from [`ModuleGraph::fn_skips`]: the top-level
     /// fns of a std module that the program does not reach. Their bodies are not checked.
     skip_fn_bodies: crate::resolver::SkippedFns,

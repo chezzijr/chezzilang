@@ -17,7 +17,7 @@ test fn spawn_inside_recover_in_a_fn_body_runs():
     match r:
         ?_: pass
         !e: assert false, "recover: returned Err instead of running the task: {e.message()}"
-    assert ch.recv() == 7
+    assert ch.recv() == ?7
 
 test fn spawn_inside_recover_in_a_closure_body_runs():
     ch := Channel[int]()
@@ -27,4 +27,4 @@ test fn spawn_inside_recover_in_a_closure_body_runs():
     match r:
         ?_: pass
         !e: assert false, "recover: returned Err instead of running the task: {e.message()}"
-    assert ch.recv() == 9
+    assert ch.recv() == ?9

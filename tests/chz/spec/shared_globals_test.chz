@@ -29,7 +29,7 @@ test fn r01_task_reads_a_parent_write_in_place():
     got := Shared(0)
     parallel:
         spawn:
-            ch.recv()
+            _ := ch.recv()
             got.set(G.len())
         G["b"] = 2
         ch.send(0)
@@ -41,7 +41,7 @@ test fn r02_task_reads_a_parent_rebind():
     got := Shared(0)
     parallel:
         spawn:
-            ch.recv()
+            _ := ch.recv()
             got.set(S)
         S = 9
         ch.send(0)

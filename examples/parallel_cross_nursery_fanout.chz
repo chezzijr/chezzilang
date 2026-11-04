@@ -8,10 +8,10 @@
 fn inner(a: Channel[int], b: Channel[int], c: Channel[int]):
     spawn:
         a.send(1)
-        y := b.recv()
+        y := b.recv() else: panic("b closed")
         print("I1 got {y}")
     spawn:
-        z := c.recv()
+        z := c.recv() else: panic("c closed")
         print("I2 got {z}")
 
 fn main():
@@ -20,7 +20,7 @@ fn main():
     c := Channel[int]()
     parallel:
         spawn:
-            x := a.recv()
+            x := a.recv() else: panic("a closed")
             b.send(x)
             c.send(99)
             print("O got {x}")

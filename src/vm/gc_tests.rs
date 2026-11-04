@@ -861,7 +861,7 @@ fn main():
     filler := []
     for i in 0..30:
         filler.push([\"{i}\"])
-    f := ch.recv()
+    f := ch.recv() else: panic(\"ch closed\")
     print(f())
 
     # A NESTED core inside a core: the outer must stay DIRTY so the inner's contents stay rooted.
@@ -870,7 +870,8 @@ fn main():
     outer := Shared(inner)
     for i in 0..30:
         junk := [\"{i}\"]
-    print(outer.get().recv())
+    got := outer.get().recv() else: panic(\"inner closed\")
+    print(got)
 
     # An Executor queue holding submitted closures across a stressed run.
     ex := Executor(1)

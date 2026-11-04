@@ -95,7 +95,7 @@ pub fn standalone_graph(stmts: &[Stmt]) -> ModuleGraph {
     let id = crate::base::module_id::ModuleId(std::path::PathBuf::from("<main>"));
     ModuleGraph {
         entry: id.clone(),
-        range_used: true,
+        prelude_used: crate::resolver::PreludeUse::ALL,
         skipped_fns: std::collections::HashMap::new(),
         modules: vec![crate::resolver::LoadedModule {
             id,

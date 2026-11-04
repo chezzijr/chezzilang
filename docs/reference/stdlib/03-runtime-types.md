@@ -25,7 +25,8 @@ Three shapes:
 A full/rendezvous `send` with no possible consumer is a deadlock fault, not an over-fill or a hang.
 
 Methods: `send(x: T) -> None` · `try_send(x: T) -> bool` (`false` = closed, full, **or** rendezvous
-with no waiting receiver; never blocks) · `recv() -> T` · `try_recv() -> T?` (`?v` if queued or
+with no waiting receiver; never blocks) · `recv() -> T!RecvError` (`!RecvError` on every call once
+closed and drained, no fault) · `try_recv() -> T?` (`?v` if queued or
 offered by a parked sender, `None` otherwise) · `close() -> None` · `trip() -> None` (permanent
 level-trigger latch, **`Channel[bool]` only**, gated by `where T: bool`, since it always delivers
 `true`; the primitive behind `std.cancel`'s `done()`) · `len() -> int` (buffered values only; a parked

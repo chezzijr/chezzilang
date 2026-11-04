@@ -9,6 +9,7 @@ fn main():
             spawn:
                 _ := [0, 1, 2].map(fn(j: int) -> int: put(i, j))
         for _ in 0..12:
-            out.push(ch.recv())
+            v := ch.recv() else: panic("ch closed")
+            out.push(v)
     print(" ".join(out))
 main()

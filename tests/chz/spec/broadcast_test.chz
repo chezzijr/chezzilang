@@ -6,7 +6,7 @@
 # newest value arrives. Neither asserts which values were dropped.
 #
 # Gated by `chz_suite_passes` (`tests/chz_suite.rs`).
-import Broadcast, Receiver, Lagged from std.concurrency.broadcast
+import Broadcast, BroadcastError, Receiver, Lagged from std.concurrency.broadcast
 import Executor, AtomicInt from std.concurrency
 import Iterable from std.iter
 
@@ -42,12 +42,12 @@ test fn send_never_blocks_and_every_receiver_gets_the_one_value():
     b.close()
     xs := a.recv()
     match xs:
-        !e: assert e.missed == 8
+        !e: assert e == BroadcastError.Lagged(Lagged(missed=8))
         ?_: assert false
     va := a.recv() ?? []
     vc := c.recv()
     match vc:
-        !e: assert e.missed == 8
+        !e: assert e == BroadcastError.Lagged(Lagged(missed=8))
         ?_: assert false
     vc2 := c.recv() ?? []
     va.push(99)
@@ -62,7 +62,7 @@ test fn a_lagging_receiver_reports_the_missed_count_then_continues():
         b.send(i)
     first := rx.recv()
     match first:
-        !e: assert e.missed == 3
+        !e: assert e == BroadcastError.Lagged(Lagged(missed=3))
         ?_: assert false
     assert (rx.recv() ?? 0) == 4
     assert (rx.recv() ?? 0) == 5
@@ -156,8 +156,8 @@ test fn a_broadcast_and_its_receivers_cross_spawn():
     want: List[str] = []
     for i in 0..20:
         want.push("{i}")
-    assert o1.recv() == want
-    assert o2.recv() == want
+    assert o1.recv() == ?want
+    assert o2.recv() == ?want
 
 fn sum_into(rx: Receiver[int], total: Channel[int]):
     s := 0
@@ -176,7 +176,7 @@ test fn a_receiver_crosses_an_executor_job():
         b.send(i)
     b.close()
     ex.shutdown()
-    assert total.recv() == 10
+    assert total.recv() == ?10
 
 # Busy work between two receives, so the publisher task outruns the subscriber task.
 fn spin(k: int) -> int:
@@ -211,8 +211,8 @@ test fn a_slow_subscriber_task_counts_every_value_it_missed():
             slow_reader(rx, got, missed)
         spawn:
             publish(b, n)
-    vs := got.recv()
-    lost := missed.recv()
+    vs := got.recv() else: panic("results closed")
+    lost := missed.recv() else: panic("missed closed")
     for i in 1..vs.len():
         assert vs[i - 1] < vs[i], "values out of order at {i}: {vs[i - 1]} then {vs[i]}"
     assert lost > 0, "the subscriber task never lagged"
@@ -246,8 +246,8 @@ test fn two_publisher_tasks_reach_every_subscriber_in_one_order():
             collect_into(r2, o2)
         spawn:
             publish_two_then_close(b)
-    l1 := o1.recv()
-    l2 := o2.recv()
+    l1 := o1.recv() else: panic("o1 closed")
+    l2 := o2.recv() else: panic("o2 closed")
     assert l1.len() == 400
     assert l1 == l2
 
@@ -260,7 +260,8 @@ fn one_lag_trial() -> List[str]:
             collect_into(rx, out)
         spawn:
             publish(b, 2)
-    return out.recv()
+    got := out.recv() else: panic("out closed")
+    return got
 
 # 3 across tasks. Mailbox of 1, a reader task drains it while the publisher task sends 0, 1 and closes.
 # The reader may drain between the hub's failed `try_send` and its `try_recv`; the newest value must
@@ -299,7 +300,9 @@ test fn two_tasks_reading_one_receiver_share_each_value_once():
             shared_reader(rx, o2)
         spawn:
             shared_publish(b, n)
-    all := o1.recv() + o2.recv()
+    v1 := o1.recv() else: panic("o1 closed")
+    v2 := o2.recv() else: panic("o2 closed")
+    all := v1 + v2
     count: List[int] = []
     for _ in 0..n:
         count.push(0)
@@ -350,8 +353,9 @@ fn small_cap_shared_trial(readers: int) -> str:
     received := 0
     lost := 0
     for _ in 0..readers:
-        vs := got.recv()
-        lost += missed.recv()
+        vs := got.recv() else: panic("results closed")
+        m := missed.recv() else: panic("missed closed")
+        lost += m
         received += vs.len()
         for i in 0..vs.len():
             if i > 0 and vs[i - 1] >= vs[i]:
@@ -375,7 +379,11 @@ fn blocked_reader(rx: Receiver[int], started: Channel[int]) -> int:
     started.send(1)
     match rx.recv():
         ?v: return v
-        !e: return 0 - e.missed
+        !e:
+            match e:
+                BroadcastError.Lagged(l): return 0 - l.missed
+                BroadcastError.Closed: panic("closed before a value")
+    return 0
 
 # TICKET-292 rule 5. `try_recv` never waits for the receive step. A reader parked in `recv` holds
 # the step; `try_recv` returns `None` at once instead of queueing behind it, and the parked reader
@@ -388,13 +396,13 @@ test fn try_recv_returns_none_while_another_reader_is_receiving():
     started := Channel[int](1)
     ex := Executor()
     _ := ex.submit(fn(): got.send(blocked_reader(rx, started)))
-    started.recv()
+    _ := started.recv()
     # The reader is now parked in `recv` or about to park. A `try_recv` that queued behind its
     # receive step would never return, since nothing is sent yet.
     for _ in 0..200:
         assert rx.try_recv() == None
     b.send(7)
-    assert got.recv() == 7
+    assert got.recv() == ?7
     ex.shutdown()
 
 fn taking_reader(rx: Receiver[int], taken: Channel[int]):
@@ -407,7 +415,8 @@ fn taking_reader(rx: Receiver[int], taken: Channel[int]):
 fn fault_after(half: int, taken: Channel[int], first: Channel[List[int]], go: Channel[int]):
     vs: List[int] = []
     for _ in 0..half:
-        vs.push(taken.recv())
+        v := taken.recv() else: panic("taken closed")
+        vs.push(v)
     first.send(vs)
     go.send(1)
     panic("reader nursery faults")
@@ -448,7 +457,9 @@ test fn a_reader_cancelled_inside_a_receive_does_not_block_the_other_reader():
             reader_after_go(rx, go, rest)
         spawn:
             faulting_nursery_then_rest(b, rx, half, n, taken, first, go)
-    all := first.recv() + rest.recv()
+    vf := first.recv() else: panic("first closed")
+    vr := rest.recv() else: panic("rest closed")
+    all := vf + vr
     seen: List[int] = []
     for _ in 0..n:
         seen.push(0)
@@ -458,16 +469,18 @@ test fn a_reader_cancelled_inside_a_receive_does_not_block_the_other_reader():
     for i in 0..n:
         assert seen[i] == 1, "value {i} arrived {seen[i]} times"
 
-# `recv` on a closed and drained receiver faults with the `Channel.recv` message.
-test fn recv_on_a_closed_and_drained_receiver_faults():
+# `recv` on a closed and drained receiver gives `!BroadcastError.Closed`, every time, with no fault
+# (tokio `broadcast::error::RecvError::Closed`).
+test fn recv_on_a_closed_and_drained_receiver_gives_closed():
     b := Broadcast[int].new(2)
     rx := b.subscribe()
     b.close()
-    res := recover:
-        _ := rx.recv()
-    match res:
-        ?_: assert false
-        !e: assert e.message() == "receive on a closed channel"
+    for _ in 0..3:
+        match rx.recv():
+            ?v: assert false, "got {v}"
+            !e:
+                assert e == BroadcastError.Closed
+                assert e.message() == "receiving on a closed channel"
     assert rx.try_recv() == None
 
 fn note(r: int!Lagged, got: List[int], taken: AtomicInt):
@@ -484,12 +497,13 @@ fn for_path_reader(rx: Receiver[int], taken: AtomicInt, out: Channel[List[int]])
 
 fn recv_path_reader(rx: Receiver[int], taken: AtomicInt, out: Channel[List[int]]):
     got: List[int] = []
-    res := recover:
-        while true:
-            note(rx.recv(), got, taken)
-    match res:
-        ?_: pass
-        !e: assert e.message() == "receive on a closed channel"
+    while true:
+        match rx.recv():
+            ?v: note(?v, got, taken)
+            !e:
+                match e:
+                    BroadcastError.Closed: break
+                    BroadcastError.Lagged(l): note(!l, got, taken)
     out.send(got)
 
 # Polls until every value is taken: closed-and-drained and empty both give `None`.
@@ -520,7 +534,10 @@ test fn every_receive_path_shares_one_receiver_without_a_duplicate():
             try_recv_path_reader(rx, n, taken, o3)
         spawn:
             shared_publish(b, n)
-    all := o1.recv() + o2.recv() + o3.recv()
+    v1 := o1.recv() else: panic("o1 closed")
+    v2 := o2.recv() else: panic("o2 closed")
+    v3 := o3.recv() else: panic("o3 closed")
+    all := v1 + v2 + v3
     seen: List[int] = []
     for _ in 0..n:
         seen.push(0)

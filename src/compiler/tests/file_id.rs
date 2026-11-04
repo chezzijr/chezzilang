@@ -106,13 +106,19 @@ fn prelude_range_methods(graph: &crate::resolver::ModuleGraph) -> Vec<String> {
 fn range_free_graph_checks_no_prelude_fn_bodies() {
     for src in LAZY_ROWS {
         let graph = graph_of(src);
-        assert!(!graph.range_used, "{src:?} recorded a Range use");
+        assert!(
+            !graph.prelude_used.uses(crate::resolver::RANGE_STRUCT),
+            "{src:?} recorded a Range use"
+        );
         let bodies = crate::checker::check_graph_counting_fn_bodies(&graph);
         assert_eq!(bodies, 0, "{src:?} checked {bodies} fn bodies");
     }
     for src in RANGE_ROWS {
         let graph = graph_of(src);
-        assert!(graph.range_used, "{src:?} recorded no Range use");
+        assert!(
+            graph.prelude_used.uses(crate::resolver::RANGE_STRUCT),
+            "{src:?} recorded no Range use"
+        );
         let bodies = crate::checker::check_graph_counting_fn_bodies(&graph);
         let methods = prelude_range_methods(&graph).len();
         assert!(
@@ -135,6 +141,57 @@ fn range_use_grid_matches_the_compiled_methods() {
                 assert!(have.contains(&&m), "{src:?} lacks Range method {m}");
             }
         }
+    }
+}
+
+/// The prelude's `RecvError` methods follow the same gate as `Range`'s: compiled only for a graph
+/// whose non-prelude source holds a `recv` (a `.recv()` call or a `wait:` recv arm) or names the
+/// struct.
+#[test]
+fn recv_error_methods_are_compiled_only_for_a_graph_that_receives() {
+    let rows: &[(&str, bool)] = &[
+        (
+            "print(1)
+",
+            false,
+        ),
+        (
+            "c := Channel[int](1)
+c.send(1)
+print(c.try_send(2))
+",
+            false,
+        ),
+        (
+            "c := Channel[int](1)
+c.send(1)
+print(c.recv())
+",
+            true,
+        ),
+        (
+            "c := Channel[int](1)
+c.send(1)
+wait:
+    v := c.recv():
+        print(v)
+",
+            true,
+        ),
+        (
+            "e := RecvError()
+print(e.message())
+",
+            true,
+        ),
+    ];
+    for (src, used) in rows {
+        let graph = graph_of(src);
+        let program = compile_graph(&graph).unwrap_or_else(|e| panic!("{src:?}: {}", e.message));
+        let has = program.structs[&program.recv_error_key]
+            .methods
+            .contains_key("message");
+        assert_eq!(has, *used, "{src:?} compiled RecvError.message: {has}");
     }
 }
 

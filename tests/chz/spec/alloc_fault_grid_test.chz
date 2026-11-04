@@ -55,5 +55,5 @@ test fn alloc_faults_in_a_spawned_task():
     parallel:
         spawn:
             out.send([outcome(op) for op in ops()])
-    got := out.recv()
+    got := out.recv() else: panic("out closed")
     assert got == GOLDEN, "{got}"

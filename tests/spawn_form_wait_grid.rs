@@ -91,7 +91,7 @@ const OPS: &[WaitOp] = &[
         arg: "ch",
         setup: &["ch := Channel[int](1)", "ch.send(0)"],
         call: "ch.send(1)",
-        driver: &["time.sleep_ms(30)", "print(ch.recv() + ch.recv())"],
+        driver: &["time.sleep_ms(30)", "print(ch.recv()? + ch.recv()?)"],
         done_stdout: "1\nend\n",
     },
     WaitOp {

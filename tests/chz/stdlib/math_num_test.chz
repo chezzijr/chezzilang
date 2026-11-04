@@ -43,4 +43,4 @@ test fn abs_value_crosses_spawn():
     parallel:
         spawn:
             ch.send(g(-4))
-    assert ch.recv() == 4
+    assert ch.recv() == ?4

@@ -567,7 +567,7 @@ fn typeid_guard_struct_round_trips_through_channel() {
     // so assert the VM output directly.
     let src = concat!(
         "struct Pt:\n    x: int\n    y: int\n",
-        "fn worker(ch: Channel[Pt]):\n    p := ch.recv()\n    print(\"{p.x} {p.y}\")\n",
+        "fn worker(ch: Channel[Pt]):\n    p := ch.recv() else: panic(\"ch closed\")\n    print(\"{p.x} {p.y}\")\n",
         "fn sender(ch: Channel[Pt]):\n    ch.send(Pt(10, 20))\n",
         "fn main():\n    ch := Channel[Pt]()\n    parallel:\n        spawn worker(ch)\n        spawn sender(ch)\n",
         "main()\n",
@@ -846,7 +846,7 @@ fn method_ic_survives_fiber_park_under_parallel() {
     // runs, the parked fiber resumes and makes a CACHED method call). The central liveness claim:
     // the cell holds no `GcRef`, so a context swap can't invalidate it. VM == `--parallel`.
     let src = "struct Acc:\n    base: int\n\n    fn fold_in(self, k: int) -> int:\n        return self.base + k\n\
-                   fn consumer(ch: Channel[int]):\n    a := Acc(1000)\n    total := 0\n    i := 0\n    while i < 4:\n        v := ch.recv()\n        total = total + a.fold_in(v)\n        i = i + 1\n    print(total)\n\
+                   fn consumer(ch: Channel[int]):\n    a := Acc(1000)\n    total := 0\n    i := 0\n    while i < 4:\n        v := ch.recv() else: panic(\"ch closed\")\n        total = total + a.fold_in(v)\n        i = i + 1\n    print(total)\n\
                    fn producer(ch: Channel[int]):\n    i := 0\n    while i < 4:\n        ch.send(i)\n        i = i + 1\n\
                    fn main():\n    ch := Channel[int]()\n    parallel:\n        spawn consumer(ch)\n        spawn producer(ch)\nmain()\n";
     // total = 4*1000 + (0+1+2+3) = 4006

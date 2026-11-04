@@ -19,7 +19,7 @@ test fn memoize_wrapper_called_in_spawned_task_returns_value():
     ch := Channel[str](1)
     parallel:
         spawn _child_memo(m, ch)
-    got := ch.recv()
+    got := ch.recv() else: panic("ch closed")
     assert got == "42", got
 
 fn listed(x: int) -> List[int]:

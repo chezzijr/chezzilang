@@ -4,7 +4,7 @@
 import std.time
 
 fn i32receiver(c: Channel[int], strobe: Channel[bool]):  # Go: c chan int32
-    assert c.recv() == 123, "i32 value"
+    assert c.recv() == ?123, "i32 value"
     strobe.send(true)
 
 fn i32sender(c: Channel[int], strobe: Channel[bool]):  # Go: c chan int32
@@ -12,7 +12,7 @@ fn i32sender(c: Channel[int], strobe: Channel[bool]):  # Go: c chan int32
     strobe.send(true)
 
 fn i64receiver(c: Channel[int], strobe: Channel[bool]):  # Go: c chan int64
-    assert c.recv() == 123456, "i64 value"
+    assert c.recv() == ?123456, "i64 value"
     strobe.send(true)
 
 fn i64sender(c: Channel[int], strobe: Channel[bool]):  # Go: c chan int64
@@ -20,7 +20,7 @@ fn i64sender(c: Channel[int], strobe: Channel[bool]):  # Go: c chan int64
     strobe.send(true)
 
 fn breceiver(c: Channel[bool], strobe: Channel[bool]):
-    assert c.recv(), "b value"
+    assert c.recv() == ?true, "b value"
     strobe.send(true)
 
 fn bsender(c: Channel[bool], strobe: Channel[bool]):
@@ -28,7 +28,7 @@ fn bsender(c: Channel[bool], strobe: Channel[bool]):
     strobe.send(true)
 
 fn sreceiver(c: Channel[str], strobe: Channel[bool]):
-    assert c.recv() == "hello", "s value"
+    assert c.recv() == ?"hello", "s value"
     strobe.send(true)
 
 fn ssender(c: Channel[str], strobe: Channel[bool]):
@@ -83,10 +83,10 @@ test fn main_():
                     try += 1
                     assert try <= MAX_TRIES, "i32receiver buffer={buffer}"  # Go: if try > maxTries { ... panic("fail") }
                     sleep()
-        sync.recv()
+        _ := sync.recv()
         spawn i32sender(c32, sync)
         if buffer > 0:
-            sync.recv()
+            _ := sync.recv()
         try = 0
         while true:  # Go: Recv32: for {
             wait:
@@ -98,7 +98,7 @@ test fn main_():
                     sleep()
         assert i32 == 234, "i32sender value"
         if buffer == 0:
-            sync.recv()
+            _ := sync.recv()
 
         spawn i64receiver(c64, sync)
         try = 0
@@ -110,10 +110,10 @@ test fn main_():
                     try += 1
                     assert try <= MAX_TRIES, "i64receiver"  # Go: if try > maxTries { ... panic("fail") }
                     sleep()
-        sync.recv()
+        _ := sync.recv()
         spawn i64sender(c64, sync)
         if buffer > 0:
-            sync.recv()
+            _ := sync.recv()
         try = 0
         while true:  # Go: Recv64: for {
             wait:
@@ -125,7 +125,7 @@ test fn main_():
                     sleep()
         assert i64 == 234567, "i64sender value"
         if buffer == 0:
-            sync.recv()
+            _ := sync.recv()
 
         spawn breceiver(cb, sync)
         try = 0
@@ -137,10 +137,10 @@ test fn main_():
                     try += 1
                     assert try <= MAX_TRIES, "breceiver"  # Go: if try > maxTries { ... panic("fail") }
                     sleep()
-        sync.recv()
+        _ := sync.recv()
         spawn bsender(cb, sync)
         if buffer > 0:
-            sync.recv()
+            _ := sync.recv()
         try = 0
         while true:  # Go: RecvBool: for {
             wait:
@@ -152,7 +152,7 @@ test fn main_():
                     sleep()
         assert b, "bsender value"
         if buffer == 0:
-            sync.recv()
+            _ := sync.recv()
 
         spawn sreceiver(cs, sync)
         try = 0
@@ -164,10 +164,10 @@ test fn main_():
                     try += 1
                     assert try <= MAX_TRIES, "sreceiver"  # Go: if try > maxTries { ... panic("fail") }
                     sleep()
-        sync.recv()
+        _ := sync.recv()
         spawn ssender(cs, sync)
         if buffer > 0:
-            sync.recv()
+            _ := sync.recv()
         try = 0
         while true:  # Go: RecvString: for {
             wait:
@@ -179,4 +179,4 @@ test fn main_():
                     sleep()
         assert s == "hello again", "ssender value"
         if buffer == 0:
-            sync.recv()
+            _ := sync.recv()

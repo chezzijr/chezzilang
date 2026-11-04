@@ -1387,12 +1387,16 @@ fn timeout_reaches_a_guard_waiter_parked_behind_a_recv() {
         "guard_waiter_test.chz",
         r#"import Shared from std.concurrency
 
+fn take(ch: Channel[int]) -> int:
+    v := ch.recv() else: panic("ch closed")
+    return v
+
 test fn guard_waiter_hangs():
     s := Shared(0)
     ch := Channel[int]()
     parallel:
         spawn:
-            s.update(fn(x: int) -> int: x + ch.recv())
+            s.update(fn(x: int) -> int: x + take(ch))
         spawn:
             s.set(5)
 "#,

@@ -31,7 +31,7 @@ impl Checker {
                 c.json_module = Some(lm.id.clone());
             }
         }
-        c.range_key = crate::resolver::range_key(graph);
+        c.range_key = crate::resolver::prelude_struct_key(graph, crate::resolver::RANGE_STRUCT);
         // ROOT REDESIGN — module-scoped IDENTITY KEYS: scan every non-native module's struct/enum/alias
         // names and key EACH one `<module-key>::Name` (via the shared `resolver::module_keys`, the SAME
         // derivation the compiler uses), so the checker, compiler, and VM agree on every key (parity) and
@@ -93,7 +93,7 @@ impl Checker {
         c.graph_binds = std::rc::Rc::clone(&binds);
         for (idx, lm) in graph.modules.iter().enumerate() {
             c.module_idx_of.insert(lm.id.clone(), idx);
-            c.skip_range_bodies = graph.skips_range_methods(lm);
+            c.skipped_prelude_structs = graph.skipped_prelude_structs(lm);
             c.skip_fn_bodies = graph.fn_skips(lm);
             // Keys every checker->compiler table this module's bodies record, the bodied fns of a native
             // std module included (they are checked below, before the AST-module branch sets it).

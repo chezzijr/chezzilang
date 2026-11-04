@@ -278,7 +278,7 @@ fn main():
     ch := Channel[bytes](1)
     parallel:
         spawn worker(ch, b\"\\x00A\\xff\")
-    got := ch.recv()
+    got := ch.recv() else: panic(\"ch closed\")
     print(got.len())
     print(got[0])
     print(got[2])
@@ -1219,9 +1219,12 @@ import Shared from std.concurrency
 import std.time
 s := Shared(0)
 ch := Channel[int]()
+fn add_recv(x: int) -> int:
+    r := ch.recv() else: panic(\"ch closed\")
+    return x + r
 parallel:
     spawn:
-        s.update(fn(x: int) -> int: x + ch.recv())
+        s.update(add_recv)
     spawn:
         time.sleep_ms(100)
         s.set(5)
@@ -1425,7 +1428,7 @@ parallel:
     spawn:
         n = 100
         ch.send(outer())
-g := ch.recv()
+g := ch.recv() else: panic(\"ch closed\")
 print(g(3))
 ";
     let entry = write_temp_chz("ticket016_global_read_write", src);
@@ -1450,7 +1453,7 @@ parallel:
     spawn:
         n = 100
         ch.send(fn(x: int) -> int: x * (fn() -> int: n)())
-g := ch.recv()
+g := ch.recv() else: panic(\"ch closed\")
 print(g(3))
 ";
     let entry = write_temp_chz("ticket016_global_nested_closure", src);
@@ -1477,7 +1480,7 @@ parallel:
     spawn:
         n = 100
         ch.send(fn(x: int) -> int: x * n)
-f := ch.recv()
+f := ch.recv() else: panic(\"ch closed\")
 print(f(3))
 ";
     let entry = write_temp_chz("ticket016_global_capture", src);
@@ -1506,7 +1509,7 @@ fn main():
             recover:
                 n = 100
             ch.send(fn(x: int) -> int: x * n)
-    f := ch.recv()
+    f := ch.recv() else: panic(\"ch closed\")
     print(f(3))
 
 main()
@@ -1952,7 +1955,7 @@ for _ in 0..20:
     ex := Executor()
     gate := Channel[int](0)
     fn job() -> int:
-        v := gate.recv()
+        v := gate.recv() else: panic("gate closed")
         return v
     t := ex.submit(job)
     gate.send(7)

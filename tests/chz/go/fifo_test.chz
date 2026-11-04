@@ -8,11 +8,11 @@ fn asynch_fifo():
     for i in 0..N:
         ch.send(i)
     for i in 0..N:
-        assert ch.recv() == i, "bad receive"
+        assert ch.recv() == ?i, "bad receive"
 
 fn chain(ch: Channel[int], val: int, inp: Channel[int], out: Channel[int]):  # Go: in <-chan int, out chan<- int
-    inp.recv()
-    assert ch.recv() == val, "{val}"  # Go: panic(val)
+    _ := inp.recv()
+    assert ch.recv() == ?val, "{val}"  # Go: panic(val)
     out.send(1)
 
 # thread together a daisy chain to read the elements in sequence
@@ -27,7 +27,7 @@ fn synch_fifo():
     start.send(0)
     for i in 0..N:
         ch.send(i)
-    inp.recv()
+    _ := inp.recv()
 
 test fn main_():
     asynch_fifo()

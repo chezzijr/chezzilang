@@ -573,7 +573,7 @@ fn main():
     ch.send(xs)
     parallel:
         spawn:
-            ys := ch.recv()
+            ys := ch.recv() else: panic(\"ch closed\")
             print(\"{ys[0][0]} {ys[1].len()}\")
 main()";
     assert_golden_out(src, "10 2\n");
@@ -592,7 +592,7 @@ fn main():
     ch.send(m)
     parallel:
         spawn:
-            n := ch.recv()
+            n := ch.recv() else: panic(\"ch closed\")
             self_ref := n[\"leaf\"][0]
             depth := self_ref[\"leaf\"].len()
             print(\"{depth}\")
@@ -675,7 +675,7 @@ fn main():
     ch.send(xs)
     parallel:
         spawn:
-            ys := ch.recv()
+            ys := ch.recv() else: panic(\"ch closed\")
             ys[0].n = 9
             print(\"{ys[0].n} {ys[1].n}\")
 main()";
@@ -710,6 +710,7 @@ main()";
 #[test]
 fn crossing_generator_reached_twice_is_one_copy() {
     let src = "\
+import Iterator from std.iter
 fn gen() -> Iterator[int]:
     yield 1
 fn main():
@@ -717,7 +718,7 @@ fn main():
     xs := [it, it]
     ch := Channel[List[Iterator[int]]](1)
     ch.send(xs)
-    ys := ch.recv()
+    ys := ch.recv() else: panic(\"ch closed\")
     print(\"{ys[0].next() ?? -1} {ys[1].next() ?? -1}\")
 main()";
     assert_golden_out(src, "1 -1\n");
@@ -1424,11 +1425,13 @@ fn cursor_crosses_spawn_three_engine_parity() {
     // panicked the spawned worker on the VM while the since-removed interp engine succeeded — a
     // parity divergence.)
     let src = concat!(
+        "import Iterator from std.iter\n",
         "fn main():\n",
         "    ch := Channel[Iterator[int]]()\n",
         "    parallel:\n",
         "        spawn ch.send([1, 2].iter())\n",
-        "    print(ch.recv().next())\n",
+        "    it := ch.recv() else: panic(\"ch closed\")\n",
+        "    print(it.next())\n",
         "main()\n"
     );
     assert_golden_out(src, "1\n");

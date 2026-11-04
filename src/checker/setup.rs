@@ -170,7 +170,7 @@ impl Checker {
             carrier_seeds: CarrierSeeds::default(),
             imported_variants: HashMap::new(),
             native_prelude_sigs: HashMap::new(),
-            skip_range_bodies: false,
+            skipped_prelude_structs: Vec::new(),
             skip_fn_bodies: crate::resolver::SkippedFns::default(),
             type_keys: HashMap::new(),
             current_module_id: None,

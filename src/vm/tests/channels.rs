@@ -31,8 +31,12 @@ fn parallel_recv_blocks_until_send_wakes_it() {
     sender
         .channel_method(sh, "send", &[Value::int(42)], sp)
         .unwrap();
-    let handle = std::thread::spawn(move || worker.channel_method(wh, "recv", &[], sp).unwrap());
-    assert_eq!(handle.join().unwrap(), Value::int(42));
+    let handle = std::thread::spawn(move || {
+        let got = worker.channel_method(wh, "recv", &[], sp).unwrap();
+        (worker, got)
+    });
+    let (worker, got) = handle.join().unwrap();
+    assert_eq!(recv_ok(&worker, got), Value::int(42));
 }
 
 // ----- bounded Channel[T](cap): capacity + backpressure -----
@@ -773,8 +777,8 @@ fn main():
     ch := Channel[int!]()
     parallel:
         spawn worker(ch)
-    a := ch.recv()
-    b := ch.recv()
+    a := ch.recv() else: panic(\"ch closed\")
+    b := ch.recv() else: panic(\"ch closed\")
     match a:
         ?v: print(\"ok {v}\")
         !e: print(\"err {e.message()}\")
@@ -1075,7 +1079,7 @@ fn give_then_open(rv: Channel[Map[str, int]], gate: Channel[int]) -> int:
     return 0
 
 fn take(rv: Channel[Map[str, int]], gate: Channel[int], out: Channel[int]):
-    r := rv.recv()
+    r := rv.recv() else: panic("rv closed")
     _ := gate.recv()
     out.send(r.len() * 100 + r["k49"])
 
@@ -1089,7 +1093,7 @@ fn offer(rv: Channel[Map[str, int]], ready: Channel[int], done: Channel[int], ou
 fn take_offer(rv: Channel[Map[str, int]], ready: Channel[int], done: Channel[int]):
     _ := ready.recv()
     _ := churn()
-    r := rv.recv()
+    r := rv.recv() else: panic("rv closed")
     r["b"] = 2
     done.send(1)
 
@@ -1112,7 +1116,7 @@ fn main():
     ch := Channel[Map[str, int]](1)
     fill(ch)
     _ := churn()
-    q := ch.recv()
+    q := ch.recv() else: panic("ch closed")
     print("queue", q.len(), q["k49"])
     a := Atomic({"z": 0})
     put(a)
@@ -1125,7 +1129,8 @@ fn main():
     parallel:
         spawn take(rv, gate, out)
         spawn give_then_open(rv, gate)
-    print("slot", out.recv())
+    got := out.recv() else: panic("out closed")
+    print("slot", got)
     rv2 := Channel[Map[str, int]](0)
     ready := Channel[int](1)
     done := Channel[int](1)
@@ -1133,7 +1138,8 @@ fn main():
     parallel:
         spawn offer(rv2, ready, done, out2)
         spawn take_offer(rv2, ready, done)
-    print("offer", out2.recv())
+    got2 := out2.recv() else: panic("out2 closed")
+    print("offer", got2)
     ex := Executor()
     t := ex.submit(fn(): job_value())
     ex.shutdown()
@@ -1145,7 +1151,8 @@ fn main():
     gate := Channel[int](1)
     ex2 := Executor()
     _t2 := ex2.submit(fn(): door_job(cc, gate))
-    r3 := cc.recv().recv()
+    rv3 := cc.recv() else: panic("cc closed")
+    r3 := rv3.recv() else: panic("rv3 closed")
     _ := gate.recv()
     _ := churn()
     print("door", r3.len(), r3["k49"])

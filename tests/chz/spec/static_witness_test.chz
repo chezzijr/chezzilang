@@ -139,7 +139,9 @@ test fn a_witness_call_site_inside_a_spawn_block():
             ch.send(reset(Counter(9)).n)
         spawn:
             ch.send(reset(Counter(5)).n)
-    assert ch.recv() + ch.recv() == 0
+    a := ch.recv() else: panic("ch closed")
+    b := ch.recv() else: panic("ch closed")
+    assert a + b == 0
 
 test fn a_witness_call_site_inside_a_defer_block():
     seen := [1]
@@ -604,10 +606,10 @@ test fn a_spawned_witness_call_constructs_the_callers_type():
     ch := Channel[str](4)
     parallel:
         spawn reset_send(Counter(9), ch)
-    assert ch.recv() == "Counter(n=0)"
+    assert ch.recv() == ?"Counter(n=0)"
     parallel:
         spawn reset_send(Tag("hi"), ch)
-    assert ch.recv() == "Tag(s='none')"
+    assert ch.recv() == ?"Tag(s='none')"
 
 test fn a_keyword_spelled_deferred_witness_call_keeps_its_witness_last():
     # the hidden argument is TRAILING, so it must land after the arguments have been permuted into
@@ -634,10 +636,10 @@ test fn a_spawned_member_witness_call_constructs_the_callers_type():
     r := Recorder(7)
     parallel:
         spawn r.emit(Counter(9), ch)
-    assert ch.recv() == "7:Counter(n=0)"
+    assert ch.recv() == ?"7:Counter(n=0)"
     parallel:
         spawn r.emit(Tag("hi"), ch)
-    assert ch.recv() == "7:Tag(s='none')"
+    assert ch.recv() == ?"7:Tag(s='none')"
 
 # …and the target inside a GENERIC body, where the witness stops being a constant and becomes a
 # FORWARD of the enclosing frame's own `$w:T` — for `spawn`, into the task.
@@ -659,9 +661,9 @@ test fn a_deferred_target_forwards_the_enclosing_witness():
 test fn a_spawned_target_forwards_the_enclosing_witness_across_tasks():
     ch := Channel[str](4)
     spawn_forward(Counter(9), ch)
-    assert ch.recv() == "Counter(n=0)"
+    assert ch.recv() == ?"Counter(n=0)"
     spawn_forward(Tag("hi"), ch)
-    assert ch.recv() == "Tag(s='none')"
+    assert ch.recv() == ?"Tag(s='none')"
 
 # ===== Task 4 — the witness REACHES a nested body =====
 #
@@ -736,9 +738,9 @@ fn spawn_block[T: Default](x: T, ch: Channel[str]):
 test fn a_spawn_block_reaches_the_witness():
     ch := Channel[str](4)
     spawn_block(Counter(9), ch)
-    assert ch.recv() == "Counter(n=0)"
+    assert ch.recv() == ?"Counter(n=0)"
     spawn_block(Tag("hi"), ch)
-    assert ch.recv() == "Tag(s='none')"
+    assert ch.recv() == ?"Tag(s='none')"
 
 # a nested `fn` whose body spawns: the block reads the witness the nested fn itself only CAPTURED
 # (`CapSrc::Captured`), one hop further from the declaring frame
@@ -752,9 +754,9 @@ fn spawn_from_nested[T: Default](x: T, ch: Channel[str]):
 test fn a_spawn_block_two_frames_down_reaches_the_witness():
     ch := Channel[str](4)
     spawn_from_nested(Counter(9), ch)
-    assert ch.recv() == "Counter(n=0)"
+    assert ch.recv() == ?"Counter(n=0)"
     spawn_from_nested(Tag("hi"), ch)
-    assert ch.recv() == "Tag(s='none')"
+    assert ch.recv() == ?"Tag(s='none')"
 
 # ---- 5: a closure that FORWARDS `T` into another generic instead of constructing ----
 
@@ -805,9 +807,9 @@ test fn a_member_witness_reaches_a_spawn_block_in_its_own_body():
     n := Nest(1)
     ch := Channel[str](4)
     n.deep(Counter(9), ch)
-    assert ch.recv() == "Counter(n=0)"
+    assert ch.recv() == ?"Counter(n=0)"
     n.deep(Tag("hi"), ch)
-    assert ch.recv() == "Tag(s='none')"
+    assert ch.recv() == ?"Tag(s='none')"
 
 # ---- a generator: the `$w:T` local lives in a suspended frame, and its closure still reads it ----
 

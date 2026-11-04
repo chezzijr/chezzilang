@@ -135,12 +135,14 @@ no `join_next()`/select-on-completion API: completion order is nondeterministic.
 
 ### `std.concurrency.broadcast` — pub/sub over `Channel`
 
-**`Broadcast[T]`**, **`Receiver[T]`** and **`Lagged`**: the tokio `broadcast` contract in pure
-Chezzi. `import Broadcast, Receiver, Lagged from std.concurrency.broadcast`. Construct with
+**`Broadcast[T]`**, **`Receiver[T]`**, **`Lagged`** and **`BroadcastError`**: the tokio `broadcast`
+contract in pure Chezzi. `import Broadcast, BroadcastError, Receiver, Lagged from std.concurrency.broadcast`. Construct with
 **`Broadcast[T].new(cap)`**. `b.subscribe()` gives a `Receiver[T]`, `b.send(v)` does not wait for receivers, and
-`b.close()` ends every receiver's `for`. `rx.recv() -> T!Lagged`, `rx.try_recv() -> (T!Lagged)?`,
+`b.close()` ends every receiver's `for`. `rx.recv() -> T!BroadcastError`, `rx.try_recv() -> (T!Lagged)?`,
 and `for r in rx:` gives `T!Lagged`. A receiver that fell more than `cap` values behind gets
-`!Lagged(missed)` once, then the oldest value still held. The full contract is in
+`!Lagged(missed)` once (`!BroadcastError.Lagged(l)` from `recv`), then the oldest value still held.
+Once the broadcast is closed and drained, `recv` gives `!BroadcastError.Closed` on every call, with
+no fault, and `try_recv` gives `None`. The full contract is in
 [`02-channel.md` §5c](../concurrency/02-channel.md).
 
 ### `std.cmp` — ordering generics (`Comparable`)

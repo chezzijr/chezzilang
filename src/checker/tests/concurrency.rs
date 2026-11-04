@@ -43,7 +43,7 @@ fn spawn_block_form_ok() {
 #[test]
 fn channel_construct_and_methods_ok() {
     ok(
-        "fn main():\n    ch := Channel[int]()\n    ch.send(1)\n    x := ch.recv()\n    n := ch.len()\n    print(x + n)\nmain()\n",
+        "fn main():\n    ch := Channel[int]()\n    ch.send(1)\n    x := ch.recv() else: panic(\"ch closed\")\n    n := ch.len()\n    print(x + n)\nmain()\n",
     );
 }
 
@@ -835,10 +835,11 @@ fn atomic_is_sendable() {
 
 #[test]
 fn timer_returns_channel_bool() {
-    // `timer(ms)` yields a `Channel[bool]`; `recv()` on it composes where a `bool` is expected.
+    // `timer(ms)` yields a `Channel[bool]`; `recv()` on it is a `bool!RecvError`, which compares
+    // against `?true` in a condition.
     // `timer` now requires `import std.time` (gated builtin) — see `timer_requires_import`.
     entry_ok(
-        "import timer from std.time\nfn main():\n    t := timer(50)\n    if t.recv():\n        print(\"fired\")\nmain()\n",
+        "import timer from std.time\nfn main():\n    t := timer(50)\n    if t.recv() == ?true:\n        print(\"fired\")\nmain()\n",
     );
 }
 
@@ -1256,7 +1257,7 @@ fn module_global_nonsendable_spawn_callee_ok() {
     // resolvable in every task (like a free fn), NOT a per-task local capture — the scope-0 exclusion
     // must keep it out of the gate even when a task READS it.
     entry_ok(
-        "protocol NS:\n    fn tag(self) -> int\nstruct Boxy:\n    v: int\n    fn tag(self) -> int:\n        return self.v\ng: NS = Boxy(42)\nfn work(ch: Channel[int]):\n    ch.send(g.tag())\nfn main():\n    ch := Channel[int]()\n    parallel:\n        spawn work(ch)\n    print(ch.recv())\nmain()\n",
+        "protocol NS:\n    fn tag(self) -> int\nstruct Boxy:\n    v: int\n    fn tag(self) -> int:\n        return self.v\ng: NS = Boxy(42)\nfn work(ch: Channel[int]):\n    ch.send(g.tag())\nfn main():\n    ch := Channel[int]()\n    parallel:\n        spawn work(ch)\n    v := ch.recv() else: panic(\"ch closed\")\n    print(v)\nmain()\n",
     );
 }
 
@@ -1265,7 +1266,7 @@ fn spawn_callee_capturing_sendable_closure_ok() {
     // A callee whose captured environment holds a CAPTURE-FREE sibling closure (`double`) is sendable
     // (it crosses by handle) — must NOT be gated (example #1, already runs; pin the check side).
     ok(
-        "fn main():\n    double := fn(x: int) -> int: x * 2\n    ch := Channel[int]()\n    work := fn(): ch.send(double(21))\n    parallel:\n        spawn work()\n    print(ch.recv())\nmain()\n",
+        "fn main():\n    double := fn(x: int) -> int: x * 2\n    ch := Channel[int]()\n    work := fn(): ch.send(double(21))\n    parallel:\n        spawn work()\n    v := ch.recv() else: panic(\"ch closed\")\n    print(v)\nmain()\n",
     );
 }
 
@@ -1274,7 +1275,7 @@ fn channel_of_closures_typechecks() {
     // `sendable(Func)` permissive → a `Channel[fn() -> int]` (closures as data) now type-checks; the
     // producer sends a capture-free closure and the consumer calls it (runs 42 — see parity test).
     ok(
-        "fn producer(ch: Channel[fn() -> int]):\n    ch.send(fn() -> int: 42)\nfn main():\n    ch := Channel[fn() -> int]()\n    parallel:\n        spawn producer(ch)\n    f := ch.recv()\n    print(f())\nmain()\n",
+        "fn producer(ch: Channel[fn() -> int]):\n    ch.send(fn() -> int: 42)\nfn main():\n    ch := Channel[fn() -> int]()\n    parallel:\n        spawn producer(ch)\n    f := ch.recv() else: panic(\"ch closed\")\n    print(f())\nmain()\n",
     );
 }
 
@@ -1283,7 +1284,7 @@ fn closure_returned_across_task_typechecks() {
     // A capturing closure returned from a factory and sent over a `Channel[fn(int) -> int]` — the
     // closure carries a SENDABLE capture (an int `n`), so it crosses by handle (runs 105 — parity test).
     ok(
-        "fn adder(n: int) -> fn(int) -> int:\n    return fn(x: int) -> int: x + n\nfn producer(ch: Channel[fn(int) -> int]):\n    ch.send(adder(100))\nfn main():\n    ch := Channel[fn(int) -> int]()\n    parallel:\n        spawn producer(ch)\n    f := ch.recv()\n    print(f(5))\nmain()\n",
+        "fn adder(n: int) -> fn(int) -> int:\n    return fn(x: int) -> int: x + n\nfn producer(ch: Channel[fn(int) -> int]):\n    ch.send(adder(100))\nfn main():\n    ch := Channel[fn(int) -> int]()\n    parallel:\n        spawn producer(ch)\n    f := ch.recv() else: panic(\"ch closed\")\n    print(f(5))\nmain()\n",
     );
 }
 

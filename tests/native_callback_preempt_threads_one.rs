@@ -95,7 +95,8 @@ fn wait_then_join(f: AtomicInt, c: Channel[int], x: int) -> int:
     got := AtomicInt(0)
     parallel:
         spawn:
-            got.store(c.recv())
+            got_c := c.recv() else: panic("c closed")
+            got.store(got_c)
     return x + got.load()
 parallel:
     spawn:

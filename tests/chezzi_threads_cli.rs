@@ -384,7 +384,7 @@ fn threads_one_serializes_a_top_level_body_that_burns_after_a_blocking_recv() {
          go.send(1)\n        \
          spawn: burn(750000)\n        \
          spawn: burn(750000)\n        \
-         v := go.recv()\n        \
+         v := go.recv() else: panic(\"go closed\")\n        \
          print(burn(750000) + v)\n\
          main()\n",
         ),
@@ -1172,8 +1172,8 @@ const NESTED_OWNER_BLOCKED_ONLY: &str = "fn main():
         spawn:
             parallel:
                 spawn:
-                    never.recv()
-                never.recv()
+                    _ := never.recv()
+                _ := never.recv()
     print(\"unreachable\")
 main()
 ";
@@ -1187,7 +1187,7 @@ const NESTED_OWNER_SECOND_SEND: &str = "fn main():
                 spawn:
                     parallel:
                         spawn:
-                            never.recv()
+                            _ := never.recv()
                         never.send(1)
                         never.send(2)
     print(\"unreachable\")
@@ -1203,8 +1203,10 @@ const NESTED_LIVE_RENDEZVOUS: &str = "fn main():
             parallel:
                 spawn:
                     inner.send(1)
-                out.send(inner.recv() + 1)
-        print(\"got {out.recv()}\")
+                got_inner := inner.recv() else: panic(\"inner closed\")
+                out.send(got_inner + 1)
+        got_out := out.recv() else: panic(\"out closed\")
+        print(\"got {got_out}\")
 main()
 ";
 
@@ -1219,7 +1221,7 @@ const COUSIN_FED: &str = "fn main():
             r := recover:
                 parallel:
                     spawn:
-                        never.recv()
+                        _ := never.recv()
             match r:
                 ?_: print(\"inner ok\")
                 !e: print(\"inner err\")
@@ -1227,8 +1229,10 @@ const COUSIN_FED: &str = "fn main():
         spawn:
             parallel:
                 spawn:
-                    y.send(x.recv() + 1)
-                print(\"F got {y.recv()}\")
+                    got_x := x.recv() else: panic(\"x closed\")
+                    y.send(got_x + 1)
+                got_y := y.recv() else: panic(\"y closed\")
+                print(\"F got {got_y}\")
     print(\"done\")
 main()
 ";
@@ -1737,13 +1741,14 @@ const TWO_RECOVERERS_FAN_IN: &str = "fn main():
                     parallel:
                         spawn:
                             never := Channel[int](0)
-                            never.recv()
+                            _ := never.recv()
                 match r:
                     ?_: out.send(0)
                     !e: out.send(1)
         t := 0
         for i in 0..2:
-            t = t + out.recv()
+            got_out := out.recv() else: panic(\"out closed\")
+            t = t + got_out
         print(\"t {t}\")
 main()
 ";

@@ -1046,7 +1046,8 @@ test fn nest_cell_91():
         ch := Channel[int](1)
         parallel:
             spawn job(ch)
-        return y + ch.recv()
+        got := ch.recv() else: panic("ch closed")
+        return y + got
     fn f0(x: int) -> int:
         b1.update(f1)
         return x + 1
@@ -1072,7 +1073,8 @@ test fn nest_cell_93():
         ch := Channel[int](1)
         parallel:
             spawn job(ch)
-        return y + ch.recv()
+        got := ch.recv() else: panic("ch closed")
+        return y + got
     fn f0(x: int) -> int:
         b1.update(f1)
         return x + K
@@ -1098,7 +1100,8 @@ test fn nest_cell_95():
         ch := Channel[int](1)
         parallel:
             spawn job(ch)
-        return y + ch.recv()
+        got := ch.recv() else: panic("ch closed")
+        return y + got
     fn f0(x: int) -> int:
         b1.update(f1)
         return x + G.len()
@@ -1124,7 +1127,8 @@ test fn nest_cell_97():
         ch := Channel[int](1)
         parallel:
             spawn job(ch)
-        return y + ch.recv()
+        got := ch.recv() else: panic("ch closed")
+        return y + got
     fn f0(x: int) -> int:
         b1.write(f1)
         return x + 1
@@ -1150,7 +1154,8 @@ test fn nest_cell_99():
         ch := Channel[int](1)
         parallel:
             spawn job(ch)
-        return y + ch.recv()
+        got := ch.recv() else: panic("ch closed")
+        return y + got
     fn f0(x: int) -> int:
         b1.write(f1)
         return x + K
@@ -1176,7 +1181,8 @@ test fn nest_cell_101():
         ch := Channel[int](1)
         parallel:
             spawn job(ch)
-        return y + ch.recv()
+        got := ch.recv() else: panic("ch closed")
+        return y + got
     fn f0(x: int) -> int:
         b1.write(f1)
         return x + G.len()
@@ -1203,7 +1209,8 @@ test fn nest_cell_103():
         ch := Channel[int](1)
         parallel:
             spawn job(ch)
-        return y + ch.recv()
+        got := ch.recv() else: panic("ch closed")
+        return y + got
     fn f1(x: int) -> int:
         b2.update(f2)
         return x + 1
@@ -1237,7 +1244,8 @@ test fn nest_cell_105():
         ch := Channel[int](1)
         parallel:
             spawn job(ch)
-        return y + ch.recv()
+        got := ch.recv() else: panic("ch closed")
+        return y + got
     fn f1(x: int) -> int:
         b2.update(f2)
         return x + K
@@ -1271,7 +1279,8 @@ test fn nest_cell_107():
         ch := Channel[int](1)
         parallel:
             spawn job(ch)
-        return y + ch.recv()
+        got := ch.recv() else: panic("ch closed")
+        return y + got
     fn f1(x: int) -> int:
         b2.update(f2)
         return x + G.len()

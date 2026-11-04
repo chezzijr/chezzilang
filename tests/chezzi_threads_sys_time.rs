@@ -127,7 +127,8 @@ fn main():\n    \
         spawn worker(96000, 128000, out)\n    \
     total := 0\n    \
     for _ in 0..4:\n        \
-        total += out.recv()\n    \
+        v := out.recv() else: panic(\"out closed\")\n        \
+        total += v\n    \
     print(\"primes: {total}\")\n\n\
 main()\n",
     )

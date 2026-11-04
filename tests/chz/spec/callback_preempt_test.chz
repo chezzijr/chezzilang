@@ -13,7 +13,8 @@ fn wait_then_join(f: AtomicInt, c: Channel[int], x: int) -> int:
     got := AtomicInt(0)
     parallel:
         spawn:
-            got.store(c.recv())
+            v := c.recv() else: panic("c closed")
+            got.store(v)
     return x + got.load()
 
 test fn a_map_callback_spin_lets_its_sibling_run():

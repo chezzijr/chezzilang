@@ -61,11 +61,6 @@ pub(super) fn send_deadlock_msg(cap: Option<usize>) -> &'static str {
 /// blocked-sender loop must all emit byte-identical text. Go panics `send on closed channel` here.
 pub(super) const CLOSED_SEND: &str = "send on a closed channel";
 
-/// The shared fault for a `recv` on a CLOSED-and-drained channel — the twin of [`CLOSED_SEND`], and
-/// one const for the same byte-identical-text reason (it is raised from both the demote arm and the
-/// ordinary `chan_recv_step` arm of the same `match`).
-pub(super) const CLOSED_RECV: &str = "receive on a closed channel";
-
 /// The shared fault for a `recv` on an EMPTY channel that cannot park. Raised by the native-callback
 /// arm of [`Vm::chan_recv_step`], which cannot block at all, and by any party that blocked in place
 /// and was then judged deadlocked by the process-wide verdict ([`crate::vm::quiesce`]): ONE const so

@@ -45,7 +45,8 @@ fn fan_open() -> int:
                 spawn: burn(1500000)
                 spawn: burn(1500000)
             ch.send(1)
-        got = ch.recv()
+        v := ch.recv() else: panic("ch closed")
+        got = v
     return got
 
 test fn nested_nursery_fans_out_while_outer_body_is_open():
@@ -73,7 +74,8 @@ fn fan_flat() -> int:
         spawn:
             burn(1500000)
             ch.send(1)
-        got = ch.recv()
+        v := ch.recv() else: panic("ch closed")
+        got = v
     return got
 
 test fn flat_nursery_fans_out_while_body_is_blocked():

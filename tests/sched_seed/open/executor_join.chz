@@ -15,6 +15,7 @@ fn main():
                 ch.send("joined{c}")
     out: List[str] = []
     for _ in 0..30:
-        out.push(ch.recv())
+        v := ch.recv() else: panic("ch closed")
+        out.push(v)
     print(" ".join(out))
 main()

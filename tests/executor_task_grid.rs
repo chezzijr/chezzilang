@@ -776,14 +776,14 @@ fn the_grid_holds_inside_a_test_fn() {
     for p in &PARTIES {
         let mut body = vec![
             "$S(show1)",
-            "assert out.recv() == \"1 [1]\"",
+            "assert out.recv() == ?\"1 [1]\"",
             "xs.push(2)",
             "$S(show2)",
-            "assert out.recv() == \"2 [1, 2]\"",
+            "assert out.recv() == ?\"2 [1, 2]\"",
             "$S(wr_recovered)",
-            "assert out.recv() == \"no fault\"",
+            "assert out.recv() == ?\"no fault\"",
             "$S(show2)",
-            "assert out.recv() == \"2 [1, 2, 9]\"",
+            "assert out.recv() == ?\"2 [1, 2, 9]\"",
         ];
         if !p.nursery {
             body.extend([
@@ -792,7 +792,7 @@ fn the_grid_holds_inside_a_test_fn() {
                 "    ?_: assert false",
                 "    !e: assert e.message().contains(\"boom\")",
                 "$S(parked)",
-                "hs.recv()",
+                "_ := hs.recv()",
                 "ex.cancel()",
                 "assert not flag.get()",
             ]);

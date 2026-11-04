@@ -325,7 +325,7 @@ ex.shutdown()
 /// introduced it: a `wait:` with a CLOSED arm must still reach its deadlock fault.
 ///
 /// `closed` means opposite things at the two blocking sites. A single `recv` on a closed channel makes
-/// progress — it returns `ClosedEmpty`, so a `for v in ch:` ends and a bare `recv` faults. But the
+/// progress — it returns `ClosedEmpty`, so a `for v in ch:` ends and a bare `recv` gives `!RecvError`. But the
 /// `wait:` poll SKIPS a closed+empty recv arm (W7-13r(a)), so that arm is not progress at all. Folding
 /// both into one `PartyWait` made the closed arm answer "satisfiable" forever, which vetoed the
 /// verdict permanently: this program faults in 0 ms before the detector and HUNG with the variants
@@ -850,7 +850,8 @@ ex := Executor()
 ex.submit(producer)
 parallel:
     spawn consumer()
-print(\"sum {done.recv()}\")
+got := done.recv() else: panic(\"done closed\")
+print(\"sum {got}\")
 ex.shutdown()
 ",
         // …and the reverse: the nursery task produces, the job consumes and answers, so BOTH
@@ -867,7 +868,8 @@ fn client():
     total := 0
     for i in 0..300:
         req.send(i)
-        total = total + resp.recv()
+        got2 := resp.recv() else: panic(\"resp closed\")
+        total = total + got2
     req.close()
     print(\"sum {total}\")
 ex := Executor()
@@ -2288,7 +2290,7 @@ fn jobber(ch: Channel[Executor]):
 ch := Channel[Executor](1)
 outer := Executor()
 outer.submit(fn(): jobber(ch))
-inner := ch.recv()
+inner := ch.recv() else: panic("ch closed")
 time.sleep_ms(50)
 outer.cancel()
 t := inner.submit(work)
@@ -2330,7 +2332,7 @@ fn jobber(ch: Channel[Executor]):
 ch := Channel[Executor](1)
 outer := Executor()
 outer.submit(fn(): jobber(ch))
-inner := ch.recv()
+inner := ch.recv() else: panic("ch closed")
 time.sleep_ms(50)
 outer.shutdown()
 inner.submit(work)

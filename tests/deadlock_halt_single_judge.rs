@@ -13,7 +13,8 @@ fn main():
     started := Channel[int](1)
     fn hold(x: int) -> int:
         started.send(1)
-        return x + c.recv()
+        got_c := c.recv() else: panic("c closed")
+        return x + got_c
     ex := Executor()
     _ := ex.submit(fn(): s.update(hold))
     _ := started.recv()
@@ -59,7 +60,7 @@ fn deadlock_on_a_held_guard_ends_the_run_at_the_first_party_site() {
                             .expect("run chezzi");
                         let stdout = String::from_utf8_lossy(&out.stdout);
                         let stderr = String::from_utf8_lossy(&out.stderr);
-                        if stdout.contains("main: past the guard") || !stderr.contains("G.chz:13:5")
+                        if stdout.contains("main: past the guard") || !stderr.contains("G.chz:14:5")
                         {
                             bad.push(format!("run {run}: stdout {stdout:?}"));
                         }
@@ -101,7 +102,8 @@ fn main():
     started := Channel[int](1)
     fn hold(x: int) -> int:
         started.send(1)
-        return x + c.recv()
+        got_c := c.recv() else: panic("c closed")
+        return x + got_c
     ex := Executor()
     _ := ex.submit(fn(): s.update(hold))
     _ := started.recv()
@@ -110,7 +112,7 @@ fn main():
     ex.shutdown()
 main()
 "#,
-        site: "12:5",
+        site: "13:5",
         after_ok: false,
         test_mode: false,
     },
@@ -123,7 +125,8 @@ fn main():
     started := Channel[int](1)
     fn hold(x: int) -> int:
         started.send(1)
-        return x + c.recv()
+        got_c := c.recv() else: panic("c closed")
+        return x + got_c
     ex := Executor()
     _ := ex.submit(fn(): s.update(hold))
     _ := started.recv()
@@ -133,7 +136,7 @@ fn main():
     ex.shutdown()
 main()
 "#,
-        site: "12:5",
+        site: "13:5",
         after_ok: false,
         test_mode: false,
     },
@@ -146,7 +149,8 @@ fn main():
     started := Channel[int](1)
     fn hold(x: int) -> int:
         started.send(1)
-        return x + c.recv()
+        got_c := c.recv() else: panic("c closed")
+        return x + got_c
     ex := Executor()
     _ := ex.submit(fn(): r.write(hold))
     _ := started.recv()
@@ -157,7 +161,7 @@ main()
 "#,
         // TICKET-246: a reader waits for a writer that holds the box, so main is the first party
         // at its `read`, as in `ex_guard`.
-        site: "12:10",
+        site: "13:10",
         after_ok: false,
         test_mode: false,
     },
@@ -185,15 +189,21 @@ import std.time
 fn main():
     a := Channel[int](0)
     b := Channel[int](0)
+    fn ab():
+        got_a := a.recv() else: panic("a closed")
+        b.send(got_a)
+    fn ba():
+        got_b := b.recv() else: panic("b closed")
+        a.send(got_b)
     ex := Executor()
-    _ := ex.submit(fn(): b.send(a.recv()))
-    _ := ex.submit(fn(): a.send(b.recv()))
+    _ := ex.submit(ab)
+    _ := ex.submit(ba)
     time.sleep_ms(50)
     ex.shutdown()
     print("AFTER")
 main()
 "#,
-        site: "7:33",
+        site: "7:18",
         after_ok: false,
         test_mode: false,
     },
@@ -227,7 +237,8 @@ fn main():
     started := Channel[int](1)
     fn hold(x: int) -> int:
         started.send(1)
-        return x + c.recv()
+        got_c := c.recv() else: panic("c closed")
+        return x + got_c
     parallel:
         spawn: s.update(hold)
         _ := started.recv()
@@ -235,7 +246,7 @@ fn main():
         print("AFTER")
 main()
 "#,
-        site: "12:9",
+        site: "13:9",
         after_ok: false,
         test_mode: false,
     },
@@ -248,7 +259,8 @@ fn main():
     started := Channel[int](1)
     fn hold(x: int) -> int:
         started.send(1)
-        return x + c.recv()
+        got_c := c.recv() else: panic("c closed")
+        return x + got_c
     parallel:
         spawn: r.write(hold)
         _ := started.recv()
@@ -256,7 +268,7 @@ fn main():
         print("AFTER {v}")
 main()
 "#,
-        site: "12:14",
+        site: "13:14",
         after_ok: false,
         test_mode: false,
     },
@@ -300,8 +312,12 @@ fn main():
     a := Channel[int](0)
     b := Channel[int](0)
     parallel:
-        spawn: b.send(a.recv())
-        spawn: a.send(b.recv())
+        spawn:
+            got_a := a.recv() else: panic("a closed")
+            b.send(got_a)
+        spawn:
+            got_b := b.recv() else: panic("b closed")
+            a.send(got_b)
         time.sleep_ms(50)
     print("AFTER")
 main()
@@ -323,7 +339,8 @@ test fn a_deadlocks():
     started := Channel[int](1)
     fn hold(x: int) -> int:
         started.send(1)
-        return x + c.recv()
+        got_c := c.recv() else: panic("c closed")
+        return x + got_c
     ex := Executor()
     _ := ex.submit(fn(): s.update(hold))
     _ := started.recv()
@@ -335,7 +352,7 @@ test fn b_runs():
     _ := ex.submit(fn(): print("B"))
     ex.shutdown()
 "#,
-        site: "13:5",
+        site: "14:5",
         after_ok: false,
         test_mode: true,
     },
@@ -624,7 +641,8 @@ fn main():
     started := Channel[int](1)
     fn hold(x: int) -> int:
         started.send(1)
-        return x + c.recv()
+        got_c := c.recv() else: panic("c closed")
+        return x + got_c
     parallel:
         spawn: s.update(hold)
         _ := started.recv()
@@ -632,7 +650,7 @@ fn main():
         print("AFTER")
 main()
 "#,
-        site: "12:9",
+        site: "13:9",
         after_ok: false,
         test_mode: false,
     };

@@ -36,7 +36,8 @@ fn main():
         spawn worker(1500000, 2000000, out)
     total := 0
     for _ in 0..4:
-        total += out.recv()
+        v := out.recv() else: panic("out closed")
+        total += v
     print("primes below 2,000,000: {total}")
 
 main()

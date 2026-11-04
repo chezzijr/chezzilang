@@ -16,9 +16,13 @@ fn main():
         spawn:
             out: List[str] = []
             for _ in 0..81:
-                out.push(ch.recv())
+                v := ch.recv() else: panic("ch closed")
+                out.push(v)
             print(" ".join(out))
-    print(res.recv())
-    print(res.recv())
-    print(res.recv())
+    r1 := res.recv() else: panic("res closed")
+    print(r1)
+    r2 := res.recv() else: panic("res closed")
+    print(r2)
+    r3 := res.recv() else: panic("res closed")
+    print(r3)
 main()

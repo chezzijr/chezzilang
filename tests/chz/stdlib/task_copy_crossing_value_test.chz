@@ -42,7 +42,7 @@ test fn copy_get_sees_owner_alias_as_of_the_crossing():
     out := Channel[str](2)
     parallel:
         spawn: out.send("captured xs: {xs}  must(t.get()): {must(t.get())}")
-    assert out.recv() == "captured xs: [1, 99]  must(t.get()): [1, 99]"
+    assert out.recv() == ?"captured xs: [1, 99]  must(t.get()): [1, 99]"
 
 fn one(k: int) -> List[int]:
     return [k]
@@ -72,10 +72,12 @@ fn read_memo(m: fn(int) -> List[int], out: Channel[str]):
     out.send("{m(1)}")
 
 fn recv_read_task(hc: Channel[Task[List[int]]], out: Channel[str]):
-    read_task(hc.recv(), out)
+    t := hc.recv() else: panic("hc closed")
+    read_task(t, out)
 
 fn recv_read_memo(hc: Channel[fn(int) -> List[int]], out: Channel[str]):
-    read_memo(hc.recv(), out)
+    m := hc.recv() else: panic("hc closed")
+    read_memo(m, out)
 
 fn states() -> List[str]:
     return ["mutated", "observed", "unobserved"]
@@ -90,7 +92,8 @@ test fn task_copy_value_through_a_spawn_call():
         out := Channel[str](1)
         parallel:
             spawn read_task(t, out)
-        got.push("{s}: copy {out.recv()} owner {must(t.get())}")
+        c := out.recv() else: panic("out closed")
+        got.push("{s}: copy {c} owner {must(t.get())}")
     assert "{got}" == want(), "{got}"
 
 test fn task_copy_value_through_a_spawn_block():
@@ -100,7 +103,8 @@ test fn task_copy_value_through_a_spawn_block():
         out := Channel[str](1)
         parallel:
             spawn: out.send("{must(t.get())}")
-        got.push("{s}: copy {out.recv()} owner {must(t.get())}")
+        c := out.recv() else: panic("out closed")
+        got.push("{s}: copy {c} owner {must(t.get())}")
     assert "{got}" == want(), "{got}"
 
 test fn task_copy_value_through_an_executor_job():
@@ -111,7 +115,8 @@ test fn task_copy_value_through_an_executor_job():
         ex := concurrency.Executor()
         _ := ex.submit(fn(): read_task(t, out))
         ex.shutdown()
-        got.push("{s}: copy {out.recv()} owner {must(t.get())}")
+        c := out.recv() else: panic("out closed")
+        got.push("{s}: copy {c} owner {must(t.get())}")
     assert "{got}" == want(), "{got}"
 
 test fn task_copy_value_through_a_channel_send():
@@ -123,7 +128,8 @@ test fn task_copy_value_through_a_channel_send():
         hc.send(t)
         parallel:
             spawn recv_read_task(hc, out)
-        got.push("{s}: copy {out.recv()} owner {must(t.get())}")
+        c := out.recv() else: panic("out closed")
+        got.push("{s}: copy {c} owner {must(t.get())}")
     assert "{got}" == want(), "{got}"
 
 test fn memo_copy_value_through_a_spawn_call():
@@ -133,7 +139,8 @@ test fn memo_copy_value_through_a_spawn_call():
         out := Channel[str](1)
         parallel:
             spawn read_memo(m, out)
-        got.push("{s}: copy {out.recv()} owner {m(1)}")
+        c := out.recv() else: panic("out closed")
+        got.push("{s}: copy {c} owner {m(1)}")
     assert "{got}" == want(), "{got}"
 
 test fn memo_copy_value_through_a_spawn_block():
@@ -143,7 +150,8 @@ test fn memo_copy_value_through_a_spawn_block():
         out := Channel[str](1)
         parallel:
             spawn: out.send("{m(1)}")
-        got.push("{s}: copy {out.recv()} owner {m(1)}")
+        c := out.recv() else: panic("out closed")
+        got.push("{s}: copy {c} owner {m(1)}")
     assert "{got}" == want(), "{got}"
 
 test fn memo_copy_value_through_an_executor_job():
@@ -154,7 +162,8 @@ test fn memo_copy_value_through_an_executor_job():
         ex := concurrency.Executor()
         _ := ex.submit(fn(): read_memo(m, out))
         ex.shutdown()
-        got.push("{s}: copy {out.recv()} owner {m(1)}")
+        c := out.recv() else: panic("out closed")
+        got.push("{s}: copy {c} owner {m(1)}")
     assert "{got}" == want(), "{got}"
 
 test fn memo_copy_value_through_a_channel_send():
@@ -166,7 +175,8 @@ test fn memo_copy_value_through_a_channel_send():
         hc.send(m)
         parallel:
             spawn recv_read_memo(hc, out)
-        got.push("{s}: copy {out.recv()} owner {m(1)}")
+        c := out.recv() else: panic("out closed")
+        got.push("{s}: copy {c} owner {m(1)}")
     assert "{got}" == want(), "{got}"
 
 test fn owner_get_stays_one_object_after_a_crossing():
@@ -176,8 +186,8 @@ test fn owner_get_stays_one_object_after_a_crossing():
     parallel:
         spawn read_task(t, out)
         spawn read_memo(m, out)
-    out.recv()
-    out.recv()
+    _ := out.recv()
+    _ := out.recv()
     a := must(t.get())
     a.push(7)
     b := m(1)
@@ -202,7 +212,9 @@ test fn a_copy_write_to_the_crossing_value_lands_on_the_one_object():
     out := Channel[str](2)
     parallel:
         spawn copy_write(t, m, out)
-    got := [out.recv(), out.recv()]
+    r1 := out.recv() else: panic("out closed")
+    r2 := out.recv() else: panic("out closed")
+    got := [r1, r2]
     assert got == ["write ok", "write ok"], "{got}"
     assert "{must(t.get())}" == "[1, 99, 5]", "{must(t.get())}"
     assert "{m(1)}" == "[1, 99, 5]", "{m(1)}"
@@ -219,7 +231,9 @@ test fn a_copy_write_lands_in_every_owner_state():
         out := Channel[str](2)
         parallel:
             spawn copy_write(t, m, out)
-        got := [out.recv(), out.recv()]
+        r1 := out.recv() else: panic("out closed")
+        r2 := out.recv() else: panic("out closed")
+        got := [r1, r2]
         assert got == ["write ok", "write ok"], "{state}: {got}"
         assert "{must(t.get())}" == want_owner(state), "{state}: {must(t.get())}"
         assert "{m(1)}" == want_owner(state), "{state}: {m(1)}"
@@ -232,14 +246,16 @@ test fn a_copy_write_lands_in_every_owner_state_in_an_executor_job():
         ex := concurrency.Executor()
         _ := ex.submit(fn(): copy_write(t, m, out))
         ex.shutdown()
-        got := [out.recv(), out.recv()]
+        r1 := out.recv() else: panic("out closed")
+        r2 := out.recv() else: panic("out closed")
+        got := [r1, r2]
         assert got == ["write ok", "write ok"], "{state}: {got}"
         assert "{must(t.get())}" == want_owner(state), "{state}: {must(t.get())}"
         assert "{m(1)}" == want_owner(state), "{state}: {m(1)}"
 
 fn handoff_write(tc: Channel[Task[List[int]]], mc: Channel[fn(int) -> List[int]], out: Channel[str]):
-    t := tc.recv()
-    m := mc.recv()
+    t := tc.recv() else: panic("tc closed")
+    m := mc.recv() else: panic("mc closed")
     rt := recover: must(t.get()).push(5)
     send_outcome(rt, out)
     out.send("{must(t.get())}")
@@ -256,7 +272,10 @@ test fn a_handoff_receiver_write_is_never_silently_lost():
     out := Channel[str](3)
     parallel:
         spawn handoff_write(tc, mc, out)
-    got := [out.recv(), out.recv(), out.recv()]
+    r1 := out.recv() else: panic("out closed")
+    r2 := out.recv() else: panic("out closed")
+    r3 := out.recv() else: panic("out closed")
+    got := [r1, r2, r3]
     assert got == ["write ok", "[1, 5]", "write ok"], "{got}"
     assert "{must(t.get())}" == "[1, 5]", "{must(t.get())}"
     assert "{m(1)}" == "[1, 5]", "{m(1)}"
@@ -288,7 +307,10 @@ test fn a_task_owned_key_reachable_from_a_memo_result_stays_writable():
     out := Channel[str](3)
     parallel:
         spawn own_key_write(m, out)
-    got := [out.recv(), out.recv(), out.recv()]
+    r1 := out.recv() else: panic("out closed")
+    r2 := out.recv() else: panic("out closed")
+    r3 := out.recv() else: panic("out closed")
+    got := [r1, r2, r3]
     assert got == ["write ok", "[1]", "write ok"], "{got}"
     assert "{m(Key(7, [])).log}" == "[1, 2]"
 
@@ -314,7 +336,7 @@ test fn a_copy_miss_on_a_key_that_never_equals_itself_returns_the_fill():
     out := Channel[str](1)
     parallel:
         spawn never_use(m, out)
-    assert out.recv() == "[1]"
+    assert out.recv() == ?"[1]"
 
 struct FnBox:
     f: fn(int) -> int
@@ -338,7 +360,7 @@ test fn a_function_valued_channel_result_leaves_the_readers_globals_writable():
     mc := Channel[fn(int) -> FnBox](1)
     parallel:
         spawn send_memo(mc)
-    m := mc.recv()
+    m := mc.recv() else: panic("mc closed")
     b := m(1)
     assert b.f(1) == 2
     rb := recover: b.xs.push(5)

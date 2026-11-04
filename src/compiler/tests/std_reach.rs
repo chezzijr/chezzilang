@@ -248,8 +248,14 @@ fn every_std_file_checks_clean_as_the_entry() {
 #[test]
 fn a_range_in_a_skipped_std_body_records_no_range_use() {
     let skipped = graph_of("import std.string as s\nprint(s.is_empty(\"\"))\n");
-    assert!(!skipped.range_used, "a skipped body recorded a Range use");
+    assert!(
+        !skipped.prelude_used.uses(crate::resolver::RANGE_STRUCT),
+        "a skipped body recorded a Range use"
+    );
     let reached = graph_of("import std.string as s\nprint(s.capitalize(\"ab\"))\n");
-    assert!(reached.range_used, "a reached body recorded no Range use");
+    assert!(
+        reached.prelude_used.uses(crate::resolver::RANGE_STRUCT),
+        "a reached body recorded no Range use"
+    );
     compile_graph(&reached).expect("compile");
 }

@@ -8,8 +8,13 @@ fn main():
                     ch.send("t{i}.{j}")
         for c in 0..2:
             spawn:
-                got := [0, 1, 2, 3, 4, 5].map(fn(k: int) -> str: ch.recv())
+                fn take(k: int) -> str:
+                    v := ch.recv() else: panic("ch closed")
+                    return v
+                got := [0, 1, 2, 3, 4, 5].map(take)
                 res.send("c{c}:" + " ".join(got))
-    print(res.recv())
-    print(res.recv())
+    r1 := res.recv() else: panic("res closed")
+    print(r1)
+    r2 := res.recv() else: panic("res closed")
+    print(r2)
 main()

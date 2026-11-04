@@ -6,11 +6,11 @@ CH1 := Channel[fn() -> int](1)
 CH2 := Channel[fn() -> int](1)
 
 fn job1() -> int:
-    f := CH1.recv()
+    f := CH1.recv() else: panic("CH1 closed")
     return f()
 
 fn job2() -> int:
-    f := CH2.recv()
+    f := CH2.recv() else: panic("CH2 closed")
     return f()
 
 EX := Executor()

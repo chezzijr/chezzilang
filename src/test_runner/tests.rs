@@ -1156,7 +1156,7 @@ fn under_cap_still_passes_with_many_handles_to_one_core() {
             "import Shared from std.concurrency\n\ntest fn alias():\n    xs: List[int] = []\n    \
              for i in 0..20000:\n        xs.push(i)\n    s := Shared(xs)\n    \
              ch := Channel[Shared[List[int]]](100)\n    for i in 0..50:\n        ch.send(s)\n    \
-             hs: List[Shared[List[int]]] = []\n    for i in 0..50:\n        hs.push(ch.recv())\n    \
+             hs: List[Shared[List[int]]] = []\n    for i in 0..50:\n        h := ch.recv() else: panic(\"ch closed\")\n        hs.push(h)\n    \
              junk: List[int] = []\n    for i in 0..5000:\n        junk = [i]\n    \
              assert hs.len() == 50\n",
         );
@@ -1640,7 +1640,7 @@ fn a_live_timer_still_delivers_under_a_generous_timeout() {
         // The single-`recv` park: the timer's own deadline is what wakes it.
         (
             "livetimer_test.chz",
-            "import std.time\nfn nap():\n    tm := time.timer(120)\n    assert tm.recv()\ntest fn t():\n    parallel:\n        spawn nap()\n",
+            "import std.time\nfn nap():\n    tm := time.timer(120)\n    assert tm.recv() == ?true\ntest fn t():\n    parallel:\n        spawn nap()\n",
         ),
         // The `wait:` timer-arm park with NO competing value: the timer arm is taken.
         (
@@ -2086,7 +2086,7 @@ fn a_socket_timeout_is_still_catchable_under_a_generous_timeout() {
                          parallel:\n                \
                              spawn serve(server, out)\n        \
                      !e: out.send(\"NOLISTEN\")\n    \
-                 assert out.recv() == \"ERR:timeout\"\n",
+                 assert out.recv() == ?\"ERR:timeout\"\n",
     );
     let (text, passed) = run_tests_timed_watchdog("netcatch_test.chz", &f, 5000);
     assert!(

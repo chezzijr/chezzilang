@@ -161,9 +161,13 @@ enum EH:
 fn gen(v: int) -> Iterator[int]:
     yield v
 
+fn take(c: Channel[int]) -> int:
+    v := c.recv() else: panic(\"closed\")
+    return v
+
 fn block_in(held: Channel[int], hold: Channel[int]) -> int:
     held.send(1)
-    return hold.recv()
+    return take(hold)
 
 fn hold_s(s: Shared[int], held: Channel[int], hold: Channel[int]):
     s.update(fn(x: int) -> int: x + block_in(held, hold))
@@ -259,14 +263,14 @@ fn run_src(c: &Cell) -> String {
     let (driver, extra) = match c.halt {
         Halt::ShutdownNow => (
             format!(
-                "ex := Executor()\n_ := ex.submit(fn(): act(gate.recv(), {ARGS}))\ngate.send(7)\nex.cancel()\nex.shutdown()"
+                "ex := Executor()\n_ := ex.submit(fn(): act(take(gate), {ARGS}))\ngate.send(7)\nex.cancel()\nex.shutdown()"
             ),
             String::new(),
         ),
         Halt::Cancel => (
             format!("_ := recover: run(gate, {ARGS})"),
             format!(
-                "fn run(gate: Channel[int], {PARAMS}):\n    parallel:\n        spawn: act(gate.recv(), {ARGS})\n        spawn: fault(gate)\n"
+                "fn run(gate: Channel[int], {PARAMS}):\n    parallel:\n        spawn: act(take(gate), {ARGS})\n        spawn: fault(gate)\n"
             ),
         ),
         Halt::ChildFault => (
@@ -352,8 +356,8 @@ fn ops() -> Vec<Op> {
         Op {
             name: "recv",
             out: "Channel[int](1)",
-            ready: Some(("src.send(7)", "got.add(src.recv())", "got.load() == 7")),
-            wait: Some(("", "got.add(src.recv())", "after.load() == 0", None)),
+            ready: Some(("src.send(7)", "got.add(take(src))", "got.load() == 7")),
+            wait: Some(("", "got.add(take(src))", "after.load() == 0", None)),
         },
         Op {
             name: "try_send",
@@ -669,10 +673,14 @@ const HOOKS: [(&str, &str); 12] = [
     ("RwShared.read", "got.add(w.read(fn(x: int) -> int: x + v))"),
 ];
 
-const SUBMIT_ROUND: &str = "fn round() -> bool:
+const SUBMIT_ROUND: &str = "fn take(c: Channel[int]) -> int:
+    v := c.recv() else: panic(\"closed\")
+    return v
+
+fn round() -> bool:
     gate := Channel[int](0)
     ex := Executor()
-    o := ex.submit(fn() -> int: gate.recv())
+    o := ex.submit(fn() -> int: take(gate))
     gate.send(7)
     ex.cancel()
     ex.shutdown()
