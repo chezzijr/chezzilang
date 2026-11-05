@@ -380,10 +380,12 @@ fn owner(kind: &str, methods: &str) -> String {
     }
 }
 
-fn dir() -> PathBuf {
-    let d = std::env::temp_dir().join(format!("chezzi-hook-grid-{}", std::process::id()));
-    std::fs::create_dir_all(&d).expect("create the grid directory");
-    d
+/// The file a cell is written to. The `chezzi()` helper below deletes it once its run returns.
+fn cell(name: &str) -> PathBuf {
+    std::env::temp_dir().join(format!(
+        "chezzi-hook-grid-{}-{name}.chz",
+        std::process::id()
+    ))
 }
 
 /// One run of a cell: did it exit with status zero, its stdout, and everything it printed.
@@ -395,7 +397,7 @@ struct Outcome {
 }
 
 fn chezzi(sub: &str, name: &str, src: &str, threads: Option<&str>) -> Outcome {
-    let path = dir().join(format!("{name}.chz"));
+    let path = cell(name);
     std::fs::write(&path, src).expect("write the cell");
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_chezzi"));
     cmd.arg(sub).arg(&path);
@@ -404,6 +406,7 @@ fn chezzi(sub: &str, name: &str, src: &str, threads: Option<&str>) -> Outcome {
         None => cmd.env_remove("CHEZZI_THREADS"),
     };
     let out = cmd.output().expect("run chezzi");
+    let _ = std::fs::remove_file(&path);
     let stdout = String::from_utf8_lossy(&out.stdout).to_string();
     let text = format!("{stdout}{}", String::from_utf8_lossy(&out.stderr));
     Outcome {
@@ -1451,10 +1454,7 @@ fn every_iterand_source_feeds_every_consumer() {
 /// A run's text with the file name dropped and each call site cut to its line: the consumers of
 /// one hook spell its call at one line but at different columns.
 fn trace(name: &str, text: &str) -> String {
-    let text = text.replace(
-        &format!("{}:", dir().join(format!("{name}.chz")).display()),
-        "",
-    );
+    let text = text.replace(&format!("{}:", cell(name).display()), "");
     text.lines()
         .map(|line| match line.split_once("(called at ") {
             Some((head, site)) => {
@@ -1635,7 +1635,7 @@ fn a_warning_fires_exactly_where_the_operator_skips_the_method() {
                 let decl = owner(kind, &hook.shapes[si]);
                 let src = format!("{}{decl}{}", import_lines("", &[&decl]), hook.op);
                 let tag = format!("warn_{kind}_{}_{shape}", hook.name);
-                let path = dir().join(format!("{tag}.chz"));
+                let path = cell(&tag);
                 std::fs::write(&path, &src).expect("write the cell");
                 let checked = Command::new(env!("CARGO_BIN_EXE_chezzi"))
                     .arg("check")
