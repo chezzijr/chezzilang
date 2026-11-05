@@ -220,8 +220,9 @@ impl Parser {
     /// `expect_ident`, but the `from` keyword is a name too. Only for a member name: after `.` /
     /// `?.`, and a method name in a struct, enum, native-struct or protocol body (`T.from(x)`).
     pub(super) fn expect_member_name(&mut self) -> PResult<String> {
-        if self.eat(&Token::From) {
-            return Ok("from".to_string());
+        if let Some(name) = super::member_name(self.peek()).map(str::to_string) {
+            self.advance();
+            return Ok(name);
         }
         self.expect_ident()
     }

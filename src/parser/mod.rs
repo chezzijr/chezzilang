@@ -337,6 +337,19 @@ impl Parser {
     // ----- cursor helpers -----
 }
 
+/// The member name `tok` spells after `.` / `?.` or as a method name: an identifier, or the `from`
+/// keyword (`T.from(x)`). The one rule [`Parser::expect_member_name`] and a module's member words
+/// ([`parse_module_source`]) read.
+fn member_name(tok: &Token) -> Option<&str> {
+    if let Token::Ident(name) = tok {
+        Some(name)
+    } else if matches!(tok, Token::From) {
+        Some("from")
+    } else {
+        None
+    }
+}
+
 /// Why [`parse_module_source`] stopped.
 #[derive(Debug, Clone, PartialEq)]
 pub enum SourceError {
@@ -365,6 +378,15 @@ pub fn parse_module_source(
         words.text.push_str(w);
         words.at.push((line, start..words.text.len()));
     });
+    crate::lexer::each_token(&tokens, &mut |tok, next| {
+        if matches!(tok.kind, Token::Dot | Token::QuestionDot)
+            && let Some(name) = next.and_then(|t| member_name(&t.kind))
+        {
+            words.members.push(name.to_string());
+        }
+    });
+    words.members.sort();
+    words.members.dedup();
     let mut ast = parse_with_docs(tokens, comments).map_err(SourceError::Parse)?;
     crate::ast::classify_variant_imports(&mut ast, is_project_module);
     Ok((ast, words))

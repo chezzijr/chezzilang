@@ -2192,19 +2192,29 @@ pub fn tokenize(source: &str) -> Result<Vec<Tok>, LexError> {
 /// order. The tokens of a string hole and of a spec field count; a keyword, a comment and string
 /// text do not. The module graph reads it to find the std fns a program names.
 pub fn ident_words(toks: &[Tok], each: &mut impl FnMut(u32, &str)) {
-    for tok in toks {
+    each_token(toks, &mut |tok, _| {
         if let Token::Ident(word) = &tok.kind {
             each(tok.span.line, word);
-        } else if let Token::Str(lit) = &tok.kind {
+        }
+    });
+}
+
+/// Call `each` with each token of `toks` and the token after it in the same run, in token order.
+/// The tokens of a string hole and of a spec field count, each hole its own run; a comment and
+/// string text are no tokens.
+pub fn each_token(toks: &[Tok], each: &mut impl FnMut(&Tok, Option<&Tok>)) {
+    for (i, tok) in toks.iter().enumerate() {
+        each(tok, toks.get(i + 1));
+        if let Token::Str(lit) = &tok.kind {
             for part in &lit.parts {
                 match part {
                     StrPart::Text(_) => {}
                     StrPart::Hole(hole) => {
-                        ident_words(&hole.tokens, each);
+                        each_token(&hole.tokens, each);
                         for spec in hole.spec.iter().flatten() {
                             match spec {
                                 SpecPart::Text(_) => {}
-                                SpecPart::Field(field) => ident_words(field, each),
+                                SpecPart::Field(field) => each_token(field, each),
                             }
                         }
                     }
@@ -2418,11 +2428,13 @@ pub fn strip_num_underscores_radix(s: &str, radix: u32) -> Option<std::borrow::C
 }
 
 /// TICKET-265 — one module's identifier words: `text` holds them back to back, `at` the line and
-/// byte range of each.
+/// byte range of each. `members` are the names read after a `.` / `?.` (`from` in `int.from`),
+/// sorted and deduped.
 #[derive(Debug, Default, Clone, PartialEq, borsh::BorshSerialize, borsh::BorshDeserialize)]
 pub struct IdentWords {
     pub text: String,
     pub at: Vec<(u32, std::ops::Range<usize>)>,
+    pub members: Vec<String>,
 }
 
 #[cfg(test)]

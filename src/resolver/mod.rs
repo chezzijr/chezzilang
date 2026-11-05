@@ -144,14 +144,16 @@ impl PreludeUse {
     /// Every prelude struct used: the graph-less and test graphs, and a run of the prelude itself.
     pub const ALL: Self = Self([true; PRELUDE_STRUCTS.len()], true);
 
-    /// The prelude structs whose [`PreludeStruct::words`] `source` holds, and whether it holds the
-    /// name of a bodied prelude native-struct method ([`prelude_native_body_names`]).
-    fn named_in(source: &str) -> Self {
+    /// The prelude structs whose [`PreludeStruct::words`] `source` holds, and whether its tokens
+    /// read a bodied prelude native-struct method ([`prelude_native_body_names`]) as a member
+    /// (`words.members`): such a method is reached only through a member path (`int.from(x)`,
+    /// `T.from(x)`, `?.from`), and `from` alone is the import keyword.
+    fn named_in(source: &str, words: &Words) -> Self {
         Self(
             PRELUDE_STRUCTS.map(|p| p.words.iter().any(|w| source.contains(w))),
             prelude_native_body_names()
                 .iter()
-                .any(|n| names_member(source, n)),
+                .any(|n| words.members.binary_search(n).is_ok()),
         )
     }
 
@@ -1263,12 +1265,12 @@ impl Builder {
         // `Cell`, not `&mut self`: `parse` is called from `&self` contexts.
         let file = self.file_seq.get() + 1;
         self.file_seq.set(file);
-        if dotted != ["std", "prelude"] {
-            self.note_prelude_named(PreludeUse::named_in(source));
-        }
         let (ast, words) = lex_and_parse(source, dotted, file, &|x: &str| {
             !std_file && module_file(&[x.to_string()], &self.project_root, &self.std_root).exists()
         })?;
+        if dotted != ["std", "prelude"] {
+            self.note_prelude_named(PreludeUse::named_in(source, &words));
+        }
         self.words.borrow_mut().insert(file, words);
         Ok((ast, file))
     }
@@ -1420,12 +1422,12 @@ fn shared_std_parse_at(index: usize, dotted: &[String]) -> Option<&'static Share
             };
             Some(SharedStdParse {
                 module,
-                words,
                 prelude_named: if dotted == ["std", "prelude"] {
                     PreludeUse::default()
                 } else {
-                    PreludeUse::named_in(source)
+                    PreludeUse::named_in(source, &words)
                 },
+                words,
                 file,
             })
         })
@@ -1450,18 +1452,6 @@ fn native_body_names(module: &Module) -> Vec<String> {
     names.sort();
     names.dedup();
     names
-}
-
-/// Does `source` hold `name` as a member name, `.name` (spaces allowed after the `.`) not followed
-/// by an identifier char? A bodied prelude native-struct method is reached only through a member
-/// path (`int.from(x)`, `T.from(x)`, `?.from`), and `from` alone is the import keyword.
-fn names_member(source: &str, name: &str) -> bool {
-    let ident = |c: char| c.is_alphanumeric() || c == '_';
-    source.match_indices(name).any(|(i, _)| {
-        let after = source[i + name.len()..].chars().next();
-        let before = source[..i].trim_end().chars().next_back();
-        before == Some('.') && !after.is_some_and(ident)
-    })
 }
 
 /// The bodied methods of the embedded prelude's `native struct` decls (`int.from`, `int.try_from`):

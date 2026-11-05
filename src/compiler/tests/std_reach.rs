@@ -266,7 +266,7 @@ fn a_range_in_a_skipped_std_body_records_no_range_use() {
 /// them (`tests/chz/spec/builtin_from_test.chz`).
 #[test]
 fn prelude_native_bodies_are_kept_only_when_named() {
-    let rows: [(&str, bool); 6] = [
+    let rows: [(&str, bool); 9] = [
         ("print(1)\n", false),
         // `from` the import keyword and `bytes.from_iter` name no bodied method.
         (
@@ -276,6 +276,13 @@ fn prelude_native_bodies_are_kept_only_when_named() {
         ("print(bytes.from_iter([1]))\n", false),
         ("print(int.from(true))\n", true),
         ("print(float.try_from(\"1.5\") ?? 0.0)\n", true),
+        // The decision reads tokens: a comment between `.` and the name, or holding the path.
+        ("x := (int.  # pick\n    from(true))\nprint(x)\n", true),
+        (
+            "f := (float.  # c\n    try_from)\nprint(f(\"2.5\") ?? 0.0)\n",
+            true,
+        ),
+        ("# int.from(true)\nprint(\"a.from\")\n", false),
         (
             "import From from std.convert\nfn lift[T: From[bool]](b: bool) -> T:\n    return T.from(b)\nprint(lift[int](true))\n",
             true,
