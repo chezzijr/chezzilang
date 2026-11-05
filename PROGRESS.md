@@ -282,7 +282,8 @@ Each group below is one fact decided in two or more places (grouped 2026-10-16).
     `wait: every arm is off ...`. `tests/chz/go/` holds faithful ports of Go 1.27.0 `test/chan`
     (license in its `NOTICE`), run at both worker counts. Done: 17 of 20 files; select3 has 15 of
     its 24 cases (95, 195, 200 and 206 came with item 28; the 9 left are always-block cases).
-    The powser2 port found that a protocol method could not name its own protocol (fixed).
+    The powser2 port found that a protocol method could not name its own protocol (fixed). Go's
+    `<-ticker` and `runtime.Gosched()` map to `time.sleep_ms(1)`, a park (Chezzi has no yield).
     Not ported: select5 (a generator), perm
     (directional channels), select2's heap check. Grid: `tests/chz/spec/wait_guard_test.chz`.
 28. **`Channel.recv` returns `T!RecvError` on a closed channel (D1 and D2, done 2026-11-04).** Buffered

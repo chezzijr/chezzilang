@@ -542,11 +542,11 @@ fn no_new_rust_test_sleeps_to_order_two_events() {
     );
 }
 
-/// The 8 `tests/chz` sites that keep a `time.sleep_ms` for a reason recorded on the entry, because
+/// The `tests/chz` sites that keep a `time.sleep_ms` for a reason recorded on the entry, because
 /// nothing else can express the wait: a parked rendezvous sender or a job that must be INSIDE the
 /// sleep when cancelled has no Chezzi-visible predicate, and one entry asserts a window a value must
 /// NOT change across, which is a legitimate clock use, not a happens-before guess (TICKET-059/060).
-const CHZ_SLEEP_SITES: [(&str, &str); 15] = [
+const CHZ_SLEEP_SITES: [(&str, &str); 20] = [
     // The socket and `request.get` timeout grid: for a waiting form (`None` or no argument) the
     // peer acts after the sleep, so the call is seen to wait. It orders no result: a waiting call
     // succeeds whether the peer acts before or after it, and a polling form has no peer action.
@@ -602,6 +602,29 @@ const CHZ_SLEEP_SITES: [(&str, &str); 15] = [
     // lets the writer in first too, so the asserts hold unless the writer is 30 ms late.
     ("tests/chz/spec/shared_handle_test.chz", "time.sleep_ms(80)"),
     ("tests/chz/spec/shared_handle_test.chz", "time.sleep_ms(30)"),
+    // Go test/chan ports: the sleep stands for Go's `<-ticker` (a park) and `runtime.Gosched()` (a
+    // yield). Chezzi has no yield and `sleep_ms(0)` returns at once, so the 1 ms park is what hands
+    // the run permit to the spawned peer at one worker (without it nonblock's poll never lets the
+    // receiver run inside its tries). It is a yield, not a guess at timing: its length orders
+    // nothing, and select7's send completes whether or not the receiver parked first.
+    ("tests/chz/go/nonblock_test.chz", "time.sleep_ms(1)"),
+    ("tests/chz/go/select7_test.chz", "time.sleep_ms(1)"),
+    // D1 and D2: the sleep lets the receiver or `wait:` park before another task closes its
+    // channel, so the row covers the wake of a parked waiter. It orders no result: a close that
+    // lands first makes the recv or arm ready at once, with the same value. No handshake can say
+    // "the other task is parked".
+    (
+        "tests/chz/spec/channel_closed_recv_test.chz",
+        "time.sleep_ms(50)",
+    ),
+    (
+        "tests/chz/spec/wait_closed_arm_test.chz",
+        "time.sleep_ms(50)",
+    ),
+    // The wait guard: line 72 lets the `wait:` park before the send (a send that lands first makes
+    // the arm ready with the same value); line 172 asserts a window nothing may change across (no
+    // job runs while the arm is off).
+    ("tests/chz/spec/wait_guard_test.chz", "time.sleep_ms(20)"),
 ];
 
 /// Every `path:line: text` under `tests/chz` that calls `time.sleep_ms(` and is not one of
