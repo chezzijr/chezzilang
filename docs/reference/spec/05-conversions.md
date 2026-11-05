@@ -1,8 +1,8 @@
 ## Type conversions & casting
 
-Chezzi has **no `as` cast operator**, no `Into`, and no value-level conversion protocol; the
-**bound-only** `From[S]` and `TryFrom[S]` protocols exist as generic bounds (below). A conversion is a method on the
-source value, display is interpolation, and there is no implicit `int`→`float` widening at a slot
+Chezzi has **no `as` cast operator** and no value-level conversion protocol; the
+**bound-only** `From[S]` and `TryFrom[S]` protocols exist as generic bounds, and a type converts itself
+with `x.into[T]()` (below). A conversion is a method on the source value, display is interpolation, and there is no implicit `int`→`float` widening at a slot
 (rule D3). A conversion is therefore always visible in the source.
 
 **A call on a scalar type's name gives its zero value.** A constructor sets fields only, and a scalar
@@ -98,8 +98,9 @@ collection holds no cursor position); iterate it with `for`, or call `.iter()` f
 **What does NOT exist:**
 
 - No `as` operator (`as` in the grammar is only import aliasing).
-- No `Into`, and no value-level conversion protocol. `From[S]` and `TryFrom[S]` are **bound-only**
-  (below): `c: From[int]` as an annotation is rejected, since a value cannot invoke a static ctor.
+- No value-level conversion protocol. `From[S]` and `TryFrom[S]` are **bound-only** (below):
+  `c: From[int]` as an annotation is rejected, since a value cannot invoke a static ctor. `Into[T]`
+  and `TryInto[T]` are not bounds yet: `[S: Into[float]]` is *type Rat does not satisfy Into*.
 - `cast[T](val: Any) -> T?` (a checked downcast off `Any`) is **deferred**: it needs runtime type tags,
   because generics are erased ([`roadmap.md`](../../design/roadmap.md)).
 
@@ -161,8 +162,9 @@ b := Rat.from("ab")    # the str overload: Rat(2, 3)
 - Two overloads may not overlap, that is, one value may not fit both: `int` and `int?` overlap (`3`),
   `int?` and `str?` overlap (`None`), `int!str` and `int!int` overlap (`3` wraps into both), a
   protocol overlaps a type that satisfies it (also as `Sq?`), and two protocols always overlap. The error names the first one: *conflicting from for int: from(x: int) at 3:8*.
-- Only `from` and `try_from` overload. Any other repeated method name, and an instance
-  `from(self, …)` declared twice, is *method '…' is already defined*.
+- Only `from`, `try_from`, `into` and `try_into` overload (the names `std.convert`'s protocols
+  declare). Any other repeated method name, an instance `from(self, …)` declared twice and a static
+  `into(x: …)` declared twice are *method '…' is already defined*.
 - A trace, `<fn …>` and every message call an overload `from`.
 - A free `S` in `[S, T: From[S]]` is not inferred from an overloaded type: pin it.
 - A bound picks too, by the direct call's rule: `fn make[S, T: From[S]](x: S) -> T` called as
@@ -176,3 +178,62 @@ b := Rat.from("ab")    # the str overload: Rat(2, 3)
   is the `int` overload. With no fn type there, `g := Rat.from` and
   `print(Rat.from)` are *type annotations needed: Rat.from has 2 overloads (int, str)*, as
   Rust's `let g = Rat::from;` is `E0283`. A type with one `from` reads as a value as before.
+
+**`into`: a conversion on the source.** A struct or enum converts ITSELF with an instance
+`fn into(self) -> T` (Rust `impl Into<T> for Rat`), one per target type, and with
+`fn try_into(self) -> T!` (Rust `impl TryInto<T>`) when the conversion can fail. The protocols
+`Into[T]` and `TryInto[T]` in `std.convert` give the shape. A call on an overload set names the target:
+
+```chezzi
+struct Rat:
+    n: int
+    d: int
+    fn into(self) -> float:
+        return self.n.to_float() / self.d.to_float()
+    fn into(self) -> str:
+        return "{self.n}/{self.d}"
+    fn try_into(self) -> int!:
+        if self.d != 1:
+            return !"{self.n}/{self.d} is not an int"
+        return self.n
+
+r := Rat(1, 2)
+x := r.into[float]()       # 0.5
+s := r.into[str]()         # "1/2"
+n := r.try_into[int]()     # an error value: 1/2 is not an int
+```
+
+- Two or more `into`s are an overload set. The `[T]` picks the overload whose return is `T`, exactly
+  (Rust's `Into<T>`; Chezzi infers bottom-up, so the target is written). `r.into()` is *into on Rat
+  needs a target type: r.into[T]()*; a target with no overload is *type Rat has no into for int (it
+  has: float, str)*, the one error of the call. `Rat.into[float](r)` is the same call through the type.
+- One `into` is a plain method, as one `from`: `r.into()` calls it, `[r].map(Rat.into)` reads it, it
+  satisfies a protocol that requires `fn into(self) -> float`, and it may take more params. A `[T]`
+  on it is the same pick: `r.into[float]()` works when it returns `float`, and `r.into[int]()` is
+  *type Rat has no into for int (it has: float)*.
+- Each `into` of an overload set takes only `self` and returns a concrete type (not a type
+  parameter): `T` for `into`, `T!E` for `try_into`. A `float!` `into` is *an overloaded into returns
+  T, found float!; a fallible conversion is try_into*. Two `into`s with one target are *conflicting into for float: into(self) ->
+  float at 3:8*. A static `fn into(x: …)` is an ordinary static method, and two of them are
+  *already defined*.
+- There is no blanket `into` from a `from` (Chezzi has no blanket impls): `r.into[Big]()` finds only
+  a written `into`. When `Big` converts a `Rat` itself, the error names it: *type Rat has no into for
+  Big; Big defines it: use Big.from(r)*. So `true.into[int]()` names `int.from`.
+- An overloaded `into` is not a method value (`r.into` is rejected, as every bound method) and does
+  not witness a protocol requirement named `into`: the call site picks the target.
+- In a trace, `<fn …>` and every message an overload is called `into`.
+
+**One owner per conversion pair** (Rust `E0119`, where `impl Into<B> for A` collides with the blanket
+`Into` of `impl From<A> for B`). Of `B.from(x: A)`, `B.try_from(x: A)`, `A.into -> B` and
+`A.try_into -> B!`, a module declares at most one. Two are *conflicting conversion Rat -> Big: into
+at 3:8 and from at 7:8*; a source that overlaps (a protocol `A` satisfies, `A?`) counts as `A`. The
+module of the `into` names both types, so it checks the pair even when `B` is imported:
+`B.from(x: P)` in module `zb` and `A`, which satisfies `P`, with `fn into(self) -> B` are
+*conflicting conversion A -> B: into at 7:8 and B.from of an imported module*.
+
+| From `A` to `B` | Fallible | Spelled | Called |
+|---|---|---|---|
+| on the target `B` | no | `fn from(x: A) -> Self` | `B.from(a)`, `[T: From[A]]` |
+| on the target `B` | yes | `fn try_from(x: A) -> Self!` | `B.try_from(a)`, `[T: TryFrom[A]]` |
+| on the source `A` | no | `fn into(self) -> B` | `a.into[B]()` |
+| on the source `A` | yes | `fn try_into(self) -> B!` | `a.try_into[B]()` |

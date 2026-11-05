@@ -327,8 +327,9 @@ fn cells() -> Vec<Cell> {
     for protocol in protocols {
         let decl = &decls[protocol.as_str()];
         let Some(owner) = Owner::of(protocol) else {
-            // A static requirement (`from(x: S) -> Self`): no receiver, so no operator and no
-            // builtin grant. The decl column fails any other protocol with no owner.
+            // A static requirement (`from(x: S) -> Self`) or a target-keyed conversion
+            // (`into(self) -> T`): no operator and no builtin grant. The decl column fails any
+            // other protocol with no owner.
             continue;
         };
         let s = spec(protocol, owner);
@@ -389,7 +390,9 @@ fn run(name: &str, src: &str) -> (bool, String, String) {
 }
 
 /// The decl column: each `HOOKS` and `Unhooked` protocol's method is the one own method of its std
-/// decl, and each other std protocol with a method has only static methods.
+/// decl, and each other std protocol with a method has only static methods (`From[S]`) or only
+/// conversions keyed by their target (`Into[T]`'s `into(self) -> T`, called `x.into[T]()`; the
+/// checker's gate decides, `chezzi::checker::std_target_keyed_protocols`).
 #[test]
 fn every_hook_method_is_its_std_decls_method() {
     let decls = std_decls();
@@ -412,8 +415,13 @@ fn every_hook_method_is_its_std_decls_method() {
             None => bad.push(format!("{protocol}: no std decl")),
         }
     }
+    let target_keyed = chezzi::checker::std_target_keyed_protocols();
     for (name, d) in &decls {
-        if !d.methods.is_empty() && Owner::of(name).is_none() && !d.is_static {
+        if !d.methods.is_empty()
+            && Owner::of(name).is_none()
+            && !d.is_static
+            && !target_keyed.contains(name)
+        {
             bad.push(format!(
                 "std protocol {name} has an instance method and no hook or Unhooked owner"
             ));

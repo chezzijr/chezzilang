@@ -742,7 +742,8 @@ impl Checker {
     /// method signature or embed may name itself or a protocol declared after it (Go
     /// `type item interface { eq(c item) bool }`). The first pass inserts every protocol and meets
     /// names not inserted yet, so its diagnostics are dropped; the second pass re-resolves each one
-    /// with all of them in place. The one loop for std protocols and for a user module's protocols.
+    /// with all of them in place. The loop for a user module's protocols; the std set, whose
+    /// harvest reports nothing, seeds every name first instead (`seed_std_protocols`).
     pub(super) fn insert_protocols_in_two_passes(&mut self, mut insert_all: impl FnMut(&mut Self)) {
         for pass in 0..2 {
             let mark = self.diag_mark();
@@ -758,7 +759,9 @@ impl Checker {
     /// resolve names no user module sees.
     ///
     /// The shapes depend only on the embedded std sources, so a process harvests them once and
-    /// every later checker (`chezzi run` builds two) copies that table.
+    /// every later checker (`chezzi run` builds two) copies that table. A shape may name a
+    /// protocol declared after it, so every name and arity is in the table before the one harvest
+    /// pass (half the cost of two full passes).
     pub(super) fn seed_std_protocols(&mut self) {
         static SHAPES: std::sync::OnceLock<Vec<(String, ProtocolInfo)>> =
             std::sync::OnceLock::new();
@@ -768,13 +771,21 @@ impl Checker {
         }
         let outer_std = std::mem::replace(&mut self.current_module_is_stdlib, true);
         let mark = self.errors.len() + self.warnings.len();
-        self.insert_protocols_in_two_passes(|c| {
-            for d in super::graph_pass::std_protocol_decls() {
-                if let Some(info) = c.harvest_protocol_stmt(&d.stmt) {
-                    c.protocols.insert(d.name.clone(), info);
-                }
+        for d in super::graph_pass::std_protocol_decls() {
+            if let StmtKind::Protocol { type_params, .. } = &d.stmt.kind {
+                let info = ProtocolInfo {
+                    type_params: type_params.iter().map(|tp| tp.name.clone()).collect(),
+                    methods: std::sync::Arc::default(),
+                    embeds: Vec::new(),
+                };
+                self.protocols.insert(d.name.clone(), info);
             }
-        });
+        }
+        for d in super::graph_pass::std_protocol_decls() {
+            if let Some(info) = self.harvest_protocol_stmt(&d.stmt) {
+                self.protocols.insert(d.name.clone(), info);
+            }
+        }
         self.current_module_is_stdlib = outer_std;
         // A diagnostic would be this checker's own; a clean harvest is the same for every checker.
         if self.errors.len() + self.warnings.len() == mark {

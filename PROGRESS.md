@@ -303,8 +303,8 @@ Each group below is one fact decided in two or more places (grouped 2026-10-16).
     `[T: From[S]]` bound picks through the caller, which passes the chosen method as the witness
     (one hidden witness per type param and static requirement). Overlapping overloads are rejected
     at the declaration (`conflicting from for int`, Rust E0119); `Rat.from` as a value needs
-    an annotation (Rust E0283). Only static `from` may repeat; every other name stays one per
-    type. Grids: `tests/chz/spec/from_overload_test.chz`, `checker::tests::from_overloads`.
+    an annotation (Rust E0283). Only the conversions (`from`, `try_from`, `into`, `try_into`) may
+    repeat; every other name stays one per type. Grids: `tests/chz/spec/from_overload_test.chz`, `checker::tests::from_overloads`.
 30. **`from` is a member name (done 2026-11-05).** `from` stays a keyword, but it is accepted as a
     name after `.` / `?.` and as a method name in a struct, enum, native-struct or protocol body
     (`Q.from(3)`, `fn from(x: int) -> Q`); a free `fn from` is still an error and `import X from m`
@@ -322,6 +322,16 @@ Each group below is one fact decided in two or more places (grouped 2026-10-16).
     A graph that names none of the prelude's bodied native methods as a member skips their bodies,
     and a process harvests the std protocol shapes once (`print(1)` run -1.5% vs before).
     Grids: `tests/chz/spec/builtin_from_test.chz`, `checker::tests::from_overloads`.
+32. **`into` / `try_into`, and one owner per conversion pair (done 2026-11-06).** A type converts
+    itself with an instance `fn into(self) -> T` (Rust `impl Into<T>`), one per target type, or
+    `fn try_into(self) -> T!`; protocols `Into[T]` / `TryInto[T]` in `std.convert` (not bounds
+    yet). A call on two or more names the target: `r.into[float]()`, `Rat.into[float](r)` (bottom-up
+    inference). No blanket `into` from a `from`: `r.into[Big]()` with only `Big.from(x: Rat)` says
+    `Big defines it: use Big.from(r)`. Of `B.from(A)`, `B.try_from(A)`, `A.into -> B`,
+    `A.try_into -> B!` a module declares one (`conflicting conversion Rat -> Big: into at .. and
+    from at ..`, Rust E0119), checked from the `into` side when `B` is imported. One `into` is a
+    plain method (`r.into()`, a value, a protocol witness); 2+ make the overload set. Grids:
+    `tests/chz/spec/into_test.chz`, `checker::tests::from_overloads::into_overload_grid`.
 
 ### Open questions for the owner
 

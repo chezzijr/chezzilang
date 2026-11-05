@@ -306,16 +306,14 @@ impl Checker {
                 let is_suite = methods.iter().any(|m| m.is_test);
                 // The type's runtime key — the table the members' stored `witness_params` live under.
                 let host_key = self.bare_key(name);
-                if self.has_conversion_pair(methods)
-                    && let Some(info) = self.structs.get(&host_key).cloned()
+                if let Some(ov) = self
+                    .structs
+                    .get(&host_key)
+                    .map(|info| &info.overloads)
+                    .filter(|ov| !ov.is_empty())
+                    .cloned()
                 {
-                    self.check_overload_decls(
-                        methods,
-                        &info.overloads,
-                        &info.methods,
-                        type_params,
-                        &self_ty,
-                    );
+                    self.check_overload_decls(methods, &ov, type_params, &self_ty);
                 }
                 for (i, m) in methods.iter().enumerate() {
                     // TICKET-255 — a graph that builds no value of a prelude struct skips its bodies.
@@ -393,13 +391,12 @@ impl Checker {
                 let host_key = self.bare_key(name);
                 let saved_binders =
                     std::mem::replace(&mut self.default_binders, method_binders(methods, name));
-                if self.has_conversion_pair(methods) {
-                    let ov = self
-                        .enum_overloads_of(&host_key)
-                        .cloned()
-                        .unwrap_or_default();
-                    let table = self.enum_methods_of(&host_key).cloned().unwrap_or_default();
-                    self.check_overload_decls(methods, &ov, &table, type_params, &self_ty);
+                if let Some(ov) = self
+                    .enum_overloads_of(&host_key)
+                    .filter(|ov| !ov.is_empty())
+                    .cloned()
+                {
+                    self.check_overload_decls(methods, &ov, type_params, &self_ty);
                 }
                 for (i, m) in methods.iter().enumerate() {
                     if m.is_test {

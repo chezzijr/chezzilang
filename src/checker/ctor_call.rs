@@ -37,12 +37,23 @@ impl Checker {
         // side's answer, so an instance method takes its receiver first (`P.get(p)`).
         // An overloaded name (several `from`s): the argument's type picks the overload first,
         // and the call binds against that one's sig. The compiler reads the pick off the table.
+        let mut mtargs = mtargs;
         let pick = match self.head_overloads(th, method) {
+            // `A.into[T](x)`: the `[T]` picks the target, and is no method type argument.
+            Some(set) if self.target_keyed(method) => {
+                let Some(k) = self.pick_target(&set, tname, method, mtargs, "x", None, span) else {
+                    self.infer_all(args);
+                    return Ty::Unknown;
+                };
+                mtargs = &[];
+                self.record_overload_call(method, &set[k], name_span, span);
+                Some(k)
+            }
             Some(set) => {
                 let Some(k) = self.pick_overload(&set, tname, method, args, span) else {
                     return Ty::Unknown;
                 };
-                self.record_overload_call(method, &set[k].params[0], name_span, span);
+                self.record_overload_call(method, &set[k], name_span, span);
                 Some(k)
             }
             None => None,
@@ -66,6 +77,23 @@ impl Checker {
         if self.hover_probe.is_some() {
             let fty = crate::checker::fn_value_ty(&sig);
             self.hover_record_at(name_span, &fty, HoverKind::Func, sig.doc.clone());
+        }
+        // `A.into[T](x)` on a lone `into`: the overload pick checks the `[T]` against its return.
+        if pick.is_none()
+            && !mtargs.is_empty()
+            && sig.type_params.is_empty()
+            && !sig.is_static
+            && self.target_keyed(method)
+        {
+            let one = std::slice::from_ref(&sig);
+            if self
+                .pick_target(one, tname, method, mtargs, "x", None, span)
+                .is_none()
+            {
+                self.infer_all(args);
+                return Ty::Unknown;
+            }
+            mtargs = &[];
         }
         // A method-level turbofish (`Box.empty[int]()`) on a static method that declares NO own
         // `[U]` is an arity error: it takes no method type arguments.

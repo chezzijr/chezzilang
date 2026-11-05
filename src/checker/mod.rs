@@ -22,6 +22,8 @@ use std::fmt;
 
 pub(crate) use crate::base::builtin::{Builtin, Lowering};
 pub(crate) use builtin_type::BuiltinType;
+#[cfg(any(test, feature = "test-api"))]
+pub use from_overload::std_target_keyed_protocols;
 pub use graph_pass::std_protocol_owner;
 pub use ty::Ty;
 pub use ty::{

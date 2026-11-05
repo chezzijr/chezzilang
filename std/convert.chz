@@ -1,12 +1,23 @@
-# std.convert -- the From and TryFrom protocols (Rust From, TryFrom).
+# std.convert -- the From, TryFrom, Into and TryInto protocols (Rust From, TryFrom, Into, TryInto).
 #
 # `from(x: S) -> Self` is STATIC (the first param is `x`, not `self`), so it is called
 # `Target.from(src)` and produces a fresh `Self`. `S`, the source type, is the one arity param, so
 # the bound reads `[T: From[str]]`. A conversion that can fail is `try_from(x: S) -> Self!`
 # (`[T: TryFrom[str]]`): a `from` never returns `Self!`. A bound needs
 # `import From, TryFrom from std.convert`.
+#
+# `into(self) -> T` is an INSTANCE method on the source type, overloaded by its return type `T`,
+# so it is called `x.into[T]()`; the fallible one is `try_into(self) -> T!`. At most one of
+# `B.from(A)`, `B.try_from(A)`, `A.into -> B`, `A.try_into -> B!` converts one pair. `Into` and
+# `TryInto` are not bounds yet.
 protocol From[S]:
     fn from(x: S) -> Self
 
 protocol TryFrom[S]:
     fn try_from(x: S) -> Self!
+
+protocol Into[T]:
+    fn into(self) -> T
+
+protocol TryInto[T]:
+    fn try_into(self) -> T!

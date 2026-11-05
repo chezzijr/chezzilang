@@ -187,6 +187,12 @@ fixes the branch was +6.8% on `run`: one 2-line std protocol cost +62k instructi
 a member (`int.from`, `T.from`) now skips them (`PreludeUse::uses_native_bodies`). The `check`
 remainder is the harvested sigs of the 4 bodied methods (~55k) and the `TryFrom` shape.
 
+One-pass std protocol harvest (2026-11-06, with `Into` + `TryInto`): `print(1)`, release,
+`perf stat -e instructions:u`, median of 5, base `6ae90b8d` in its own target dir. `run`: 8,610,999
+base, 8,560,578 branch (-0.59%); `check`: 6,015,034 base, 5,940,376 branch (-1.24%). The two new
+protocols and the `into` gate alone were `run` +1.12%, `check` +1.22%; `seed_std_protocols` now
+seeds every std protocol's name and arity and harvests each once, instead of two full passes.
+
 ### Peak memory vs Go
 
 Peak process RSS, `benches/maxrss.py`, median of 3, 2026-07-25 after the four memory levers

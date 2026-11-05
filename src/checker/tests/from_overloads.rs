@@ -343,3 +343,207 @@ fn from_overload_bound_pick_ignores_declaration_order() {
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
+
+/// The instance conversion `fn into(self) -> T` / `fn try_into(self) -> T!` (Rust `impl Into<T>`,
+/// `impl TryInto<T>`), overloaded by the return type and picked by `r.into[T]()`, and the one
+/// owner per conversion pair (Rust `E0119`): at most one of `B.from(A)`, `B.try_from(A)`,
+/// `A.into -> B`, `A.try_into -> B!`. The program is `Rat` (methods `rat`), then `Big` (methods
+/// `big`), then `main` running `stmt`. Each accept cell type-checks clean; each reject cell gives
+/// its message, and a cell the overload gate admits never also says "already defined".
+#[test]
+fn into_overload_grid() {
+    let src = |rat: &str, big: &str, stmt: &str| {
+        format!(
+            "struct Rat:\n    n: int\n{rat}struct Big:\n    n: int\n{big}fn main():\n    r := Rat(1)\n    {stmt}\nmain()\n"
+        )
+    };
+    let to_float = "    fn into(self) -> float:\n        return 0.5\n";
+    let to_str = "    fn into(self) -> str:\n        return \"r\"\n";
+    let to_int = "    fn try_into(self) -> int!:\n        return self.n\n";
+    let to_big = "    fn into(self) -> Big:\n        return Big(self.n)\n";
+    let try_to_big = "    fn try_into(self) -> Big!:\n        return Big(self.n)\n";
+    let big_from = "    fn from(x: Rat) -> Big:\n        return Big(x.n)\n";
+    let big_try_from = "    fn try_from(x: Rat) -> Big!:\n        return Big(x.n)\n";
+    let three = format!("{to_float}{to_str}{to_int}");
+    let accept: Vec<(&str, String)> = vec![
+        (
+            "into float + into str + try_into int",
+            src(
+                &three,
+                "",
+                "f: float = r.into[float]()\n    s: str = r.into[str]()\n    n: int = r.try_into[int]() ?? 0",
+            ),
+        ),
+        ("one into", src(to_float, "", "f: float = r.into[float]()")),
+        // A single `into` is a plain method (2+ decls make an overload set), as a single `from`.
+        ("one into, no [T]", src(to_float, "", "f: float = r.into()")),
+        (
+            "one into through the type",
+            src(to_float, "", "f: float = Rat.into[float](r)"),
+        ),
+        ("one into as a value", src(to_float, "", "xs := [r].map(Rat.into)")),
+        (
+            "one into takes a parameter",
+            src("    fn into(self, k: int) -> int:\n        return self.n + k\n", "", "n: int = r.into(2)"),
+        ),
+        (
+            "one into returns T!",
+            src("    fn into(self) -> float!:\n        return 0.5\n", "", "f: float = r.into() ?? 0.0"),
+        ),
+        (
+            "one into satisfies a user protocol",
+            "protocol Conv:\n    fn into(self) -> int\nstruct A:\n    n: int\n    fn into(self) -> int:\n        return self.n\nfn use(c: Conv) -> int:\n    return c.into()\nfn main():\n    print(use(A(4)))\nmain()\n".to_string(),
+        ),
+        (
+            "an enum into",
+            "enum E:\n    A\n    fn into(self) -> int:\n        return 1\nfn main():\n    n: int = E.A.into[int]()\nmain()\n".to_string(),
+        ),
+        (
+            "a static into is a plain method",
+            src("    fn into(x: int) -> Rat:\n        return Rat(x)\n", "", "q := Rat.into(3)"),
+        ),
+        (
+            "Rat into Big beside Big from int (two pairs)",
+            src(to_big, "    fn from(x: int) -> Big:\n        return Big(x)\n", "b: Big = r.into[Big]()"),
+        ),
+        (
+            "Rat into float beside Rat from float (two directions)",
+            src(&format!("{to_float}    fn from(x: float) -> Rat:\n        return Rat(0)\n"), "", "f: float = r.into[float]()"),
+        ),
+    ];
+    let reject: Vec<(&str, String, &str)> = vec![
+        (
+            "no target type",
+            src(&three, "", "f := r.into()"),
+            "into on Rat needs a target type: r.into[T]()",
+        ),
+        (
+            "no overload for the target",
+            src(&three, "", "n := r.into[int]()"),
+            "type Rat has no into for int (it has: float, str)",
+        ),
+        (
+            "an argument",
+            src(&three, "", "f := r.into[float](3)"),
+            "an overloaded into takes no argument, found 1",
+        ),
+        (
+            "the pair is Big's from",
+            src(to_float, big_from, "b := r.into[Big]()"),
+            "type Rat has no into for Big (it has: float); Big defines it: use Big.from(r)",
+        ),
+        (
+            "the pair is Big's try_from, and Rat has no into",
+            src("", big_try_from, "b := r.try_into[Big]()"),
+            "type Rat has no try_into for Big; Big defines it: use Big.try_from(r)",
+        ),
+        (
+            "two into -> float",
+            src(&format!("{to_float}{to_float}"), "", "f := 1"),
+            "conflicting into for float: into(self) -> float at 3:8",
+        ),
+        (
+            "into takes a parameter",
+            src(&format!("{to_float}    fn into(self, y: int) -> str:\n        return \"\"\n"), "", "f := 1"),
+            "an overloaded into takes no parameter but self, as Into[T] declares",
+        ),
+        (
+            "into returns T!",
+            src(&format!("{to_str}    fn into(self) -> float!:\n        return 0.5\n"), "", "f := 1"),
+            "an overloaded into returns T, found float!; a fallible conversion is try_into",
+        ),
+        (
+            "try_into returns T",
+            src("    fn try_into(self) -> int:\n        return 1\n    fn try_into(self) -> str!:\n        return \"\"\n", "", "f := 1"),
+            "an overloaded try_into returns T!E, found int",
+        ),
+        (
+            "into returns the struct's own type param",
+            "struct Box[T]:\n    v: T\n    fn into(self) -> T:\n        return self.v\n    fn into(self) -> str:\n        return \"\"\nfn main():\n    print(1)\nmain()\n".to_string(),
+            "an overloaded into returns a concrete type, found T",
+        ),
+        (
+            "Rat.into -> Big and Big.from(Rat)",
+            src(to_big, big_from, "f := 1"),
+            "conflicting conversion Rat -> Big: into at 3:8 and from at 7:8",
+        ),
+        (
+            "Rat.into -> Big and Big.try_from(Rat)",
+            src(to_big, big_try_from, "f := 1"),
+            "conflicting conversion Rat -> Big: into at 3:8 and try_from at 7:8",
+        ),
+        (
+            "Rat.try_into -> Big! and Big.from(Rat)",
+            src(try_to_big, big_from, "f := 1"),
+            "conflicting conversion Rat -> Big: try_into at 3:8 and from at 7:8",
+        ),
+        (
+            "into -> float and try_into -> float! on one type",
+            src(&format!("{to_float}    fn try_into(self) -> float!:\n        return 0.5\n"), "", "f := 1"),
+            "conflicting conversion Rat -> float: into at 3:8 and try_into at 5:8",
+        ),
+        (
+            "one into, another target",
+            src(to_float, "", "n := r.into[int]()"),
+            "type Rat has no into for int (it has: float)",
+        ),
+        (
+            "a type param target",
+            format!("struct Rat:\n    n: int\n{three}fn conv[T](r: Rat) -> T:\n    return r.into[T]()\n"),
+            "type Rat has no into for T (it has: float, str)",
+        ),
+        (
+            "two static into are no overloads",
+            src("    fn into(x: int) -> Rat:\n        return Rat(x)\n    fn into(x: str) -> Rat:\n        return Rat(0)\n", "", "f := 1"),
+            "method 'into' is already defined",
+        ),
+    ];
+    let mut failures = Vec::new();
+    for (cell, src) in &accept {
+        let errs = check_entry(src);
+        if !errs.is_empty() {
+            failures.push(format!("accept `{cell}`: {errs:?}"));
+        }
+    }
+    for (cell, src, needle) in &reject {
+        let errs = check_entry(src);
+        if !errs.iter().any(|e| e.message.contains(needle)) {
+            failures.push(format!("reject `{cell}`: wanted {needle:?}, got {errs:?}"));
+        } else if errs.len() != 1 {
+            failures.push(format!("reject `{cell}`: wanted one error, got {errs:?}"));
+        } else if !needle.contains("already defined")
+            && errs.iter().any(|e| e.message.contains("already defined"))
+        {
+            failures.push(format!(
+                "reject `{cell}`: an admitted overload says already defined: {errs:?}"
+            ));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// One owner per conversion pair across modules (Rust `E0119`): `B.from(x: P)` in an imported
+/// module owns the pair `A -> B` for an `A` that satisfies `P`, so `A`'s `into -> B` conflicts.
+/// The importing module, which names both types, reports it.
+#[test]
+fn into_conflicts_with_an_imported_from() {
+    let zb = "protocol P:\n    fn n(self) -> int\nstruct B:\n    m: int\n    fn from(x: P) -> B:\n        return B(x.n())\n";
+    let a = |into: &str| {
+        format!(
+            "import B, P from zb\nstruct A:\n    k: int\n    fn n(self) -> int:\n        return self.k\n{into}a := A(5)\nprint(B.from(a))\n"
+        )
+    };
+    let to_b = "    fn into(self) -> B:\n        return B(-1)\n";
+    let try_to_b = "    fn try_into(self) -> B!:\n        return B(-1)\n";
+    for (into, name) in [(to_b, "into"), (try_to_b, "try_into")] {
+        let errs = check_files(&[("zb.chz", zb), ("main.chz", &a(into))]);
+        let needle = format!("conflicting conversion A -> B: {name} at 6:8 and B.from");
+        assert!(
+            errs.len() == 1 && errs[0].message.contains(&needle),
+            "{name}: wanted one {needle:?}, got {errs:?}"
+        );
+    }
+    // A type that does not satisfy `P` converts by its own `into`.
+    let other = "import B from zb\nstruct C:\n    k: int\n    fn into(self) -> B:\n        return B(1)\nprint(C(1).into[B]())\n";
+    files_ok(&[("zb.chz", zb), ("main.chz", other)]);
+}

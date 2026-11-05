@@ -23,7 +23,7 @@ impl Checker {
         // anchor the editor hover record at the method name; never affects checking.
         name_span: Span,
         args: &[Expr],
-        type_args: &[Ty],
+        mut type_args: &[Ty],
         span: Span,
         // The expected-type hint of the enclosing `let`/annotation, threaded through to a generic
         // MODULE fn call so a return-type-only type param can be solved from it. `None` everywhere
@@ -34,6 +34,12 @@ impl Checker {
             self.range_literal_fault(obj, true);
         }
         let obj_ty = self.infer(obj);
+        // `x.into[T]()`: a conversion keyed by its target, picked by the `[T]`.
+        if let Some(ty) =
+            self.infer_target_call(obj, &obj_ty, method, args, &mut type_args, name_span, span)
+        {
+            return ty;
+        }
         // M3.1/M3.4 — an aggregate mutated in a task (`xs.push(v)`, …), a module global or a
         // captured local, is legal: the task writes the one object (Go). A member-level turbofish (`obj.method[A, B](...)`) is
         // only valid on a USER method that declares its OWN `[U]` type params. On a builtin

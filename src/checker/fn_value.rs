@@ -764,7 +764,7 @@ impl Checker {
                         else {
                             return Some(Ty::Unknown);
                         };
-                        self.record_overload_call(name, &set[k].params[0], name_span, name_span);
+                        self.record_overload_call(name, &set[k], name_span, name_span);
                         Some(k)
                     }
                     None => None,

@@ -427,8 +427,11 @@ impl Compiler {
                     argc: argc + w,
                     ic,
                 },
+                // An `into` overload: the checker's pick for this call, by the witness key.
                 None => Op::CallMethod {
-                    name: name.clone(),
+                    name: self
+                        .overload_pick(*name_span)
+                        .unwrap_or_else(|| name.clone()),
                     argc: argc + w,
                     ic,
                 },
