@@ -162,7 +162,7 @@ and range patterns, `std.os.exit`, stack traces, static protocol requirements, `
 | `ref T` / `Ref[T]` | removed: scalar aliasing only; use a one-field `struct` in a task, `Shared[T]` across tasks |
 | `cast[T](val: Any) -> T?` | no consumer: the owner ruled against leaning on `Any`. If it returns, only `cast[Scalar]`, `cast[str]`, a bare container kind and a named struct/enum are sound; a parameterized target needs runtime type tags |
 | `Into` | skipped: needs expected-type threading; Chezzi infers bottom-up |
-| `TryFrom` | not needed: a fallible conversion is `from(x: S) -> Self!E` |
+| `TryFrom` | done (2026-11-05): `try_from(x: S) -> Self!`, the fallible twin of `from`, as a bound `[T: TryFrom[S]]`; a `Self!` `from` cannot meet `From[S]`. `int`/`float` witness `From[bool]` and `TryFrom[str]` ([`05-conversions.md`](../reference/spec/05-conversions.md)) |
 | multi-source `From` | done (2026-11-05): one static `from` overload per source type, picked by the argument's type ([`05-conversions.md`](../reference/spec/05-conversions.md)); other overloading stays banned |
 
 ---

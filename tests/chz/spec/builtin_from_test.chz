@@ -1,0 +1,72 @@
+# tests/chz/spec/builtin_from_test.chz: the builtin scalars have static conversions (Rust
+# `i64::from(true)`, `f64::from(true)`, and the parse `"5".parse::<i64>()` spelled as Rust's
+# `i64::try_from`): `int.from(x: bool) -> int`, `float.from(x: bool) -> float`,
+# `int.try_from(x: str) -> int!`, `float.try_from(x: str) -> float!`. There is no
+# `float.from(int)` (rustc: `f64: From<i64>` is E0277, lossy): that reject is a Rust checker test
+# (`src/checker/tests/from_overloads.rs`). A scalar is a witness for `[T: From[S]]` and
+# `[T: TryFrom[S]]` like a struct or an enum.
+# Gated by `chz_suite_passes` (`tests/chz_suite.rs`).
+
+import From, TryFrom from std.convert
+
+struct Rat:
+    n: int
+    d: int
+    fn try_from(x: str) -> Self!:
+        parts := x.split("/")
+        if parts.len() != 2:
+            return !"not a ratio: {x}"
+        return Rat(parts[0].to_int()?, parts[1].to_int()?)
+
+fn parse[T: TryFrom[str]](s: str) -> T!:
+    return T.try_from(s)
+
+fn lift[T: From[bool]](b: bool) -> T:
+    return T.from(b)
+
+# `?` inside a fn that returns `!`; a test fn reads the result with `??`.
+fn int_plus_one(s: str) -> int!:
+    return int.try_from(s)? + 1
+
+fn float_twice(s: str) -> float!:
+    return float.try_from(s)? * 2.0
+
+fn parsed_sum() -> int!:
+    n := parse[int]("7")?
+    r := parse[Rat]("1/3")?
+    return n + r.n + r.d
+
+test fn a_bool_converts_to_a_number():
+    assert int.from(true) == 1
+    assert int.from(false) == 0
+    assert float.from(true) == 1.0
+    assert float.from(false) == 0.0
+
+test fn a_str_parses_with_try_from():
+    assert (int_plus_one("5") ?? -1) == 6
+    assert (float_twice("1.5") ?? -1.0) == 3.0
+    assert (int.try_from("5") ?? -1) == 5
+    assert (float.try_from(" 1.5 ") ?? -1.0) == 1.5, "trims, as to_float"
+    match int.try_from("x"):
+        ?v: assert false, "parsed {v}"
+        !e: assert e.message() != ""
+    match float.try_from("x"):
+        ?v: assert false, "parsed {v}"
+        !e: assert e.message() != ""
+
+test fn a_scalar_is_a_try_from_witness():
+    assert (parse[int]("7") ?? -1) == 7
+    assert (parse[float]("2.5") ?? -1.0) == 2.5
+    assert (parsed_sum() ?? -1) == 11
+    match parse[int]("x"):
+        ?v: assert false, "parsed {v}"
+        !e: assert e.message() != ""
+    match parse[Rat]("x"):
+        ?v: assert false, "parsed {v.n}"
+        !e: assert e.message() != ""
+
+test fn a_scalar_is_a_from_witness():
+    assert lift[int](true) == 1
+    assert lift[float](true) == 1.0
+    i: int = lift(false)
+    assert i == 0

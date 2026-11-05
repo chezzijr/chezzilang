@@ -627,7 +627,9 @@ struct StructInfo {
 #[derive(Clone)]
 struct ProtocolInfo {
     type_params: Vec<String>,
-    methods: Vec<(String, FnSig)>,
+    /// Shared: a copy of the table (each checker's seed of the std protocols, an import) copies
+    /// no signature.
+    methods: std::sync::Arc<Vec<(String, FnSig)>>,
     /// Embedded (super-)protocols (M22): `protocol Vector: Add + Sub` carries `[Add, Sub]`. A type
     /// satisfies this protocol iff it satisfies every embed (transitively) AND has every OWN method
     /// in `methods`. Empty for an ordinary protocol. Reuses [`Bound`] — an embed ref is identical to

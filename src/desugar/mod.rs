@@ -389,6 +389,7 @@ pub fn run(graph: &mut ModuleGraph) -> Result<(), ResolveError> {
             builds_range: false,
             counting_iterand: false,
             skipped_fns: graph.fn_skips(&graph.modules[mi]),
+            skips_native_bodies: graph.skips_prelude_native_bodies(&graph.modules[mi]),
         };
         let ast: &mut Module = &mut graph.modules[mi].ast;
         walker.walk_block(&mut ast.stmts)?;
@@ -423,6 +424,7 @@ pub fn run_standalone(module: &mut Module) -> Result<(), ResolveError> {
         builds_range: false,
         counting_iterand: false,
         skipped_fns: crate::resolver::SkippedFns::default(),
+        skips_native_bodies: false,
     };
     walker.walk_block(&mut module.stmts)?;
     Ok(())
@@ -894,6 +896,9 @@ struct Walker<'a> {
     /// TICKET-265 — this module's [`ModuleGraph::fn_skips`]. The checker and the compiler skip those
     /// bodies, so a range literal inside one records no `Range` use.
     skipped_fns: crate::resolver::SkippedFns,
+    /// [`crate::resolver::ModuleGraph::skips_prelude_native_bodies`] for this module: the checker
+    /// and the compiler skip those bodies, so the walk does too.
+    skips_native_bodies: bool,
 }
 
 /// TICKET-109 / W12-12 — how deep `fn` declarations may nest. A top-level `fn`, a `test fn` or a
@@ -1217,7 +1222,8 @@ impl Walker<'_> {
                 bodied_methods,
                 ..
             } => {
-                for m in bodied_methods.iter_mut() {
+                let skip = self.skips_native_bodies;
+                for m in bodied_methods.iter_mut().filter(|_| !skip) {
                     for p in m.params.iter_mut() {
                         if let Some(d) = &mut p.default {
                             self.walk_expr(d)?;

@@ -5,26 +5,50 @@ use super::setup::{TypeHead, TypeHeadKind};
 use super::*;
 
 impl Checker {
-    /// The gate: the static requirement named `name` of a parameterized std protocol whose
-    /// parameter mentions the protocol's own type param, with the protocol spelled `From[S]`.
-    /// Today that is only `From[S]`'s `from(x: S)` (`std/convert.chz`). Read from the std
-    /// protocol table, and only when a method name repeats.
-    fn overload_requirement(&self, name: &str) -> Option<(String, FnSig)> {
-        super::graph_pass::std_protocol_decls()
-            .iter()
-            .find_map(|d| {
-                let pinfo = self.protocol_shape(&d.name)?;
-                if pinfo.type_params.is_empty() {
-                    return None;
+    /// The gate: every static requirement of a parameterized std protocol whose parameter
+    /// mentions the protocol's own type param, with the protocol spelled `From[S]`: `From[S]`'s
+    /// `from(x: S)` and `TryFrom[S]`'s `try_from(x: S)` (`std/convert.chz`). Read from the std
+    /// protocol table, and only for a type body that declares such a name.
+    fn overload_requirements(&self) -> Vec<(String, String, FnSig)> {
+        let mut out = Vec::new();
+        for d in super::graph_pass::std_protocol_decls() {
+            let Some(pinfo) = self.protocol_shape(&d.name) else {
+                continue;
+            };
+            if pinfo.type_params.is_empty() {
+                continue;
+            }
+            let spelled = format!("{}[{}]", d.name, pinfo.type_params.join(", "));
+            for (n, req) in pinfo.methods.iter() {
+                if req.is_static
+                    && req
+                        .params
+                        .iter()
+                        .any(|p| mentions_any(p, &pinfo.type_params))
+                {
+                    out.push((n.clone(), spelled.clone(), req.clone()));
                 }
-                let (_, req) = pinfo.methods.iter().find(|(n, s)| {
-                    n == name
-                        && s.is_static
-                        && s.params.iter().any(|p| mentions_any(p, &pinfo.type_params))
-                })?;
-                let spelled = format!("{}[{}]", d.name, pinfo.type_params.join(", "));
-                Some((spelled, req.clone()))
-            })
+            }
+        }
+        out
+    }
+
+    /// The requirement [`Self::overload_requirements`] names `name`, with its protocol spelled.
+    fn overload_requirement(&self, name: &str) -> Option<(String, FnSig)> {
+        self.overload_requirements()
+            .into_iter()
+            .find(|(n, _, _)| n == name)
+            .map(|(_, spelled, req)| (spelled, req))
+    }
+
+    /// Does the type body `methods` declare two or more static conversions (names the gate
+    /// admits)? Only then has it overloads or a conversion pair to check.
+    pub(super) fn has_conversion_pair(&self, methods: &[FnDecl]) -> bool {
+        methods
+            .iter()
+            .filter(|m| !m.takes_self() && self.overload_requirement(&m.name).is_some())
+            .count()
+            > 1
     }
 
     /// Report each repeated method name of one type body as "already defined", except a name the
@@ -90,9 +114,11 @@ impl Checker {
         &mut self,
         methods: &[FnDecl],
         overloads: &HashMap<String, Vec<FnSig>>,
+        table: &HashMap<String, FnSig>,
         own_type_params: &[TypeParam],
         self_ty: &Ty,
     ) {
+        self.check_conversion_owners(methods, overloads, table, self_ty);
         for (name, sigs) in overloads {
             let Some((spelled, req)) = self.overload_requirement(name) else {
                 continue;
@@ -107,13 +133,8 @@ impl Checker {
                     .collect();
                 let msg = if decl.ret.is_none() {
                     format!("an overloaded {name} declares its return type, as {spelled} declares")
-                } else if sig.ret != *self_ty
-                    && !matches!(&sig.ret, Ty::Result(ok, _) if **ok == *self_ty)
-                {
-                    format!(
-                        "an overloaded {name} returns Self or Self!E, found {}",
-                        sig.ret
-                    )
+                } else if let Some(msg) = self.ret_misfit(name, &req, &sig.ret, self_ty) {
+                    msg
                 } else if sig.params.len() != req.params.len() {
                     let n = req.params.len();
                     let s = if n == 1 { "" } else { "s" };
@@ -154,6 +175,72 @@ impl Checker {
 }
 
 impl Checker {
+    /// The message for an overload of `name` whose return `ret` is not what the requirement `req`
+    /// declares (Rust `E0053`): `Self` for `from`, `Self!E` for `try_from`, with `self_ty` for
+    /// `Self`. A `Self!E` where `Self` is due names the fallible twin: the requirement that returns
+    /// `req`'s return with `!` (`try_from`).
+    fn ret_misfit(&self, name: &str, req: &FnSig, ret: &Ty, self_ty: &Ty) -> Option<String> {
+        let ok_is_self = matches!(ret, Ty::Result(ok, _) if **ok == *self_ty);
+        if matches!(req.ret, Ty::Result(..)) {
+            return (!ok_is_self)
+                .then(|| format!("an overloaded {name} returns Self!E, found {ret}"));
+        }
+        if *ret == *self_ty {
+            return None;
+        }
+        let twin = ok_is_self
+            .then(|| {
+                self.overload_requirements()
+                    .into_iter()
+                    .find(|(_, _, r)| matches!(&r.ret, Ty::Result(ok, _) if **ok == req.ret))
+            })
+            .flatten();
+        let hint = twin
+            .map(|(t, _, _)| format!("; a fallible conversion is {t}"))
+            .unwrap_or_default();
+        Some(format!(
+            "an overloaded {name} returns Self, found {ret}{hint}"
+        ))
+    }
+
+    /// One owner per conversion (Rust `E0119`): two static conversions of one type body with
+    /// different names (`from(x: int)` and `try_from(x: int)`) must not take an overlapping
+    /// source. Two of one name are the overlap rule of [`Self::check_overload_decls`].
+    fn check_conversion_owners(
+        &mut self,
+        methods: &[FnDecl],
+        overloads: &HashMap<String, Vec<FnSig>>,
+        table: &HashMap<String, FnSig>,
+        self_ty: &Ty,
+    ) {
+        let convs: Vec<(&FnDecl, Ty)> = (0..methods.len())
+            .filter(|&i| {
+                !methods[i].takes_self() && self.overload_requirement(&methods[i].name).is_some()
+            })
+            .filter_map(|i| {
+                let sig = method_decl_sig(methods, i, table, Some(overloads))?;
+                let p = sig.params.first().filter(|p| !p.is_unknown())?.clone();
+                Some((&methods[i], p))
+            })
+            .collect();
+        for (j, (decl, b)) in convs.iter().enumerate() {
+            let earlier = convs[..j]
+                .iter()
+                .filter(|(d, _)| d.name != decl.name)
+                .find_map(|(d, a)| self.overlap(a, b).map(|what| (d, what)));
+            if let Some((d, what)) = earlier {
+                let (at, here) = (d.name_span, decl.name_span);
+                self.error(
+                    here,
+                    format!(
+                        "conflicting conversion {what} -> {self_ty}: {} at {}:{} and {} at {}:{}",
+                        d.name, at.line, at.col, decl.name, here.line, here.col
+                    ),
+                );
+            }
+        }
+    }
+
     /// The sig of `methods[i]` at hoist: [`Self::fn_sig`], with the call-binding slots named for
     /// its place among same-named methods (each overload's default providers are its own).
     pub(super) fn method_sig_at(&mut self, methods: &[FnDecl], i: usize, self_ty: &Ty) -> FnSig {

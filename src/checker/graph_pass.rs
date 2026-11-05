@@ -14,6 +14,67 @@ impl Checker {
         }
     }
 
+    /// Check the bodies of the bodied methods of every `native struct` in `stmts` (`Reader.lines`,
+    /// `int.from`). Each uses a FRESH `fn_sig` (which keeps the leading `self`), NOT the
+    /// leading-`self`-STRIPPED method-table sig — else `check_fn_body`'s positional decl↔sig param
+    /// map (self at decl index 0) shifts every real param to `Unknown`.
+    fn check_native_struct_bodies(&mut self, stmts: &[Stmt]) {
+        for s in stmts {
+            if let StmtKind::NativeStruct {
+                name,
+                type_params,
+                bodied_methods,
+                ..
+            } = &s.kind
+                && !bodied_methods.is_empty()
+            {
+                let saved = self.enter_type_params(type_params);
+                // A native struct's `self` is usually a RESERVED opaque handle
+                // (`Reader`→`Ty::Reader`, `Socket`→`Ty::Socket`, …) whose method dispatch goes
+                // through the reserved-`Ty` arm (which reads the leading-`self`-stripped method
+                // table correctly). Use that Ty for `self` so `self.read_line()` resolves —
+                // `Ty::Struct("Reader")` would route to the generic struct arm and wrongly demand a
+                // receiver slot. Fall back to the nominal struct type for a plain (non-reserved)
+                // native struct.
+                let args: Vec<Ty> = type_params
+                    .iter()
+                    .map(|tp| Ty::Param(tp.name.clone()))
+                    .collect();
+                let self_ty = self
+                    .qualified_builtin_ty(name, &args)
+                    .unwrap_or_else(|| self.struct_self_ty(name));
+                for m in bodied_methods {
+                    let msig = self.fn_sig(m, m.name_span, Some(&self_ty));
+                    self.check_fn_body(m, Some(self_ty.clone()), msig);
+                }
+                self.exit_type_params(saved);
+            }
+        }
+    }
+
+    /// Check the prelude's bodied native-struct methods (`int.try_from` calls `x.to_int()`), which
+    /// read the method tables just harvested into `container_seeds`: the tables are lent to
+    /// `structs` for the check and taken back, so no table is copied.
+    fn check_prelude_native_bodies(&mut self, stmts: &[Stmt]) {
+        let lent: Vec<(String, Option<StructInfo>)> = std::mem::take(&mut self.container_seeds)
+            .into_iter()
+            .map(|(name, info)| {
+                let prev = self.structs.insert(name.clone(), info);
+                (name, prev)
+            })
+            .collect();
+        self.check_native_struct_bodies(stmts);
+        for (name, prev) in lent {
+            let info = match prev {
+                Some(p) => self.structs.insert(name.clone(), p),
+                None => self.structs.remove(&name),
+            };
+            if let Some(info) = info {
+                self.container_seeds.insert(name, info);
+            }
+        }
+    }
+
     /// The shared deps-first module-checking pass behind both [`check_graph`] and
     /// [`resolve_extern_signatures`]. When `harvest_externs` is set, gathers every struct's AST field
     /// types up front and stamps each module's graph index so the extern loop records resolved C
@@ -228,41 +289,7 @@ impl Checker {
                             c.check_fn_body(decl, None, fsig);
                         }
                     }
-                    // Native-struct bodied methods (`Reader.lines`): use a FRESH `fn_sig` (which keeps
-                    // the leading `self`), NOT the leading-`self`-STRIPPED method-table sig — else
-                    // `check_fn_body`'s positional decl↔sig param map (self at decl index 0) shifts
-                    // every real param to `Unknown`.
-                    for s in &lm.ast.stmts {
-                        if let StmtKind::NativeStruct {
-                            name,
-                            type_params,
-                            bodied_methods,
-                            ..
-                        } = &s.kind
-                            && !bodied_methods.is_empty()
-                        {
-                            let saved = c.enter_type_params(type_params);
-                            // A native struct's `self` is usually a RESERVED opaque handle
-                            // (`Reader`→`Ty::Reader`, `Socket`→`Ty::Socket`, …) whose method dispatch
-                            // goes through the reserved-`Ty` arm (which reads the leading-`self`-stripped
-                            // method table correctly). Use that Ty for `self` so `self.read_line()`
-                            // resolves — `Ty::Struct("Reader")` would route to the generic struct arm and
-                            // wrongly demand a receiver slot. Fall back to the nominal struct type for a
-                            // plain (non-reserved) native struct.
-                            let args: Vec<Ty> = type_params
-                                .iter()
-                                .map(|tp| Ty::Param(tp.name.clone()))
-                                .collect();
-                            let self_ty = c
-                                .qualified_builtin_ty(name, &args)
-                                .unwrap_or_else(|| c.struct_self_ty(name));
-                            for m in bodied_methods {
-                                let msig = c.fn_sig(m, m.name_span, Some(&self_ty));
-                                c.check_fn_body(m, Some(self_ty.clone()), msig);
-                            }
-                            c.exit_type_params(saved);
-                        }
-                    }
+                    c.check_native_struct_bodies(&lm.ast.stmts);
                     // A plain `struct` of the module (TICKET-289: `Task[T]`) has Chezzi methods whose
                     // bodies the harvest only hoisted. Without this check the compiler faults on every
                     // program that imports the module (`no name resolution recorded`).
@@ -337,6 +364,9 @@ impl Checker {
                     .harvest_native_struct_tables(&lm.ast)
                     .into_iter()
                     .collect();
+                if !graph.skips_prelude_native_bodies(lm) {
+                    c.check_prelude_native_bodies(&lm.ast.stmts);
+                }
             }
             // M24 — the manifest's `[project] entrypoint = "mod:fn"` names a function the runtime
             // invokes BY NAME at a fixed arity of ZERO, exactly like a `test fn`. A hidden witness

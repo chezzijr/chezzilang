@@ -911,8 +911,8 @@ impl Vm {
         }
     }
 
-    /// The proto of method `method` on the struct or enum `type_key`, and the index of
-    /// the type's declaring module (its home). The one lookup `CallStatic` and `MakeMethodFunc`
+    /// The proto of method `method` on the struct, the enum or the builtin `type_key`, and the
+    /// index of the type's declaring module (its home). The one lookup `CallStatic` and `MakeMethodFunc`
     /// share (TICKET-204).
     pub(super) fn type_method_proto(
         &self,
@@ -923,9 +923,14 @@ impl Vm {
         if let Some(def) = prog.structs.get(type_key) {
             return def.methods.get(method).map(|&p| (p, def.module_idx));
         }
-        let ms = prog.enum_methods.get(type_key)?;
-        ms.get(method)
-            .map(|&p| (p, self.enum_home_module(type_key)))
+        if let Some(ms) = prog.enum_methods.get(type_key) {
+            return ms
+                .get(method)
+                .map(|&p| (p, self.enum_home_module(type_key)));
+        }
+        // A builtin's bodied static (`int.from`), compiled under the builtin's bare name.
+        let ms = prog.native_methods.get(type_key)?;
+        ms.get(method).map(|&p| (p, prog.native_home[type_key]))
     }
 
     /// The one fn object for `key` in this run (TICKET-215, M3.1), and the only allocator of

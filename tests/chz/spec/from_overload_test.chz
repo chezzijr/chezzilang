@@ -1,6 +1,7 @@
 # tests/chz/spec/from_overload_test.chz: a type may declare several static `fn from(x: S)`
 # overloads, one per source type `S` (Rust's several `impl From<S>`). A direct call
-# `Rat.from(3)` picks the overload whose parameter fits the argument, and runs THAT body.
+# `Rat.from(3)` picks the overload whose parameter fits the argument, and runs THAT body. A
+# fallible conversion is `try_from` (Rust `impl TryFrom<S>`), overloaded the same way.
 #
 # Rust is the ancestor: `impl From<i64> for Rat` beside `impl From<&str> for Rat`, then
 # `Rat::from(3)` and `Rat::from("ab")`, each run their own `from`. The declaration rejects
@@ -44,21 +45,21 @@ struct Opt:
 
 struct Pos:
     v: int
-    fn from(x: int) -> Pos!str:
+    fn try_from(x: int) -> Pos!str:
         if x < 0:
             return !"negative"
         return Pos(x)
-    fn from(x: str) -> Pos!str:
+    fn try_from(x: str) -> Pos!str:
         if x == "":
             return !"empty"
         return Pos(x.len())
 
 fn pos_of_int(n: int) -> int!str:
-    p := Pos.from(n)?
+    p := Pos.try_from(n)?
     return p.v
 
 fn pos_of_str(s: str) -> int!str:
-    p := Pos.from(s)?
+    p := Pos.try_from(s)?
     return p.v
 
 fn text(r: int!str) -> str:
@@ -100,7 +101,7 @@ test fn an_optional_overload_takes_none_and_a_plain_value():
     assert Opt.from(5).v == 5, "`5` fits `int?`, not `str`"
     assert Opt.from("ab").v == 200
 
-test fn a_result_overload_propagates_with_try():
+test fn a_try_from_overload_propagates_with_try():
     assert text(pos_of_int(4)) == "ok 4"
     assert text(pos_of_int(-1)) == "negative"
     assert text(pos_of_str("abc")) == "ok 3"

@@ -242,9 +242,22 @@ native struct int:
     # 8-byte value above i64::MAX gives an error that names `signed=true`.
     native fn from_be_bytes(b: bytes, signed: bool = false) -> int!
     native fn from_le_bytes(b: bytes, signed: bool = false) -> int!
+    # Rust `i64::from(true)`: `true` is 1, `false` is 0.
+    fn from(x: bool) -> int:
+        return if x: 1 else: 0
+    # Rust `i64::try_from` / `"5".parse::<i64>()`: `str.to_int`, the one parse.
+    fn try_from(x: str) -> int!:
+        return x.to_int()
 
 native struct float:
     native fn to_int(self) -> Option[int]
+    # Rust `f64::from(true)`: `true` is 1.0, `false` is 0.0. No `float.from(int)`: an int past
+    # 2^53 does not round-trip (rustc: `f64: From<i64>` is E0277); write `n.to_float()`.
+    fn from(x: bool) -> float:
+        return if x: 1.0 else: 0.0
+    # Rust `"1.5".parse::<f64>()`: `str.to_float`, the one parse.
+    fn try_from(x: str) -> float!:
+        return x.to_float()
 
 # `bytes` (immutable byte sequence): `decode() -> str!` (UTF-8; invalid UTF-8 gives an error that
 # names the byte, `!"decode: invalid UTF-8 at byte 2 (0xff)"`) and `len()` (byte count). `extend` is

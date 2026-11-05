@@ -597,7 +597,7 @@ impl Checker {
             key,
             ProtocolInfo {
                 type_params: type_params.iter().map(|tp| tp.name.clone()).collect(),
-                methods: sigs,
+                methods: std::sync::Arc::new(sigs),
                 // Names only: an embed arg may name a protocol declared LATER, so
                 // `resolve_protocol_embeds` fills the args once every protocol is hoisted, before
                 // any reader runs (TICKET-202).
@@ -776,7 +776,7 @@ impl Checker {
             if !seen.insert(emb.name.clone()) {
                 continue; // already merged on this walk — a shared subtree, not new work
             }
-            for (mn, ms) in &pinfo.methods {
+            for (mn, ms) in pinfo.methods.iter() {
                 merge(mn, ms, &mut conflict);
             }
             path.push(emb.name.clone());

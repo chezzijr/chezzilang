@@ -144,6 +144,7 @@ pub fn compile_graph(graph: &ModuleGraph) -> Result<Program, CompileError> {
     let binds = crate::resolver::graph_global_binds(graph);
     for (idx, lm) in graph.modules.iter().enumerate() {
         c.skip_fns = graph.fn_skips(lm);
+        c.skip_native_bodies = graph.skips_prelude_native_bodies(lm);
         let toplevel =
             c.compile_module(idx, &lm.ast, &lm.imports, idx == entry_idx, &binds[idx])?;
         let global_slots = std::mem::take(&mut c.global_slots);
@@ -322,6 +323,9 @@ struct Compiler {
     /// their prelude methods are not compiled, and [`Compiler::emit_new_struct`] stops a build that
     /// emits one.
     unused_prelude_structs: Vec<&'static str>,
+    /// Set per module from [`ModuleGraph::skips_prelude_native_bodies`]: the prelude's bodied
+    /// native-struct methods (`int.from`) are compiled only for a graph that names one.
+    skip_native_bodies: bool,
     /// TICKET-265 — set per module from [`ModuleGraph::fn_skips`]: the top-level fns of a std module
     /// that the program does not reach. They get no proto and their global slot stays unset.
     skip_fns: crate::resolver::SkippedFns,
@@ -667,6 +671,7 @@ impl Compiler {
         Compiler {
             program,
             unused_prelude_structs: Vec::new(),
+            skip_native_bodies: false,
             skip_fns: crate::resolver::SkippedFns::default(),
             hook_table: crate::checker::HookTable::new(),
             hook_calls: crate::checker::HookCallTable::new(),
@@ -1075,7 +1080,7 @@ impl Compiler {
                 ..
             } = &stmt.kind
             {
-                if bodied_methods.is_empty() {
+                if bodied_methods.is_empty() || self.skip_native_bodies {
                     continue;
                 }
                 let mut compiled: HashMap<String, ProtoId> = HashMap::new();

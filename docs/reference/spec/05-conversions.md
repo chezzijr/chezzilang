@@ -1,7 +1,7 @@
 ## Type conversions & casting
 
-Chezzi has **no `as` cast operator**, no `Into`/`TryFrom`, and no value-level conversion protocol; a
-**bound-only** `From[S]` protocol exists as a generic bound (below). A conversion is a method on the
+Chezzi has **no `as` cast operator**, no `Into`, and no value-level conversion protocol; the
+**bound-only** `From[S]` and `TryFrom[S]` protocols exist as generic bounds (below). A conversion is a method on the
 source value, display is interpolation, and there is no implicit `int`→`float` widening at a slot
 (rule D3). A conversion is therefore always visible in the source.
 
@@ -17,17 +17,22 @@ whose help names the form below for the argument's type.
 | `s.to_int()` / `s.to_float()` | `str` → `int!` / `float!` | an error that names the cause (trims first, PEP-515 underscores): `!"to_int: cannot parse 'x' as int"`, `!"to_int: '99999999999999999999' is out of range for int"`, `!"to_float: cannot parse 'x' as float"` |
 | `n.to_be_bytes(len, signed)` / `n.to_le_bytes(…)` | `int` → `bytes!` | `len` is 1 to 8; `signed` defaults to `false` (Python `to_bytes`); a negative unsigned value, a value that does not fit and a bad `len` are errors that name the cause |
 | `int.from_be_bytes(b, signed)` / `int.from_le_bytes(…)` | `bytes` → `int!` | 0 to 8 bytes (`b""` is `0`); more than 8 bytes, or an unsigned 8-byte value above i64::MAX, is an error |
+| `int.from(b)` / `float.from(b)` | `bool` → `int` / `float` | never fails: `true` is `1` / `1.0`, `false` is `0` / `0.0` (Rust `i64::from(true)`) |
+| `int.try_from(s)` / `float.try_from(s)` | `str` → `int!` / `float!` | the parse of `s.to_int()` / `s.to_float()`, same errors (Rust `str::parse`) |
 | `"{x}"` | **anything** → `str` | never fails: the `Stringable` display (`print` uses the same path, Go `fmt.Sprint`) |
 | `ord(s)` / `chr(n)` | `str` ↔ codepoint `int` | narrow, single-purpose |
 
 There is no `bool` conversion (Go, Rust): test the value with `x != 0` or `s.len() > 0` (`if 0:`
-is already a type error). A `bool` does not convert to a number either; write `if b: 1 else: 0`.
+is already a type error). A `bool` is not a number (`true + 1` is a type error); convert it with
+`int.from(b)` or `float.from(b)`. There is no `float.from(int)`: an `int` past 2^53 does not
+round-trip (rustc: `f64: From<i64>` is E0277); write `n.to_float()`. There is no `str.from(x)`:
+write `"{x}"`.
 
 | Old call | Type error help |
 |----------|-----------------|
 | `int(x)` on a `float` / a `str` | ``convert with `x.to_int()`, which gives int?`` / `int!` |
 | `float(x)` on an `int` / a `str` | ``convert with `x.to_float()`, which gives float`` / `float!` |
-| `int(x)` / `float(x)` on a `bool` | ``a bool is not a number; write `if x: 1 else: 0` `` (`1.0`, `0.0` for `float`) |
+| `int(x)` / `float(x)` on a `bool` | ``a bool is not a number; write `int.from(x)` `` (`float.from(x)` for `float`) |
 | `str(x)` | ``render the value with `"{x}"` `` |
 | `bool(x)` | ``test the value: write `x != 0` `` for a number, `` `x != None` `` for an optional, `` `x.len() > 0` `` for a type with `len` |
 | `T(x)` where `x` is already a `T` | `the argument is already an int` (and so on) |
@@ -93,8 +98,8 @@ collection holds no cursor position); iterate it with `for`, or call `.iter()` f
 **What does NOT exist:**
 
 - No `as` operator (`as` in the grammar is only import aliasing).
-- No `Into`/`TryFrom`, and no value-level conversion protocol. `From[S]` is **bound-only** (below):
-  `c: From[int]` as an annotation is rejected, since a value cannot invoke a static ctor.
+- No `Into`, and no value-level conversion protocol. `From[S]` and `TryFrom[S]` are **bound-only**
+  (below): `c: From[int]` as an annotation is rejected, since a value cannot invoke a static ctor.
 - `cast[T](val: Any) -> T?` (a checked downcast off `Any`) is **deferred**: it needs runtime type tags,
   because generics are erased ([`roadmap.md`](../../design/roadmap.md)).
 
@@ -118,9 +123,17 @@ protocol. A type **witnesses** `From[S]` by declaring a **static** method `fn fr
   `syntax.md §7a`.
 - Direct `Type.from(x)` needs no protocol and is the right spelling when the type is known. See
   [`roadmap.md` §3](../../design/roadmap.md).
+- **`TryFrom[S]`** is the fallible twin (Rust `TryFrom`): a type witnesses it by a static
+  `fn try_from(x: S) -> Self!` (or `Self!E`), called `T.try_from(x)`. A `from` returns `Self`, so a
+  conversion that can fail is a `try_from`; `[T: From[str]]` never reaches a `Self!` method.
+- **The builtins `int` and `float` witness both** with the statics their prelude decls declare:
+  `lift[int](true)` for `fn lift[T: From[bool]](b: bool) -> T`, and `parse[int]("7")` for
+  `fn parse[T: TryFrom[str]](s: str) -> T!`. A scalar's witness key is its bare name (`int`); a
+  user type's key is `<module>::Name`, so a user `struct int` never collides.
 
 **Several `from`s: overloads.** A struct or enum may declare one static `from` per source type,
-as Rust's several `impl From<S>`. The argument's type picks the overload:
+as Rust's several `impl From<S>`, and one static `try_from` per source type, as several
+`impl TryFrom<S>`. The argument's type picks the overload:
 
 ```chezzi
 struct Rat:
@@ -140,13 +153,16 @@ b := Rat.from("ab")    # the str overload: Rat(2, 3)
   (it has: int, str)*. An argument that fits two overloads (`[]` against `List[int]` and `List[str]`)
   is *type annotations needed*.
 - Each overload takes one parameter named `x`, of a concrete type (not a type parameter), and declares
-  its return type, `Self` or `Self!E`; any other is *an overloaded from returns Self or Self!E,
-  found int*.
+  its return type: `Self` for `from`, `Self!E` for `try_from`. Any other is *an overloaded from
+  returns Self, found int*; a fallible `from` is *an overloaded from returns Self, found Rat!str; a
+  fallible conversion is try_from*, and *an overloaded try_from returns Self!E, found Rat*.
+- One owner per source: a type may not declare both `from` and `try_from` for one source (Rust
+  `E0119`), *conflicting conversion int -> Rat: from at 3:8 and try_from at 5:8*.
 - Two overloads may not overlap, that is, one value may not fit both: `int` and `int?` overlap (`3`),
   `int?` and `str?` overlap (`None`), `int!str` and `int!int` overlap (`3` wraps into both), a
   protocol overlaps a type that satisfies it (also as `Sq?`), and two protocols always overlap. The error names the first one: *conflicting from for int: from(x: int) at 3:8*.
-- Only `from` overloads. Any other repeated method name, and an instance `from(self, …)` declared
-  twice, is *method '…' is already defined*.
+- Only `from` and `try_from` overload. Any other repeated method name, and an instance
+  `from(self, …)` declared twice, is *method '…' is already defined*.
 - A trace, `<fn …>` and every message call an overload `from`.
 - A free `S` in `[S, T: From[S]]` is not inferred from an overloaded type: pin it.
 - A bound picks too, by the direct call's rule: `fn make[S, T: From[S]](x: S) -> T` called as

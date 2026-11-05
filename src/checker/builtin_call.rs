@@ -379,17 +379,22 @@ impl Checker {
                 sig.ret
             ));
         }
-        let numeric = |one: &str, zero: &str| {
-            matches!(aty, Ty::Bool)
-                .then(|| format!("a bool is not a number; write `if x: {one} else: {zero}`"))
+        // The target's static that takes the argument's type (`int.from(x: bool)`), read from its
+        // prelude `native struct` decl.
+        let numeric = || {
+            let info = self.structs.get(name).filter(|_| matches!(aty, Ty::Bool))?;
+            let (m, _) = info
+                .methods
+                .iter()
+                .find(|(_, s)| s.is_static && s.params.as_slice() == std::slice::from_ref(aty))?;
+            Some(format!("a bool is not a number; write `{name}.{m}(x)`"))
         };
         let help = match b {
             Builtin::Str => Some("render the value with `\"{x}\"`".to_string()),
             Builtin::Bool => self
                 .truth_test(aty)
                 .map(|t| format!("test the value: write `{t}`")),
-            Builtin::Int => numeric("1", "0"),
-            Builtin::Float => numeric("1.0", "0.0"),
+            Builtin::Int | Builtin::Float => numeric(),
             Builtin::Print
             | Builtin::Ord
             | Builtin::Chr

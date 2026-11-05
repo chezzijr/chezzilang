@@ -1,5 +1,6 @@
-//! Checker tests: declaring several static `from` overloads on one type (Rust's several
-//! `impl From<S>`). The declaration rules: which repeats are admitted, which overlap, which shapes.
+//! Checker tests: declaring several static `from` / `try_from` overloads on one type (Rust's
+//! several `impl From<S>` / `impl TryFrom<S>`), and the builtin `int` / `float` conversions. The
+//! declaration rules: which repeats are admitted, which overlap, which shapes, one owner per source.
 
 use super::*;
 
@@ -34,8 +35,12 @@ fn from_overload_declaration_grid() {
             format!("import From from std.convert\n{}", rat(&format!("{to_int}{to_str}"))),
         ),
         (
-            "overloads returning Rat!str",
-            rat("    fn from(x: int) -> Rat!str:\n        return Rat(x)\n    fn from(x: str) -> Rat!str:\n        return !\"no\"\n"),
+            "try_from overloads returning Rat!str",
+            rat("    fn try_from(x: int) -> Rat!str:\n        return Rat(x)\n    fn try_from(x: str) -> Rat!str:\n        return !\"no\"\n"),
+        ),
+        (
+            "a from and a try_from of different sources",
+            rat(&format!("{to_int}    fn try_from(x: str) -> Rat!:\n        return Rat(x.to_int()?)\n")),
         ),
         (
             "int + str on an enum",
@@ -107,12 +112,32 @@ fn from_overload_declaration_grid() {
         (
             "an overload returning another type",
             rat(&format!("{to_int}    fn from(x: str) -> int:\n        return 5\n")),
-            "an overloaded from returns Self or Self!E, found int",
+            "an overloaded from returns Self, found int",
         ),
         (
             "an overload returning a result of another type",
             rat(&format!("{to_int}    fn from(x: str) -> str!int:\n        return \"a\"\n")),
-            "an overloaded from returns Self or Self!E, found str!int",
+            "an overloaded from returns Self, found str!int",
+        ),
+        (
+            "a fallible from",
+            rat(&format!("{to_int}    fn from(x: str) -> Rat!str:\n        return Rat(0)\n")),
+            "an overloaded from returns Self, found Rat!str; a fallible conversion is try_from",
+        ),
+        (
+            "a try_from returning Self",
+            rat("    fn try_from(x: int) -> Rat:\n        return Rat(x)\n    fn try_from(x: str) -> Rat!str:\n        return Rat(0)\n"),
+            "an overloaded try_from returns Self!E, found Rat",
+        ),
+        (
+            "a from and a try_from of one source",
+            rat(&format!("{to_int}    fn try_from(x: int) -> Rat!:\n        return Rat(x)\n")),
+            "conflicting conversion int -> Rat: from at 3:8 and try_from at 5:8",
+        ),
+        (
+            "a from and a try_from of overlapping sources",
+            rat("    fn from(x: int?) -> Rat:\n        return Rat(0)\n    fn try_from(x: str?) -> Rat!:\n        return Rat(1)\n"),
+            "conflicting conversion None -> Rat: from at 3:8 and try_from at 5:8",
         ),
         (
             "a renamed param",
@@ -204,7 +229,34 @@ fn from_overload_call_grid() {
             call(three, "f: fn(str) -> Rat = Rat.from"),
         ),
     ];
+    let builtin = |stmt: &str| format!("fn main():\n    {stmt}\nmain()\n");
+    let accept_builtin: Vec<(&str, String)> = vec![
+        ("int.from a bool", builtin("n: int = int.from(true)")),
+        ("float.from a bool", builtin("x: float = float.from(false)")),
+        (
+            "int.try_from a str",
+            builtin("n: int! = int.try_from(\"5\")"),
+        ),
+        (
+            "float.try_from a str",
+            builtin("x: float! = float.try_from(\"1.5\")"),
+        ),
+        (
+            "int.from as a value",
+            builtin("f: fn(bool) -> int = int.from"),
+        ),
+    ];
     let reject: Vec<(&str, String, &str)> = vec![
+        (
+            "float.from an int (lossy past 2^53, rustc E0277)",
+            builtin("x := float.from(3)"),
+            "argument 1 of 'from': expected bool, found int",
+        ),
+        (
+            "int.from a str (a parse is try_from)",
+            builtin("n := int.from(\"5\")"),
+            "argument 1 of 'from': expected bool, found str",
+        ),
         (
             "a float (no widening)",
             call(three, "r := Rat.from(1.5)"),
@@ -237,7 +289,7 @@ fn from_overload_call_grid() {
         ),
     ];
     let mut failures = Vec::new();
-    for (cell, src) in &accept {
+    for (cell, src) in accept.iter().chain(&accept_builtin) {
         let errs = check_entry(src);
         if !errs.is_empty() {
             failures.push(format!("accept `{cell}`: {errs:?}"));

@@ -184,13 +184,30 @@ impl Checker {
             // Presence in `sub` is NOT enough: `enforce_bounds` silently SKIPS a param missing from
             // the map, and a param bound to a partly-`Unknown` type has no runtime identity either.
             let concrete = sub.get(w).filter(|t| ty_fully_concrete(t));
+            // The `Ty::Struct`/`Ty::Enum` name IS the runtime identity key (`<module-key>::Name`,
+            // bare for a std/native type) — the checker and the compiler derive it from the same
+            // `resolver::module_keys`, so this is exactly what `do_static_call` resolves. A builtin
+            // whose `native struct` decl declares the static (`int.from`) is keyed by its bare
+            // name, which no user type has (a user type's key is `<module>::Name`).
+            let host = concrete.and_then(|t| {
+                if let Ty::Struct(key, _) | Ty::Enum(key, _) = t {
+                    return Some(key.clone());
+                }
+                Self::native_witness_key(t)
+                    .filter(|k| {
+                        self.struct_shape(k)
+                            .and_then(|i| i.methods.get(&wp.method))
+                            .is_some_and(|s| s.is_static)
+                    })
+                    .map(str::to_string)
+            });
             match concrete {
-                // The `Ty::Struct`/`Ty::Enum` name IS the runtime identity key (`<module-key>::Name`,
-                // bare for a std/native type) — the checker and the compiler derive it from the same
-                // `resolver::module_keys`, so this is exactly what `do_static_call` resolves. The
-                // CALLER picks the method: an overloaded name's overload that conformance picked
-                // (`witness_overload`), else the requirement's own name.
-                Some(t @ (Ty::Struct(key, _) | Ty::Enum(key, _))) => {
+                // The CALLER picks the method: an overloaded name's overload that conformance
+                // picked (`witness_overload`), else the requirement's own name.
+                Some(t) if host.is_some() => {
+                    let Some(key) = &host else {
+                        unreachable!("guarded by the arm's own condition")
+                    };
                     let method = match self.witness_overload(t, &wp.method, &want) {
                         Some(Ok(sig)) => {
                             super::from_overload::internal_name(&wp.method, &sig.params[0])

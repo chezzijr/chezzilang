@@ -393,12 +393,19 @@ impl Checker {
                     method(tps, msig, recv)
                 }
             }
-            // A native type's methods have no proto: only a static one, which its decl declares,
-            // is a member of the type path.
+            // A native type's instance methods have no proto: only a static one, which its decl
+            // declares, is a member of the type path. A bodyless static is a `NativeStatic`; a
+            // bodied one (`int.from(x: bool)`) has a proto under the type's name, as a struct's.
             TypeHeadKind::Struct if th.native_handle => {
                 let info = self.struct_shape(key)?;
                 let msig = info.methods.get(name).filter(|s| s.is_static)?;
-                let res = Resolution::NativeStatic(NativeStatic::from_key(&th.name, name)?);
+                let res = match NativeStatic::from_key(&th.name, name) {
+                    Some(which) => Resolution::NativeStatic(which),
+                    None => Resolution::MethodFn {
+                        type_key: key.clone(),
+                        method: name.to_string(),
+                    },
+                };
                 let tps = info.type_params.clone();
                 (method_value_sig(msig, &tps, Ty::Unknown), tps, res)
             }

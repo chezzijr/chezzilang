@@ -624,7 +624,7 @@ impl Checker {
         let protocol_display = crate::base::words::bare_display(protocol);
         let native_methods = self.structs.get(key).map(|i| &i.methods);
         let mut table: HashMap<String, FnSig> = HashMap::new();
-        for (mname, _) in &pinfo.methods {
+        for (mname, _) in pinfo.methods.iter() {
             if self.std_internal_hidden(mname) {
                 continue;
             }

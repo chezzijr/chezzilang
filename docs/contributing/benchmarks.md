@@ -175,6 +175,18 @@ saving is per run (prelude parse plus protocol scan). A std import still costs a
 encoded ASTs take 601,653 bytes; the release binary grows from 15,760,960 to 16,875,240 bytes (the
 artifact plus the `borsh` code for every AST type).
 
+Std protocol shapes and prelude native bodies (2026-11-06, `TryFrom` + `int.from`): `print(1)`,
+release, `perf stat -e instructions:u`, median of 5, base `a3149cda` in its own target dir. `run`:
+8,737,303 base, 8,608k branch (-1.5%); `check`: 5,870k base, 6,017k branch (+2.5%). Before the two
+fixes the branch was +6.8% on `run`: one 2-line std protocol cost +62k instructions per `run`
+(+32k per `check`), because each checker (a `run` builds two, `check_graph_diags` and
+`compile_tables_pass`) harvested every std protocol twice (`insert_protocols_in_two_passes`), about
+309k per checker. Now one process harvests them once (`seed_std_protocols`, a `OnceLock`) and
+`ProtocolInfo::methods` is an `Arc`, so a copy copies no signature. The 4 prelude bodies cost
++500k per `run` (decoded, desugared, checked, compiled); a graph whose sources name none of them as
+a member (`int.from`, `T.from`) now skips them (`PreludeUse::uses_native_bodies`). The `check`
+remainder is the harvested sigs of the 4 bodied methods (~55k) and the `TryFrom` shape.
+
 ### Peak memory vs Go
 
 Peak process RSS, `benches/maxrss.py`, median of 3, 2026-07-25 after the four memory levers

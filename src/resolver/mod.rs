@@ -133,18 +133,31 @@ pub const PRELUDE_STRUCTS: [PreludeStruct; 2] = [
     },
 ];
 
-/// TICKET-255 — which [`PRELUDE_STRUCTS`] a graph can build, by position in that list. The checker
-/// and the compiler skip the method bodies of every prelude struct the graph does not use.
+/// TICKET-255 — which [`PRELUDE_STRUCTS`] a graph can build, by position in that list, and whether
+/// it names a bodied method of a prelude `native struct` (`int.from`). The checker and the compiler
+/// skip the method bodies of every prelude struct the graph does not use, and the bodied
+/// native-struct methods when it names none of them.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct PreludeUse([bool; PRELUDE_STRUCTS.len()]);
+pub struct PreludeUse([bool; PRELUDE_STRUCTS.len()], bool);
 
 impl PreludeUse {
     /// Every prelude struct used: the graph-less and test graphs, and a run of the prelude itself.
-    pub const ALL: Self = Self([true; PRELUDE_STRUCTS.len()]);
+    pub const ALL: Self = Self([true; PRELUDE_STRUCTS.len()], true);
 
-    /// The prelude structs whose [`PreludeStruct::words`] `source` holds.
+    /// The prelude structs whose [`PreludeStruct::words`] `source` holds, and whether it holds the
+    /// name of a bodied prelude native-struct method ([`prelude_native_body_names`]).
     fn named_in(source: &str) -> Self {
-        Self(PRELUDE_STRUCTS.map(|p| p.words.iter().any(|w| source.contains(w))))
+        Self(
+            PRELUDE_STRUCTS.map(|p| p.words.iter().any(|w| source.contains(w))),
+            prelude_native_body_names()
+                .iter()
+                .any(|n| names_member(source, n)),
+        )
+    }
+
+    /// True when the graph names a bodied method of a prelude `native struct`.
+    pub fn uses_native_bodies(&self) -> bool {
+        self.1
     }
 
     /// Record a use of prelude struct `name`.
@@ -159,6 +172,7 @@ impl PreludeUse {
         for (used, o) in self.0.iter_mut().zip(other.0) {
             *used |= o;
         }
+        self.1 |= other.1;
     }
 
     /// True when prelude struct `name` is used.
@@ -236,6 +250,12 @@ impl ModuleGraph {
         } else {
             Vec::new()
         }
+    }
+
+    /// True when `lm` is the prelude and the graph names none of its bodied native-struct methods
+    /// ([`PreludeUse::uses_native_bodies`]): desugar, the checker and the compiler skip those bodies.
+    pub fn skips_prelude_native_bodies(&self, lm: &LoadedModule) -> bool {
+        lm.dotted == ["std", "prelude"] && !self.prelude_used.uses_native_bodies()
     }
 
     /// TICKET-265 — the top-level fns of `lm` whose bodies are skipped; empty for a module the reach
@@ -792,11 +812,18 @@ fn build_graph_impl(
     let prelude_id = ModuleId(canonical_or_abs(&prelude_file));
     b.visit(&prelude_id, &prelude_path, Span::RUNTIME)?;
     b.visit(&entry_id, &[], Span::RUNTIME)?;
-    let prelude_used = if entry_id == prelude_id {
+    let mut prelude_used = if entry_id == prelude_id {
         PreludeUse::ALL
     } else {
         b.prelude_named.get()
     };
+    // A prelude that is not the embedded one (`$CHEZZI_STD`) may declare other bodied methods than
+    // the names the sources were read for: keep its bodies.
+    if b.order.iter().any(|m| {
+        m.dotted == prelude_path && native_body_names(&m.ast) != prelude_native_body_names()
+    }) {
+        prelude_used.1 = true;
+    }
     let skipped_fns = unreached_std_fns(&b.order, &entry_id, &b.words.take());
     let mut graph = ModuleGraph {
         entry: entry_id,
@@ -1403,6 +1430,50 @@ fn shared_std_parse_at(index: usize, dotted: &[String]) -> Option<&'static Share
             })
         })
         .as_ref()
+}
+
+/// The names of the bodied methods of the `native struct` decls of `module`, sorted and deduped.
+fn native_body_names(module: &Module) -> Vec<String> {
+    let mut names: Vec<String> = module
+        .stmts
+        .iter()
+        .filter_map(|s| {
+            if let StmtKind::NativeStruct { bodied_methods, .. } = &s.kind {
+                Some(bodied_methods)
+            } else {
+                None
+            }
+        })
+        .flatten()
+        .map(|m| m.name.clone())
+        .collect();
+    names.sort();
+    names.dedup();
+    names
+}
+
+/// Does `source` hold `name` as a member name, `.name` (spaces allowed after the `.`) not followed
+/// by an identifier char? A bodied prelude native-struct method is reached only through a member
+/// path (`int.from(x)`, `T.from(x)`, `?.from`), and `from` alone is the import keyword.
+fn names_member(source: &str, name: &str) -> bool {
+    let ident = |c: char| c.is_alphanumeric() || c == '_';
+    source.match_indices(name).any(|(i, _)| {
+        let after = source[i + name.len()..].chars().next();
+        let before = source[..i].trim_end().chars().next_back();
+        before == Some('.') && !after.is_some_and(ident)
+    })
+}
+
+/// The bodied methods of the embedded prelude's `native struct` decls (`int.from`, `int.try_from`):
+/// a graph whose non-prelude sources name none of them skips their bodies ([`PreludeUse`]). Read
+/// from the decls, once per process.
+fn prelude_native_body_names() -> &'static [String] {
+    static NAMES: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+    NAMES.get_or_init(|| {
+        std_module_ast("prelude.chz")
+            .map(native_body_names)
+            .unwrap_or_default()
+    })
 }
 
 /// The AST of the embedded std file `rel` (`"ops.chz"`), from the shared parse. The spans carry the

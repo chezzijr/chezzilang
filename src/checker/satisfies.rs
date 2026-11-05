@@ -836,7 +836,19 @@ impl Checker {
                     self.satisfies_methods(ty, protocol, args, pinfo, methods)
                         .map(|()| Grant::no_intrinsic_method())
                 }
-                None => Err(format!("type {ty} does not satisfy {protocol_display}")),
+                // A builtin witnesses a protocol of STATIC requirements only (`From[bool]`) by the
+                // statics of its `native struct` decl (`int.from`): a static has no receiver, so
+                // no intrinsic arm above can stand for it.
+                None => match Self::native_witness_key(ty)
+                    .and_then(|key| self.struct_shape(key))
+                    .filter(|_| {
+                        !pinfo.methods.is_empty() && pinfo.methods.iter().all(|(_, s)| s.is_static)
+                    }) {
+                    Some(info) => self
+                        .satisfies_methods(ty, protocol, args, pinfo, &info.methods)
+                        .map(|()| Grant::no_intrinsic_method()),
+                    None => Err(format!("type {ty} does not satisfy {protocol_display}")),
+                },
             },
         }
     }
@@ -875,7 +887,7 @@ impl Checker {
         pinfo: &ProtocolInfo,
         methods: &HashMap<String, FnSig>,
     ) -> Result<(), String> {
-        for (mname, _) in &pinfo.methods {
+        for (mname, _) in pinfo.methods.iter() {
             self.requirement_matches(ty, protocol, args, pinfo, mname, methods)
                 .map_err(ReqMiss::text)?;
         }

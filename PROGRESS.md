@@ -233,7 +233,7 @@ Each group below is one fact decided in two or more places (grouped 2026-10-16).
     Rust `i64::default()`). A conversion is a method of the source type's prelude `native struct`:
     `n.to_float() -> float`, `f.to_int() -> int?` (`None` for NaN, ±inf and outside i64),
     `s.to_int()`/`s.to_float()`; display is `"{x}"`. Every `T(x)` is `T() takes no argument` with a
-    help derived from the argument type (`x.to_int()`, `"{x}"`, `x != 0`, `if x: 1 else: 0`, "already
+    help derived from the argument type (`x.to_int()`, `"{x}"`, `x != 0`, `int.from(x)` (item 31), "already
     an int"). No bool conversion (Go, Rust). Deleted: `builtin_int`/`float`/`bool`/`str` (VM),
     `reject_non_scalar_cast` and its type list, the scalar receivers' separate "no method" arm.
     `tests/scalar_conversion_grid.rs`, 99 cells; guard `a_prelude_ctor_takes_no_argument`. History:
@@ -312,6 +312,16 @@ Each group below is one fact decided in two or more places (grouped 2026-10-16).
     Grid: `parser::tests::decls_targets::from_member_name_grid`. Second step (done 2026-11-05): the
     static `convert` / protocol `Convert[S]` are renamed `from` / `From[S]` (module `std.convert`
     unchanged, as Rust `std::convert::From`); every message reads `from`/`From`.
+31. **`TryFrom` and the builtin `int`/`float` conversions (done 2026-11-05).** A fallible
+    conversion is `fn try_from(x: S) -> Self!`, protocol `TryFrom[S]` in `std.convert` (Rust
+    `TryFrom`); an overloaded `from` returns `Self` (`a fallible conversion is try_from`), and one
+    source has one owner (`conflicting conversion int -> Rat: from at .. and try_from at ..`).
+    `int.from(x: bool)`, `float.from(x: bool)`, `int.try_from(x: str)`, `float.try_from(x: str)` are
+    Chezzi bodies in the prelude `native struct` decls; `int`/`float` witness `[T: From[bool]]` and
+    `[T: TryFrom[str]]` (witness key: the bare name). No `float.from(int)` (lossy, rustc E0277).
+    A graph that names none of the prelude's bodied native methods as a member skips their bodies,
+    and a process harvests the std protocol shapes once (`print(1)` run -1.5% vs before).
+    Grids: `tests/chz/spec/builtin_from_test.chz`, `checker::tests::from_overloads`.
 
 ### Open questions for the owner
 

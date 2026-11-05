@@ -118,7 +118,8 @@ may not share a name (a declaration-time error), so `Color.Red` is always the va
 
 A type declares each method name once (`method 'show' is already defined`). The one exception is a
 static `from`: one per source type, picked by the argument's type (`Rat.from(3)`,
-`Rat.from("1/3")`). The rules are in [`05-conversions.md`](../spec/05-conversions.md).
+`Rat.from("1/3")`). A conversion that can fail is a static `try_from(x: S) -> Self!`, overloaded
+the same way; one source has one owner, a `from` or a `try_from`. The rules are in [`05-conversions.md`](../spec/05-conversions.md).
 
 **Generic static methods** take a **type-level turbofish** (the type's args sit on the type):
 
@@ -192,7 +193,9 @@ that only *has* such a bound (`fn tagged[T: Spawnable](x: T) -> str: return x.ta
   (`h.make(x)`, `Holder.build(x)`, `h.make[Counter](x)`)
 - the call inside a closure (also one that escapes), a nested `fn`, `defer:`, and `spawn:`/`parallel:`
   (the witness is a value, so it crosses)
-- the reserved `From[S]` protocol, whose witness is a static `from(x: S) -> Self`:
+- the reserved `From[S]` protocol, whose witness is a static `from(x: S) -> Self`, and its fallible
+  twin `TryFrom[S]` (`try_from(x: S) -> Self!`); the builtins `int` and `float` witness both
+  (`int.from(x: bool)`, `int.try_from(x: str)`):
 
 ```chezzi
 import From from std.convert
