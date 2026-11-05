@@ -291,6 +291,37 @@ impl Checker {
             .collect()
     }
 
+    /// M24 — the witness slots of a fn whose witnessed type params are `names` (from
+    /// [`Self::witness_params_of`]) and whose resolved params are `tps`: one per (type param, static
+    /// requirement of its bounds, own or embedded), in declaration order, requirements by name. Two
+    /// bounds with the same requirement (same name and param types) share one slot.
+    pub(super) fn witness_reqs(&self, names: &[String], tps: &[TyParam]) -> Vec<WitnessParam> {
+        let mut out: Vec<WitnessParam> = Vec::new();
+        for tp in tps.iter().filter(|tp| names.contains(&tp.name)) {
+            for b in &tp.bounds {
+                let map = self.bound_subst(&tp.name, b);
+                for m in self.protocol_method_names(&b.name) {
+                    let Some(msig) = self.protocol_method_sig(&b.name, &m) else {
+                        continue;
+                    };
+                    if !msig.is_static {
+                        continue;
+                    }
+                    let w = WitnessParam {
+                        param: tp.name.clone(),
+                        method: m,
+                        params: msig.params.iter().map(|t| subst(t, &map)).collect(),
+                        ret: subst(&msig.ret, &map),
+                    };
+                    if !out.iter().any(|o| o.tag() == w.tag()) {
+                        out.push(w);
+                    }
+                }
+            }
+        }
+        out
+    }
+
     /// M24 — `decl`'s type params with at least one bound (declared or `where`) whose protocol
     /// carries a STATIC requirement: the CANDIDATES for a hidden witness argument, before any body
     /// question. Read by [`Self::witness_params_of`].
@@ -362,7 +393,7 @@ impl Checker {
             && sig
                 .witness_params
                 .iter()
-                .all(|w| Self::ty_param_in_params(sig, w, &c.supplied));
+                .all(|w| Self::ty_param_in_params(sig, &w.param, &c.supplied));
         !args_pin_the_witnesses
     }
 

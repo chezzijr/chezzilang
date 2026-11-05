@@ -91,6 +91,11 @@ impl Checker {
                                 type_params,
                                 variants,
                                 methods: self.enum_methods.get(&key).cloned().unwrap_or_default(),
+                                overloads: self
+                                    .enum_overloads
+                                    .get(&key)
+                                    .cloned()
+                                    .unwrap_or_default(),
                                 doc: self.name_docs.get(name).cloned(),
                             },
                         );

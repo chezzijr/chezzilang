@@ -623,6 +623,7 @@ mod builtins_misc;
 mod carriers_control;
 mod coercion_assign;
 mod concurrency;
+mod convert_overloads;
 mod core_methods;
 mod empty_collections;
 mod ffi;

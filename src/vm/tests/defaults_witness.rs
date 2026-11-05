@@ -21,6 +21,10 @@ fn capture_names_of(src: &str, proto: &str) -> Vec<Vec<String>> {
         .collect()
 }
 
+/// The hidden local of `T`'s one witness slot (`T` and its requirement `default()`), as
+/// `crate::checker::witness_tag` spells it.
+const W_T: &str = "$w:T:default()";
+
 /// The shared preamble: a static requirement, a type that answers it, and a witness-taking free fn.
 const W_PRELUDE: &str = "protocol Default:\n    fn default() -> Self\n\
      struct Counter:\n    n: int\n    fn default() -> Counter:\n        return Counter(0)\n\
@@ -57,7 +61,7 @@ fn m24_2_a_sibling_closure_that_calls_the_static_keeps_its_witness() {
         caps[0]
     );
     assert!(
-        caps[1].contains(&"$w:T".to_string()),
+        caps[1].contains(&W_T.to_string()),
         "the `T.default()` closure keeps its witness: {:?}",
         caps[1]
     );
@@ -77,7 +81,7 @@ fn m24_2_a_witness_two_levels_down_keeps_both_captures() {
         let caps = capture_names_of(&src, name);
         assert_eq!(caps.len(), 1, "one `{name}` proto");
         assert!(
-            caps[0].contains(&"$w:T".to_string()),
+            caps[0].contains(&W_T.to_string()),
             "`{name}` keeps the witness: {:?}",
             caps[0]
         );
@@ -95,7 +99,7 @@ fn m24_2_a_nested_body_that_only_forwards_keeps_its_witness() {
     let caps = capture_names_of(&src, "<closure>");
     assert_eq!(caps.len(), 1, "one closure proto");
     assert!(
-        caps[0].contains(&"$w:T".to_string()),
+        caps[0].contains(&W_T.to_string()),
         "a forwarding body needs the witness: {:?}",
         caps[0]
     );
@@ -115,7 +119,7 @@ fn m24_2_a_nested_body_forwarding_through_a_member_keeps_its_witness() {
     let caps = capture_names_of(&src, "<closure>");
     assert_eq!(caps.len(), 1, "one closure proto");
     assert!(
-        caps[0].contains(&"$w:T".to_string()),
+        caps[0].contains(&W_T.to_string()),
         "a member forward needs the witness: {:?}",
         caps[0]
     );

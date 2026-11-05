@@ -52,7 +52,8 @@ mod tests;
 #[cfg(any(test, feature = "test-api"))]
 pub const STANDALONE_MODULE_KEY: &str = "<main>";
 
-/// M24 — the UNSPELLABLE local name holding the runtime type witness for type param `t`. `$` is not
+/// M24 — the UNSPELLABLE local name holding the runtime type witness for the slot tagged `t`
+/// (`crate::checker::witness_tag`). `$` is not
 /// an identifier character, so no source binding can shadow or read it.
 fn witness_local(t: &str) -> String {
     format!("{WITNESS_PREFIX}{t}")
@@ -438,8 +439,8 @@ struct Compiler {
     /// one compilation is all that is ever needed — and this makes it true by construction rather
     /// than by argument.
     next_opt_tmp: usize,
-    /// M24 — the witness TYPE-PARAM names the NEXT [`Self::compile_fn_body`] declares as trailing
-    /// `$w:T` params, in declaration order. DECLARATION only: a nested body's REACH is read off the
+    /// M24 — the witness slot tags (`crate::checker::witness_tag`) the NEXT
+    /// [`Self::compile_fn_body`] declares as trailing `$w:<tag>` params, in declaration order. DECLARATION only: a nested body's REACH is read off the
     /// frame it is emitting into ([`FnComp::witness_ref`]), never from here, so this cannot drift
     /// from what was actually captured.
     witness_locals: Vec<String>,
@@ -473,6 +474,19 @@ struct Compiler {
 /// has no params, is a STATIC (associated) method (`FnDecl::takes_self`).
 fn is_static_method(m: &FnDecl) -> bool {
     !m.takes_self()
+}
+
+impl Compiler {
+    /// The name method `m` of module `module_idx` is compiled and tabled under: a `convert`
+    /// overload's internal name (`convert$int`) from the checker's
+    /// [`crate::checker::WitnessTable::overload_names`], else its own name.
+    fn method_name(&self, module_idx: usize, m: &FnDecl) -> String {
+        self.witnesses
+            .overload_names
+            .get(&(module_idx, m.name_span))
+            .cloned()
+            .unwrap_or_else(|| m.name.clone())
+    }
 }
 
 /// Key into [`Compiler::static_methods`]: the type's runtime key + the method name, joined by a
@@ -838,7 +852,8 @@ impl Compiler {
                     // site classifies it as `Op::CallStatic`, mirroring the checker's classification.
                     for m in methods {
                         if is_static_method(m) {
-                            self.static_methods.insert(static_key(&key, &m.name));
+                            let mname = self.method_name(module_idx, m);
+                            self.static_methods.insert(static_key(&key, &mname));
                         }
                     }
                     if self.program.structs.contains_key(&key) {
@@ -883,7 +898,8 @@ impl Compiler {
                     }
                     for m in methods {
                         if is_static_method(m) {
-                            self.static_methods.insert(static_key(&key, &m.name));
+                            let mname = self.method_name(module_idx, m);
+                            self.static_methods.insert(static_key(&key, &mname));
                         }
                     }
                 }
@@ -988,11 +1004,12 @@ impl Compiler {
                 // TICKET-255 — a prelude struct's methods are compiled only for a graph that uses it.
                 let skip = module_idx == 0 && self.unused_prelude_structs.contains(&name.as_str());
                 for m in methods.iter().filter(|_| !skip) {
-                    self.pending_witnesses = self.member_witnesses(module_idx, &key, &m.name);
+                    let mname = self.method_name(module_idx, m);
+                    self.pending_witnesses = self.member_witnesses(module_idx, &key, &mname);
                     let pid = self.compile_fn(m, false)?;
                     let def = self.program.structs.get_mut(&key).expect("hoisted");
                     def.module_idx = module_idx;
-                    def.methods.insert(m.name.clone(), pid);
+                    def.methods.insert(mname, pid);
                     if m.is_test {
                         test_methods.push(m.name.clone());
                         suite_tests.push((m.name.clone(), pid));
@@ -1032,9 +1049,10 @@ impl Compiler {
                     self.hook_sets.insert(key.clone(), *set);
                 }
                 for m in methods {
-                    self.pending_witnesses = self.member_witnesses(module_idx, &key, &m.name);
+                    let mname = self.method_name(module_idx, m);
+                    self.pending_witnesses = self.member_witnesses(module_idx, &key, &mname);
                     let pid = self.compile_fn(m, false)?;
-                    compiled.insert(m.name.clone(), pid);
+                    compiled.insert(mname, pid);
                 }
                 self.program
                     .enum_methods

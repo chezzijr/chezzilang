@@ -24,9 +24,10 @@ impl Checker {
         tname: &str,
         method: &str,
         args: &[Expr],
+        name_span: Span,
         span: Span,
     ) -> Ty {
-        let in_scope = self.witness_scope.iter().any(|w| w == tname);
+        let in_scope = self.witness_scope.iter().any(|w| w.param == tname);
         // A type param declared by the ENCLOSING TYPE (`struct Bx[T]`) can never carry a witness,
         // WHATEVER its bounds: the witness lives in the calling frame, and a `Bx` value has no
         // frame — so this verdict is checked BEFORE the bound lookup. It used to sit after it, so an
@@ -90,14 +91,64 @@ impl Checker {
             );
             return Ty::Unknown;
         }
+        // The witness slot this call reads: the one requirement `method` of `T`, or, with two
+        // `Convert` bounds on one `T`, the one the argument's type picks (as a direct call picks an
+        // overload). The compiler loads that slot's `$w:` local.
+        let cands: Vec<WitnessParam> = self
+            .witness_scope
+            .iter()
+            .filter(|w| w.param == tname && w.method == method)
+            .cloned()
+            .collect();
+        let w = match cands.as_slice() {
+            [one] => one.clone(),
+            [] => WitnessParam {
+                param: tname.to_string(),
+                method: method.to_string(),
+                params: msig.params.iter().map(|t| subst(t, &map)).collect(),
+                ret: subst(&msig.ret, &map),
+            },
+            _ => {
+                let set: Vec<FnSig> = cands
+                    .iter()
+                    .map(|c| FnSig::plain(c.params.clone(), c.ret.clone()))
+                    .collect();
+                let Some(k) = self.pick_overload(&set, tname, method, args, span) else {
+                    return Ty::Unknown;
+                };
+                cands[k].clone()
+            }
+        };
+        self.record_witness_static(&w.tag(), name_span, span);
         // A STATIC requirement has NO receiver slot, so every declared param is a real argument.
-        let expected: Vec<Ty> = msig.params.iter().map(|t| subst(t, &map)).collect();
+        let expected = w.params.clone();
         let slots = super::expr::callable_slots(&msig.labels, expected.len(), expected.len(), None);
         let Some(bound) = self.bind_call(Some(&slots), method, args, 0, span) else {
             return Ty::Unknown;
         };
         self.check_args(method, &expected, &bound, span);
-        subst(&msig.ret, &map)
+        w.ret
+    }
+
+    /// Record the witness slot a `T.m(args)` call reads, for the compiler's `CallStaticDyn` (the
+    /// harvest pass only, as every [`WitnessTable`] half).
+    fn record_witness_static(&mut self, tag: &str, key_span: Span, span: Span) {
+        if !self.harvest_keywords {
+            return;
+        }
+        crate::checker::record_call_table_entry(
+            &mut self.witnesses.statics,
+            &mut self.table_conflicts,
+            crate::checker::witness_key(
+                self.graph_module_idx,
+                self.kw_frag_ctx,
+                self.kw_frag_ord,
+                key_span,
+            ),
+            tag.to_string(),
+            "static-witness slot",
+            span,
+        );
     }
 
     /// M24 — record (or reject) the witness arguments a call to `name` needs. Runs AFTER every
@@ -119,23 +170,40 @@ impl Checker {
     pub(super) fn record_witness_call(
         &mut self,
         name: &str,
-        wparams: &[String],
+        wparams: &[WitnessParam],
         sub: &HashMap<String, Ty>,
         key_span: Span,
         span: Span,
         recv: WitnessCallee,
     ) {
         let mut srcs = Vec::with_capacity(wparams.len());
-        for w in wparams {
+        for wp in wparams {
+            let w = &wp.param;
+            // The requirement as this call site sees it: the callee's `S` replaced by the caller's.
+            let want: Vec<Ty> = wp.params.iter().map(|t| subst(t, sub)).collect();
             // Presence in `sub` is NOT enough: `enforce_bounds` silently SKIPS a param missing from
             // the map, and a param bound to a partly-`Unknown` type has no runtime identity either.
             let concrete = sub.get(w).filter(|t| ty_fully_concrete(t));
             match concrete {
                 // The `Ty::Struct`/`Ty::Enum` name IS the runtime identity key (`<module-key>::Name`,
                 // bare for a std/native type) — the checker and the compiler derive it from the same
-                // `resolver::module_keys`, so this is exactly what `do_static_call` resolves.
-                Some(Ty::Struct(key, _) | Ty::Enum(key, _)) => {
-                    srcs.push(WitnessSrc::Concrete(key.clone()));
+                // `resolver::module_keys`, so this is exactly what `do_static_call` resolves. The
+                // CALLER picks the method: an overloaded name's overload that conformance picked
+                // (`witness_overload`), else the requirement's own name.
+                Some(t @ (Ty::Struct(key, _) | Ty::Enum(key, _))) => {
+                    let method = match self.witness_overload(t, &wp.method, &want) {
+                        Some(Ok(sig)) => {
+                            super::convert_overload::internal_name(&wp.method, &sig.params[0])
+                        }
+                        // No unique pick: conformance (the same `witness_overload`) already
+                        // rejected the bound, before this record.
+                        Some(Err(_)) => return,
+                        None => wp.method.clone(),
+                    };
+                    srcs.push(WitnessSrc::Concrete {
+                        type_key: key.clone(),
+                        method,
+                    });
                 }
                 Some(other) => {
                     let other = other.clone();
@@ -158,7 +226,8 @@ impl Checker {
                         unreachable!("guarded by the arm's own pattern")
                     };
                     let p = p.clone();
-                    if !self.witness_scope.contains(&p)
+                    let reachable = self.witness_scope.iter().any(|x| x.param == p);
+                    if !reachable
                         && self.enclosing_type_declaring(&p).is_none()
                         && self.type_params.contains_key(&p)
                     {
@@ -181,7 +250,7 @@ impl Checker {
                         );
                         return;
                     }
-                    if !self.witness_scope.contains(&p) {
+                    if !reachable {
                         self.error(
                             span,
                             format!(
@@ -198,7 +267,21 @@ impl Checker {
                         );
                         return;
                     }
-                    srcs.push(WitnessSrc::Forward(p));
+                    // The caller's own slot for the same requirement: same param, same method,
+                    // equal param types once the callee's are spelled in the caller's.
+                    // None: `p`'s bounds lack the requirement, which the bound check already
+                    // rejected (`type U does not satisfy Convert[str]`) before this record.
+                    let Some(own) = self
+                        .witness_scope
+                        .iter()
+                        .find(|x| x.param == p && x.method == wp.method && x.params == want)
+                    else {
+                        return;
+                    };
+                    srcs.push(WitnessSrc::Forward {
+                        param: p,
+                        req: own.req(),
+                    });
                 }
                 None => {
                     // The suggested spelling has to be one that PARSES. A member's type arguments
@@ -604,7 +687,7 @@ impl Checker {
         declared: &[Ty],
         ret: &Ty,
         mtps: &[TyParam],
-        wparams: &[String],
+        wparams: &[WitnessParam],
         recv_ty: &Ty,
         targs: &[Ty],
         args: &[Expr],

@@ -573,8 +573,9 @@ fn synthesize_providers_into(stmts: &mut Vec<Stmt>, file: u32) {
                         Dflt::Inline(_) | Dflt::CalleeFilled | Dflt::Literal(_) => {}
                     }
                 }
-                for mth in methods {
-                    let owner = format!("{name}.{}", mth.name);
+                for (i, mth) in methods.iter().enumerate() {
+                    let nth = methods[..i].iter().filter(|m| m.name == mth.name).count();
+                    let owner = crate::base::provider_name::method_owner(name, &mth.name, nth);
                     push_param_providers(
                         &mut new_fns,
                         file,
@@ -592,8 +593,9 @@ fn synthesize_providers_into(stmts: &mut Vec<Stmt>, file: u32) {
                 ..
             } => {
                 let stps: Vec<String> = type_params.iter().map(|t| t.name.clone()).collect();
-                for mth in methods {
-                    let owner = format!("{name}.{}", mth.name);
+                for (i, mth) in methods.iter().enumerate() {
+                    let nth = methods[..i].iter().filter(|m| m.name == mth.name).count();
+                    let owner = crate::base::provider_name::method_owner(name, &mth.name, nth);
                     push_param_providers(
                         &mut new_fns,
                         file,
@@ -611,8 +613,12 @@ fn synthesize_providers_into(stmts: &mut Vec<Stmt>, file: u32) {
                 ..
             } => {
                 let stps: Vec<String> = type_params.iter().map(|t| t.name.clone()).collect();
-                for mth in bodied_methods {
-                    let owner = format!("{name}.{}", mth.name);
+                for (i, mth) in bodied_methods.iter().enumerate() {
+                    let nth = bodied_methods[..i]
+                        .iter()
+                        .filter(|m| m.name == mth.name)
+                        .count();
+                    let owner = crate::base::provider_name::method_owner(name, &mth.name, nth);
                     push_param_providers(
                         &mut new_fns,
                         file,

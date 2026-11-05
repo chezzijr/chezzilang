@@ -35,7 +35,19 @@ impl Checker {
     ) -> Ty {
         // The call through a type is the path's value applied: `type_member_fn` is the value
         // side's answer, so an instance method takes its receiver first (`P.get(p)`).
-        let Some(pf) = self.type_member_fn(th, None, method) else {
+        // An overloaded name (several `convert`s): the argument's type picks the overload first,
+        // and the call binds against that one's sig. The compiler reads the pick off the table.
+        let pick = match self.head_overloads(th, method) {
+            Some(set) => {
+                let Some(k) = self.pick_overload(&set, tname, method, args, span) else {
+                    return Ty::Unknown;
+                };
+                self.record_overload_call(method, &set[k].params[0], name_span, span);
+                Some(k)
+            }
+            None => None,
+        };
+        let Some(pf) = self.type_member_fn_at(th, None, method, pick) else {
             self.infer_all(args);
             if !self.type_member_refusal(th, method, name_span) {
                 self.error(

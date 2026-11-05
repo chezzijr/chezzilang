@@ -157,6 +157,18 @@ impl Checker {
                 {
                     return (self.infer_arg(a, Some(s)), ArgPass::Checked);
                 }
+                // An overloaded method value picks by its fn slot's param types alone: a slot
+                // whose return is still free (`fn(int) -> T`) seeds it now; one whose params are
+                // not known yet (`.map`'s `fn(T) -> U`, a native method's unsubstituted slot)
+                // defers it to the re-inference against the substituted slot.
+                if self.is_overload_value(a) {
+                    if let Some(s) = &slot
+                        && fn_slot_params_concrete(s, &|n| self.rigid_param(n, &free))
+                    {
+                        return (self.infer_arg_seeded(a, s), ArgPass::Checked);
+                    }
+                    return (Ty::Unknown, ArgPass::Deferred);
+                }
                 // A seed is a guess at `T`, so it reaches an argument only where the slot IS that
                 // `T`, and as a seed: `5` stays `int`, `?5` and `None` read their carrier from it.
                 // Substituted into a compound slot (`List[T]`, `fn(T) -> T`) it would be an owned
@@ -220,6 +232,14 @@ impl Checker {
             self.infer_arg(arg, Some(expected))
         } else {
             fallback.clone()
+        };
+        // A deferred overloaded value has no first-pass type: its re-inferred one is checked,
+        // once its slot is known (a still-free return is the loop-back's to bind).
+        let fallback = match pass {
+            ArgPass::Deferred if ty_concrete_but(expected, &|n| self.rigid_param(n, &[])) => {
+                &refined
+            }
+            ArgPass::Checked | ArgPass::Prepass { .. } | ArgPass::Deferred => fallback,
         };
         if !self.assignable(expected, fallback) {
             let [fallback_s, expected_s] = Ty::render_distinct([fallback, expected]);

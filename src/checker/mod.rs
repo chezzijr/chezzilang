@@ -27,7 +27,7 @@ pub use ty::Ty;
 pub use ty::{
     ArgFill, CallPlanTable, CarrierKey, CarrierMode, CarrierTable, FallOff, FallOffTable, FnLabels,
     Resolution, ResolutionTable, RetCoerce, RetCoerceTable, SumSeed, SumSeedTable, WitnessCallee,
-    WitnessKey, WitnessSrc, WitnessTable, Wrap, WrapTable,
+    WitnessKey, WitnessSrc, WitnessTable, Wrap, WrapTable, witness_tag, witness_tag_param,
 };
 use ty::{compatible, param_invariant};
 
@@ -392,6 +392,42 @@ struct TyBound {
     args: Vec<Ty>,
 }
 
+/// M24 — ONE hidden witness slot of a generic fn: a static-bounded type param and one static
+/// requirement of its bounds (`T` and `convert(x: int) -> T` for `T: Convert[int]`), spelled in the
+/// fn's own type params (`Self` is `T`). Two `Convert` bounds on one `T` are two slots, so the caller
+/// can pick a different overload for each. Built by [`Checker::witness_reqs`].
+#[derive(Clone, Debug, PartialEq)]
+struct WitnessParam {
+    param: String,
+    method: String,
+    /// The requirement's param types after substitution: with `method`, its identity.
+    params: Vec<Ty>,
+    ret: Ty,
+}
+
+impl WitnessParam {
+    /// The requirement half of the slot's [`witness_tag`]: `convert(int)`.
+    fn req(&self) -> String {
+        let ps: Vec<String> = self.params.iter().map(Ty::render_keyed).collect();
+        format!("{}({})", self.method, ps.join(", "))
+    }
+
+    fn tag(&self) -> String {
+        witness_tag(&self.param, &self.req())
+    }
+}
+
+/// The type params `ws` witness, each once, in order: what a diagnostic names.
+fn witness_param_names(ws: &[WitnessParam]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for w in ws {
+        if !out.contains(&w.param) {
+            out.push(w.param.clone());
+        }
+    }
+    out
+}
+
 /// A declared type parameter with its bounds resolved once in the declaring scope (TICKET-202) by
 /// [`Checker::resolve_bounds`]. The resolved twin of the AST [`TypeParam`].
 #[derive(Clone, Debug, PartialEq)]
@@ -451,9 +487,10 @@ struct FnSig {
     /// native/synthetic sigs). Purely informational — surfaced on LSP hover, never affects checking
     /// (excluded from `fn_sig_eq`). Covers free fns AND methods/static methods (all reuse `FnSig`).
     doc: Option<String>,
-    /// M24 — the type params this fn takes a hidden trailing `$w:T` witness argument for, in
-    /// declaration order (empty for everything else, which is nearly every signature). Computed by
-    /// [`Checker::witness_params_of`] at the signature hoist — where the declaration BODY is still
+    /// M24 — the hidden trailing witness slots this fn takes, one per (type param, static
+    /// requirement) ([`WitnessParam`]), in declaration order (empty for everything else, which is
+    /// nearly every signature). Computed by [`Checker::witness_params_of`] +
+    /// [`Checker::witness_reqs`] at the signature hoist — where the declaration BODY is still
     /// available — then re-derived to a fixpoint over the module's free fns (and re-passed once over
     /// its members) in [`Checker::hoist`], since forwarding makes the answer depend on the callees'.
     /// [`FnSig::min_params`] is DERIVED from this and is rewritten wherever this is, so the two can
@@ -463,7 +500,7 @@ struct FnSig {
     /// [`ModuleSig`]. Excluded from `fn_sig_eq` (a lowering detail, not type identity). On a METHOD's
     /// sig it is inert — slice A threads witnesses for module-level FREE fns only, and every consumer
     /// reaches this field through a free-fn table.
-    witness_params: Vec<String>,
+    witness_params: Vec<WitnessParam>,
     /// `Some(i)` iff parameter `i` is variadic (`fn f(...xs: T)`) — its slot type is the collapsed
     /// `List[T]`, and everything after index `i` is keyword-only. Surface-only: the desugar pass
     /// collapses surplus positionals into a `List` literal before checking, so this drives arity /
@@ -565,6 +602,9 @@ struct StructInfo {
     type_params: Vec<TyParam>,
     fields: Vec<(String, Ty)>,
     methods: HashMap<String, FnSig>,
+    /// The overload sets: each name the overload gate admits (static `convert`s, Rust's several
+    /// `impl From<S>`) to its sigs in declaration order. `methods` keeps one entry per name.
+    overloads: HashMap<String, Vec<FnSig>>,
     origin: StructOrigin,
     /// The struct's own decl docstring (the `#` block above `struct X:`), captured in `capture_sig`
     /// from `name_docs` so it crosses the module boundary to an importer's hover. Editor-only; `None`
@@ -772,6 +812,8 @@ struct EnumSigInfo {
     /// The enum's methods (`fn area(self) …`), name-keyed like `StructInfo.methods`. Ferried across
     /// the module boundary so an imported enum's methods resolve in the importer.
     methods: HashMap<String, FnSig>,
+    /// The enum's overload sets, as [`StructInfo`]'s `overloads`. Ferried with `methods`.
+    overloads: HashMap<String, Vec<FnSig>>,
     /// The enum's own decl docstring, carried across the module boundary for an importer's hover
     /// (see [`StructInfo::doc`]). Editor-only; never read by checking/codegen.
     doc: Option<String>,
@@ -835,6 +877,8 @@ struct Checker {
     /// enum name (runtime key) → its methods (`fn area(self) …`), name-keyed exactly like
     /// `StructInfo.methods`. Resolves `enumval.method(args)` and protocol satisfaction for enums.
     enum_methods: HashMap<String, HashMap<String, FnSig>>,
+    /// enum name (runtime key) → its overload sets, as [`StructInfo`]'s `overloads`.
+    enum_overloads: HashMap<String, HashMap<String, Vec<FnSig>>>,
     /// Keyed by `(enum_name, variant_name)`: variants are scoped under their enum, so two enums may
     /// declare the same variant name. Resolution always carries the enum (a qualified `Enum.Variant`
     /// or, in a pattern slot, the scrutinee's enum) — there is no bare-name lookup.
@@ -1072,7 +1116,7 @@ struct Checker {
     /// carrier nested inside another carrier's operand can never shadow it. Mirrors the desugar
     /// walker's `next_tmp`; never reset (uniqueness within one checked graph is free).
     next_opt_tmp: usize,
-    /// M24 — the witness TYPE-PARAM names whose `$w:T` binding is reachable at the statement
+    /// M24 — the witness slots whose `$w:` binding is reachable at the statement
     /// currently being checked: the witness params of the enclosing MODULE-LEVEL free fn or of the
     /// enclosing MEMBER (Task 5 — a method/static method declares its own `[T]`, and the hidden
     /// argument rides on its frame the same way), and empty everywhere else.
@@ -1088,7 +1132,7 @@ struct Checker {
     /// is exactly what the compiler can lower (`compiler::FnComp::witness_ref` is the other half).
     /// A type param of the enclosing TYPE (`struct Bx[T]`) is never in here: its
     /// witness would have to live in the instance, which is a different mechanism.
-    witness_scope: Vec<String>,
+    witness_scope: Vec<WitnessParam>,
     /// M24-2 — every METHOD NAME in the program that some declaration takes a hidden witness for (a
     /// method of a struct / enum declaring a type param with a static-carrying bound).
     /// Graph-wide and never cleared per module — modules are checked deps-first, so an imported
@@ -1358,6 +1402,7 @@ mod branch;
 mod builtin_call;
 mod builtin_type;
 mod closure;
+mod convert_overload;
 mod ctor_call;
 mod exhaust;
 mod expr;

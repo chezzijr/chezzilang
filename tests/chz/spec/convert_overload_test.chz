@@ -1,0 +1,234 @@
+# tests/chz/spec/convert_overload_test.chz: a type may declare several static `fn convert(x: S)`
+# overloads, one per source type `S` (Rust's several `impl From<S>`). A direct call
+# `Rat.convert(3)` picks the overload whose parameter fits the argument, and runs THAT body.
+#
+# Rust is the ancestor: `impl From<i64> for Rat` beside `impl From<&str> for Rat`, then
+# `Rat::from(3)` and `Rat::from("ab")`, each run their own `from`. The declaration rejects
+# (overlap, shape) and the call rejects (no overload for the argument, an argument that fits two)
+# are Rust checker tests (`src/checker/tests/convert_overloads.rs`): they never reach a runtime.
+# A fault inside an overload names the frame `convert` in its trace: a Rust VM test
+# (`src/vm/tests/goldens_display.rs`), since a `.chz` test cannot read a trace.
+# Gated by `chz_suite_passes` (`tests/chz_suite.rs`).
+
+import convert_overload_lib as lib
+import Convert from std.convert
+
+struct Rat:
+    n: int
+    d: int
+    fn convert(x: int) -> Rat:
+        return Rat(x, 1)
+    fn convert(x: str) -> Rat:
+        return Rat(x.len(), 3)
+    fn convert(x: Rat) -> Rat:
+        return Rat(x.n * 2, x.d * 2)
+
+enum Sign:
+    Pos
+    Neg
+    fn convert(x: int) -> Sign:
+        if x < 0:
+            return Sign.Neg
+        return Sign.Pos
+    fn convert(x: bool) -> Sign:
+        if x:
+            return Sign.Pos
+        return Sign.Neg
+
+struct Opt:
+    v: int
+    fn convert(x: int?) -> Opt:
+        return Opt(x ?? -1)
+    fn convert(x: str) -> Opt:
+        return Opt(x.len() * 100)
+
+struct Pos:
+    v: int
+    fn convert(x: int) -> Pos!str:
+        if x < 0:
+            return !"negative"
+        return Pos(x)
+    fn convert(x: str) -> Pos!str:
+        if x == "":
+            return !"empty"
+        return Pos(x.len())
+
+fn pos_of_int(n: int) -> int!str:
+    p := Pos.convert(n)?
+    return p.v
+
+fn pos_of_str(s: str) -> int!str:
+    p := Pos.convert(s)?
+    return p.v
+
+fn text(r: int!str) -> str:
+    match r:
+        ?v: return "ok {v}"
+        !e: return e.message()
+
+fn seven() -> int:
+    return 7
+
+fn abc() -> str:
+    return "abc"
+
+# Each overload has a computed default for `x`, so each gets a default PROVIDER function: the two
+# must be distinct functions (one owner per overload), not one name declared twice.
+struct Dflt:
+    v: int
+    fn convert(x: int = seven()) -> Dflt:
+        return Dflt(x)
+    fn convert(x: str = abc()) -> Dflt:
+        return Dflt(x.len() * 10)
+
+test fn each_struct_overload_runs_its_own_body():
+    a := Rat.convert(3)
+    assert a.n == 3 and a.d == 1, "the int body"
+    b := Rat.convert("abcd")
+    assert b.n == 4 and b.d == 3, "the str body"
+    c := Rat.convert(Rat(5, 7))
+    assert c.n == 10 and c.d == 14, "the Rat body"
+
+test fn each_enum_overload_runs_its_own_body():
+    assert Sign.convert(-4) == Sign.Neg
+    assert Sign.convert(4) == Sign.Pos
+    assert Sign.convert(false) == Sign.Neg
+    assert Sign.convert(true) == Sign.Pos
+
+test fn an_optional_overload_takes_none_and_a_plain_value():
+    assert Opt.convert(None).v == -1
+    assert Opt.convert(5).v == 5, "`5` fits `int?`, not `str`"
+    assert Opt.convert("ab").v == 200
+
+test fn a_result_overload_propagates_with_try():
+    assert text(pos_of_int(4)) == "ok 4"
+    assert text(pos_of_int(-1)) == "negative"
+    assert text(pos_of_str("abc")) == "ok 3"
+    assert text(pos_of_str("")) == "empty"
+
+test fn overloads_with_defaults_keep_their_own_providers():
+    assert Dflt.convert(1).v == 1
+    assert Dflt.convert("ab").v == 20
+    assert Dflt.convert(x=5).v == 5, "a named argument picks the overload too"
+    assert Dflt.convert(x="abcd").v == 40
+
+test fn an_imported_type_picks_its_overload_across_modules():
+    assert lib.Temp.convert(3).c == 3
+    assert lib.Temp.convert(2.5).c == -1
+    assert lib.Level.convert(20) == lib.Level.High
+    assert lib.Level.convert("low") == lib.Level.Low
+    assert lib.Level.convert("high") == lib.Level.High
+
+# ---- through a bound: the CALLER picks the overload (Rust: `T: From<S>` picks the impl at the
+# call, where `T` and `S` are known). The witness carries the chosen method; a generic caller
+# forwards its own witness for the same requirement. ----
+
+# A type with ONE convert: every bound shape below must keep working.
+struct One:
+    v: int
+    fn convert(x: int) -> One:
+        return One(x + 1000)
+
+fn from_int[T: Convert[int]](n: int) -> T:
+    return T.convert(n)
+
+fn make[S, T: Convert[S]](x: S) -> T:
+    return T.convert(x)
+
+fn h[U, S: Convert[U]](x: U) -> S:
+    return make(x)
+
+fn both[T: Convert[int] + Convert[str]](n: int, s: str) -> List[T]:
+    return [T.convert(n), T.convert(s)]
+
+test fn a_bound_with_a_concrete_source_runs_that_overload():
+    r: Rat = from_int(3)
+    assert r.n == 3 and r.d == 1, "the int body"
+    o: One = from_int(3)
+    assert o.v == 1003
+
+test fn a_bound_with_a_generic_source_picks_by_the_callers_source():
+    a: Rat = make(5)
+    assert a.n == 5 and a.d == 1, "the int body"
+    b: Rat = make("ab")
+    assert b.n == 2 and b.d == 3, "the str body"
+    o: One = make(5)
+    assert o.v == 1005
+
+test fn a_generic_forwarder_passes_its_own_witness_on():
+    a: Rat = h(5)
+    assert a.n == 5 and a.d == 1, "the int body"
+    b: Rat = h("abc")
+    assert b.n == 3 and b.d == 3, "the str body"
+    o: One = h(6)
+    assert o.v == 1006
+
+test fn two_convert_bounds_on_one_type_param_each_pick_their_own():
+    rs: List[Rat] = both(4, "abcde")
+    assert rs[0].n == 4 and rs[0].d == 1, "the int body"
+    assert rs[1].n == 5 and rs[1].d == 3, "the str body"
+    ls: List[lib.Level] = both(20, "low")
+    assert ls[0] == lib.Level.High
+    assert ls[1] == lib.Level.Low
+
+# ---- as a value: `Rat.convert` names several fns, so the position's fn type picks one (Rust
+# `E0283` without it: `let g = Rat::from;` needs an annotation). The checker test owns the reject. ----
+
+fn apply(f: fn(str) -> Rat) -> int:
+    return f("ab").n
+
+test fn an_annotated_method_value_picks_its_overload():
+    f: fn(int) -> Rat = Rat.convert
+    a := f(3)
+    assert a.n == 3 and a.d == 1, "the int body"
+    g: fn(str) -> Rat = Rat.convert
+    b := g("abcd")
+    assert b.n == 4 and b.d == 3, "the str body"
+    assert "{f}" == "<fn convert>", "the internal name never shows"
+    assert apply(Rat.convert) == 2, "a typed parameter picks it too"
+    o := One.convert
+    assert o(1).v == 1001, "a single convert reads as before"
+
+fn app_int[T](f: fn(int) -> T, n: int) -> T:
+    return f(n)
+
+test fn a_generic_slot_picks_the_method_value_by_its_param():
+    rs := [1, 2].map(Rat.convert)
+    assert rs[1].n == 2 and rs[1].d == 1, "the int body"
+    r := app_int(Rat.convert, 7)
+    assert r.n == 7 and r.d == 1, "the int body"
+
+# ---- a source with holes (`[]`, `None`): the witness picks the one overload the source fits,
+# the direct call's rule, whatever the declaration order (Rust: `make(vec![])` with
+# `From<String>` + `From<Vec<i32>>` infers `Vec<i32>` and runs it). ----
+
+struct ListFirst:
+    v: int
+    fn convert(x: List[int]) -> ListFirst:
+        return ListFirst(x.len())
+    fn convert(x: str) -> ListFirst:
+        return ListFirst(100)
+
+struct ListLast:
+    v: int
+    fn convert(x: str) -> ListLast:
+        return ListLast(100)
+    fn convert(x: List[int]) -> ListLast:
+        return ListLast(x.len())
+
+struct OptLast:
+    v: int
+    fn convert(x: str) -> OptLast:
+        return OptLast(x.len() * 100)
+    fn convert(x: int?) -> OptLast:
+        return OptLast(x ?? -1)
+
+test fn a_bound_source_with_holes_picks_the_one_overload_it_fits():
+    a: ListFirst = make([])
+    assert a.v == 0, "the List[int] body"
+    b: ListLast = make([])
+    assert b.v == 0, "the List[int] body"
+    c: Opt = make(None)
+    assert c.v == -1, "the int? body"
+    d: OptLast = make(None)
+    assert d.v == -1, "the int? body"

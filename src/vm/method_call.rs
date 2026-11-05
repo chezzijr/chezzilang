@@ -32,7 +32,7 @@ impl Vm {
         Err(self.err(
             format!(
                 "function '{}' expects {want} argument(s), got {got}",
-                p.name
+                crate::base::provider_name::display_fn_name(&p.name)
             ),
             span,
         ))
@@ -967,6 +967,7 @@ impl Vm {
                 Some(def) => format!("'{}'", def.display_name),
                 None => crate::base::words::bare_display(type_key),
             };
+            let method = crate::base::provider_name::display_fn_name(method);
             return Err(self.err(
                 format!("type {display} has no static method '{method}'"),
                 span,

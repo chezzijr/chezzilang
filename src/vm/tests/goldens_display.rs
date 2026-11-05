@@ -2314,3 +2314,30 @@ fn deep_accepted_chains_run_without_stack_overflow() {
     let flat = format!("print(1{})\n", "+1".repeat(400));
     assert_eq!(run_capture(&flat).unwrap().trim(), "401");
 }
+
+/// Convert overloads: a fault inside one `convert` overload names its frame `convert` in the trace,
+/// never the internal overload name (`convert$str`). The overload's own body runs: the int
+/// overload would not fault.
+#[test]
+fn a_convert_overload_frame_in_a_trace_reads_convert() {
+    let dir = std::env::temp_dir().join(format!("chezzi_convert_ov_trace_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let entry = dir.join("main.chz");
+    std::fs::write(
+        &entry,
+        "struct Rat:\n    n: int\n    fn convert(x: int) -> Rat:\n        return Rat(x)\n    fn convert(x: str) -> Rat:\n        return Rat([1][9])\nprint(Rat.convert(\"a\").n)\n",
+    )
+    .unwrap();
+    let (_o, _e, res, _c) = run_file(&entry);
+    let _ = std::fs::remove_dir_all(&dir);
+    let e = res.expect_err("the str overload faults");
+    let trace = format_trace(&e);
+    assert!(
+        trace.contains("at convert"),
+        "expected a `convert` frame, got:\n{trace}"
+    );
+    assert!(
+        !trace.contains("convert$"),
+        "the internal overload name reached a trace:\n{trace}"
+    );
+}

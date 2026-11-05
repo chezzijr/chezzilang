@@ -47,7 +47,7 @@ impl Compiler {
         // M24: the hidden trailing witness params sit AFTER the declared params, so every existing
         // slot index (float/box prologues, capture entries) is untouched and only the arity grows.
         let mut fc = FnComp::new(
-            decl.name.clone(),
+            self.method_name(self.current_module_idx, decl),
             decl.params.len() + self.witness_locals.len(),
             false,
         );

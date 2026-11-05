@@ -32,12 +32,16 @@ pub(super) enum ArgPass {
     /// A closure whose slot depends on a sibling argument: inferred in a rolled-back prepass, to
     /// be re-inferred against its substituted slot. `ret_inferred` — its return was not written.
     Prepass { ret_inferred: bool },
+    /// An overloaded method value (`Rat.convert`) whose fn slot's param types depend on another
+    /// argument or the receiver (`.map`'s `fn(T) -> U`): not inferred in the first pass, its slot
+    /// picks the overload at the re-inference, and that type is the one checked.
+    Deferred,
 }
 
 impl ArgPass {
     /// Whether the argument must be re-inferred against its substituted slot.
     pub(super) fn deferred(self) -> bool {
-        matches!(self, ArgPass::Prepass { .. })
+        matches!(self, ArgPass::Prepass { .. } | ArgPass::Deferred)
     }
     /// Whether the argument's prepass return type is a guess that unification must not read.
     pub(super) fn masks_ret(self) -> bool {
@@ -381,7 +385,7 @@ impl Checker {
             // of `T`'s bounds declares `member` as a STATIC requirement AND the enclosing fn's
             // hidden `$w:T` witness local is reachable here; a miss reports itself.
             Some(Resolution::WitnessStatic(tname)) => {
-                self.infer_witness_static_call(&tname, name, args, span)
+                self.infer_witness_static_call(&tname, name, args, name_span, span)
             }
             // A bound's INSTANCE method through the parameter (`T.get(v)`, Rust's
             // `T::get(&v)`) is the path value `T.get` applied.
@@ -1083,14 +1087,7 @@ impl Checker {
         };
         let unknown = |k: &str| -> String {
             let known: Vec<&str> = slots.iter().filter_map(|s| s.name.as_deref()).collect();
-            if known.is_empty() {
-                format!("unknown named argument '{k}'")
-            } else {
-                format!(
-                    "unknown named argument '{k}' (its parameters are: {})",
-                    known.join(", ")
-                )
-            }
+            unknown_named_arg(k, &known)
         };
         let variadic = slots.iter().position(|s| s.is_variadic);
         if variadic.is_none() {
@@ -1394,5 +1391,18 @@ fn literal_expr_kind(d: crate::base::builtin_method::DeclDefault) -> ExprKind {
         DeclDefault::Bool(b) => ExprKind::Bool(b),
         DeclDefault::Str(s) => ExprKind::Str(s.to_string()),
         DeclDefault::None => ExprKind::NoneLit,
+    }
+}
+
+/// THE message for a keyword argument `k` that names no parameter; `known` are the callee's
+/// parameter names.
+pub(super) fn unknown_named_arg(k: &str, known: &[&str]) -> String {
+    if known.is_empty() {
+        format!("unknown named argument '{k}'")
+    } else {
+        format!(
+            "unknown named argument '{k}' (its parameters are: {})",
+            known.join(", ")
+        )
     }
 }

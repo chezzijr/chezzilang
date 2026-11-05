@@ -511,7 +511,16 @@ pub(super) fn instantiate_method(sig: &FnSig, recv_map: &HashMap<String, Ty>) ->
             })
             .collect(),
         where_bounds: subst_ty_params(&sig.where_bounds, &map),
-        witness_params: sig.witness_params.iter().map(rename).collect(),
+        witness_params: sig
+            .witness_params
+            .iter()
+            .map(|w| WitnessParam {
+                param: rename(&w.param),
+                method: w.method.clone(),
+                params: w.params.iter().map(|t| subst(t, &map)).collect(),
+                ret: subst(&w.ret, &map),
+            })
+            .collect(),
         ..sig.clone()
     }
 }

@@ -24,6 +24,7 @@ impl Checker {
                 .map(|(n, t)| (n.to_string(), t))
                 .collect(),
             methods: HashMap::new(),
+            overloads: HashMap::new(),
             origin: StructOrigin::Builtin,
             doc: None,
             defaulted_fields: Vec::new(),
@@ -200,6 +201,7 @@ impl Checker {
                     // transiently visible so a method return type can reference a sibling native
                     // struct, e.g. `Listener.accept -> Result[Socket]`).
                     methods: HashMap::new(),
+                    overloads: HashMap::new(),
                     origin: StructOrigin::Builtin,
                     doc: None,
                     defaulted_fields: Vec::new(),
@@ -536,6 +538,7 @@ impl Checker {
                         type_params: self.resolve_bounds(type_params, s.span),
                         fields: Vec::new(),
                         methods: table,
+                        overloads: HashMap::new(),
                         origin: StructOrigin::Builtin,
                         doc: None,
                         defaulted_fields: Vec::new(),

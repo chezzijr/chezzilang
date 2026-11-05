@@ -163,7 +163,7 @@ and range patterns, `std.os.exit`, stack traces, static protocol requirements, `
 | `cast[T](val: Any) -> T?` | no consumer: the owner ruled against leaning on `Any`. If it returns, only `cast[Scalar]`, `cast[str]`, a bare container kind and a named struct/enum are sound; a parameterized target needs runtime type tags |
 | `Into` | skipped: needs expected-type threading; Chezzi infers bottom-up |
 | `TryFrom` | not needed: a fallible conversion is `convert(x: S) -> Self!E` |
-| multi-source `Convert` | deferred: needs argument-type overloading (banned); distinct-named static ctors cover it |
+| multi-source `Convert` | done (2026-11-05): one static `convert` overload per source type, picked by the argument's type ([`05-conversions.md`](../reference/spec/05-conversions.md)); other overloading stays banned |
 
 ---
 

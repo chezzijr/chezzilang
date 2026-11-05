@@ -297,6 +297,14 @@ Each group below is one fact decided in two or more places (grouped 2026-10-16).
     every pass; a guard switches it off. A wait arm takes no tuple target (`a, b := ch.recv():` is a
     parse error; bind, then unpack in the body). Grids: `tests/chz/spec/channel_closed_recv_test.chz`,
     `tests/chz/spec/wait_closed_arm_test.chz`.
+29. **A type has several `convert` overloads, one per source type (done 2026-11-05).** Rust's
+    several `impl From<S>`, written in the struct or enum body: `fn convert(x: int) -> Self` and
+    `fn convert(x: str) -> Self`. `Rat.convert(3)` picks by the argument's type (no widening); a
+    `[T: Convert[S]]` bound picks through the caller, which passes the chosen method as the witness
+    (one hidden witness per type param and static requirement). Overlapping overloads are rejected
+    at the declaration (`conflicting convert for int`, Rust E0119); `Rat.convert` as a value needs
+    an annotation (Rust E0283). Only static `convert` may repeat; every other name stays one per
+    type. Grids: `tests/chz/spec/convert_overload_test.chz`, `checker::tests::convert_overloads`.
 
 ### Open questions for the owner
 

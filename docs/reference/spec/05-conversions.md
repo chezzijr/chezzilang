@@ -105,12 +105,58 @@ protocol. A type **witnesses** `Convert[S]` by declaring a **static** method `fn
   (param/field/return/binding, also nested `List[Convert[int]]`/`…?`/tuple, a type alias, and a
   protocol that *embeds* a static-ctor protocol), by the static-slot rule of any static-ctor protocol.
 - **`T.convert(x)` through the bound** works by **witness passing**: a type parameter whose bound
-  carries a static requirement, and whose body needs it, gets a hidden trailing parameter holding the
-  concrete type's runtime identity key, so `T.convert(n)` dispatches to the real type while generics
-  stay erased (nothing monomorphized; no type argument reaches the VM). The same mechanism serves
-  `T.default()` on any user protocol with a static requirement.
+  carries a static requirement, and whose body needs it, gets one hidden trailing parameter per static
+  requirement of its bounds, holding the concrete type's runtime identity key and the method that
+  meets the requirement there. The CALLER fills it, because the caller knows `T` and `S` (Rust picks
+  the `impl From<S>` at the call the same way), so `T.convert(n)` dispatches to the real type and the
+  right overload while generics stay erased (nothing monomorphized; no type argument reaches the VM).
+  A generic caller forwards its own witness for the same requirement. `[T: Convert[int] +
+  Convert[str]]` is two witnesses, and the argument's type picks one at `T.convert(x)`. The same
+  mechanism serves `T.default()` on any user protocol with a static requirement.
 - It does not work for: a type parameter of the enclosing TYPE, a witness-taking fn read as a function
   VALUE, and an undetermined `T`. A `spawn`/`defer` statement target is an ordinary call site. Surface:
   `syntax.md §7a`.
 - Direct `Type.convert(x)` needs no protocol and is the right spelling when the type is known. See
   [`roadmap.md` §3](../../design/roadmap.md).
+
+**Several `convert`s: overloads.** A struct or enum may declare one static `convert` per source type,
+as Rust's several `impl From<S>`. The argument's type picks the overload:
+
+```chezzi
+struct Rat:
+    n: int
+    d: int
+    fn convert(x: int) -> Rat:
+        return Rat(x, 1)
+    fn convert(x: str) -> Rat:
+        return Rat(x.len(), 3)
+
+a := Rat.convert(3)       # the int overload: Rat(3, 1)
+b := Rat.convert("ab")    # the str overload: Rat(2, 3)
+```
+
+- `Type.convert(x)` runs the one overload whose parameter takes the type of `x` (an `int?` overload
+  takes `3` and `None`). There is no widening: `Rat.convert(1.5)` is *type Rat has no convert for float
+  (it has: int, str)*. An argument that fits two overloads (`[]` against `List[int]` and `List[str]`)
+  is *type annotations needed*.
+- Each overload takes one parameter named `x`, of a concrete type (not a type parameter), and declares
+  its return type, `Self` or `Self!E`; any other is *an overloaded convert returns Self or Self!E,
+  found int*.
+- Two overloads may not overlap, that is, one value may not fit both: `int` and `int?` overlap (`3`),
+  `int?` and `str?` overlap (`None`), `int!str` and `int!int` overlap (`3` wraps into both), a
+  protocol overlaps a type that satisfies it (also as `Sq?`), and two protocols always overlap. The error names the first one: *conflicting convert for int: convert(x: int) at 3:8*.
+- Only `convert` overloads. Any other repeated method name, and an instance `convert(self, …)` declared
+  twice, is *method '…' is already defined*.
+- A trace, `<fn …>` and every message call an overload `convert`.
+- A free `S` in `[S, T: Convert[S]]` is not inferred from an overloaded type: pin it.
+- A bound picks too, by the direct call's rule: `fn make[S, T: Convert[S]](x: S) -> T` called as
+  `r: Rat = make("ab")` runs the `str` overload, and `make([])` on a type with `str` and `List[int]`
+  overloads runs the `List[int]` one (Rust's `make(vec![])` infers `Vec<i32>` the same way). A source
+  that fits two overloads (`[]` against `List[int]` and `List[str]`) is *type Rat does not satisfy
+  Convert (type annotations needed: …)*. The declaration order never matters.
+- As a value, `Rat.convert` names several fns, so its position's fn type picks one:
+  `f: fn(int) -> Rat = Rat.convert` is the `int` overload (an annotated binding, a parameter, a
+  return, a typed list element), and so does a generic slot's param type: `[1, 2].map(Rat.convert)`
+  is the `int` overload. With no fn type there, `g := Rat.convert` and
+  `print(Rat.convert)` are *type annotations needed: Rat.convert has 2 overloads (int, str)*, as
+  Rust's `let g = Rat::from;` is `E0283`. A type with one `convert` reads as a value as before.

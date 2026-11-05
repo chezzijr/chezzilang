@@ -41,20 +41,34 @@ pub fn provider_name(file: u32, slot: Slot, owner: &str, param: &str) -> String 
     format!("{PROVIDER_PREFIX}{file}${}${owner}.{param}$", slot.tag())
 }
 
-/// [`provider_name`] for a **parameter** slot, for the checker's decl-site `?` gate: it asks whether
-/// the default it is about to infer will be judged again inside a provider body, and the honest way
-/// to answer is to look for the function [`synthesize_providers`] would have emitted.
-pub fn param_provider_name(file: u32, owner: &str, param: &str) -> String {
-    provider_name(file, Slot::Param, owner, param)
+/// The provider owner of method `method` of type `host` (bare name): `S.m`. `nth` counts the
+/// earlier methods of the same name in the type body, so each `convert` overload gets its own
+/// owner (`S.convert#1`); the first keeps `S.m`. `#` is unspellable, and [`provider_label`] drops
+/// it. ONE builder, for `desugar` (which names the providers) and the checker (which binds them).
+pub fn method_owner(host: &str, method: &str, nth: usize) -> String {
+    if nth == 0 {
+        format!("{host}.{method}")
+    } else {
+        format!("{host}.{method}#{nth}")
+    }
 }
 
-/// Render a compiled function's name for a user-visible message — a stack-trace frame, chiefly.
-/// A synthesized provider's internal name is unspellable ON PURPOSE (`$def$2$f.x$`), which also
-/// makes it unreadable, so a frame for one is shown as what it is. Every other name passes through
+/// The separator between a method's name and its overload's source type in the internal name of
+/// a `convert` overload (`convert$int`, built by the checker). Unspellable in source, and
+/// [`display_fn_name`] cuts the name at it.
+pub const OVERLOAD_SEP: char = '$';
+
+/// Render a compiled function's name for a user-visible message — a stack-trace frame, `<fn …>`,
+/// a fault. A synthesized provider's internal name is unspellable ON PURPOSE (`$def$2$f.x$`), which
+/// also makes it unreadable, so a frame for one is shown as what it is. An overload's internal
+/// name (`convert$int`) shows its method name (`convert`). Every other name passes through
 /// borrowed, so this is free on the ordinary path.
 pub fn display_fn_name(name: &str) -> std::borrow::Cow<'_, str> {
     if name.starts_with(PROVIDER_PREFIX) {
         std::borrow::Cow::Owned(format!("<default for {}>", provider_label(name)))
+    } else if let Some((base, _)) = name.split_once(OVERLOAD_SEP).filter(|(b, _)| !b.is_empty()) {
+        // A name that STARTS with `$` is compiler-private (`$json.decode#3`), not an overload.
+        std::borrow::Cow::Borrowed(base)
     } else {
         std::borrow::Cow::Borrowed(name)
     }
@@ -82,7 +96,26 @@ pub fn provider_label(name: &str) -> String {
         return format!("'{name}'");
     };
     match owner_param.rsplit_once('.') {
-        Some((owner, param)) => format!("'{param}' of '{owner}'"),
+        Some((owner, param)) => {
+            // An overload's owner carries its ordinal (`S.convert#1`, see [`method_owner`]).
+            let owner = owner.split_once('#').map_or(owner, |(o, _)| o);
+            format!("'{param}' of '{owner}'")
+        }
         None => format!("'{owner_param}'"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::display_fn_name;
+
+    /// An overload's internal name shows its method name; a compiler-private name that STARTS with
+    /// `$` (`$json.decode#3`) is not an overload and passes through whole.
+    #[test]
+    fn display_fn_name_cuts_only_an_overload_suffix() {
+        assert_eq!(display_fn_name("convert$int"), "convert");
+        assert_eq!(display_fn_name("convert$Rat"), "convert");
+        assert_eq!(display_fn_name("$json.decode#3"), "$json.decode#3");
+        assert_eq!(display_fn_name("main"), "main");
     }
 }

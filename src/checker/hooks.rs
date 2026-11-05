@@ -516,7 +516,18 @@ impl Checker {
             // Pre-substitute the receiving type's params into the ACTUAL (user) method signature so
             // its `Box[T]` becomes `Box[int]` before the comparison. Only the actual side is bound —
             // a genuinely wrong sig (`add(self, o: int) -> int`) stays a mismatch, no laundering.
-            let actual_owned = methods.get(mname).map(|actual| {
+            // An overloaded name witnesses with THE pick (`witness_overload`, the record's too);
+            // no unique pick is the bound's miss, never a fall back to the last overload.
+            let actual = match self.witness_overload(ty, mname, &want.params) {
+                Some(Ok(sig)) => Some(sig),
+                Some(Err(why)) => {
+                    return Err(ReqMiss::Shape(format!(
+                        "type {ty} does not satisfy {protocol_display} ({why})"
+                    )));
+                }
+                None => methods.get(mname),
+            };
+            let actual_owned = actual.map(|actual| {
                 if tymap.is_empty() {
                     actual.clone()
                 } else {

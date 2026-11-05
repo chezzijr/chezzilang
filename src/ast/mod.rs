@@ -1300,9 +1300,9 @@ pub enum ExprKind {
         obj: Box<Expr>,
         name: String,
         /// Source span of the field NAME token (`name`), distinct from the node's `span` which (like
-        /// every postfix expr) inherits the receiver's start. Purely diagnostic metadata for editor
-        /// tooling (LSP hover keys field-name hovers on this true position); runtime-inert — never
-        /// read by desugar/compiler/vm, so it is behavior-neutral.
+        /// every postfix expr) inherits the receiver's start. LSP hover keys field-name hovers on
+        /// this position, and the compiler keys a `convert` overload pick on it
+        /// (`WitnessTable.overload_calls`, read by `Compiler::overload_pick`).
         name_span: Span,
     },
     /// `head[X…]`: one bracket node carrying both readings (TICKET-222). `index` is the bracket read

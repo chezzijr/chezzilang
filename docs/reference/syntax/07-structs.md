@@ -116,6 +116,10 @@ q := Path(b"/a/b")                 # sets the field
 **Enums** get static methods too (for example `from_str(s) -> Color?`). A variant and a static method
 may not share a name (a declaration-time error), so `Color.Red` is always the variant.
 
+A type declares each method name once (`method 'show' is already defined`). The one exception is a
+static `convert`: one per source type, picked by the argument's type (`Rat.convert(3)`,
+`Rat.convert("1/3")`). The rules are in [`05-conversions.md`](../spec/05-conversions.md).
+
 **Generic static methods** take a **type-level turbofish** (the type's args sit on the type):
 
 ```chezzi

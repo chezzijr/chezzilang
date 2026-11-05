@@ -550,6 +550,14 @@ impl Checker {
             let Some(actual) = methods.get(&mname) else {
                 continue;
             };
+            // An overloaded name (2+ `convert`s) has no one witnessing sig, so it recovers nothing
+            // and a free `S` stays "cannot infer" (Rust `E0283`); the caller pins it.
+            if self
+                .nominal_overloads(ty)
+                .is_some_and(|o| o.contains_key(&mname))
+            {
+                continue;
+            }
             if msig.params.len() != actual.params.len() || msig.is_static != actual.is_static {
                 continue;
             }
@@ -819,6 +827,13 @@ impl Checker {
                 .filter(|s| pick(s))
                 .map(|s| (b.clone(), s))
         })?;
+        let map = self.bound_subst(tname, &bound);
+        Some((bound, msig, map))
+    }
+
+    /// The substitution that spells a requirement of `bound` on the type param `tname`: `Self` is
+    /// `tname`, each protocol param is the bound's argument.
+    pub(super) fn bound_subst(&self, tname: &str, bound: &TyBound) -> HashMap<String, Ty> {
         let mut map = HashMap::from([("Self".to_string(), Ty::Param(tname.to_string()))]);
         let ptps = self
             .protocol_shape(&bound.name)
@@ -827,7 +842,7 @@ impl Checker {
         for (pn, parg) in ptps.iter().zip(&bound.args) {
             map.insert(pn.clone(), parg.clone());
         }
-        Some((bound, msig, map))
+        map
     }
 
     /// The return of a bound's method (sig `msig`, map `map`): the requirement's declared return

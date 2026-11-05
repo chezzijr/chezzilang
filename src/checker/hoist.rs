@@ -265,10 +265,8 @@ impl Checker {
                     );
                     // A repeated method name silently last-wins (the HashMap collapses it) — reject at
                     // hoist so the dup is the headline error, not a downstream return-type mismatch.
-                    self.report_dup_names(
-                        methods.iter().map(|m| (m.name.as_str(), m.name_span)),
-                        "method",
-                    );
+                    // A repeat the overload gate admits (static `convert`s) is kept as overloads.
+                    let overloaded = self.report_dup_methods(methods);
                     // A field and a method may not share a name on the same struct (mirrors the enum
                     // variant/static disjointness below): `p.f` would be ambiguous between the two.
                     let field_names: std::collections::HashSet<&str> =
@@ -311,10 +309,15 @@ impl Checker {
                             .collect(),
                     );
                     let saved_self = self.current_self_ty.replace(self_ty.clone());
-                    let methods = methods
-                        .iter()
-                        .map(|m| (m.name.clone(), self.fn_sig(m, m.name_span, Some(&self_ty))))
+                    let sigs: Vec<(String, FnSig)> = (0..methods.len())
+                        .map(|i| {
+                            let sig = self.method_sig_at(methods, i, &self_ty);
+                            (methods[i].name.clone(), sig)
+                        })
                         .collect();
+                    let overloads = super::convert_overload::overload_sets(&overloaded, &sigs);
+                    self.record_overload_names(methods, &overloads);
+                    let methods = sigs.into_iter().collect();
                     self.current_self_ty = saved_self;
                     self.exit_type_params(saved);
                     let origin = if self.current_module_is_stdlib {
@@ -337,6 +340,7 @@ impl Checker {
                             type_params: rtps,
                             fields,
                             methods,
+                            overloads,
                             origin,
                             // Decl docstring is attached later in `capture_sig` (from `name_docs`),
                             // only for the module's exported sig; the in-checker layout doesn't need it.
@@ -391,11 +395,9 @@ impl Checker {
                     }
                     // Methods see the enum's type parameters in scope (like the struct path), so a
                     // generic `fn get(self) -> T` resolves `T`. Name-keyed exactly like struct methods.
-                    // A repeated method name silently last-wins (the HashMap collapses it) — reject.
-                    self.report_dup_names(
-                        methods.iter().map(|m| (m.name.as_str(), m.name_span)),
-                        "method",
-                    );
+                    // A repeated method name silently last-wins (the HashMap collapses it) — reject,
+                    // except a repeat the overload gate admits (static `convert`s).
+                    let overloaded = self.report_dup_methods(methods);
                     // `Self` in a method sig resolves to this concrete enum (parameterized by its own
                     // type params — the `enum_type_params` table isn't inserted yet, so build the
                     // self-ty from the in-scope `type_params`, matching `enum_self_ty`'s shape).
@@ -407,10 +409,15 @@ impl Checker {
                             .collect(),
                     );
                     let saved_self = self.current_self_ty.replace(self_ty.clone());
-                    let method_sigs: HashMap<String, FnSig> = methods
-                        .iter()
-                        .map(|m| (m.name.clone(), self.fn_sig(m, m.name_span, Some(&self_ty))))
+                    let sigs: Vec<(String, FnSig)> = (0..methods.len())
+                        .map(|i| {
+                            let sig = self.method_sig_at(methods, i, &self_ty);
+                            (methods[i].name.clone(), sig)
+                        })
                         .collect();
+                    let overloads = super::convert_overload::overload_sets(&overloaded, &sigs);
+                    self.record_overload_names(methods, &overloads);
+                    let method_sigs: HashMap<String, FnSig> = sigs.into_iter().collect();
                     self.current_self_ty = saved_self;
                     // Variant names and STATIC-method names must be DISJOINT: `Enum.name` always
                     // resolves the variant first (see `infer_call`), so a static method named after a
@@ -428,7 +435,8 @@ impl Checker {
                     // TICKET-027 + TICKET-202: keyed bounds, args resolved in the declaring scope.
                     let rtps = self.resolve_bounds(type_params, s.span);
                     self.enum_type_params.insert(key.clone(), rtps);
-                    self.enum_methods.insert(key, method_sigs);
+                    self.enum_methods.insert(key.clone(), method_sigs);
+                    self.enum_overloads.insert(key, overloads);
                 }
                 StmtKind::Extern { fns, .. } => {
                     // Dynamic C-ABI FFI (`dlopen`/libffi) is unix-only — `int` marshals as C `long`,
@@ -764,7 +772,11 @@ impl Checker {
         for _ in 0..fn_decls.len() {
             let mut changed = false;
             for d in &fn_decls {
-                let w = self.witness_params_of(d);
+                let names = self.witness_params_of(d);
+                let w = match self.functions.get(&d.name) {
+                    Some(sig) => self.witness_reqs(&names, &sig.type_params),
+                    None => continue,
+                };
                 if let Some(sig) = self.functions.get_mut(&d.name)
                     && sig.witness_params != w
                 {
@@ -821,42 +833,26 @@ impl Checker {
                 | StmtKind::Expr(_) => continue,
             };
             for m in methods {
-                let w = self.witness_params_of(m);
-                let slot = match &s.kind {
-                    StmtKind::Struct { .. } => self
-                        .structs
+                let names = self.witness_params_of(m);
+                let is_struct = matches!(s.kind, StmtKind::Struct { .. });
+                let tps = if is_struct {
+                    self.structs.get(&key).and_then(|s| s.methods.get(&m.name))
+                } else {
+                    self.enum_methods.get(&key).and_then(|ms| ms.get(&m.name))
+                }
+                .map(|sig| sig.type_params.clone());
+                let Some(tps) = tps else {
+                    continue;
+                };
+                let w = self.witness_reqs(&names, &tps);
+                let slot = if is_struct {
+                    self.structs
                         .get_mut(&key)
-                        .and_then(|s| s.methods.get_mut(&m.name)),
-                    StmtKind::Let { .. }
-                    | StmtKind::Assign { .. }
-                    | StmtKind::Fn(_)
-                    | StmtKind::Protocol { .. }
-                    | StmtKind::Enum { .. }
-                    | StmtKind::TypeAlias { .. }
-                    | StmtKind::If { .. }
-                    | StmtKind::For { .. }
-                    | StmtKind::While { .. }
-                    | StmtKind::Match { .. }
-                    | StmtKind::Return(_)
-                    | StmtKind::Yield(_)
-                    | StmtKind::Defer(_)
-                    | StmtKind::Parallel { .. }
-                    | StmtKind::Spawn(_)
-                    | StmtKind::Wait { .. }
-                    | StmtKind::Break
-                    | StmtKind::Continue
-                    | StmtKind::Pass
-                    | StmtKind::Import(_)
-                    | StmtKind::Extern { .. }
-                    | StmtKind::Native(_)
-                    | StmtKind::NativeStruct { .. }
-                    | StmtKind::NativeEnum { .. }
-                    | StmtKind::NativeType { .. }
-                    | StmtKind::Assert { .. }
-                    | StmtKind::Expr(_) => self
-                        .enum_methods
+                        .and_then(|s| s.methods.get_mut(&m.name))
+                } else {
+                    self.enum_methods
                         .get_mut(&key)
-                        .and_then(|ms| ms.get_mut(&m.name)),
+                        .and_then(|ms| ms.get_mut(&m.name))
                 };
                 if let Some(sig) = slot {
                     sig.witness_params = w;
