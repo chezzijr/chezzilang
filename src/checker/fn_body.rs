@@ -578,7 +578,7 @@ impl Checker {
         // capture entries instead (Task 4), so its scope is left untouched below. A body whose
         // receiver is neither struct nor enum declares none and inherits none (nothing
         // there declares a proto the witness could ride on).
-        // A `convert` overload keys on its internal name (`convert$int`), so two overloads never
+        // A `from` overload keys on its internal name (`from$int`), so two overloads never
         // share an entry.
         let witness_fn_name = match &self_ty {
             _ if saved_in_fn => None,

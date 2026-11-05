@@ -550,7 +550,7 @@ impl Checker {
             let Some(actual) = methods.get(&mname) else {
                 continue;
             };
-            // An overloaded name (2+ `convert`s) has no one witnessing sig, so it recovers nothing
+            // An overloaded name (2+ `from`s) has no one witnessing sig, so it recovers nothing
             // and a free `S` stays "cannot infer" (Rust `E0283`); the caller pins it.
             if self
                 .nominal_overloads(ty)
@@ -812,7 +812,7 @@ impl Checker {
 
     /// The first bound of type param `tname` whose protocol declares `method` with a sig `pick`
     /// accepts, that sig, and its map: `Self` ↦ `Ty::Param(tname)` (the body is still checked
-    /// abstractly) plus each protocol param ↦ the bound's arg (`Convert[int]` ⇒ `S ↦ int`). The one
+    /// abstractly) plus each protocol param ↦ the bound's arg (`From[int]` ⇒ `S ↦ int`). The one
     /// bound search, read by the static-witness call, a bound-param receiver's method call and
     /// the path value `T.m`.
     pub(super) fn bound_method(

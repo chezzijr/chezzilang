@@ -14,7 +14,7 @@
 # (`// ===== M24` section), not here: they never reach a runtime.
 # Gated by `chz_suite_passes` (`tests/chz_suite.rs`).
 
-import Convert from std.convert
+import From from std.convert
 import Iterator from std.iter
 import Comparable from std.cmp
 import Shared from std.concurrency
@@ -64,7 +64,7 @@ struct Wrap:
 
 struct Port:
     v: int
-    fn convert(x: int) -> Port:
+    fn from(x: int) -> Port:
         return Port(x + 1)
 
 fn reset[T: Default](old: T) -> T:
@@ -76,8 +76,8 @@ fn empty[T: Default]() -> T:
 fn mk[T: Conv](seed: T, n: int) -> T:
     return T.conv(n)
 
-fn make[T: Convert[int]](seed: T, n: int) -> T:
-    return T.convert(n)
+fn make[T: From[int]](seed: T, n: int) -> T:
+    return T.from(n)
 
 fn second_of[T: Default, U: Default](a: T, b: U) -> U:
     x := T.default()
@@ -96,7 +96,7 @@ test fn two_different_concrete_types_flow_through_one_generic():
 test fn an_enum_can_host_the_static_requirement():
     assert reset(Col.Red) == Col.Blue
 
-# ---- arguments, and the reserved `Convert[S]` bound ----
+# ---- arguments, and the reserved `From[S]` bound ----
 
 test fn a_static_requirement_takes_arguments():
     assert mk(Wrap(0), 21).v == 42

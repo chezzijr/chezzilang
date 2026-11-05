@@ -327,7 +327,7 @@ fn cells() -> Vec<Cell> {
     for protocol in protocols {
         let decl = &decls[protocol.as_str()];
         let Some(owner) = Owner::of(protocol) else {
-            // A static requirement (`convert(x: S) -> Self`): no receiver, so no operator and no
+            // A static requirement (`from(x: S) -> Self`): no receiver, so no operator and no
             // builtin grant. The decl column fails any other protocol with no owner.
             continue;
         };

@@ -393,8 +393,8 @@ struct TyBound {
 }
 
 /// M24 — ONE hidden witness slot of a generic fn: a static-bounded type param and one static
-/// requirement of its bounds (`T` and `convert(x: int) -> T` for `T: Convert[int]`), spelled in the
-/// fn's own type params (`Self` is `T`). Two `Convert` bounds on one `T` are two slots, so the caller
+/// requirement of its bounds (`T` and `from(x: int) -> T` for `T: From[int]`), spelled in the
+/// fn's own type params (`Self` is `T`). Two `From` bounds on one `T` are two slots, so the caller
 /// can pick a different overload for each. Built by [`Checker::witness_reqs`].
 #[derive(Clone, Debug, PartialEq)]
 struct WitnessParam {
@@ -406,7 +406,7 @@ struct WitnessParam {
 }
 
 impl WitnessParam {
-    /// The requirement half of the slot's [`witness_tag`]: `convert(int)`.
+    /// The requirement half of the slot's [`witness_tag`]: `from(int)`.
     fn req(&self) -> String {
         let ps: Vec<String> = self.params.iter().map(Ty::render_keyed).collect();
         format!("{}({})", self.method, ps.join(", "))
@@ -602,7 +602,7 @@ struct StructInfo {
     type_params: Vec<TyParam>,
     fields: Vec<(String, Ty)>,
     methods: HashMap<String, FnSig>,
-    /// The overload sets: each name the overload gate admits (static `convert`s, Rust's several
+    /// The overload sets: each name the overload gate admits (static `from`s, Rust's several
     /// `impl From<S>`) to its sigs in declaration order. `methods` keeps one entry per name.
     overloads: HashMap<String, Vec<FnSig>>,
     origin: StructOrigin,
@@ -1402,7 +1402,6 @@ mod branch;
 mod builtin_call;
 mod builtin_type;
 mod closure;
-mod convert_overload;
 mod ctor_call;
 mod exhaust;
 mod expr;
@@ -1410,6 +1409,7 @@ mod flow;
 mod fn_call;
 mod fn_value;
 mod fn_writes;
+mod from_overload;
 mod globals;
 mod infer;
 mod infer_access;

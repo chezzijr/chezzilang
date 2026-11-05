@@ -156,8 +156,8 @@ impl Checker {
     }
 
     /// Does `n` name a protocol with ANY STATIC method requirement (first param NOT `self`), directly OR
-    /// through a transitively-embedded protocol? Such a protocol (e.g. `Convert`'s static-ctor
-    /// `convert(x: S) -> Self`, or a bundle `protocol MakeInt: Convert[int]` that EMBEDS it) is
+    /// through a transitively-embedded protocol? Such a protocol (e.g. `From`'s static-ctor
+    /// `from(x: S) -> Self`, or a bundle `protocol MakeInt: From[int]` that EMBEDS it) is
     /// witnessable only by a STATIC method — a VALUE cannot invoke it — so it is usable ONLY as a generic
     /// bound `[T: P]`, never as a value-annotation type. Keys on the STRUCTURAL property (own + flattened
     /// embed requirements), so a future/user static-ctor protocol — and any bundle embedding one — is
@@ -525,7 +525,7 @@ impl Checker {
     }
 
     /// Find the first STATIC-CTOR protocol embedded ANYWHERE in a (possibly nested) already-resolved
-    /// `Ty` — directly (`Convert[int]`), or nested under a container / `Option` / tuple / `Result` /
+    /// `Ty` — directly (`From[int]`), or nested under a container / `Option` / tuple / `Result` /
     /// `Func` / struct-or-enum type arg. Read-only. This is the value-position gate for a `Ty` that
     /// arrives ALREADY RESOLVED — a cross-module type-alias body, computed by the `&self` read-only
     /// resolver (`resolve_ty_ro_d`) which cannot emit — so the mutable `resolve_type` arm gate never

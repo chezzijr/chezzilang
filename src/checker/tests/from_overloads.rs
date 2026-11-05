@@ -1,4 +1,4 @@
-//! Checker tests: declaring several static `convert` overloads on one type (Rust's several
+//! Checker tests: declaring several static `from` overloads on one type (Rust's several
 //! `impl From<S>`). The declaration rules: which repeats are admitted, which overlap, which shapes.
 
 use super::*;
@@ -11,149 +11,149 @@ fn rat(body: &str) -> String {
 /// The whole declaration grid. Each accept cell type-checks clean; each reject cell gives its
 /// message, and a cell the overload gate admits never also says "already defined".
 #[test]
-fn convert_overload_declaration_grid() {
-    let to_int = "    fn convert(x: int) -> Rat:\n        return Rat(x)\n";
-    let to_str = "    fn convert(x: str) -> Rat:\n        return Rat(x.len())\n";
+fn from_overload_declaration_grid() {
+    let to_int = "    fn from(x: int) -> Rat:\n        return Rat(x)\n";
+    let to_str = "    fn from(x: str) -> Rat:\n        return Rat(x.len())\n";
     let shape = "protocol Shape:\n    fn area(self) -> int\nstruct Sq:\n    s: int\n    fn area(self) -> int:\n        return self.s\n";
     let named = "protocol Named:\n    fn name(self) -> str\n";
     let accept: Vec<(&str, String)> = vec![
         (
             "int + str + Rat",
             rat(&format!(
-                "{to_int}{to_str}    fn convert(x: Rat) -> Rat:\n        return Rat(x.n)\n"
+                "{to_int}{to_str}    fn from(x: Rat) -> Rat:\n        return Rat(x.n)\n"
             )),
         ),
         (
             "int + float",
             rat(&format!(
-                "{to_int}    fn convert(x: float) -> Rat:\n        return Rat(0)\n"
+                "{to_int}    fn from(x: float) -> Rat:\n        return Rat(0)\n"
             )),
         ),
         (
-            "int + str with the Convert import",
-            format!("import Convert from std.convert\n{}", rat(&format!("{to_int}{to_str}"))),
+            "int + str with the From import",
+            format!("import From from std.convert\n{}", rat(&format!("{to_int}{to_str}"))),
         ),
         (
             "overloads returning Rat!str",
-            rat("    fn convert(x: int) -> Rat!str:\n        return Rat(x)\n    fn convert(x: str) -> Rat!str:\n        return !\"no\"\n"),
+            rat("    fn from(x: int) -> Rat!str:\n        return Rat(x)\n    fn from(x: str) -> Rat!str:\n        return !\"no\"\n"),
         ),
         (
             "int + str on an enum",
-            "enum E:\n    A\n    B\n    fn convert(x: int) -> E:\n        return E.A\n    fn convert(x: str) -> E:\n        return E.B\nfn main():\n    print(1)\nmain()\n".to_string(),
+            "enum E:\n    A\n    B\n    fn from(x: int) -> E:\n        return E.A\n    fn from(x: str) -> E:\n        return E.B\nfn main():\n    print(1)\nmain()\n".to_string(),
         ),
     ];
     let reject: Vec<(&str, String, &str)> = vec![
         (
             "same type twice",
             rat(&format!("{to_int}{to_int}")),
-            "conflicting convert for int: convert(x: int) at 3:8",
+            "conflicting from for int: from(x: int) at 3:8",
         ),
         (
             "an alias of the same type",
             format!(
                 "type C = int\n{}",
                 rat(&format!(
-                    "{to_int}    fn convert(x: C) -> Rat:\n        return Rat(x)\n"
+                    "{to_int}    fn from(x: C) -> Rat:\n        return Rat(x)\n"
                 ))
             ),
-            "conflicting convert for int",
+            "conflicting from for int",
         ),
         (
             "int + int?",
             rat(&format!(
-                "{to_int}    fn convert(x: int?) -> Rat:\n        return Rat(0)\n"
+                "{to_int}    fn from(x: int?) -> Rat:\n        return Rat(0)\n"
             )),
-            "conflicting convert for int",
+            "conflicting from for int",
         ),
         (
             "int? + str?",
-            rat("    fn convert(x: int?) -> Rat:\n        return Rat(0)\n    fn convert(x: str?) -> Rat:\n        return Rat(0)\n"),
-            "conflicting convert for None: convert(x: int?) at 3:8",
+            rat("    fn from(x: int?) -> Rat:\n        return Rat(0)\n    fn from(x: str?) -> Rat:\n        return Rat(0)\n"),
+            "conflicting from for None: from(x: int?) at 3:8",
         ),
         (
             "a protocol param + a struct that satisfies it",
             format!(
                 "{shape}{}",
-                rat("    fn convert(x: Shape) -> Rat:\n        return Rat(x.area())\n    fn convert(x: Sq) -> Rat:\n        return Rat(x.s)\n")
+                rat("    fn from(x: Shape) -> Rat:\n        return Rat(x.area())\n    fn from(x: Sq) -> Rat:\n        return Rat(x.s)\n")
             ),
-            "conflicting convert for Sq",
+            "conflicting from for Sq",
         ),
         (
             "two protocol params",
             format!(
                 "{shape}{named}{}",
-                rat("    fn convert(x: Shape) -> Rat:\n        return Rat(0)\n    fn convert(x: Named) -> Rat:\n        return Rat(0)\n")
+                rat("    fn from(x: Shape) -> Rat:\n        return Rat(0)\n    fn from(x: Named) -> Rat:\n        return Rat(0)\n")
             ),
-            "conflicting convert for a type that satisfies both Shape and Named",
+            "conflicting from for a type that satisfies both Shape and Named",
         ),
         (
             "int!str + int!int (3 wraps into both)",
-            rat("    fn convert(x: int!str) -> Rat:\n        return Rat(0)\n    fn convert(x: int!int) -> Rat:\n        return Rat(1)\n"),
-            "conflicting convert for int: convert(x: int!str) at 3:8",
+            rat("    fn from(x: int!str) -> Rat:\n        return Rat(0)\n    fn from(x: int!int) -> Rat:\n        return Rat(1)\n"),
+            "conflicting from for int: from(x: int!str) at 3:8",
         ),
         (
             "int? + int!str (3 wraps into both)",
-            rat("    fn convert(x: int?) -> Rat:\n        return Rat(0)\n    fn convert(x: int!str) -> Rat:\n        return Rat(1)\n"),
-            "conflicting convert for int",
+            rat("    fn from(x: int?) -> Rat:\n        return Rat(0)\n    fn from(x: int!str) -> Rat:\n        return Rat(1)\n"),
+            "conflicting from for int",
         ),
         (
             "a protocol param + an optional struct that satisfies it",
             format!(
                 "{shape}{}",
-                rat("    fn convert(x: Shape) -> Rat:\n        return Rat(x.area())\n    fn convert(x: Sq?) -> Rat:\n        return Rat(0)\n")
+                rat("    fn from(x: Shape) -> Rat:\n        return Rat(x.area())\n    fn from(x: Sq?) -> Rat:\n        return Rat(0)\n")
             ),
-            "conflicting convert for Sq",
+            "conflicting from for Sq",
         ),
         (
             "an overload returning another type",
-            rat(&format!("{to_int}    fn convert(x: str) -> int:\n        return 5\n")),
-            "an overloaded convert returns Self or Self!E, found int",
+            rat(&format!("{to_int}    fn from(x: str) -> int:\n        return 5\n")),
+            "an overloaded from returns Self or Self!E, found int",
         ),
         (
             "an overload returning a result of another type",
-            rat(&format!("{to_int}    fn convert(x: str) -> str!int:\n        return \"a\"\n")),
-            "an overloaded convert returns Self or Self!E, found str!int",
+            rat(&format!("{to_int}    fn from(x: str) -> str!int:\n        return \"a\"\n")),
+            "an overloaded from returns Self or Self!E, found str!int",
         ),
         (
             "a renamed param",
             rat(&format!(
-                "{to_int}    fn convert(y: str) -> Rat:\n        return Rat(0)\n"
+                "{to_int}    fn from(y: str) -> Rat:\n        return Rat(0)\n"
             )),
-            "method 'convert' parameter 1 is named 'y', but Convert declares 'x'",
+            "method 'from' parameter 1 is named 'y', but From declares 'x'",
         ),
         (
             "two params",
             rat(&format!(
-                "{to_int}    fn convert(x: str, k: int) -> Rat:\n        return Rat(k)\n"
+                "{to_int}    fn from(x: str, k: int) -> Rat:\n        return Rat(k)\n"
             )),
-            "an overloaded convert takes 1 parameter, as Convert[S] declares",
+            "an overloaded from takes 1 parameter, as From[S] declares",
         ),
         (
             "an inferred return type",
-            rat(&format!("{to_int}    fn convert(x: str): Rat(x.len())\n")),
-            "an overloaded convert declares its return type, as Convert[S] declares",
+            rat(&format!("{to_int}    fn from(x: str): Rat(x.len())\n")),
+            "an overloaded from declares its return type, as From[S] declares",
         ),
         (
             "a generic param",
-            "struct Box[T]:\n    v: int\n    fn convert(x: T) -> Box[T]:\n        return Box[T](0)\n    fn convert(x: int) -> Box[T]:\n        return Box[T](x)\nfn main():\n    print(1)\nmain()\n".to_string(),
-            "an overloaded convert takes a concrete type, found T",
+            "struct Box[T]:\n    v: int\n    fn from(x: T) -> Box[T]:\n        return Box[T](0)\n    fn from(x: int) -> Box[T]:\n        return Box[T](x)\nfn main():\n    print(1)\nmain()\n".to_string(),
+            "an overloaded from takes a concrete type, found T",
         ),
         (
             "each body checks against its own signature",
             rat(&format!(
-                "{to_int}    fn convert(x: str) -> Rat:\n        return Rat(x)\n"
+                "{to_int}    fn from(x: str) -> Rat:\n        return Rat(x)\n"
             )),
             "argument 1 of 'Rat': expected int, found str",
         ),
         (
             "the same type twice on an enum",
-            "enum E:\n    A\n    fn convert(x: int) -> E:\n        return E.A\n    fn convert(x: int) -> E:\n        return E.A\nfn main():\n    print(1)\nmain()\n".to_string(),
-            "conflicting convert for int",
+            "enum E:\n    A\n    fn from(x: int) -> E:\n        return E.A\n    fn from(x: int) -> E:\n        return E.A\nfn main():\n    print(1)\nmain()\n".to_string(),
+            "conflicting from for int",
         ),
         (
-            "an instance convert twice",
-            rat("    fn convert(self, x: int) -> Rat:\n        return Rat(x)\n    fn convert(self, x: str) -> Rat:\n        return Rat(0)\n"),
-            "method 'convert' is already defined",
+            "an instance from twice",
+            rat("    fn from(self, x: int) -> Rat:\n        return Rat(x)\n    fn from(self, x: str) -> Rat:\n        return Rat(0)\n"),
+            "method 'from' is already defined",
         ),
         (
             "any other method twice",
@@ -183,60 +183,57 @@ fn convert_overload_declaration_grid() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
-/// The direct call `Rat.convert(arg)` on an overloaded name: the argument picks the one overload
+/// The direct call `Rat.from(arg)` on an overloaded name: the argument picks the one overload
 /// it fits. No overload fits (no widening, Rust `E0277`), or the argument fits more than one
 /// (Rust `E0283`), is an error that lists the overloads. Each accept cell type-checks clean.
 #[test]
-fn convert_overload_call_grid() {
-    let three = "    fn convert(x: int) -> Rat:\n        return Rat(x)\n    fn convert(x: str) -> Rat:\n        return Rat(x.len())\n    fn convert(x: Rat) -> Rat:\n        return Rat(x.n)\n";
-    let lists = "    fn convert(x: List[int]) -> Rat:\n        return Rat(0)\n    fn convert(x: List[str]) -> Rat:\n        return Rat(1)\n";
+fn from_overload_call_grid() {
+    let three = "    fn from(x: int) -> Rat:\n        return Rat(x)\n    fn from(x: str) -> Rat:\n        return Rat(x.len())\n    fn from(x: Rat) -> Rat:\n        return Rat(x.n)\n";
+    let lists = "    fn from(x: List[int]) -> Rat:\n        return Rat(0)\n    fn from(x: List[str]) -> Rat:\n        return Rat(1)\n";
     let call = |body: &str, stmt: &str| {
         format!("struct Rat:\n    n: int\n{body}fn main():\n    {stmt}\nmain()\n")
     };
     let accept: Vec<(&str, String)> = vec![
-        ("an int", call(three, "r := Rat.convert(3)")),
-        ("a str", call(three, "r := Rat.convert(\"ab\")")),
-        ("a Rat", call(three, "r := Rat.convert(Rat(1))")),
-        (
-            "an annotated result",
-            call(three, "r: Rat = Rat.convert(3)"),
-        ),
-        ("a List[int]", call(lists, "r := Rat.convert([1])")),
+        ("an int", call(three, "r := Rat.from(3)")),
+        ("a str", call(three, "r := Rat.from(\"ab\")")),
+        ("a Rat", call(three, "r := Rat.from(Rat(1))")),
+        ("an annotated result", call(three, "r: Rat = Rat.from(3)")),
+        ("a List[int]", call(lists, "r := Rat.from([1])")),
         (
             "an annotated value",
-            call(three, "f: fn(str) -> Rat = Rat.convert"),
+            call(three, "f: fn(str) -> Rat = Rat.from"),
         ),
     ];
     let reject: Vec<(&str, String, &str)> = vec![
         (
             "a float (no widening)",
-            call(three, "r := Rat.convert(1.5)"),
-            "type Rat has no convert for float (it has: int, str, Rat)",
+            call(three, "r := Rat.from(1.5)"),
+            "type Rat has no from for float (it has: int, str, Rat)",
         ),
         (
             "an argument that fits two overloads",
-            call(lists, "r := Rat.convert([])"),
-            "type annotations needed: Rat.convert has 2 overloads that take List[?] (List[int], List[str])",
+            call(lists, "r := Rat.from([])"),
+            "type annotations needed: Rat.from has 2 overloads that take List[?] (List[int], List[str])",
         ),
         (
             "no argument",
-            call(three, "r := Rat.convert()"),
-            "an overloaded convert takes 1 argument, found 0",
+            call(three, "r := Rat.from()"),
+            "an overloaded from takes 1 argument, found 0",
         ),
         (
             "an unknown keyword",
-            call(three, "r := Rat.convert(y=3)"),
+            call(three, "r := Rat.from(y=3)"),
             "unknown named argument 'y' (its parameters are: x)",
         ),
         (
             "a value with no annotation",
-            call(three, "g := Rat.convert"),
-            "type annotations needed: Rat.convert has 3 overloads (int, str, Rat)",
+            call(three, "g := Rat.from"),
+            "type annotations needed: Rat.from has 3 overloads (int, str, Rat)",
         ),
         (
             "a value annotated with a source no overload takes",
-            call(three, "g: fn(float) -> Rat = Rat.convert"),
-            "type Rat has no convert for float (it has: int, str, Rat)",
+            call(three, "g: fn(float) -> Rat = Rat.from"),
+            "type Rat has no from for float (it has: int, str, Rat)",
         ),
     ];
     let mut failures = Vec::new();
@@ -255,15 +252,15 @@ fn convert_overload_call_grid() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
-/// A bound call `make(src)` on an overloaded `T` (`fn make[S, T: Convert[S]](x: S) -> T`) whose
+/// A bound call `make(src)` on an overloaded `T` (`fn make[S, T: From[S]](x: S) -> T`) whose
 /// source still has holes (`[]`, `None`): conformance and the witness read the one pick, the
 /// direct call's rule, so the verdict never depends on the declaration order. Each cell checks
 /// both orders of its two overloads.
 #[test]
-fn convert_overload_bound_pick_ignores_declaration_order() {
+fn from_overload_bound_pick_ignores_declaration_order() {
     let src = |a: &str, b: &str, arg: &str| {
         format!(
-            "import Convert from std.convert\nstruct Rat:\n    n: int\n    fn convert(x: {a}) -> Rat:\n        return Rat(0)\n    fn convert(x: {b}) -> Rat:\n        return Rat(1)\nfn make[S, T: Convert[S]](x: S) -> T:\n    return T.convert(x)\nfn main():\n    r: Rat = make({arg})\n    print(r.n)\nmain()\n"
+            "import From from std.convert\nstruct Rat:\n    n: int\n    fn from(x: {a}) -> Rat:\n        return Rat(0)\n    fn from(x: {b}) -> Rat:\n        return Rat(1)\nfn make[S, T: From[S]](x: S) -> T:\n    return T.from(x)\nfn main():\n    r: Rat = make({arg})\n    print(r.n)\nmain()\n"
         )
     };
     let accept = [("str", "List[int]", "[]"), ("str", "int?", "None")];
@@ -271,7 +268,7 @@ fn convert_overload_bound_pick_ignores_declaration_order() {
         "List[int]",
         "List[str]",
         "[]",
-        "type annotations needed: Rat.convert has 2 overloads that take List[?]",
+        "type annotations needed: Rat.from has 2 overloads that take List[?]",
     )];
     let mut failures = Vec::new();
     for (a, b, arg) in accept {

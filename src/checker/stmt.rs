@@ -334,7 +334,7 @@ impl Checker {
                     // emitting a misleading return-type mismatch, so `method_decl_sig` skips it. An
                     // admitted overload is checked against its own sig.
                     if let Some(sig) = self.structs.get(&self.bare_key(name)).and_then(|s| {
-                        super::convert_overload::method_decl_sig(
+                        super::from_overload::method_decl_sig(
                             methods,
                             i,
                             &s.methods,
@@ -409,7 +409,7 @@ impl Checker {
                     // admitted overload is checked against its own sig.
                     let key = self.bare_key(name);
                     if let Some(sig) = self.enum_methods.get(&key).and_then(|ms| {
-                        super::convert_overload::method_decl_sig(
+                        super::from_overload::method_decl_sig(
                             methods,
                             i,
                             ms,

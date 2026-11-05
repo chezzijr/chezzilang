@@ -293,7 +293,7 @@ impl Vm {
             // local it itself initialized from a `ConstStr`, so a non-`str` here is an internal
             // invariant break — surfaced as a clear runtime error, never a panic.
             // The witness is `<type key>\u{1}<method>` (the compiler's `static_key`): the caller
-            // picked the method (a `convert` overload), so it is read from the witness; `method`
+            // picked the method (a `from` overload), so it is read from the witness; `method`
             // is the requirement's name as written.
             Op::CallStaticDyn { method, argc } => {
                 let w = self.pop();

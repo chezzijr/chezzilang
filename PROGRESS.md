@@ -297,19 +297,21 @@ Each group below is one fact decided in two or more places (grouped 2026-10-16).
     every pass; a guard switches it off. A wait arm takes no tuple target (`a, b := ch.recv():` is a
     parse error; bind, then unpack in the body). Grids: `tests/chz/spec/channel_closed_recv_test.chz`,
     `tests/chz/spec/wait_closed_arm_test.chz`.
-29. **A type has several `convert` overloads, one per source type (done 2026-11-05).** Rust's
-    several `impl From<S>`, written in the struct or enum body: `fn convert(x: int) -> Self` and
-    `fn convert(x: str) -> Self`. `Rat.convert(3)` picks by the argument's type (no widening); a
-    `[T: Convert[S]]` bound picks through the caller, which passes the chosen method as the witness
+29. **A type has several `from` overloads, one per source type (done 2026-11-05).** Rust's
+    several `impl From<S>`, written in the struct or enum body: `fn from(x: int) -> Self` and
+    `fn from(x: str) -> Self`. `Rat.from(3)` picks by the argument's type (no widening); a
+    `[T: From[S]]` bound picks through the caller, which passes the chosen method as the witness
     (one hidden witness per type param and static requirement). Overlapping overloads are rejected
-    at the declaration (`conflicting convert for int`, Rust E0119); `Rat.convert` as a value needs
-    an annotation (Rust E0283). Only static `convert` may repeat; every other name stays one per
-    type. Grids: `tests/chz/spec/convert_overload_test.chz`, `checker::tests::convert_overloads`.
+    at the declaration (`conflicting from for int`, Rust E0119); `Rat.from` as a value needs
+    an annotation (Rust E0283). Only static `from` may repeat; every other name stays one per
+    type. Grids: `tests/chz/spec/from_overload_test.chz`, `checker::tests::from_overloads`.
 30. **`from` is a member name (done 2026-11-05).** `from` stays a keyword, but it is accepted as a
     name after `.` / `?.` and as a method name in a struct, enum, native-struct or protocol body
     (`Q.from(3)`, `fn from(x: int) -> Q`); a free `fn from` is still an error and `import X from m`
     is unchanged. First step of the `from`/`into` conversion pair (plan `2026-11-05-from-into`).
-    Grid: `parser::tests::decls_targets::from_member_name_grid`.
+    Grid: `parser::tests::decls_targets::from_member_name_grid`. Second step (done 2026-11-05): the
+    static `convert` / protocol `Convert[S]` are renamed `from` / `From[S]` (module `std.convert`
+    unchanged, as Rust `std::convert::From`); every message reads `from`/`From`.
 
 ### Open questions for the owner
 

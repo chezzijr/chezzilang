@@ -35,7 +35,7 @@ impl Checker {
     ) -> Ty {
         // The call through a type is the path's value applied: `type_member_fn` is the value
         // side's answer, so an instance method takes its receiver first (`P.get(p)`).
-        // An overloaded name (several `convert`s): the argument's type picks the overload first,
+        // An overloaded name (several `from`s): the argument's type picks the overload first,
         // and the call binds against that one's sig. The compiler reads the pick off the table.
         let pick = match self.head_overloads(th, method) {
             Some(set) => {

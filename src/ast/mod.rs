@@ -1301,7 +1301,7 @@ pub enum ExprKind {
         name: String,
         /// Source span of the field NAME token (`name`), distinct from the node's `span` which (like
         /// every postfix expr) inherits the receiver's start. LSP hover keys field-name hovers on
-        /// this position, and the compiler keys a `convert` overload pick on it
+        /// this position, and the compiler keys a `from` overload pick on it
         /// (`WitnessTable.overload_calls`, read by `Compiler::overload_pick`).
         name_span: Span,
     },

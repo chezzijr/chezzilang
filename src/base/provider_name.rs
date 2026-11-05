@@ -42,8 +42,8 @@ pub fn provider_name(file: u32, slot: Slot, owner: &str, param: &str) -> String 
 }
 
 /// The provider owner of method `method` of type `host` (bare name): `S.m`. `nth` counts the
-/// earlier methods of the same name in the type body, so each `convert` overload gets its own
-/// owner (`S.convert#1`); the first keeps `S.m`. `#` is unspellable, and [`provider_label`] drops
+/// earlier methods of the same name in the type body, so each `from` overload gets its own
+/// owner (`S.from#1`); the first keeps `S.m`. `#` is unspellable, and [`provider_label`] drops
 /// it. ONE builder, for `desugar` (which names the providers) and the checker (which binds them).
 pub fn method_owner(host: &str, method: &str, nth: usize) -> String {
     if nth == 0 {
@@ -54,14 +54,14 @@ pub fn method_owner(host: &str, method: &str, nth: usize) -> String {
 }
 
 /// The separator between a method's name and its overload's source type in the internal name of
-/// a `convert` overload (`convert$int`, built by the checker). Unspellable in source, and
+/// a `from` overload (`from$int`, built by the checker). Unspellable in source, and
 /// [`display_fn_name`] cuts the name at it.
 pub const OVERLOAD_SEP: char = '$';
 
 /// Render a compiled function's name for a user-visible message — a stack-trace frame, `<fn …>`,
 /// a fault. A synthesized provider's internal name is unspellable ON PURPOSE (`$def$2$f.x$`), which
 /// also makes it unreadable, so a frame for one is shown as what it is. An overload's internal
-/// name (`convert$int`) shows its method name (`convert`). Every other name passes through
+/// name (`from$int`) shows its method name (`from`). Every other name passes through
 /// borrowed, so this is free on the ordinary path.
 pub fn display_fn_name(name: &str) -> std::borrow::Cow<'_, str> {
     if name.starts_with(PROVIDER_PREFIX) {
@@ -97,7 +97,7 @@ pub fn provider_label(name: &str) -> String {
     };
     match owner_param.rsplit_once('.') {
         Some((owner, param)) => {
-            // An overload's owner carries its ordinal (`S.convert#1`, see [`method_owner`]).
+            // An overload's owner carries its ordinal (`S.from#1`, see [`method_owner`]).
             let owner = owner.split_once('#').map_or(owner, |(o, _)| o);
             format!("'{param}' of '{owner}'")
         }
@@ -113,8 +113,8 @@ mod tests {
     /// `$` (`$json.decode#3`) is not an overload and passes through whole.
     #[test]
     fn display_fn_name_cuts_only_an_overload_suffix() {
-        assert_eq!(display_fn_name("convert$int"), "convert");
-        assert_eq!(display_fn_name("convert$Rat"), "convert");
+        assert_eq!(display_fn_name("from$int"), "from");
+        assert_eq!(display_fn_name("from$Rat"), "from");
         assert_eq!(display_fn_name("$json.decode#3"), "$json.decode#3");
         assert_eq!(display_fn_name("main"), "main");
     }

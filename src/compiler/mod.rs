@@ -477,8 +477,8 @@ fn is_static_method(m: &FnDecl) -> bool {
 }
 
 impl Compiler {
-    /// The name method `m` of module `module_idx` is compiled and tabled under: a `convert`
-    /// overload's internal name (`convert$int`) from the checker's
+    /// The name method `m` of module `module_idx` is compiled and tabled under: a `from`
+    /// overload's internal name (`from$int`) from the checker's
     /// [`crate::checker::WitnessTable::overload_names`], else its own name.
     fn method_name(&self, module_idx: usize, m: &FnDecl) -> String {
         self.witnesses

@@ -117,8 +117,8 @@ q := Path(b"/a/b")                 # sets the field
 may not share a name (a declaration-time error), so `Color.Red` is always the variant.
 
 A type declares each method name once (`method 'show' is already defined`). The one exception is a
-static `convert`: one per source type, picked by the argument's type (`Rat.convert(3)`,
-`Rat.convert("1/3")`). The rules are in [`05-conversions.md`](../spec/05-conversions.md).
+static `from`: one per source type, picked by the argument's type (`Rat.from(3)`,
+`Rat.from("1/3")`). The rules are in [`05-conversions.md`](../spec/05-conversions.md).
 
 **Generic static methods** take a **type-level turbofish** (the type's args sit on the type):
 
@@ -192,13 +192,13 @@ that only *has* such a bound (`fn tagged[T: Spawnable](x: T) -> str: return x.ta
   (`h.make(x)`, `Holder.build(x)`, `h.make[Counter](x)`)
 - the call inside a closure (also one that escapes), a nested `fn`, `defer:`, and `spawn:`/`parallel:`
   (the witness is a value, so it crosses)
-- the reserved `Convert[S]` protocol, whose witness is a static `convert(x: S) -> Self`:
+- the reserved `From[S]` protocol, whose witness is a static `from(x: S) -> Self`:
 
 ```chezzi
-import Convert from std.convert
+import From from std.convert
 
-fn make[T: Convert[int]](seed: T, n: int) -> T:
-    return T.convert(n)
+fn make[T: From[int]](seed: T, n: int) -> T:
+    return T.from(n)
 ```
 
 **What does not** (each has a diagnostic that names the workaround):

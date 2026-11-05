@@ -32,7 +32,7 @@ pub(super) enum ArgPass {
     /// A closure whose slot depends on a sibling argument: inferred in a rolled-back prepass, to
     /// be re-inferred against its substituted slot. `ret_inferred` — its return was not written.
     Prepass { ret_inferred: bool },
-    /// An overloaded method value (`Rat.convert`) whose fn slot's param types depend on another
+    /// An overloaded method value (`Rat.from`) whose fn slot's param types depend on another
     /// argument or the receiver (`.map`'s `fn(T) -> U`): not inferred in the first pass, its slot
     /// picks the overload at the re-inference, and that type is the one checked.
     Deferred,

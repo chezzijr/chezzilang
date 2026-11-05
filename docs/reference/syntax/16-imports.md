@@ -91,15 +91,15 @@ declares `struct int`, `int` in a type position is that struct.
 its std module: `Add`, `Sub`, `Mul`, `Div`, `Mod`, `Neg`, `BitAnd`, `BitOr`, `BitXor`, `Shl`, `Shr`,
 `Arithmetic`, `Num`, `Index`, `IndexSet`, `Slice` and `Contains` (`std.ops`); `Eq`, `Comparable` and
 `Hashable` (`std.cmp`); `Iterator` and `Iterable` (`std.iter`); `Stringable` (`std.string`);
-`PathLike` (`std.path`); `Convert` (`std.convert`).
+`PathLike` (`std.path`); `From` (`std.convert`).
 
 - Their shapes are plain `protocol` decls in those `std/*.chz` files, the only source. Intrinsic
   conformance (for example `int` satisfies `Add` with no method) and operator binding (`+`→`add`,
   `<`→`compare`, `for`→`Iterator`, `[]`→`Index`, `[a..b]`→`Slice`) are built into the compiler.
-- The syntax a protocol backs (an operator, indexing, `for`, `in`, `T.convert(...)`, interpolation, map
+- The syntax a protocol backs (an operator, indexing, `for`, `in`, `T.from(...)`, interpolation, map
   keys, `!` and `recover:`) needs no import. Only a bound or a value type that names the protocol does.
-- `Convert[S]` (`fn convert(x: S) -> Self`, a static method, Rust's `From`) is bound-only
-  (`[T: Convert[str]]`; a value annotation is rejected) and callable through the bound (§7a).
+- `From[S]` (`fn from(x: S) -> Self`, a static method, Rust's `From`) is bound-only
+  (`[T: From[str]]`; a value annotation is rejected) and callable through the bound (§7a).
 - `PathLike` (`fn as_path(self) -> bytes`) is the path input of the std filesystem surface:
   `str`/`bytes`/`bytearray` satisfy it and `path.Path` satisfies it structurally, so `fs.exists("x")`,
   `fs.exists(b"x")` and `fs.exists(p)` all work. See [`stdlib.md`](../stdlib/01-builtins.md).

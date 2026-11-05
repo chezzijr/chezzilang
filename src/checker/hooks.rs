@@ -501,7 +501,7 @@ impl Checker {
                 type_params: Vec::new(),
                 where_bounds: Vec::new(),
                 min_params,
-                // Carry the protocol requirement's static-ness (e.g. `Convert`'s `convert(x: S)` is
+                // Carry the protocol requirement's static-ness (e.g. `From`'s `from(x: S)` is
                 // STATIC) so `method_matches` can reject an instance/self-slot witness of a static slot.
                 // Instance-method requirements keep `is_static == false`, so this is inert for them.
                 is_static: msig.is_static,

@@ -42,12 +42,12 @@ pub enum WitnessCallee {
 
 /// M24 — where ONE witness argument at a call site comes from. One witness slot per (type param,
 /// static requirement), so the slot's value names the METHOD as well as the type: the caller picks
-/// the `convert` overload, because the caller knows the source type.
+/// the `from` overload, because the caller knows the source type.
 #[derive(Debug, Clone, PartialEq)]
 pub enum WitnessSrc {
     /// The concrete type's runtime IDENTITY KEY (`<module-key>::Name`) — the exact key
     /// `Vm::do_static_call` resolves against `Program::structs` / `Program::enum_methods` — and
-    /// the method that witnesses the requirement there (an overload's internal name, `convert$int`).
+    /// the method that witnesses the requirement there (an overload's internal name, `from$int`).
     Concrete { type_key: String, method: String },
     /// FORWARDING (slice 2): the callee's slot is filled by the CALLER's own witness for its
     /// still-abstract type param `param` and the requirement `req` (equal after substitution), so
@@ -57,7 +57,7 @@ pub enum WitnessSrc {
     Forward { param: String, req: String },
 }
 
-/// The name of ONE witness slot: its type param and its requirement (`T:convert(int)`). The
+/// The name of ONE witness slot: its type param and its requirement (`T:from(int)`). The
 /// compiler's hidden `$w:` local is named by it. The ONE place the spelling is decided;
 /// [`witness_tag_param`] reads it back.
 pub fn witness_tag(param: &str, req: &str) -> String {
@@ -82,13 +82,13 @@ pub fn witness_tag_param(tag: &str) -> &str {
 ///   mis-arity the nested one).
 /// * `calls` — what fills each witness slot at one call site, keyed by [`WitnessKey`], parallel to
 ///   the callee's `fns` entry.
-/// * `overload_names` — each `convert` overload's internal name (`convert$int`, decided by
-///   `convert_overload::internal_name`), keyed `(graph module index, decl name span)`. The compiler
+/// * `overload_names` — each `from` overload's internal name (`from$int`, decided by
+///   `from_overload::internal_name`), keyed `(graph module index, decl name span)`. The compiler
 ///   names the overload's proto and its method-table entry with it.
-/// * `overload_calls` — the overload's internal name a direct `Type.convert(x)` call picks (by the
+/// * `overload_calls` — the overload's internal name a direct `Type.from(x)` call picks (by the
 ///   argument's type), keyed by [`WitnessKey`]. A call with no entry names the method as written.
 /// * `statics` — the witness slot ([`witness_tag`]) a `T.m(args)` call reads, keyed by
-///   [`WitnessKey`] of its member-name token: with two `Convert` bounds on one `T`, the argument's
+///   [`WitnessKey`] of its member-name token: with two `From` bounds on one `T`, the argument's
 ///   type picks the requirement.
 #[derive(Debug, Clone, Default)]
 pub struct WitnessTable {

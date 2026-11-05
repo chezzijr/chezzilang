@@ -1,22 +1,22 @@
-# Helper MODULE for `convert_overload_test.chz`: a struct and an enum with several `convert`
+# Helper MODULE for `from_overload_test.chz`: a struct and an enum with several `from`
 # overloads, declared in ANOTHER module. Not a `*_test.chz`, so `chezzi test` never runs it alone.
 # It shows that an importer picks the right overload and runs the right body across the boundary.
 
 struct Temp:
     c: int
-    fn convert(x: int) -> Temp:
+    fn from(x: int) -> Temp:
         return Temp(x)
-    fn convert(x: float) -> Temp:
+    fn from(x: float) -> Temp:
         return Temp(-1)
 
 enum Level:
     Low
     High
-    fn convert(x: int) -> Level:
+    fn from(x: int) -> Level:
         if x > 10:
             return Level.High
         return Level.Low
-    fn convert(x: str) -> Level:
+    fn from(x: str) -> Level:
         if x == "high":
             return Level.High
         return Level.Low

@@ -153,7 +153,7 @@ impl Compiler {
         ))
     }
 
-    /// The internal name of the `convert` overload the checker picked for the call or value read
+    /// The internal name of the `from` overload the checker picked for the call or value read
     /// at `name_span` (`WitnessTable::overload_calls`); `None` for a name with one method.
     pub(super) fn overload_pick(&self, name_span: Span) -> Option<String> {
         self.witnesses
@@ -186,7 +186,7 @@ impl Compiler {
             Some(srcs) => self.emit_witness_args(fc, &srcs, name, span)?,
             None => 0,
         };
-        // A `convert` overload: the checker's pick for this call, by the witness key.
+        // A `from` overload: the checker's pick for this call, by the witness key.
         let method = self
             .overload_pick(name_span)
             .unwrap_or_else(|| name.to_string());
@@ -597,7 +597,7 @@ impl Compiler {
         for src in srcs {
             match src {
                 // The witness value is the static-method key: the type AND the method the caller
-                // picked (a `convert` overload), which `CallStaticDyn` splits.
+                // picked (a `from` overload), which `CallStaticDyn` splits.
                 crate::checker::WitnessSrc::Concrete { type_key, method } => {
                     fc.emit(Op::ConstStr(static_key(type_key, method)), span)
                 }

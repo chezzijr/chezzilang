@@ -11,7 +11,7 @@
 #
 # Deterministic golden — byte-identical at every worker count, no time-dependent behavior.
 
-import Convert from std.convert
+import From from std.convert
 protocol Default:
     fn default() -> Self
 
@@ -68,15 +68,15 @@ fn logged[T: Default](x: T, sink: List[str], ch: Channel[str]):
             ch.send("spawn {T.default()}")
     note()
 
-# The reserved `Convert[S]` protocol is witnessed by a static `convert(x: S) -> Self`, so it works
+# The reserved `From[S]` protocol is witnessed by a static `from(x: S) -> Self`, so it works
 # through a bound exactly the same way.
 struct Port:
     v: int
-    fn convert(x: int) -> Port:
+    fn from(x: int) -> Port:
         return Port(x + 1)
 
-fn make[T: Convert[int]](seed: T, n: int) -> T:
-    return T.convert(n)
+fn make[T: From[int]](seed: T, n: int) -> T:
+    return T.from(n)
 
 fn main():
     # one generic body, two different concrete types
@@ -111,7 +111,7 @@ fn main():
     print(ch.recv())
     print(sink)
 
-    # the reserved Convert[S] bound
+    # the reserved From[S] bound
     print(make(Port(0), 41).v)             # 42
 
 main()

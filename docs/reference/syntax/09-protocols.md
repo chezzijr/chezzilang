@@ -23,7 +23,7 @@ type names it after an import (`import Add from std.ops`). Without the import th
 | `std.iter` | `Iterator`, `Iterable` |
 | `std.string` | `Stringable` |
 | `std.path` | `PathLike` |
-| `std.convert` | `Convert` |
+| `std.convert` | `From` |
 
 `Iterator[T]` as a value type (a generator's return type) needs `import Iterator from std.iter`, or
 the qualified `iter.Iterator[T]` after `import std.iter as iter`. The `protocol` declarations in

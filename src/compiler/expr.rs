@@ -229,7 +229,7 @@ impl Compiler {
                     }
                     // A type path's method read as a value (`Bx[int].make`, `Pt.getx`): its proto
                     // resolves at run time, as `CallStatic`'s does. The type head is never lowered.
-                    // A `convert` overload: the checker's pick for this read, as `CallStatic`'s.
+                    // A `from` overload: the checker's pick for this read, as `CallStatic`'s.
                     Resolution::MethodFn { type_key, method } => {
                         let method = self.overload_pick(*name_span).unwrap_or(method);
                         fc.emit(Op::MakeMethodFunc { type_key, method }, expr.span);

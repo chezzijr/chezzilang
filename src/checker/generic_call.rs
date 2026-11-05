@@ -92,7 +92,7 @@ impl Checker {
             return Ty::Unknown;
         }
         // The witness slot this call reads: the one requirement `method` of `T`, or, with two
-        // `Convert` bounds on one `T`, the one the argument's type picks (as a direct call picks an
+        // `From` bounds on one `T`, the one the argument's type picks (as a direct call picks an
         // overload). The compiler loads that slot's `$w:` local.
         let cands: Vec<WitnessParam> = self
             .witness_scope
@@ -193,7 +193,7 @@ impl Checker {
                 Some(t @ (Ty::Struct(key, _) | Ty::Enum(key, _))) => {
                     let method = match self.witness_overload(t, &wp.method, &want) {
                         Some(Ok(sig)) => {
-                            super::convert_overload::internal_name(&wp.method, &sig.params[0])
+                            super::from_overload::internal_name(&wp.method, &sig.params[0])
                         }
                         // No unique pick: conformance (the same `witness_overload`) already
                         // rejected the bound, before this record.
@@ -270,7 +270,7 @@ impl Checker {
                     // The caller's own slot for the same requirement: same param, same method,
                     // equal param types once the callee's are spelled in the caller's.
                     // None: `p`'s bounds lack the requirement, which the bound check already
-                    // rejected (`type U does not satisfy Convert[str]`) before this record.
+                    // rejected (`type U does not satisfy From[str]`) before this record.
                     let Some(own) = self
                         .witness_scope
                         .iter()

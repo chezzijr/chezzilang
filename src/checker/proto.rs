@@ -544,7 +544,7 @@ impl Checker {
                     .unwrap_or(Ty::Nil);
                 // A protocol method whose first param is NOT `self` (or which has no params) is a STATIC
                 // (associated) requirement — mirrors `Checker::fn_sig`'s rule for concrete methods. This
-                // is load-bearing for `Convert`-style static-ctor protocols: it drives both the
+                // is load-bearing for `From`-style static-ctor protocols: it drives both the
                 // static-slot witnessing check (`method_matches`) and the bound-only value-position gate
                 // (`protocol_has_static_method`). Ordinary `fn get(self, …)` requirements are instance
                 // methods (`is_static == false`), unchanged.

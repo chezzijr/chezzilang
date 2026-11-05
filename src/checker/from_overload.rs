@@ -1,4 +1,4 @@
-//! Checker: static `convert` overloads (Rust's several `impl From<S>`): the gate, the one fit relation, overlap, the pick.
+//! Checker: static `from` overloads (Rust's several `impl From<S>`): the gate, the one fit relation, overlap, the pick.
 //! `super::*` is the parent module.
 
 use super::setup::{TypeHead, TypeHeadKind};
@@ -6,8 +6,8 @@ use super::*;
 
 impl Checker {
     /// The gate: the static requirement named `name` of a parameterized std protocol whose
-    /// parameter mentions the protocol's own type param, with the protocol spelled `Convert[S]`.
-    /// Today that is only `Convert[S]`'s `convert(x: S)` (`std/convert.chz`). Read from the std
+    /// parameter mentions the protocol's own type param, with the protocol spelled `From[S]`.
+    /// Today that is only `From[S]`'s `from(x: S)` (`std/convert.chz`). Read from the std
     /// protocol table, and only when a method name repeats.
     fn overload_requirement(&self, name: &str) -> Option<(String, FnSig)> {
         super::graph_pass::std_protocol_decls()
@@ -325,7 +325,7 @@ impl Checker {
         None
     }
 
-    /// The overloaded `name` read as a value (`f: fn(int) -> Rat = Rat.convert`): the index of
+    /// The overloaded `name` read as a value (`f: fn(int) -> Rat = Rat.from`): the index of
     /// the one overload whose param [`Self::fits`] the single param of the position's fn type
     /// (the `expected_hint`). No fn type there, or one that does not pick exactly one, is an
     /// error that lists the overloads (Rust `E0283`: `let g = Rat::from;` needs an annotation).
@@ -354,7 +354,7 @@ impl Checker {
         None
     }
 
-    /// Is `e` a read of an overloaded `Type.name` as a value (`Rat.convert` with 2+ overloads)?
+    /// Is `e` a read of an overloaded `Type.name` as a value (`Rat.from` with 2+ overloads)?
     /// A generic slot (`.map`'s `fn(int) -> U`) then seeds it, so [`Self::pick_overload_value`]
     /// picks by the slot's param types while its return is still free.
     pub(super) fn is_overload_value(&self, e: &Expr) -> bool {
@@ -388,7 +388,7 @@ impl Checker {
                 key_span,
             ),
             internal_name(name, s),
-            "convert overload",
+            "from overload",
             span,
         );
     }
@@ -396,7 +396,7 @@ impl Checker {
 
 /// THE message for a use of the overloaded `name` that does not pick exactly one of `set`:
 /// `fitting` are the overloads a source type `t` fits (every overload when `t` is `None`, a value
-/// read with no fn type). None fits: "has no convert for float"; several: "type annotations
+/// read with no fn type). None fits: "has no from for float"; several: "type annotations
 /// needed".
 fn overload_misfit(
     set: &[FnSig],
@@ -424,7 +424,7 @@ fn overload_misfit(
     }
 }
 
-/// The internal name of the overload of `base` that takes `s`: `convert$int`. The ONE place it is
+/// The internal name of the overload of `base` that takes `s`: `from$int`. The ONE place it is
 /// decided. Nominal types are spelled by their identity key, so two distinct types never share a
 /// name. Users never see it: `provider_name::display_fn_name` cuts it at the separator.
 pub(super) fn internal_name(base: &str, s: &Ty) -> String {

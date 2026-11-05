@@ -640,9 +640,9 @@ impl Checker {
         {
             return false;
         }
-        // A STATIC-slot protocol requirement (`Convert`'s `convert(x: S) -> Self`, first param NOT `self`)
+        // A STATIC-slot protocol requirement (`From`'s `from(x: S) -> Self`, first param NOT `self`)
         // is witnessed ONLY by a matching STATIC method — a value cannot invoke a static ctor, so an
-        // instance/`self`-slot method with the same arity (`convert(self) -> Self`) must NOT falsely satisfy
+        // instance/`self`-slot method with the same arity (`from(self) -> Self`) must NOT falsely satisfy
         // it (and vice-versa). Every non-static protocol requirement keeps `is_static == false`, so this is a
         // no-op for every existing instance-method protocol.
         if proto.is_static != actual.is_static {
