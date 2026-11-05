@@ -1,0 +1,25 @@
+# rule: methodDecl
+# rule: memberName
+# `from` is a keyword, but a member or method name may be `from`.
+import a from m
+
+struct Q:
+    n: int
+    fn from(x: int) -> Q:
+        return Q(x)
+    test fn from_t(self):
+        pass
+
+enum E:
+    A
+    fn from(x: int) -> E:
+        return E.A
+
+protocol P[S]:
+    fn from(x: S) -> Self
+
+fn main():
+    q := Q.from(3)
+    q.from = 1
+    r := q?.from(3)
+    s := Q.from[int](3)

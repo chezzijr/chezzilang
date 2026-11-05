@@ -119,6 +119,9 @@ So `None` always means the absent value (or "returns nothing"), and no enum has 
 local, a parameter or a loop variable may shadow a builtin function or type name (`print := 5`,
 `fn f(int: int)`, `for len in xs:`); a later call of the shadowed name reports `int is not callable`.
 `self` is not a keyword: `self := 5` in a method rebinds it for the rest of the body.
+One exception: `from` may be a MEMBER name, a method in a struct, enum, native-struct or protocol
+body (`fn from(x: int) -> Q`) and a name after `.` or `?.` (`Q.from(3)`, `q.from`). A free
+`fn from()` or `from := 1` is still rejected.
 
 ### What an import binds
 

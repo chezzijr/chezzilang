@@ -305,6 +305,11 @@ Each group below is one fact decided in two or more places (grouped 2026-10-16).
     at the declaration (`conflicting convert for int`, Rust E0119); `Rat.convert` as a value needs
     an annotation (Rust E0283). Only static `convert` may repeat; every other name stays one per
     type. Grids: `tests/chz/spec/convert_overload_test.chz`, `checker::tests::convert_overloads`.
+30. **`from` is a member name (done 2026-11-05).** `from` stays a keyword, but it is accepted as a
+    name after `.` / `?.` and as a method name in a struct, enum, native-struct or protocol body
+    (`Q.from(3)`, `fn from(x: int) -> Q`); a free `fn from` is still an error and `import X from m`
+    is unchanged. First step of the `from`/`into` conversion pair (plan `2026-11-05-from-into`).
+    Grid: `parser::tests::decls_targets::from_member_name_grid`.
 
 ### Open questions for the owner
 

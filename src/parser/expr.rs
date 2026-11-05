@@ -423,7 +423,7 @@ impl Parser {
                         self.advance();
                         n.to_string()
                     } else {
-                        self.expect_ident()?
+                        self.expect_member_name()?
                     };
                     // TICKET-187: `.decode[T](s)` is no longer special here. It parses as an
                     // ordinary member call with a type argument (`try_parse_type_arg_call`), and
@@ -484,7 +484,7 @@ impl Parser {
                         self.advance();
                         (n.to_string(), false)
                     } else {
-                        (self.expect_ident()?, true)
+                        (self.expect_member_name()?, true)
                     };
                     let call = if is_ident && self.check(&Token::LParen) {
                         self.advance();

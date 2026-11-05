@@ -11,23 +11,28 @@ const EMPTY_ENUM: &str = "empty enums are not supported; an enum needs at least 
 impl Parser {
     /// `test fn …` — consume the `test` modifier, parse the following `fn`, and tag it `is_test`.
     /// Shared by the free-fn site (`parse_stmt`) and the struct-method site (`parse_struct`).
-    pub(super) fn parse_test_fn(&mut self, allow_defaults: bool) -> PResult<FnDecl> {
+    pub(super) fn parse_test_fn(&mut self, allow_defaults: bool, member: bool) -> PResult<FnDecl> {
         self.expect(&Token::Test)?;
         if !self.check(&Token::Fn) {
             return Err(self.err("`test` must be followed by `fn`".to_string()));
         }
-        let mut decl = self.parse_fn(allow_defaults)?;
+        let mut decl = self.parse_fn(allow_defaults, member)?;
         decl.is_test = true;
         Ok(decl)
     }
 
-    pub(super) fn parse_fn(&mut self, allow_defaults: bool) -> PResult<FnDecl> {
+    /// `member` is true for a method in a struct, enum or native-struct body: its name may be `from`.
+    pub(super) fn parse_fn(&mut self, allow_defaults: bool, member: bool) -> PResult<FnDecl> {
         // doc = comment run immediately above the `fn` keyword line (covers methods too — they all
         // route through here). For `test fn` the modifier is on the same line, so the `fn` line works.
         let doc = self.doc_above(self.cur_span().line);
         self.expect(&Token::Fn)?;
         let name_span = self.cur_span();
-        let name = self.expect_ident()?;
+        let name = if member {
+            self.expect_member_name()?
+        } else {
+            self.expect_ident()?
+        };
         let type_params = self.parse_type_params()?;
         self.expect(&Token::LParen)?;
         let params = self.parse_params(allow_defaults)?;
@@ -165,7 +170,7 @@ impl Parser {
     /// A body-less method signature inside a `protocol` block: `fn name(params) -> ret` then NEWLINE.
     fn parse_fn_sig(&mut self) -> PResult<MethodSig> {
         self.expect(&Token::Fn)?;
-        let name = self.expect_ident()?;
+        let name = self.expect_member_name()?;
         self.expect(&Token::LParen)?;
         let params = self.parse_params(false)?;
         self.expect(&Token::RParen)?;
@@ -326,7 +331,11 @@ impl Parser {
             NativeKind::Ctor
         };
         let name_span = self.cur_span();
-        let name = self.expect_ident()?;
+        let name = if in_struct {
+            self.expect_member_name()?
+        } else {
+            self.expect_ident()?
+        };
         // Optional method-/fn-own generic params: `native fn map[U](self, f: fn(T) -> U) -> List[U]`.
         // `parse_type_params` only consumes on a leading `[`, so a plain `native fn f(...)` is
         // unaffected. On a native METHOD these are the method's own `[U]` (distinct from the enclosing
@@ -416,7 +425,7 @@ impl Parser {
             // bytecode (routed via `Program::native_methods`), so `parse_fn` (which flags a generator
             // via a `yield` in the body) parses it into `bodied_methods`. A `test fn` stays rejected.
             if self.check(&Token::Fn) {
-                bodied_methods.push(self.parse_fn(true)?);
+                bodied_methods.push(self.parse_fn(true, true)?);
                 self.skip_newlines();
                 continue;
             }
@@ -744,10 +753,10 @@ impl Parser {
             if self.check(&Token::Fn) {
                 // Methods accept default params (like free fns); the desugar pass fills omitted args
                 // / reorders named args at method call sites and rejects param-referencing defaults.
-                methods.push(self.parse_fn(true)?);
+                methods.push(self.parse_fn(true, true)?);
             } else if self.check(&Token::Test) {
                 // `test fn name(self)` — a suite test method.
-                methods.push(self.parse_test_fn(true)?);
+                methods.push(self.parse_test_fn(true, true)?);
             } else {
                 let fname_span = self.cur_span();
                 let fname = self.expect_ident()?;
@@ -840,7 +849,7 @@ impl Parser {
             } else if self.check(&Token::Fn) {
                 // Methods accept default params (like free fns / struct methods); the desugar pass
                 // fills omitted args / reorders named args at method call sites by method name.
-                methods.push(self.parse_fn(true)?);
+                methods.push(self.parse_fn(true, true)?);
             } else if self.check(&Token::Test) {
                 // Enum test *suites* are not supported: the compiler/test-runner build SuiteInfo +
                 // discovery only for structs, so an enum `test fn` would silently never run (a
@@ -850,7 +859,7 @@ impl Parser {
                         "test methods are not supported on enums (only on structs)".to_string(),
                     ),
                 );
-                self.parse_test_fn(true)?;
+                self.parse_test_fn(true, true)?;
             } else {
                 // Variants must precede methods: a variant after a method is a structuring error.
                 if !methods.is_empty() {
