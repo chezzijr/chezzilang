@@ -1580,6 +1580,77 @@ fn a_body_waiting_for_a_blocked_guard_holder_lists_the_holder_too() {
     }
 }
 
+// The mirror of the shape above: the body holds the guard and blocks in `recv()` inside
+// `update`, and its spawned task waits for the guard. The body blocks in place inside a native
+// callback, so no process-wide verdict judges it; the nursery's verdict counts it blocked and
+// cuts it with the waiter. Before, the waiter's cut cancelled no sibling and the body, which reads
+// no verdict of its own, waited forever (a hang at every worker count).
+const GUARD_MIRROR_BODY: &str = r#"s := Shared(0)
+ch := Channel[int]()
+held := Channel[int](1)
+parallel:
+    spawn:
+        _ := held.recv() else: panic("held closed")
+        s.set(5)
+    s.update(fn(x: int) -> int: x + take(ch, held))
+"#;
+
+#[test]
+fn a_guard_holder_body_blocked_in_update_lists_its_waiter_too() {
+    let head = GUARD_WAITER_HELD.split("test fn").next().unwrap();
+    let t = TmpDir::new();
+    let dir = t.0.display().to_string();
+    let entry = t.write("mirror.chz", &format!("{head}{GUARD_MIRROR_BODY}"));
+    let want = "runtime error (<dir>/mirror.chz:14:9): deadlock: 2 tasks are blocked and none can \
+                proceed\n  \
+                task 1: waiting for the Shared guard at <dir>/mirror.chz:14:9\n    \
+                at <spawned task> (called at <dir>/mirror.chz:12:5)\n  \
+                task 2: recv() on an empty channel at <dir>/mirror.chz:5:10\n    \
+                at take (called at <dir>/mirror.chz:15:37)\n    \
+                at <closure> (called at <dir>/mirror.chz:15:5)\n";
+    for threads in ["1", "2", "4"] {
+        let runs: Vec<_> = std::thread::scope(|s| {
+            let hs: Vec<_> = (0..24)
+                .map(|_| s.spawn(|| hang_deadline::run_with_hang_deadline(&entry, Some(threads))))
+                .collect();
+            hs.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+        for (i, run) in runs.into_iter().enumerate() {
+            let out = run.unwrap_or_else(|| panic!("threads={threads}: run {i} hung"));
+            let err = String::from_utf8_lossy(&out.stderr).replace(&dir, "<dir>");
+            assert_eq!(
+                (out.status.code(), err.as_str()),
+                (Some(1), want),
+                "run threads={threads}: run {i}"
+            );
+        }
+    }
+    let body: String = GUARD_MIRROR_BODY
+        .lines()
+        .map(|l| format!("    {l}\n"))
+        .collect();
+    let entry = t.write(
+        "mirror_test.chz",
+        &format!("{head}test fn mirror():\n{body}"),
+    );
+    let want = "ERROR mirror (<dir>/mirror_test.chz:15:13) deadlock: 2 tasks are blocked and none \
+                can proceed\n  \
+                task 1: waiting for the Shared guard at <dir>/mirror_test.chz:15:13\n    \
+                at <spawned task> (called at <dir>/mirror_test.chz:13:9)\n  \
+                task 2: recv() on an empty channel at <dir>/mirror_test.chz:5:10\n    \
+                at take (called at <dir>/mirror_test.chz:16:41)\n    \
+                at <closure> (called at <dir>/mirror_test.chz:16:9)\n\n\
+                1 test(s): 0 passed, 0 failed, 1 errored\n";
+    for threads in ["1", "2", "4"] {
+        for (i, out) in concurrent_test_runs(&entry, &["--timeout=2000"], threads, 24)
+            .iter()
+            .enumerate()
+        {
+            assert_eq!(out, want, "test threads={threads}: run {i}");
+        }
+    }
+}
+
 // A deadlock across two nurseries: an outer task waits on `a`, and the inner nursery of its
 // sibling holds a sender on a full channel and a second receiver on `a`. Every blocked task of
 // both nurseries is listed, in spawn-tree order (the outer task, then the inner nursery's tasks).

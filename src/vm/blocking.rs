@@ -251,6 +251,16 @@ impl Vm {
         // precisely top-level `main` — reaches that rung). ABOVE the deadlock verdict, because an
         // `Exit` outranks a synthesized `Deadlocked` — the precedence `reduce_task_slots` encodes.
         let read = self.halt_requested();
+        // A wait its sched's verdict cut ends with its own cut, before a cancel it reads now (a cut
+        // owner's abort tripped it; a cut task cancels no sibling). A blocked `parallel:` body in a
+        // native callback is judged by no process-wide verdict, so this is its one cut. An exit, a
+        // job fault, the latched verdict and a child fault keep their rungs below.
+        if !matches!(read, Some(super::block::Halt::ChildFault { .. }))
+            && !self.run_halt_due()
+            && let Some(e) = self.sched_cut_fault(span)
+        {
+            return Err(e);
+        }
         if let Some(e) = self.blocked_halt(read, span) {
             return Err(e);
         }
@@ -299,6 +309,25 @@ impl Vm {
         // pool thread to a replacement, so the job that would unblock it can still get a thread.
         self.yield_pool_slot(Some(DEMOTE_POLL_BACKOFF));
         Ok(())
+    }
+
+    /// The fault of this thread's wait when a sched verdict cut every blocked task of the sched
+    /// ([`SchedCore::flag_deadlock`]), read by [`Vm::block_halts`] outside any core lock (it takes
+    /// each sched's): the sched this fiber runs on, or a sched whose `parallel:`
+    /// body this thread runs. A blocked body is one of the verdict's tasks: its mark
+    /// (`Vm::mark_bodies`) lifted the body's veto, so the verdict counted it stuck. `terminate`
+    /// alone is no cut: it also latches when every task is done and the body blocks.
+    pub(super) fn sched_cut_fault(&self, span: Span) -> Option<RuntimeError> {
+        let sched = self
+            .mn
+            .iter()
+            .chain(
+                self.owned_eager_scopes()
+                    .filter(|s| !s.fiber_owned)
+                    .map(|s| &s.sched),
+            )
+            .find(|s| s.lock().verdict_cut)?;
+        Some(self.cut_fault(sched, span))
     }
 
     /// Sleep until `deadline`, observing the same halts every other blocking-in-place path does
