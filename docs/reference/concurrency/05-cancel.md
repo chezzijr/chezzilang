@@ -385,7 +385,14 @@ picks the report:
 3. the run's own cause (`--timeout`, `--max-heap`, an own fault, a deadlock).
 
 Go's first panic ends the process, so the earlier job fault is reported with the job's frames; an own
-fault that happened first stays the report. A job fault replacing a deadlock stays fatal, so
+fault that happened first stays the report.
+
+**One deadlock verdict, the same every run.** A deadlock verdict cuts every blocked task of the
+scheduler at once. Each cut task ends with the verdict's fault, and none of them cancels a sibling,
+so the task that wakes first does not decide the report: the lowest task by spawn order is. A
+`Shared.update` holder blocked on a `recv` nothing feeds, beside a sibling waiting for its guard,
+reports the holder's `deadlock: every task in this parallel: block is blocked …` with the holder's
+frames on every run, never the sibling's `update guard wait: deadlock`. A job fault replacing a deadlock stays fatal, so
 `recover:` cannot catch it. This applies only to an executor no `shutdown()` has started on: a
 deadlock inside that executor's own join keeps its `deadlock` verdict. A job cut by the run's own
 `--timeout` is that cause, not an earlier fault. A child's or a job's fault prints the faulting

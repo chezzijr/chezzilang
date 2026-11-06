@@ -43,10 +43,18 @@ impl MnSched {
     ) -> (bool, bool) {
         let mut c = self.lock();
         debug_assert!(Arc::ptr_eq(&c.left, &self.quiesce.epoch()));
+        // A party the sched-wide verdict cut ends with the verdict's fault. That verdict cut EVERY
+        // blocked party of this sched at once, so this end cancels no sibling: a trip here turned the
+        // sibling that read its cut later into a cancelled task, and which task's deadlock was
+        // reported depended on which woke first. Every cut party reports, and the reduce
+        // picks one by task order.
+        let cut_end = matches!(&outcome, TaskOutcome::Fault { err, .. } if err.is_deadlock)
+            && c.cut_in_place();
         // The outcome the worker handed in, before the W7-26r conversion below: that conversion
         // trips the scope's own flag, for a backlog only.
         if let Some(flag) = trip
             && outcome.aborts()
+            && !cut_end
         {
             crate::vm::trip_cancel_flag(flag);
         }
@@ -72,7 +80,7 @@ impl MnSched {
         } else {
             outcome
         };
-        let aborts = outcome.aborts();
+        let aborts = outcome.aborts() && !cut_end;
         // A job the deadlock verdict ended: the verdict cut the sched (it latched `terminate`, or a
         // demoted fiber is left to settle), so a released held job would never run and its `None`
         // slot would hang the join. It reads as a latched verdict.

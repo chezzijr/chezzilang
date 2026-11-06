@@ -1371,21 +1371,9 @@ test fn hof_completes():
     }
 }
 
-// ===== TICKET-063: a `Shared.update` guard waiter parked behind a sibling's blocking `recv` now
-// faults `deadlock` well inside `--timeout`, instead of hanging past it (W10-15) =====
-//
-// A guard wait used to be accounted `inflight`, which vetoes the process-wide deadlock verdict
-// unconditionally, so this run used to hang past its own `--timeout=500` and rely on
-// `run_capped_timed`'s external wall-clock kill (its "hung for >{secs}s" panic WAS the
-// reproduction). The fix registers the wait as a `Waiter` instead, so the deadlock verdict now
-// fires on its own well inside the cap: the runner self-terminates reporting `ERROR`, not
-// `TIMED-OUT` at the 500ms cap.
-#[test]
-fn timeout_reaches_a_guard_waiter_parked_behind_a_recv() {
-    let t = TmpDir::new();
-    let entry = t.write(
-        "guard_waiter_test.chz",
-        r#"import Shared from std.concurrency
+/// TICKET-063 — a `Shared.update` holder blocked on a `recv` nothing feeds, and a sibling waiting
+/// for its guard: two tasks blocked in place, cut by one deadlock verdict.
+const GUARD_WAITER: &str = r#"import Shared from std.concurrency
 
 fn take(ch: Channel[int]) -> int:
     v := ch.recv() else: panic("ch closed")
@@ -1399,8 +1387,21 @@ test fn guard_waiter_hangs():
             s.update(fn(x: int) -> int: x + take(ch))
         spawn:
             s.set(5)
-"#,
-    );
+"#;
+
+// ===== TICKET-063: a `Shared.update` guard waiter parked behind a sibling's blocking `recv` now
+// faults `deadlock` well inside `--timeout`, instead of hanging past it (W10-15) =====
+//
+// A guard wait used to be accounted `inflight`, which vetoes the process-wide deadlock verdict
+// unconditionally, so this run used to hang past its own `--timeout=500` and rely on
+// `run_capped_timed`'s external wall-clock kill (its "hung for >{secs}s" panic WAS the
+// reproduction). The fix registers the wait as a `Waiter` instead, so the deadlock verdict now
+// fires on its own well inside the cap: the runner self-terminates reporting `ERROR`, not
+// `TIMED-OUT` at the 500ms cap.
+#[test]
+fn timeout_reaches_a_guard_waiter_parked_behind_a_recv() {
+    let t = TmpDir::new();
+    let entry = t.write("guard_waiter_test.chz", GUARD_WAITER);
     // 10s wall-clock bound on the CHILD process: well over the 500ms cap, so a correct runner
     // finishes in well under a second. If the runner cannot self-terminate, `run_capped_timed`
     // panics with "hung for >10s" instead of returning — that panic message IS the reproduction.
@@ -1422,4 +1423,41 @@ test fn guard_waiter_hangs():
         elapsed < std::time::Duration::from_secs(2),
         "the deadlock verdict must fire well inside the 500ms cap, took {elapsed:?}: {out:?}"
     );
+}
+
+// ===== Task 7: one deadlock verdict, the same every run =====
+//
+// Both tasks of `GUARD_WAITER` are cut by the same verdict. The first one to see the cut used to
+// fault, trip the nursery's cancel, and so turn its sibling into a cancelled task: which task's text
+// was reported (the nursery's `deadlock:` line or the guard waiter's own) depended on which woke
+// first. Many concurrent runs per worker count (the load is what moves the wake order) must print
+// byte-identical output. The seeded scheduler does not reorder these wakes (both waits are in place,
+// on their own threads), so the runs are concurrent processes rather than seeds.
+#[test]
+fn a_guard_waiter_deadlock_prints_the_same_verdict_every_run() {
+    let t = TmpDir::new();
+    let entry = t.write("guard_waiter_test.chz", GUARD_WAITER);
+    for threads in ["1", "2", "4"] {
+        let outs: Vec<String> = std::thread::scope(|s| {
+            let runs: Vec<_> = (0..48)
+                .map(|_| {
+                    s.spawn(|| {
+                        let out = Command::new(env!("CARGO_BIN_EXE_chezzi"))
+                            .args(["test", "--timeout=500"])
+                            .arg(&entry)
+                            .env("CHEZZI_THREADS", threads)
+                            .output()
+                            .expect("spawn chezzi");
+                        String::from_utf8_lossy(&out.stdout).into_owned()
+                    })
+                })
+                .collect();
+            runs.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+        let first = &outs[0];
+        assert!(first.contains("deadlock:"), "threads={threads}: {first:?}");
+        for (i, out) in outs.iter().enumerate() {
+            assert_eq!(out, first, "threads={threads}: run {i} differs from run 0");
+        }
+    }
 }

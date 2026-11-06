@@ -387,6 +387,15 @@ Each group below is one fact decided in two or more places (grouped 2026-10-16).
 
 ### Owner decisions not yet implemented
 
+- **A deadlock verdict lists every blocked task** (owner decision 2026-11-06, Go's model: `fatal
+  error: all goroutines are asleep - deadlock!` then each goroutine's wait and stack). Today the
+  verdict is deterministic (one report, the lowest task by spawn order, plan
+  `2026-11-06-slot-optchain-hints` task 7) but it names one task, and the wait texts differ by site
+  (`deadlock: every task …`, `recv on an empty channel: deadlock …`, `update guard wait:
+  deadlock …`). Needs: each cut site to carry its own wait text and span (a demoted `recv` reports
+  the nursery's text today), a parked fiber's frames in its `Deadlocked` slot, one composer in the
+  reduce, and the listing's shape in `--errors=json`.
+
 - **U16: `Sized` and `Extend` protocols not declared yet** (owner decision 2026-10-16).
   A protocol only where generic code needs one; a new protocol goes in a std module, not the global
   namespace. The convention rows themselves are done (TICKET-278, 2026-10-21): Set
