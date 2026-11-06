@@ -604,9 +604,10 @@ struct StructInfo {
     type_params: Vec<TyParam>,
     fields: Vec<(String, Ty)>,
     methods: HashMap<String, FnSig>,
-    /// The overload sets: each name the overload gate admits (static `from`s, Rust's several
-    /// `impl From<S>`) to its sigs in declaration order. `methods` keeps one entry per name.
-    overloads: HashMap<String, Vec<FnSig>>,
+    /// The protocol-slot methods, decided at the declaration: each slotted name's slot, and each
+    /// overload set (a slotted name declared 2+ times, Rust's several `impl From<S>`) to its sigs
+    /// in declaration order. `methods` keeps one entry per name.
+    overloads: from_overload::Overloads,
     origin: StructOrigin,
     /// The struct's own decl docstring (the `#` block above `struct X:`), captured in `capture_sig`
     /// from `name_docs` so it crosses the module boundary to an importer's hover. Editor-only; `None`
@@ -816,8 +817,8 @@ struct EnumSigInfo {
     /// The enum's methods (`fn area(self) …`), name-keyed like `StructInfo.methods`. Ferried across
     /// the module boundary so an imported enum's methods resolve in the importer.
     methods: HashMap<String, FnSig>,
-    /// The enum's overload sets, as [`StructInfo`]'s `overloads`. Ferried with `methods`.
-    overloads: HashMap<String, Vec<FnSig>>,
+    /// The enum's protocol-slot methods, as [`StructInfo`]'s `overloads`. Ferried with `methods`.
+    overloads: from_overload::Overloads,
     /// The enum's own decl docstring, carried across the module boundary for an importer's hover
     /// (see [`StructInfo::doc`]). Editor-only; never read by checking/codegen.
     doc: Option<String>,
@@ -882,7 +883,7 @@ struct Checker {
     /// `StructInfo.methods`. Resolves `enumval.method(args)` and protocol satisfaction for enums.
     enum_methods: HashMap<String, HashMap<String, FnSig>>,
     /// enum name (runtime key) → its overload sets, as [`StructInfo`]'s `overloads`.
-    enum_overloads: HashMap<String, HashMap<String, Vec<FnSig>>>,
+    enum_overloads: HashMap<String, from_overload::Overloads>,
     /// Keyed by `(enum_name, variant_name)`: variants are scoped under their enum, so two enums may
     /// declare the same variant name. Resolution always carries the enum (a qualified `Enum.Variant`
     /// or, in a pattern slot, the scrutinee's enum) — there is no bare-name lookup.

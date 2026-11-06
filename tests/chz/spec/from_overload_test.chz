@@ -12,7 +12,7 @@
 # Gated by `chz_suite_passes` (`tests/chz_suite.rs`).
 
 import from_overload_lib as lib
-import From from std.convert
+import From, TryFrom from std.convert
 
 struct Rat:
     n: int

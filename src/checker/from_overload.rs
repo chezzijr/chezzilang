@@ -1,11 +1,11 @@
-//! Checker: conversion overloads (Rust's several `impl From<S>` / `impl Into<T>`): the gate, the
-//! one fit relation, overlap, the pick, and one owner per conversion pair.
+//! Checker: protocol-slot overloads (Rust's several `impl From<S>` / `impl Parse<S>`): the slot of
+//! a method decided once at its declaration, the one fit relation, overlap and the pick.
 //! `super::*` is the parent module.
 
 use super::setup::{TypeHead, TypeHeadKind};
 use super::*;
 
-/// The slot of a conversion requirement that keys its overloads: the parameter that mentions the
+/// The slot of a protocol requirement that keys its overloads: the parameter that mentions the
 /// protocol's type param (`from(x: S)`, the source), or the return of a receiver-only method
 /// that IS the type param or its `!` (`into(self) -> T`, the target).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -25,8 +25,9 @@ impl OverloadSlot {
     }
 }
 
-/// A conversion requirement the gate admits overloads of: its name, its protocol spelled
-/// (`From[S]`), its sig and the slot that keys the overloads.
+/// A requirement of a parameterized protocol that keys overloads: its name, its protocol spelled
+/// (`From[S]`), its sig and the slot.
+#[derive(Clone)]
 pub(super) struct OverloadReq {
     pub(super) name: String,
     pub(super) spelled: String,
@@ -34,31 +35,73 @@ pub(super) struct OverloadReq {
     pub(super) slot: OverloadSlot,
 }
 
+/// One type body's protocol-slot methods, decided at its declaration and carried with the type
+/// (an import copies it): `slots` names each method a visible protocol keys, a lone one included;
+/// the sets (read through `Deref`) are each slotted name declared 2+ times, its sigs in
+/// declaration order.
+#[derive(Clone, Default)]
+pub(super) struct Overloads {
+    pub(super) slots: HashMap<String, OverloadReq>,
+    sets: HashMap<String, Vec<FnSig>>,
+}
+
+impl std::ops::Deref for Overloads {
+    type Target = HashMap<String, Vec<FnSig>>;
+    fn deref(&self) -> &Self::Target {
+        &self.sets
+    }
+}
+
 impl Checker {
-    /// The gate: every requirement of a parameterized std protocol with an [`OverloadSlot`]:
-    /// `From[S]`'s `from(x: S)`, `TryFrom[S]`'s `try_from(x: S)`, `Into[T]`'s `into(self) -> T`
-    /// and `TryInto[T]`'s `try_into(self) -> T!` (`std/convert.chz`). Read from the std protocol
-    /// table; `only` limits it to one name, checked on the declaration before any shape is read.
-    fn overload_reqs(&self, only: Option<&str>) -> Vec<OverloadReq> {
-        let mut out = Vec::new();
-        for d in super::graph_pass::std_protocol_decls() {
-            if let StmtKind::Protocol {
-                methods,
-                type_params,
-                ..
-            } = &d.stmt.kind
-                && (type_params.is_empty()
-                    || only.is_some_and(|n| !methods.iter().any(|m| m.name == n)))
-            {
-                continue;
+    /// The keys of the parameterized protocols this module sees by a name it declares or imports
+    /// (`import From from std.convert`, `import p` for `p.Parse`); a std module sees every std
+    /// protocol. Sorted, so a message naming two reads the same every run.
+    fn visible_protocol_keys(&self) -> std::collections::BTreeSet<String> {
+        let mut keys = std::collections::BTreeSet::new();
+        if self.current_module_is_stdlib {
+            for d in super::graph_pass::std_protocol_decls() {
+                keys.insert(d.name.clone());
             }
-            let Some(pinfo) = self.protocol_shape(&d.name) else {
+        }
+        for (bind, key) in &self.bare_types {
+            let other_type = self.struct_names.contains(bind)
+                || self.enum_names.contains(bind)
+                || self.aliases.contains_key(bind);
+            if !other_type && self.protocol_by_key(key).is_some() {
+                keys.insert(key.clone());
+            }
+        }
+        for mid in self.imported_modules.values() {
+            if let Some(sig) = self.module_sigs.get(mid) {
+                for member in sig.protocol_defs.keys() {
+                    keys.insert(self.type_key(mid, member));
+                }
+            }
+        }
+        keys.retain(|k| {
+            self.protocol_by_key(k)
+                .is_some_and(|p| !p.type_params.is_empty())
+        });
+        keys
+    }
+
+    /// A protocol's shape by its identity key: this checker's table, else the owning module's.
+    fn protocol_by_key(&self, key: &str) -> Option<&ProtocolInfo> {
+        self.protocols
+            .get(key)
+            .or_else(|| self.owning_protocol_def(key))
+    }
+
+    /// Every requirement of a [`Self::visible_protocol_keys`] protocol that has an
+    /// [`OverloadSlot`]; `only` limits it to one name.
+    fn visible_slot_reqs(&self, only: Option<&str>) -> Vec<OverloadReq> {
+        let mut out = Vec::new();
+        for key in self.visible_protocol_keys() {
+            let Some(pinfo) = self.protocol_by_key(&key) else {
                 continue;
             };
-            if pinfo.type_params.is_empty() {
-                continue;
-            }
-            let spelled = format!("{}[{}]", d.name, pinfo.type_params.join(", "));
+            let bare = crate::base::words::bare_display(&key);
+            let spelled = format!("{bare}[{}]", pinfo.type_params.join(", "));
             for (n, req) in pinfo.methods.iter() {
                 if only.is_some_and(|o| o != n) {
                     continue;
@@ -76,42 +119,61 @@ impl Checker {
         out
     }
 
-    /// The requirement [`Self::overload_reqs`] names `name`.
-    pub(super) fn overload_requirement(&self, name: &str) -> Option<OverloadReq> {
-        self.overload_reqs(Some(name)).into_iter().next()
+    /// THE owner of "is this method a protocol slot", decided once per type body at hoist: for each
+    /// method name, the requirement of a visible protocol ([`Self::visible_slot_reqs`]) that keys
+    /// it, when every declaration of the name has that slot's receiver (a `Param` slot keys a
+    /// static, a `Ret` slot an instance method). Any other method is plain. Two visible protocols
+    /// that key one declared name differently are an error naming both.
+    pub(super) fn decl_slots(&mut self, methods: &[FnDecl]) -> HashMap<String, OverloadReq> {
+        let reqs = self.visible_slot_reqs(None);
+        let mut slots = HashMap::new();
+        let mut seen = HashSet::new();
+        for m in methods {
+            if !seen.insert(m.name.as_str()) {
+                continue;
+            }
+            let mut named = reqs.iter().filter(|r| r.name == m.name);
+            let Some(first) = named.next() else {
+                continue;
+            };
+            if let Some(other) = named.find(|r| r.slot != first.slot) {
+                let (a, b, name) = (&first.spelled, &other.spelled, &m.name);
+                self.error(
+                    m.name_span,
+                    format!(
+                        "protocols {a} and {b} both declare '{name}' with different overload keys"
+                    ),
+                );
+                continue;
+            }
+            let instance = first.slot == OverloadSlot::Ret;
+            if methods
+                .iter()
+                .filter(|x| x.name == m.name)
+                .all(|x| x.takes_self() == instance)
+            {
+                slots.insert(m.name.clone(), first.clone());
+            }
+        }
+        slots
     }
 
     /// Report each repeated method name of one type body as "already defined", except a name the
-    /// gate admits as overloads: it names a requirement [`Self::overload_requirement`] finds and
-    /// every declaration of it has the requirement's receiver (none for `from`, `self` for
-    /// `into`). An overload set is two or more declarations; a lone `from` or `into` is a plain
-    /// method. Returns the admitted names.
-    pub(super) fn report_dup_methods(&mut self, methods: &[FnDecl]) -> HashSet<String> {
-        let mut overloaded = HashSet::new();
-        for m in methods {
-            if overloaded.contains(&m.name) {
-                continue;
-            }
-            let decls = || methods.iter().filter(|x| x.name == m.name);
-            if decls().count() == 1 {
-                continue;
-            }
-            let Some(r) = self.overload_requirement(&m.name) else {
-                continue;
-            };
-            let instance = r.slot == OverloadSlot::Ret;
-            if decls().all(|x| x.takes_self() == instance) {
-                overloaded.insert(m.name.clone());
-            }
-        }
+    /// body's [`Self::decl_slots`] key: its 2+ declarations are an overload set. Returns the
+    /// slots, for [`overload_sets`].
+    pub(super) fn report_dup_methods(
+        &mut self,
+        methods: &[FnDecl],
+    ) -> HashMap<String, OverloadReq> {
+        let slots = self.decl_slots(methods);
         self.report_dup_names(
             methods
                 .iter()
-                .filter(|m| !overloaded.contains(&m.name))
+                .filter(|m| !slots.contains_key(&m.name))
                 .map(|m| (m.name.as_str(), m.name_span)),
             "method",
         );
-        overloaded
+        slots
     }
 
     /// Does a value of type `arg` fit a parameter of type `param`? Assignable, or a plain value the
@@ -162,12 +224,12 @@ impl Checker {
     pub(super) fn check_overload_decls(
         &mut self,
         methods: &[FnDecl],
-        overloads: &HashMap<String, Vec<FnSig>>,
+        overloads: &Overloads,
         own_type_params: &[TypeParam],
         self_ty: &Ty,
     ) {
-        for (name, sigs) in overloads {
-            let Some(r) = self.overload_requirement(name) else {
+        for (name, sigs) in overloads.iter() {
+            let Some(r) = overloads.slots.get(name) else {
                 continue;
             };
             let (spelled, req, slot) = (&r.spelled, &r.req, r.slot);
@@ -182,7 +244,7 @@ impl Checker {
                 let key = slot.key(sig);
                 let msg = if decl.ret.is_none() {
                     format!("an overloaded {name} declares its return type, as {spelled} declares")
-                } else if let Some(msg) = self.ret_misfit(&r, &sig.ret, self_ty) {
+                } else if let Some(msg) = self.ret_misfit(r, &sig.ret, self_ty) {
                     msg
                 } else if sig.params.len() != req.params.len() && req.is_static {
                     let n = req.params.len();
@@ -262,7 +324,7 @@ impl Checker {
         }
         let twin = (is_result && ok_fits(ret_ok(ret)))
             .then(|| {
-                self.overload_reqs(None)
+                self.visible_slot_reqs(None)
                     .into_iter()
                     .find(|t| matches!(&t.req.ret, Ty::Result(ok, _) if **ok == r.req.ret))
             })
@@ -273,91 +335,6 @@ impl Checker {
         Some(format!(
             "an overloaded {name} returns {shape}, found {ret}{hint}"
         ))
-    }
-
-    /// One owner per conversion pair (Rust `E0119`): of `B.from(A)`, `B.try_from(A)`,
-    /// `A.into -> B` and `A.try_into -> B!`, at most one converts an `A` to a `B`. Each conversion
-    /// of the module's type bodies is a (source, target) pair: a `from`'s param to its type, its
-    /// type to an `into`'s target. Two of different names with one target and an overlapping
-    /// source conflict; two of one name are [`Self::check_overload_decls`]'s rule. A target
-    /// declared in another module is checked from the `into` side, the module that names both
-    /// types: its static conversions ([`Self::static_owner`]) are visible there, while the target's
-    /// module may not name `A` at all (`B.from(x: P)` for a protocol `P` that `A` satisfies).
-    pub(super) fn check_conversion_owners(&mut self, stmts: &[Stmt]) {
-        let mut convs: Vec<(&FnDecl, Ty, Ty)> = Vec::new();
-        for s in stmts {
-            let (name, methods, is_enum) = if let StmtKind::Struct { name, methods, .. } = &s.kind {
-                (name, methods, false)
-            } else if let StmtKind::Enum { name, methods, .. } = &s.kind {
-                (name, methods, true)
-            } else {
-                continue;
-            };
-            let reqs: Vec<(usize, OverloadReq)> = (0..methods.len())
-                .filter_map(|i| Some((i, self.overload_requirement(&methods[i].name)?)))
-                .filter(|(i, r)| methods[*i].takes_self() == (r.slot == OverloadSlot::Ret))
-                .collect();
-            if reqs.is_empty() {
-                continue;
-            }
-            let key = self.bare_key(name);
-            let (self_ty, table, overloads) = if is_enum {
-                let table = self.enum_methods_of(&key).cloned().unwrap_or_default();
-                let ov = self.enum_overloads_of(&key).cloned();
-                (self.enum_self_ty(name), table, ov)
-            } else {
-                let Some(info) = self.structs.get(&key) else {
-                    continue;
-                };
-                let (table, ov) = (info.methods.clone(), Some(info.overloads.clone()));
-                (self.struct_self_ty(name), table, ov)
-            };
-            for (i, r) in reqs {
-                let Some(sig) = method_decl_sig(methods, i, &table, overloads.as_ref()) else {
-                    continue;
-                };
-                let Some(k) = r.slot.key(&sig).filter(|k| !k.is_unknown()).cloned() else {
-                    continue;
-                };
-                let pair = match r.slot {
-                    OverloadSlot::Param(_) => (k, self_ty.clone()),
-                    OverloadSlot::Ret => (self_ty.clone(), k),
-                };
-                convs.push((&methods[i], pair.0, pair.1));
-            }
-        }
-        for (decl, a, b) in &convs {
-            let local = |d: &FnDecl, t: &Ty| !d.takes_self() && t == b;
-            if !decl.takes_self() || convs.iter().any(|(d, _, t)| local(d, t)) {
-                continue;
-            }
-            if let Some(owner) = self.static_owner(b, a) {
-                let here = decl.name_span;
-                self.error(
-                    here,
-                    format!(
-                        "conflicting conversion {a} -> {b}: {} at {}:{} and {b}.{owner} of an imported module",
-                        decl.name, here.line, here.col
-                    ),
-                );
-            }
-        }
-        for (j, (decl, a2, b2)) in convs.iter().enumerate() {
-            let earlier = convs[..j]
-                .iter()
-                .filter(|(d, _, b)| d.name != decl.name && b == b2)
-                .find_map(|(d, a, _)| self.overlap(a, a2).map(|what| (d, what)));
-            if let Some((d, what)) = earlier {
-                let (at, here) = (d.name_span, decl.name_span);
-                self.error(
-                    here,
-                    format!(
-                        "conflicting conversion {what} -> {b2}: {} at {}:{} and {} at {}:{}",
-                        d.name, at.line, at.col, decl.name, here.line, here.col
-                    ),
-                );
-            }
-        }
     }
 
     /// The sig of `methods[i]` at hoist: [`Self::fn_sig`], with the call-binding slots named for
@@ -374,16 +351,12 @@ impl Checker {
 
     /// Record each overload's internal name under its decl name span, for the compiler (the
     /// harvest pass only, as every [`WitnessTable`] half).
-    pub(super) fn record_overload_names(
-        &mut self,
-        methods: &[FnDecl],
-        overloads: &HashMap<String, Vec<FnSig>>,
-    ) {
+    pub(super) fn record_overload_names(&mut self, methods: &[FnDecl], overloads: &Overloads) {
         if !self.harvest_keywords {
             return;
         }
-        for (name, sigs) in overloads {
-            let Some(slot) = self.overload_requirement(name).map(|r| r.slot) else {
+        for (name, sigs) in overloads.iter() {
+            let Some(slot) = overloads.slots.get(name).map(|r| r.slot) else {
                 continue;
             };
             for (decl, sig) in methods.iter().filter(|m| &m.name == name).zip(sigs) {
@@ -397,19 +370,50 @@ impl Checker {
         }
     }
 
-    /// The overload set of `name` on the type `th` names, when `name` is overloaded there.
-    pub(super) fn head_overloads(&self, th: &TypeHead, name: &str) -> Option<Vec<FnSig>> {
-        let sets = match th.kind {
-            TypeHeadKind::Enum => self.enum_overloads_of(&th.key)?,
-            TypeHeadKind::Struct if th.native_handle => return None,
-            TypeHeadKind::Struct => &self.struct_shape(&th.key)?.overloads,
-            TypeHeadKind::Protocol => return None,
-        };
-        sets.get(name).cloned()
+    /// The protocol-slot methods of the type `th` names: a struct's, an enum's, or a builtin's
+    /// native struct's (`int.from`).
+    fn head_table(&self, th: &TypeHead) -> Option<&Overloads> {
+        match th.kind {
+            TypeHeadKind::Enum => self.enum_overloads_of(&th.key),
+            TypeHeadKind::Struct if th.native_handle => {
+                self.container_seeds.get(&th.key).map(|i| &i.overloads)
+            }
+            TypeHeadKind::Struct => self.struct_shape(&th.key).map(|i| &i.overloads),
+            TypeHeadKind::Protocol => None,
+        }
     }
 
-    /// The overload sets of the struct or enum `ty`, if it has any.
-    pub(super) fn nominal_overloads(&self, ty: &Ty) -> Option<&HashMap<String, Vec<FnSig>>> {
+    /// The overload set of `name` on the type `th` names and its stored slot, when `name` is
+    /// overloaded there.
+    pub(super) fn head_overloads(
+        &self,
+        th: &TypeHead,
+        name: &str,
+    ) -> Option<(Vec<FnSig>, OverloadSlot)> {
+        let table = self.head_table(th)?;
+        Some((table.get(name)?.clone(), table.slots.get(name)?.slot))
+    }
+
+    /// The stored slot of the method `name` of the type `th` names, a lone method included.
+    pub(super) fn head_slot(&self, th: &TypeHead, name: &str) -> Option<OverloadSlot> {
+        Some(self.head_table(th)?.slots.get(name)?.slot)
+    }
+
+    /// The slot of the requirement `name` of the protocol `key`, off its shape: a call through a
+    /// bound type param (`T.from(x)`) has no receiver type that stores one.
+    pub(super) fn requirement_slot(&self, key: &str, name: &str) -> Option<OverloadSlot> {
+        let p = self.protocol_shape(key)?;
+        let (_, req) = p.methods.iter().find(|(n, _)| n == name)?;
+        overload_slot(req, &p.type_params)
+    }
+
+    /// The stored slot of the method `name` of the type `ty`, a lone method included.
+    pub(super) fn slot_of(&self, ty: &Ty, name: &str) -> Option<&OverloadReq> {
+        self.nominal_overloads(ty)?.slots.get(name)
+    }
+
+    /// The protocol-slot methods of the struct or enum `ty`, or of a builtin's native struct.
+    pub(super) fn nominal_overloads(&self, ty: &Ty) -> Option<&Overloads> {
         match ty {
             Ty::Struct(k, _) => self.struct_shape(k).map(|i| &i.overloads),
             Ty::Enum(k, _) => self.enum_overloads_of(k),
@@ -419,10 +423,12 @@ impl Checker {
             | Ty::Str
             | Ty::Bytes
             | Ty::ByteArray
-            | Ty::Nil
             | Ty::List(_)
             | Ty::Map(..)
-            | Ty::Set(_)
+            | Ty::Set(_) => Self::native_witness_key(ty)
+                .and_then(|k| self.container_seeds.get(k))
+                .map(|i| &i.overloads),
+            Ty::Nil
             | Ty::Func { .. }
             | Ty::Tuple(_)
             | Ty::Param(_)
@@ -449,8 +455,8 @@ impl Checker {
 
     /// THE witness pick, read by conformance and by the witness record alike: the overload of
     /// `name` on `ty` that witnesses a requirement with param types `want` (its `S` already
-    /// substituted). It is the direct call's pick ([`Self::fitting_overloads`]): the one overload
-    /// the source fits, so a source with holes (`List[?]` from `[]`, `None`) still picks, and the
+    /// substituted), keyed at the slot `ty` stores. It is the direct call's pick
+    /// ([`Self::fitting_overloads`]): the one overload the source fits, so a source with holes (`List[?]` from `[]`, `None`) still picks, and the
     /// declaration order never matters. `None` when `name` is not overloaded on `ty`; `Some(Err)`,
     /// the call's message, when no overload or more than one fits.
     pub(super) fn witness_overload(
@@ -459,14 +465,18 @@ impl Checker {
         name: &str,
         want: &[Ty],
     ) -> Option<Result<&FnSig, String>> {
-        let set = self.nominal_overloads(ty)?.get(name)?;
-        let slot = self.overload_requirement(name)?.slot;
-        if slot == OverloadSlot::Ret {
-            return Some(Err(format!(
-                "its {name} is picked by the target type, as x.{name}[T]()"
-            )));
-        }
-        let s = want.first().cloned().unwrap_or(Ty::Unknown);
+        let table = self.nominal_overloads(ty)?;
+        let set = table.get(name)?;
+        let i = match table.slots.get(name)?.slot {
+            OverloadSlot::Param(i) => i,
+            OverloadSlot::Ret => {
+                return Some(Err(format!(
+                    "its {name} is picked by the target type, as x.{name}[T]()"
+                )));
+            }
+        };
+        let slot = OverloadSlot::Param(i);
+        let s = want.get(i).cloned().unwrap_or(Ty::Unknown);
         let fitting = self.fitting_overloads(set, slot, &s);
         Some(match fitting.as_slice() {
             [k] => Ok(&set[*k]),
@@ -482,13 +492,14 @@ impl Checker {
     }
 
     /// The direct call `Type.name(arg)` on an overloaded `name`: the index of the one overload in
-    /// `set` whose param the argument [`Self::fits`]. The argument is the one positional argument
+    /// `set` whose param at `slot` (the type's stored slot) the argument [`Self::fits`]. The argument is the one positional argument
     /// or the keyword argument named as the param. No overload fits (no widening, Rust `E0277`),
     /// or more than one fits (Rust `E0283`), is an error that lists the overloads; `None` then, and
     /// the arguments are inferred for their own errors.
     pub(super) fn pick_overload(
         &mut self,
         set: &[FnSig],
+        slot: OverloadSlot,
         tname: &str,
         name: &str,
         args: &[Expr],
@@ -526,7 +537,6 @@ impl Checker {
         let saved = std::mem::replace(&mut self.generic_arg_prepass, true);
         let t = self.probe_ty(&arg);
         self.generic_arg_prepass = saved;
-        let slot = OverloadSlot::Param(0);
         let fitting = self.fitting_overloads(set, slot, &t);
         if let [k] = fitting.as_slice() {
             return Some(*k);
@@ -545,20 +555,18 @@ impl Checker {
         None
     }
 
-    /// The overloaded `name` read as a value (`f: fn(int) -> Rat = Rat.from`): the index of
-    /// the one overload whose param [`Self::fits`] the single param of the position's fn type
-    /// (the `expected_hint`). No fn type there, or one that does not pick exactly one, is an
+    /// The overloaded `name` read as a value (`f: fn(int) -> Rat = Rat.from`), keyed at the type's
+    /// stored `slot`: the index of the one overload whose param [`Self::fits`] the single param of
+    /// the position's fn type (the `expected_hint`). No fn type there, or one that does not pick exactly one, is an
     /// error that lists the overloads (Rust `E0283`: `let g = Rat::from;` needs an annotation).
     pub(super) fn pick_overload_value(
         &mut self,
         set: &[FnSig],
+        slot: OverloadSlot,
         tname: &str,
         name: &str,
         span: Span,
     ) -> Option<usize> {
-        let slot = self
-            .overload_requirement(name)
-            .map_or(OverloadSlot::Param(0), |r| r.slot);
         let want = match self.expected_hint.clone() {
             Some(Ty::Func { params, ret, .. }) if params.len() == 1 => match slot {
                 OverloadSlot::Param(_) => params.into_iter().next(),
@@ -604,11 +612,13 @@ impl Checker {
             .collect()
     }
 
-    /// Record the overload a direct call picked (`set[k]`) under the call's [`WitnessKey`], for
-    /// the compiler's `CallStatic` (the harvest pass only, as every [`WitnessTable`] half).
+    /// Record the overload a direct call picked (`sig`, keyed at the type's stored `slot`) under the
+    /// call's [`WitnessKey`], for the compiler's `CallStatic` (the harvest pass only, as every
+    /// [`WitnessTable`] half).
     pub(super) fn record_overload_call(
         &mut self,
         name: &str,
+        slot: OverloadSlot,
         sig: &FnSig,
         key_span: Span,
         span: Span,
@@ -616,9 +626,6 @@ impl Checker {
         if !self.harvest_keywords || self.generic_arg_prepass || self.resolving_returns {
             return;
         }
-        let slot = self
-            .overload_requirement(name)
-            .map_or(OverloadSlot::Param(0), |r| r.slot);
         let Some(s) = slot.key(sig) else {
             return;
         };
@@ -639,13 +646,12 @@ impl Checker {
 }
 
 impl Checker {
-    /// `x.into[T]()` on a receiver of type `obj_ty`, when `method` is a conversion keyed by its
-    /// target (`Into[T]`'s `into`, `TryInto[T]`'s `try_into`): the `[T]` picks the one overload of
-    /// the receiver whose target is `T`, and the call is that overload's return. A lone `into` is
-    /// a plain method: the same pick checks a `[T]` on it against its return, then clears
-    /// `type_args` for the ordinary call. With no `into` and a `T` that converts the receiver's
-    /// type itself (`B.from(A)`), the error names that conversion: there is no blanket `into` from
-    /// a `from`. `None` when the ordinary method call runs.
+    /// `x.into[T]()` on a receiver of type `obj_ty`, when the receiver's type stores `method` as a
+    /// slot keyed by its target (`Into[T]`'s `into`, `TryInto[T]`'s `try_into`): the `[T]` picks
+    /// the one overload of the receiver whose target is `T`, and the call is that overload's
+    /// return. A lone `into` is a plain method: the same pick checks a `[T]` on it against its
+    /// return, then clears `type_args` for the ordinary call. `None` when the ordinary method call
+    /// runs.
     #[allow(clippy::too_many_arguments)] // receiver + its type + method + args + targs + spans
     pub(super) fn infer_target_call(
         &mut self,
@@ -664,7 +670,8 @@ impl Checker {
         if set.is_none() && type_args.is_empty() {
             return None;
         }
-        if self.overload_requirement(method)?.slot != OverloadSlot::Ret {
+        let slot = self.slot_of(obj_ty, method)?.slot;
+        if slot != OverloadSlot::Ret {
             return None;
         }
         let recv = if let ExprKind::Ident(n) = &obj.kind {
@@ -683,7 +690,7 @@ impl Checker {
             {
                 let targs = *type_args;
                 if self
-                    .pick_target(&one, &tname, method, targs, &recv, Some(obj_ty), name_span)
+                    .pick_target(&one, &tname, method, targs, &recv, name_span)
                     .is_none()
                 {
                     self.infer_all(args);
@@ -691,19 +698,8 @@ impl Checker {
                     return Some(Ty::Unknown);
                 }
                 *type_args = &[];
-                return None;
             }
-            let [t] = *type_args else {
-                return None;
-            };
-            let hint = self.owner_hint(t, obj_ty, &recv)?;
-            self.infer_all(args);
-            self.consume_named();
-            self.error(
-                name_span,
-                format!("type {obj_ty} has no {method} for {t}{hint}"),
-            );
-            return Some(Ty::Unknown);
+            return None;
         };
         let named = self.call_ctx.as_ref().map_or(0, |c| c.named.len());
         if !args.is_empty() || named > 0 {
@@ -716,32 +712,16 @@ impl Checker {
             );
             return Some(Ty::Unknown);
         }
-        let Some(k) = self.pick_target(
-            &set,
-            &tname,
-            method,
-            type_args,
-            &recv,
-            Some(obj_ty),
-            name_span,
-        ) else {
+        let Some(k) = self.pick_target(&set, &tname, method, type_args, &recv, name_span) else {
             return Some(Ty::Unknown);
         };
-        self.record_overload_call(method, &set[k], name_span, span);
+        self.record_overload_call(method, slot, &set[k], name_span, span);
         Some(set[k].ret.clone())
     }
 
-    /// Is `name` a conversion keyed by its target (`into`, `try_into`)?
-    pub(super) fn target_keyed(&self, name: &str) -> bool {
-        self.overload_requirement(name)
-            .is_some_and(|r| r.slot == OverloadSlot::Ret)
-    }
-
     /// The call `x.name[T]()` (or `A.name[T](x)`) on `set`, an overload set keyed by its target,
-    /// with `targs` its type arguments and `src` the receiver's type when known: the index of the
-    /// one overload whose target is `T`. No `[T]` ("needs a target type"), or no overload for `T`
-    /// (with the owner of the pair when `T` converts `src` itself), is an error.
-    #[allow(clippy::too_many_arguments)] // the set + its type + name + targs + receiver + span
+    /// with `targs` its type arguments: the index of the one overload whose target is `T`. No
+    /// `[T]` ("needs a target type"), or no overload for `T`, is an error.
     pub(super) fn pick_target(
         &mut self,
         set: &[FnSig],
@@ -749,7 +729,6 @@ impl Checker {
         name: &str,
         targs: &[Ty],
         recv: &str,
-        src: Option<&Ty>,
         span: Span,
     ) -> Option<usize> {
         let t = match targs {
@@ -775,45 +754,14 @@ impl Checker {
         if let [k] = fitting.as_slice() {
             return Some(*k);
         }
-        let hint = src
-            .and_then(|s| self.owner_hint(t, s, recv))
-            .unwrap_or_default();
         let msg = overload_misfit(set, slot, &fitting, tname, name, Some(t));
-        self.error(span, format!("{msg}{hint}"));
+        self.error(span, msg);
         None
     }
 
-    /// When the target `t` converts `src` itself (a static conversion of `t` whose source `src`
-    /// fits: `Big.from(x: Rat)`), the note that names it: "; Big defines it: use Big.from(r)".
-    fn owner_hint(&self, t: &Ty, src: &Ty, recv: &str) -> Option<String> {
-        let owner = self.static_owner(t, src)?;
-        Some(format!("; {t} defines it: use {t}.{owner}({recv})"))
-    }
-
-    /// The static conversion of the target `t` that converts `src` (`from` for `Big.from(x: Rat)`
-    /// and a `Rat`, or a type that satisfies a protocol-typed source), if any.
-    fn static_owner(&self, t: &Ty, src: &Ty) -> Option<String> {
-        let owner = self.overload_reqs(None).into_iter().find(|r| {
-            let OverloadSlot::Param(i) = r.slot else {
-                return false;
-            };
-            self.conversion_sigs(t, &r.name).iter().any(|sig| {
-                sig.is_static
-                    && sig
-                        .params
-                        .get(i)
-                        .is_some_and(|p| !p.is_unknown() && self.fits(p, src))
-            })
-        })?;
-        Some(owner.name)
-    }
-
-    /// The sigs of `ty`'s method `name`: its overload set, else its one method (a struct, an
-    /// enum or a builtin scalar's native struct).
+    /// The one method `name` of `ty` (a struct, an enum or a builtin scalar's native struct), as a
+    /// set of one.
     fn conversion_sigs(&self, ty: &Ty, name: &str) -> Vec<FnSig> {
-        if let Some(set) = self.nominal_overloads(ty).and_then(|o| o.get(name)) {
-            return set.clone();
-        }
         let table = if let Ty::Enum(k, _) = ty {
             self.enum_methods_of(k)
         } else {
@@ -918,18 +866,20 @@ pub(super) fn internal_name(base: &str, s: &Ty) -> String {
     )
 }
 
-/// The overload sets of one type body: each admitted name's sigs, in declaration order.
+/// One type body's [`Overloads`]: its `slots` ([`Checker::report_dup_methods`]), and each slotted
+/// name declared 2+ times with its sigs in declaration order.
 pub(super) fn overload_sets(
-    overloaded: &HashSet<String>,
+    slots: HashMap<String, OverloadReq>,
     sigs: &[(String, FnSig)],
-) -> HashMap<String, Vec<FnSig>> {
+) -> Overloads {
     let mut sets: HashMap<String, Vec<FnSig>> = HashMap::new();
     for (name, sig) in sigs {
-        if overloaded.contains(name) {
+        if slots.contains_key(name) {
             sets.entry(name.clone()).or_default().push(sig.clone());
         }
     }
-    sets
+    sets.retain(|_, set| set.len() > 1);
+    Overloads { slots, sets }
 }
 
 /// The signature the body of `methods[i]` is checked against: its own overload's sig when its name
@@ -939,7 +889,7 @@ pub(super) fn method_decl_sig(
     methods: &[FnDecl],
     i: usize,
     table: &HashMap<String, FnSig>,
-    overloads: Option<&HashMap<String, Vec<FnSig>>>,
+    overloads: Option<&Overloads>,
 ) -> Option<FnSig> {
     let name = &methods[i].name;
     if let Some(set) = overloads.and_then(|o| o.get(name)) {

@@ -117,11 +117,13 @@ q := Path(b"/a/b")                 # sets the field
 may not share a name (a declaration-time error), so `Color.Red` is always the variant.
 
 A type declares each method name once (`method 'show' is already defined`). The one exception is a
-static `from`: one per source type, picked by the argument's type (`Rat.from(3)`,
-`Rat.from("1/3")`). A conversion that can fail is a static `try_from(x: S) -> Self!`, overloaded
-the same way. A type converts itself with an instance `into(self) -> T`, one per target type and
-picked by the call's `[T]` (`r.into[float]()`), and `try_into(self) -> T!` when it can fail. One
-pair of types has one owner: a `from`, a `try_from`, an `into` or a `try_into`. The rules are in
+method a parameterized protocol keys, when the declaring module declares or imports that protocol
+([`09-protocols.md`](09-protocols.md#a-parameterized-protocol-keys-overloads)): a static `from`
+(after `import From from std.convert`), one per source type, picked by the argument's type
+(`Rat.from(3)`, `Rat.from("1/3")`). A conversion that can fail is a static
+`try_from(x: S) -> Self!`, overloaded the same way. A type converts itself with an instance
+`into(self) -> T`, one per target type and picked by the call's `[T]` (`r.into[float]()`), and
+`try_into(self) -> T!` when it can fail. The rules are in
 [`05-conversions.md`](../spec/05-conversions.md).
 
 **Generic static methods** take a **type-level turbofish** (the type's args sit on the type):

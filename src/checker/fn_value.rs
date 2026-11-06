@@ -759,12 +759,13 @@ impl Checker {
                 // An overloaded name: the position's fn type picks the overload, and the compiler's
                 // `MakeMethodFunc` reads the pick off the table, as a direct call's `CallStatic`.
                 let pick = match self.head_overloads(&th, name) {
-                    Some(set) => {
-                        let Some(k) = self.pick_overload_value(&set, &spelled, name, name_span)
+                    Some((set, slot)) => {
+                        let Some(k) =
+                            self.pick_overload_value(&set, slot, &spelled, name, name_span)
                         else {
                             return Some(Ty::Unknown);
                         };
-                        self.record_overload_call(name, &set[k], name_span, name_span);
+                        self.record_overload_call(name, slot, &set[k], name_span, name_span);
                         Some(k)
                     }
                     None => None,

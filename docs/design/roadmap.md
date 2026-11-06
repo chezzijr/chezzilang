@@ -161,9 +161,9 @@ and range patterns, `std.os.exit`, stack traces, static protocol requirements, `
 |---|---|
 | `ref T` / `Ref[T]` | removed: scalar aliasing only; use a one-field `struct` in a task, `Shared[T]` across tasks |
 | `cast[T](val: Any) -> T?` | no consumer: the owner ruled against leaning on `Any`. If it returns, only `cast[Scalar]`, `cast[str]`, a bare container kind and a named struct/enum are sound; a parameterized target needs runtime type tags |
-| `Into` | done (2026-11-06): an instance `into(self) -> T` / `try_into(self) -> T!` per target, picked by `x.into[T]()` (bottom-up inference, so the target is written); no blanket `into` from a `from`; one owner per conversion pair. `Into[T]` as a bound: not yet ([`05-conversions.md`](../reference/spec/05-conversions.md)) |
+| `Into` | done (2026-11-06): an instance `into(self) -> T` / `try_into(self) -> T!` per target, picked by `x.into[T]()` (bottom-up inference, so the target is written); no blanket `into` from a `from`; several owners of one conversion pair are allowed (no blanket impl). `Into[T]` as a bound: not yet ([`05-conversions.md`](../reference/spec/05-conversions.md)) |
 | `TryFrom` | done (2026-11-05): `try_from(x: S) -> Self!`, the fallible twin of `from`, as a bound `[T: TryFrom[S]]`; a `Self!` `from` cannot meet `From[S]`. `int`/`float` witness `From[bool]` and `TryFrom[str]` ([`05-conversions.md`](../reference/spec/05-conversions.md)) |
-| multi-source `From` | done (2026-11-05): one static `from` overload per source type, picked by the argument's type ([`05-conversions.md`](../reference/spec/05-conversions.md)); other overloading stays banned |
+| multi-source `From` | done (2026-11-05): one static `from` overload per source type, picked by the argument's type ([`05-conversions.md`](../reference/spec/05-conversions.md)); since 2026-11-06 any parameterized protocol the declaring module sees keys overloads ([`09-protocols.md`](../reference/syntax/09-protocols.md#a-parameterized-protocol-keys-overloads)); free overloading of plain methods stays banned |
 
 ---
 

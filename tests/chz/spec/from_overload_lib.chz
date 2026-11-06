@@ -1,6 +1,10 @@
 # Helper MODULE for `from_overload_test.chz`: a struct and an enum with several `from`
 # overloads, declared in ANOTHER module. Not a `*_test.chz`, so `chezzi test` never runs it alone.
 # It shows that an importer picks the right overload and runs the right body across the boundary.
+# This module declares the overloads, so it imports the protocol that keys them; the importer
+# needs no import to call them.
+
+import From from std.convert
 
 struct Temp:
     c: int

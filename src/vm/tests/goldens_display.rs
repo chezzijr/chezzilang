@@ -2325,7 +2325,7 @@ fn a_from_overload_frame_in_a_trace_reads_from() {
     let entry = dir.join("main.chz");
     std::fs::write(
         &entry,
-        "struct Rat:\n    n: int\n    fn from(x: int) -> Rat:\n        return Rat(x)\n    fn from(x: str) -> Rat:\n        return Rat([1][9])\nprint(Rat.from(\"a\").n)\n",
+        "import From from std.convert\nstruct Rat:\n    n: int\n    fn from(x: int) -> Rat:\n        return Rat(x)\n    fn from(x: str) -> Rat:\n        return Rat([1][9])\nprint(Rat.from(\"a\").n)\n",
     )
     .unwrap();
     let (_o, _e, res, _c) = run_file(&entry);

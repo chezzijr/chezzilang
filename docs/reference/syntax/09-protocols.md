@@ -473,6 +473,40 @@ fn first(c: Container[int]) -> int:   # existential value slot
     return c.get(0) + 1               # c.get(0) recovers to int
 ```
 
+#### A parameterized protocol keys overloads
+
+A type may declare one method name several times when a parameterized protocol keys it, one
+declaration per argument (Rust's several `impl Parse<S> for W`). The key is the requirement's
+parameter that names the protocol's type parameter (a static `fn parse(x: S) -> Self`: the argument
+picks), or the return of a `self`-only method that is the type parameter (`fn into(self) -> T`: the
+call's `[T]` picks). `std.convert`'s `From`, `TryFrom`, `Into` and `TryInto` are such protocols;
+any user protocol is too:
+
+```chezzi
+protocol Parse[S]:
+    fn parse(x: S) -> Self
+
+struct W:
+    n: int
+    fn parse(x: int) -> W:
+        return W(x)
+    fn parse(x: str) -> W:
+        return W(x.len())
+
+a := W.parse(3)       # the int overload
+b := W.parse("ab")    # the str overload
+```
+
+- Only a protocol the DECLARING module declares or imports keys its methods: overloading `from`
+  needs `import From from std.convert`. Without one, a repeat is *method 'parse' is already defined*,
+  as is every repeated plain method (no free overloading, as in Rust, Go and Python).
+- The key is decided once, at the declaration, and travels with the type: a module that imports only
+  `W` calls `W.parse("a")` with no import of `Parse`.
+- Two visible protocols that key one method name differently (`parse(x: S)` and `parse(self) -> T`)
+  are *protocols Emit[T] and Parse[S] both declare 'parse' with different overload keys*.
+- The declaration rules (shape, overlap) and the picks are the conversions' rules:
+  [`05-conversions.md`](../spec/05-conversions.md).
+
 > **A protocol crosses a module boundary like any other declaration.** `mod.Named` and
 > `import Named from mod` (with or without `as`) resolve, in a bound too: `[T: mod.Named]`,
 > `where T: mod.Named`, `[T: mod.A + mod.B]`, `[S: mod.Container[int]]` and an embed line

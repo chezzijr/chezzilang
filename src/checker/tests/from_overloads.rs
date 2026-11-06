@@ -1,12 +1,16 @@
 //! Checker tests: declaring several static `from` / `try_from` overloads on one type (Rust's
 //! several `impl From<S>` / `impl TryFrom<S>`), and the builtin `int` / `float` conversions. The
-//! declaration rules: which repeats are admitted, which overlap, which shapes, one owner per source.
+//! declaration rules: which repeats a visible protocol admits, which overlap, which shapes.
 
 use super::*;
 
-/// A struct `Rat` with `body` as its methods (each line already indented one level).
+/// The import that lets a module overload `from` / `try_from` (the protocols that key them).
+const FROM: &str = "import From, TryFrom from std.convert\n";
+
+/// A struct `Rat` with `body` as its methods (each line already indented one level), after the
+/// [`FROM`] import: `Rat` starts at line 2.
 fn rat(body: &str) -> String {
-    format!("struct Rat:\n    n: int\n{body}fn main():\n    print(1)\nmain()\n")
+    format!("{FROM}struct Rat:\n    n: int\n{body}fn main():\n    print(1)\nmain()\n")
 }
 
 /// The whole declaration grid. Each accept cell type-checks clean; each reject cell gives its
@@ -31,10 +35,6 @@ fn from_overload_declaration_grid() {
             )),
         ),
         (
-            "int + str with the From import",
-            format!("import From from std.convert\n{}", rat(&format!("{to_int}{to_str}"))),
-        ),
-        (
             "try_from overloads returning Rat!str",
             rat("    fn try_from(x: int) -> Rat!str:\n        return Rat(x)\n    fn try_from(x: str) -> Rat!str:\n        return !\"no\"\n"),
         ),
@@ -42,16 +42,21 @@ fn from_overload_declaration_grid() {
             "a from and a try_from of different sources",
             rat(&format!("{to_int}    fn try_from(x: str) -> Rat!:\n        return Rat(x.to_int()?)\n")),
         ),
+        // No one owner per conversion pair: Chezzi has no blanket impl to make them clash.
+        (
+            "a from and a try_from of one source",
+            rat(&format!("{to_int}    fn try_from(x: int) -> Rat!:\n        return Rat(x)\n")),
+        ),
         (
             "int + str on an enum",
-            "enum E:\n    A\n    B\n    fn from(x: int) -> E:\n        return E.A\n    fn from(x: str) -> E:\n        return E.B\nfn main():\n    print(1)\nmain()\n".to_string(),
+            "import From from std.convert\nenum E:\n    A\n    B\n    fn from(x: int) -> E:\n        return E.A\n    fn from(x: str) -> E:\n        return E.B\nfn main():\n    print(1)\nmain()\n".to_string(),
         ),
     ];
     let reject: Vec<(&str, String, &str)> = vec![
         (
             "same type twice",
             rat(&format!("{to_int}{to_int}")),
-            "conflicting from for int: from(x: int) at 3:8",
+            "conflicting from for int: from(x: int) at 4:8",
         ),
         (
             "an alias of the same type",
@@ -73,7 +78,7 @@ fn from_overload_declaration_grid() {
         (
             "int? + str?",
             rat("    fn from(x: int?) -> Rat:\n        return Rat(0)\n    fn from(x: str?) -> Rat:\n        return Rat(0)\n"),
-            "conflicting from for None: from(x: int?) at 3:8",
+            "conflicting from for None: from(x: int?) at 4:8",
         ),
         (
             "a protocol param + a struct that satisfies it",
@@ -94,7 +99,7 @@ fn from_overload_declaration_grid() {
         (
             "int!str + int!int (3 wraps into both)",
             rat("    fn from(x: int!str) -> Rat:\n        return Rat(0)\n    fn from(x: int!int) -> Rat:\n        return Rat(1)\n"),
-            "conflicting from for int: from(x: int!str) at 3:8",
+            "conflicting from for int: from(x: int!str) at 4:8",
         ),
         (
             "int? + int!str (3 wraps into both)",
@@ -130,16 +135,6 @@ fn from_overload_declaration_grid() {
             "an overloaded try_from returns Self!E, found Rat",
         ),
         (
-            "a from and a try_from of one source",
-            rat(&format!("{to_int}    fn try_from(x: int) -> Rat!:\n        return Rat(x)\n")),
-            "conflicting conversion int -> Rat: from at 3:8 and try_from at 5:8",
-        ),
-        (
-            "a from and a try_from of overlapping sources",
-            rat("    fn from(x: int?) -> Rat:\n        return Rat(0)\n    fn try_from(x: str?) -> Rat!:\n        return Rat(1)\n"),
-            "conflicting conversion None -> Rat: from at 3:8 and try_from at 5:8",
-        ),
-        (
             "a renamed param",
             rat(&format!(
                 "{to_int}    fn from(y: str) -> Rat:\n        return Rat(0)\n"
@@ -160,7 +155,7 @@ fn from_overload_declaration_grid() {
         ),
         (
             "a generic param",
-            "struct Box[T]:\n    v: int\n    fn from(x: T) -> Box[T]:\n        return Box[T](0)\n    fn from(x: int) -> Box[T]:\n        return Box[T](x)\nfn main():\n    print(1)\nmain()\n".to_string(),
+            "import From from std.convert\nstruct Box[T]:\n    v: int\n    fn from(x: T) -> Box[T]:\n        return Box[T](0)\n    fn from(x: int) -> Box[T]:\n        return Box[T](x)\nfn main():\n    print(1)\nmain()\n".to_string(),
             "an overloaded from takes a concrete type, found T",
         ),
         (
@@ -172,7 +167,7 @@ fn from_overload_declaration_grid() {
         ),
         (
             "the same type twice on an enum",
-            "enum E:\n    A\n    fn from(x: int) -> E:\n        return E.A\n    fn from(x: int) -> E:\n        return E.A\nfn main():\n    print(1)\nmain()\n".to_string(),
+            "import From from std.convert\nenum E:\n    A\n    fn from(x: int) -> E:\n        return E.A\n    fn from(x: int) -> E:\n        return E.A\nfn main():\n    print(1)\nmain()\n".to_string(),
             "conflicting from for int",
         ),
         (
@@ -216,7 +211,7 @@ fn from_overload_call_grid() {
     let three = "    fn from(x: int) -> Rat:\n        return Rat(x)\n    fn from(x: str) -> Rat:\n        return Rat(x.len())\n    fn from(x: Rat) -> Rat:\n        return Rat(x.n)\n";
     let lists = "    fn from(x: List[int]) -> Rat:\n        return Rat(0)\n    fn from(x: List[str]) -> Rat:\n        return Rat(1)\n";
     let call = |body: &str, stmt: &str| {
-        format!("struct Rat:\n    n: int\n{body}fn main():\n    {stmt}\nmain()\n")
+        format!("{FROM}struct Rat:\n    n: int\n{body}fn main():\n    {stmt}\nmain()\n")
     };
     let accept: Vec<(&str, String)> = vec![
         ("an int", call(three, "r := Rat.from(3)")),
@@ -345,16 +340,17 @@ fn from_overload_bound_pick_ignores_declaration_order() {
 }
 
 /// The instance conversion `fn into(self) -> T` / `fn try_into(self) -> T!` (Rust `impl Into<T>`,
-/// `impl TryInto<T>`), overloaded by the return type and picked by `r.into[T]()`, and the one
-/// owner per conversion pair (Rust `E0119`): at most one of `B.from(A)`, `B.try_from(A)`,
-/// `A.into -> B`, `A.try_into -> B!`. The program is `Rat` (methods `rat`), then `Big` (methods
-/// `big`), then `main` running `stmt`. Each accept cell type-checks clean; each reject cell gives
-/// its message, and a cell the overload gate admits never also says "already defined".
+/// `impl TryInto<T>`), overloaded by the return type and picked by `r.into[T]()`. A conversion pair
+/// may have several owners (`B.from(A)` beside `A.into -> B`): Chezzi has no blanket impl. The
+/// program imports the four conversion protocols (line 1), then `Rat` (methods `rat`), then `Big`
+/// (methods `big`), then `main` running `stmt`. Each accept cell type-checks clean; each reject
+/// cell gives its message, and a cell the overload gate admits never also says "already defined".
 #[test]
 fn into_overload_grid() {
+    const CONV: &str = "import From, TryFrom, Into, TryInto from std.convert\n";
     let src = |rat: &str, big: &str, stmt: &str| {
         format!(
-            "struct Rat:\n    n: int\n{rat}struct Big:\n    n: int\n{big}fn main():\n    r := Rat(1)\n    {stmt}\nmain()\n"
+            "{CONV}struct Rat:\n    n: int\n{rat}struct Big:\n    n: int\n{big}fn main():\n    r := Rat(1)\n    {stmt}\nmain()\n"
         )
     };
     let to_float = "    fn into(self) -> float:\n        return 0.5\n";
@@ -396,7 +392,7 @@ fn into_overload_grid() {
         ),
         (
             "an enum into",
-            "enum E:\n    A\n    fn into(self) -> int:\n        return 1\nfn main():\n    n: int = E.A.into[int]()\nmain()\n".to_string(),
+            "import Into from std.convert\nenum E:\n    A\n    fn into(self) -> int:\n        return 1\nfn main():\n    n: int = E.A.into[int]()\nmain()\n".to_string(),
         ),
         (
             "a static into is a plain method",
@@ -409,6 +405,22 @@ fn into_overload_grid() {
         (
             "Rat into float beside Rat from float (two directions)",
             src(&format!("{to_float}    fn from(x: float) -> Rat:\n        return Rat(0)\n"), "", "f: float = r.into[float]()"),
+        ),
+        (
+            "Rat.into -> Big and Big.from(Rat)",
+            src(to_big, big_from, "b: Big = r.into[Big]()\n    c := Big.from(r)"),
+        ),
+        (
+            "Rat.into -> Big and Big.try_from(Rat)",
+            src(to_big, big_try_from, "b: Big = r.into[Big]()"),
+        ),
+        (
+            "Rat.try_into -> Big! and Big.from(Rat)",
+            src(try_to_big, big_from, "c := Big.from(r)"),
+        ),
+        (
+            "into -> float and try_into -> float! on one type",
+            src(&format!("{to_float}    fn try_into(self) -> float!:\n        return 0.5\n"), "", "f := 1"),
         ),
     ];
     let reject: Vec<(&str, String, &str)> = vec![
@@ -428,19 +440,9 @@ fn into_overload_grid() {
             "an overloaded into takes no argument, found 1",
         ),
         (
-            "the pair is Big's from",
-            src(to_float, big_from, "b := r.into[Big]()"),
-            "type Rat has no into for Big (it has: float); Big defines it: use Big.from(r)",
-        ),
-        (
-            "the pair is Big's try_from, and Rat has no into",
-            src("", big_try_from, "b := r.try_into[Big]()"),
-            "type Rat has no try_into for Big; Big defines it: use Big.try_from(r)",
-        ),
-        (
             "two into -> float",
             src(&format!("{to_float}{to_float}"), "", "f := 1"),
-            "conflicting into for float: into(self) -> float at 3:8",
+            "conflicting into for float: into(self) -> float at 4:8",
         ),
         (
             "into takes a parameter",
@@ -459,28 +461,8 @@ fn into_overload_grid() {
         ),
         (
             "into returns the struct's own type param",
-            "struct Box[T]:\n    v: T\n    fn into(self) -> T:\n        return self.v\n    fn into(self) -> str:\n        return \"\"\nfn main():\n    print(1)\nmain()\n".to_string(),
+            "import Into from std.convert\nstruct Box[T]:\n    v: T\n    fn into(self) -> T:\n        return self.v\n    fn into(self) -> str:\n        return \"\"\nfn main():\n    print(1)\nmain()\n".to_string(),
             "an overloaded into returns a concrete type, found T",
-        ),
-        (
-            "Rat.into -> Big and Big.from(Rat)",
-            src(to_big, big_from, "f := 1"),
-            "conflicting conversion Rat -> Big: into at 3:8 and from at 7:8",
-        ),
-        (
-            "Rat.into -> Big and Big.try_from(Rat)",
-            src(to_big, big_try_from, "f := 1"),
-            "conflicting conversion Rat -> Big: into at 3:8 and try_from at 7:8",
-        ),
-        (
-            "Rat.try_into -> Big! and Big.from(Rat)",
-            src(try_to_big, big_from, "f := 1"),
-            "conflicting conversion Rat -> Big: try_into at 3:8 and from at 7:8",
-        ),
-        (
-            "into -> float and try_into -> float! on one type",
-            src(&format!("{to_float}    fn try_into(self) -> float!:\n        return 0.5\n"), "", "f := 1"),
-            "conflicting conversion Rat -> float: into at 3:8 and try_into at 5:8",
         ),
         (
             "one into, another target",
@@ -489,7 +471,7 @@ fn into_overload_grid() {
         ),
         (
             "a type param target",
-            format!("struct Rat:\n    n: int\n{three}fn conv[T](r: Rat) -> T:\n    return r.into[T]()\n"),
+            format!("{CONV}struct Rat:\n    n: int\n{three}fn conv[T](r: Rat) -> T:\n    return r.into[T]()\n"),
             "type Rat has no into for T (it has: float, str)",
         ),
         (
@@ -522,28 +504,96 @@ fn into_overload_grid() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
-/// One owner per conversion pair across modules (Rust `E0119`): `B.from(x: P)` in an imported
-/// module owns the pair `A -> B` for an `A` that satisfies `P`, so `A`'s `into -> B` conflicts.
-/// The importing module, which names both types, reports it.
+/// The overload gate, one rule for every parameterized protocol: a repeated method name is an
+/// overload set when a protocol the DECLARING module declares or imports keys it (`Parse[S]`'s
+/// `parse(x: S)`, `From[S]`'s `from`), else "already defined". Two visible protocols that key one
+/// name differently are an error naming both. A caller in another module reads the slot stored
+/// with the type, and needs no import. Each accept cell type-checks clean.
 #[test]
-fn into_conflicts_with_an_imported_from() {
-    let zb = "protocol P:\n    fn n(self) -> int\nstruct B:\n    m: int\n    fn from(x: P) -> B:\n        return B(x.n())\n";
-    let a = |into: &str| {
-        format!(
-            "import B, P from zb\nstruct A:\n    k: int\n    fn n(self) -> int:\n        return self.k\n{into}a := A(5)\nprint(B.from(a))\n"
-        )
-    };
-    let to_b = "    fn into(self) -> B:\n        return B(-1)\n";
-    let try_to_b = "    fn try_into(self) -> B!:\n        return B(-1)\n";
-    for (into, name) in [(to_b, "into"), (try_to_b, "try_into")] {
-        let errs = check_files(&[("zb.chz", zb), ("main.chz", &a(into))]);
-        let needle = format!("conflicting conversion A -> B: {name} at 6:8 and B.from");
-        assert!(
-            errs.len() == 1 && errs[0].message.contains(&needle),
-            "{name}: wanted one {needle:?}, got {errs:?}"
-        );
+fn protocol_slot_gate_grid() {
+    let parse = "protocol Parse[S]:\n    fn parse(x: S) -> Self\n";
+    let two_parse = "struct W:\n    n: int\n    fn parse(x: int) -> W:\n        return W(x)\n    fn parse(x: str) -> W:\n        return W(x.len())\n";
+    let two_from = "struct W:\n    n: int\n    fn from(x: int) -> W:\n        return W(x)\n    fn from(x: str) -> W:\n        return W(x.len())\n";
+    let main = |stmt: &str| format!("fn main():\n    {stmt}\nmain()\n");
+    let accept: Vec<(&str, String)> = vec![
+        (
+            "a user protocol keys two parse",
+            format!(
+                "{parse}{two_parse}{}",
+                main("print(W.parse(3).n + W.parse(\"ab\").n)")
+            ),
+        ),
+        (
+            "two from with the From import",
+            format!(
+                "import From from std.convert\n{two_from}{}",
+                main("print(W.from(3).n)")
+            ),
+        ),
+        (
+            "A into -> B beside B from(x: A)",
+            "import From, Into from std.convert\nstruct A:\n    n: int\n    fn into(self) -> B:\n        return B(self.n)\nstruct B:\n    n: int\n    fn from(x: A) -> B:\n        return B(x.n)\nfn main():\n    b: B = A(1).into()\n    print(B.from(A(2)).n + b.n)\nmain()\n".to_string(),
+        ),
+    ];
+    let reject: Vec<(&str, String, &str)> = vec![
+        (
+            "two parse with no protocol",
+            format!("{two_parse}{}", main("print(1)")),
+            "method 'parse' is already defined",
+        ),
+        (
+            "two from with no From import",
+            format!("{two_from}{}", main("print(1)")),
+            "method 'from' is already defined",
+        ),
+        (
+            "a plain method twice, protocols in scope",
+            format!(
+                "import From from std.convert\n{parse}struct W:\n    n: int\n    fn add(x: int) -> W:\n        return W(x)\n    fn add(x: str) -> W:\n        return W(0)\n{}",
+                main("print(1)")
+            ),
+            "method 'add' is already defined",
+        ),
+        (
+            "two visible protocols key parse differently",
+            format!(
+                "{parse}protocol Emit[T]:\n    fn parse(self) -> T\n{two_parse}{}",
+                main("print(1)")
+            ),
+            "protocols Emit[T] and Parse[S] both declare 'parse' with different overload keys",
+        ),
+    ];
+    let mut failures = Vec::new();
+    for (cell, src) in &accept {
+        let errs = check_entry(src);
+        if !errs.is_empty() {
+            failures.push(format!("accept `{cell}`: {errs:?}"));
+        }
     }
-    // A type that does not satisfy `P` converts by its own `into`.
-    let other = "import B from zb\nstruct C:\n    k: int\n    fn into(self) -> B:\n        return B(1)\nprint(C(1).into[B]())\n";
-    files_ok(&[("zb.chz", zb), ("main.chz", other)]);
+    for (cell, src, needle) in &reject {
+        let errs = check_entry(src);
+        if !errs.iter().any(|e| e.message.contains(needle)) {
+            failures.push(format!("reject `{cell}`: wanted {needle:?}, got {errs:?}"));
+        }
+    }
+    // Two modules: `lib` imports `Parse` and declares the set; `main` imports only `W`.
+    let p = "protocol Parse[S]:\n    fn parse(x: S) -> Self\n";
+    let lib = format!("import Parse from p\n{two_parse}");
+    let caller = |stmt: &str| format!("import W from lib\nfn main():\n    {stmt}\nmain()\n");
+    let ok = caller("print(W.parse(\"a\").n)");
+    let errs = check_files(&[("p.chz", p), ("lib.chz", &lib), ("main.chz", &ok)]);
+    if !errs.is_empty() {
+        failures.push(format!(
+            "accept `W.parse(\"a\") from another module`: {errs:?}"
+        ));
+    }
+    let bad = caller("print(W.parse(1.5).n)");
+    let errs = check_files(&[("p.chz", p), ("lib.chz", &lib), ("main.chz", &bad)]);
+    let needle = "type W has no parse for float (it has: int, str)";
+    if !errs.iter().any(|e| e.message.contains(needle)) {
+        failures.push(format!(
+            "reject `W.parse(1.5) from another module`: wanted {needle:?}, got {errs:?}"
+        ));
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }

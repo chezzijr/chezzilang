@@ -240,7 +240,6 @@ impl Checker {
         }
         self.infer_returns(stmts);
         self.record_hook_table(stmts);
-        self.check_conversion_owners(stmts);
         for stmt in stmts {
             self.check_stmt(stmt);
         }

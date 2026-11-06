@@ -2,6 +2,7 @@
 //! records.
 //! Split out of `src/checker/expr.rs`. `super::*` is the parent module.
 
+use super::from_overload::OverloadSlot;
 use super::setup::{HeadBinding, TypeHead};
 use super::*;
 
@@ -40,20 +41,20 @@ impl Checker {
         let mut mtargs = mtargs;
         let pick = match self.head_overloads(th, method) {
             // `A.into[T](x)`: the `[T]` picks the target, and is no method type argument.
-            Some(set) if self.target_keyed(method) => {
-                let Some(k) = self.pick_target(&set, tname, method, mtargs, "x", None, span) else {
+            Some((set, slot @ OverloadSlot::Ret)) => {
+                let Some(k) = self.pick_target(&set, tname, method, mtargs, "x", span) else {
                     self.infer_all(args);
                     return Ty::Unknown;
                 };
                 mtargs = &[];
-                self.record_overload_call(method, &set[k], name_span, span);
+                self.record_overload_call(method, slot, &set[k], name_span, span);
                 Some(k)
             }
-            Some(set) => {
-                let Some(k) = self.pick_overload(&set, tname, method, args, span) else {
+            Some((set, slot @ OverloadSlot::Param(_))) => {
+                let Some(k) = self.pick_overload(&set, slot, tname, method, args, span) else {
                     return Ty::Unknown;
                 };
-                self.record_overload_call(method, &set[k], name_span, span);
+                self.record_overload_call(method, slot, &set[k], name_span, span);
                 Some(k)
             }
             None => None,
@@ -83,11 +84,11 @@ impl Checker {
             && !mtargs.is_empty()
             && sig.type_params.is_empty()
             && !sig.is_static
-            && self.target_keyed(method)
+            && self.head_slot(th, method) == Some(OverloadSlot::Ret)
         {
             let one = std::slice::from_ref(&sig);
             if self
-                .pick_target(one, tname, method, mtargs, "x", None, span)
+                .pick_target(one, tname, method, mtargs, "x", span)
                 .is_none()
             {
                 self.infer_all(args);

@@ -794,7 +794,7 @@ impl Checker {
     }
 
     /// An enum's overload sets by identity key: local table first, else the owning `ModuleSig`.
-    pub(super) fn enum_overloads_of(&self, key: &str) -> Option<&HashMap<String, Vec<FnSig>>> {
+    pub(super) fn enum_overloads_of(&self, key: &str) -> Option<&super::from_overload::Overloads> {
         self.enum_overloads
             .get(key)
             .or_else(|| self.owning_enum_def(key).map(|e| &e.overloads))

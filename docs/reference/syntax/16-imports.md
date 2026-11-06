@@ -97,7 +97,9 @@ its std module: `Add`, `Sub`, `Mul`, `Div`, `Mod`, `Neg`, `BitAnd`, `BitOr`, `Bi
   conformance (for example `int` satisfies `Add` with no method) and operator binding (`+`→`add`,
   `<`→`compare`, `for`→`Iterator`, `[]`→`Index`, `[a..b]`→`Slice`) are built into the compiler.
 - The syntax a protocol backs (an operator, indexing, `for`, `in`, `T.from(...)`, interpolation, map
-  keys, `!` and `recover:`) needs no import. Only a bound or a value type that names the protocol does.
+  keys, `!` and `recover:`) needs no import. Only a bound or a value type that names the protocol
+  does, and so does declaring overloads it keys (two `from`s need `import From from std.convert`);
+  calling them needs none.
 - `From[S]` (`fn from(x: S) -> Self`, a static method, Rust's `From`) is bound-only
   (`[T: From[str]]`; a value annotation is rejected) and callable through the bound (§7a).
 - `PathLike` (`fn as_path(self) -> bytes`) is the path input of the std filesystem surface:

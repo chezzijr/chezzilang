@@ -134,9 +134,13 @@ protocol. A type **witnesses** `From[S]` by declaring a **static** method `fn fr
 
 **Several `from`s: overloads.** A struct or enum may declare one static `from` per source type,
 as Rust's several `impl From<S>`, and one static `try_from` per source type, as several
-`impl TryFrom<S>`. The argument's type picks the overload:
+`impl TryFrom<S>`. The module that declares them imports the protocol that keys them (as Rust's
+`use std::convert::From` brings `From` into scope); a caller needs no import. The argument's type
+picks the overload:
 
 ```chezzi
+import From from std.convert
+
 struct Rat:
     n: int
     d: int
@@ -157,14 +161,18 @@ b := Rat.from("ab")    # the str overload: Rat(2, 3)
   its return type: `Self` for `from`, `Self!E` for `try_from`. Any other is *an overloaded from
   returns Self, found int*; a fallible `from` is *an overloaded from returns Self, found Rat!str; a
   fallible conversion is try_from*, and *an overloaded try_from returns Self!E, found Rat*.
-- One owner per source: a type may not declare both `from` and `try_from` for one source (Rust
-  `E0119`), *conflicting conversion int -> Rat: from at 3:8 and try_from at 5:8*.
+- A type may declare both `from` and `try_from` for one source: Chezzi has no blanket impl, so the
+  two never clash (Rust's `E0119` comes from its blanket `TryFrom` of a `From`).
 - Two overloads may not overlap, that is, one value may not fit both: `int` and `int?` overlap (`3`),
   `int?` and `str?` overlap (`None`), `int!str` and `int!int` overlap (`3` wraps into both), a
   protocol overlaps a type that satisfies it (also as `Sq?`), and two protocols always overlap. The error names the first one: *conflicting from for int: from(x: int) at 3:8*.
-- Only `from`, `try_from`, `into` and `try_into` overload (the names `std.convert`'s protocols
-  declare). Any other repeated method name, an instance `from(self, …)` declared twice and a static
-  `into(x: …)` declared twice are *method '…' is already defined*.
+- A repeated method name overloads when a parameterized protocol the declaring module declares or
+  imports keys it ([protocols](../syntax/09-protocols.md#a-parameterized-protocol-keys-overloads)):
+  `From[S]`'s `from` and `TryFrom[S]`'s `try_from` by the parameter, `Into[T]`'s `into` and
+  `TryInto[T]`'s `try_into` by the return, a user `Parse[S]`'s `parse(x: S)` the same way. With no
+  such protocol in scope (`from` overloads without `import From from std.convert`), any other
+  repeated method name, an instance `from(self, …)` declared twice and a static `into(x: …)`
+  declared twice are *method '…' is already defined*.
 - A trace, `<fn …>` and every message call an overload `from`.
 - A free `S` in `[S, T: From[S]]` is not inferred from an overloaded type: pin it.
 - A bound picks too, by the direct call's rule: `fn make[S, T: From[S]](x: S) -> T` called as
@@ -182,9 +190,12 @@ b := Rat.from("ab")    # the str overload: Rat(2, 3)
 **`into`: a conversion on the source.** A struct or enum converts ITSELF with an instance
 `fn into(self) -> T` (Rust `impl Into<T> for Rat`), one per target type, and with
 `fn try_into(self) -> T!` (Rust `impl TryInto<T>`) when the conversion can fail. The protocols
-`Into[T]` and `TryInto[T]` in `std.convert` give the shape. A call on an overload set names the target:
+`Into[T]` and `TryInto[T]` in `std.convert` give the shape, and the declaring module imports them. A
+call on an overload set names the target:
 
 ```chezzi
+import Into, TryInto from std.convert
+
 struct Rat:
     n: int
     d: int
@@ -217,19 +228,15 @@ n := r.try_into[int]()     # an error value: 1/2 is not an int
   float at 3:8*. A static `fn into(x: …)` is an ordinary static method, and two of them are
   *already defined*.
 - There is no blanket `into` from a `from` (Chezzi has no blanket impls): `r.into[Big]()` finds only
-  a written `into`. When `Big` converts a `Rat` itself, the error names it: *type Rat has no into for
-  Big; Big defines it: use Big.from(r)*. So `true.into[int]()` names `int.from`.
+  a written `into`, even when `Big.from(x: Rat)` exists; call `Big.from(r)`.
 - An overloaded `into` is not a method value (`r.into` is rejected, as every bound method) and does
   not witness a protocol requirement named `into`: the call site picks the target.
 - In a trace, `<fn …>` and every message an overload is called `into`.
 
-**One owner per conversion pair** (Rust `E0119`, where `impl Into<B> for A` collides with the blanket
-`Into` of `impl From<A> for B`). Of `B.from(x: A)`, `B.try_from(x: A)`, `A.into -> B` and
-`A.try_into -> B!`, a module declares at most one. Two are *conflicting conversion Rat -> Big: into
-at 3:8 and from at 7:8*; a source that overlaps (a protocol `A` satisfies, `A?`) counts as `A`. The
-module of the `into` names both types, so it checks the pair even when `B` is imported:
-`B.from(x: P)` in module `zb` and `A`, which satisfies `P`, with `fn into(self) -> B` are
-*conflicting conversion A -> B: into at 7:8 and B.from of an imported module*.
+**Several owners of one conversion pair.** `B.from(x: A)`, `B.try_from(x: A)`, `A.into -> B` and
+`A.try_into -> B!` may all be declared: each is its own method, called by its own spelling. Rust
+forbids `impl Into<B> for A` beside `impl From<A> for B` only because its blanket `Into` of a `From`
+would collide (`E0119`); Chezzi has no blanket impl.
 
 | From `A` to `B` | Fallible | Spelled | Called |
 |---|---|---|---|

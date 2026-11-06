@@ -45,7 +45,7 @@ impl Checker {
             );
             return Ty::Unknown;
         }
-        let Some((_, msig, map)) = self.bound_method(tname, method, &|s| s.is_static) else {
+        let Some((bound, msig, map)) = self.bound_method(tname, method, &|s| s.is_static) else {
             self.infer_all(args);
             // Name a protocol that ALREADY declares this static method rather than inventing a
             // signature for it — the invented `fn {method}(...) -> Self` was simply wrong for a
@@ -113,7 +113,17 @@ impl Checker {
                     .iter()
                     .map(|c| FnSig::plain(c.params.clone(), c.ret.clone()))
                     .collect();
-                let Some(k) = self.pick_overload(&set, tname, method, args, span) else {
+                // No receiver type stores a slot here: the bound's protocol keys it.
+                let Some(slot) = self.requirement_slot(&bound.name, method) else {
+                    self.infer_all(args);
+                    let n = cands.len();
+                    self.error(
+                        span,
+                        format!("type annotations needed: {tname}.{method} has {n} bounds that declare it"),
+                    );
+                    return Ty::Unknown;
+                };
+                let Some(k) = self.pick_overload(&set, slot, tname, method, args, span) else {
                     return Ty::Unknown;
                 };
                 cands[k].clone()
@@ -210,7 +220,13 @@ impl Checker {
                     };
                     let method = match self.witness_overload(t, &wp.method, &want) {
                         Some(Ok(sig)) => {
-                            super::from_overload::internal_name(&wp.method, &sig.params[0])
+                            // The pick's key at the slot the receiver type stores.
+                            let key = self
+                                .slot_of(t, &wp.method)
+                                .and_then(|r| r.slot.key(sig))
+                                .cloned()
+                                .unwrap_or(Ty::Unknown);
+                            super::from_overload::internal_name(&wp.method, &key)
                         }
                         // No unique pick: conformance (the same `witness_overload`) already
                         // rejected the bound, before this record.

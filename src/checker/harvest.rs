@@ -24,7 +24,7 @@ impl Checker {
                 .map(|(n, t)| (n.to_string(), t))
                 .collect(),
             methods: HashMap::new(),
-            overloads: HashMap::new(),
+            overloads: Default::default(),
             origin: StructOrigin::Builtin,
             doc: None,
             defaulted_fields: Vec::new(),
@@ -201,7 +201,7 @@ impl Checker {
                     // transiently visible so a method return type can reference a sibling native
                     // struct, e.g. `Listener.accept -> Result[Socket]`).
                     methods: HashMap::new(),
-                    overloads: HashMap::new(),
+                    overloads: Default::default(),
                     origin: StructOrigin::Builtin,
                     doc: None,
                     defaulted_fields: Vec::new(),
@@ -558,13 +558,16 @@ impl Checker {
                     }
                 }
                 self.exit_type_params(saved);
+                // A bodied conversion (`int.from(x: bool)`) is a protocol slot, as a struct's: the
+                // prelude is a std module, so it sees every std protocol.
+                let slots = self.decl_slots(bodied_methods);
                 out.push((
                     name.clone(),
                     StructInfo {
                         type_params: self.resolve_bounds(type_params, s.span),
                         fields: Vec::new(),
                         methods: table,
-                        overloads: HashMap::new(),
+                        overloads: super::from_overload::overload_sets(slots, &[]),
                         origin: StructOrigin::Builtin,
                         doc: None,
                         defaulted_fields: Vec::new(),

@@ -303,8 +303,8 @@ Each group below is one fact decided in two or more places (grouped 2026-10-16).
     `[T: From[S]]` bound picks through the caller, which passes the chosen method as the witness
     (one hidden witness per type param and static requirement). Overlapping overloads are rejected
     at the declaration (`conflicting from for int`, Rust E0119); `Rat.from` as a value needs
-    an annotation (Rust E0283). Only the conversions (`from`, `try_from`, `into`, `try_into`) may
-    repeat; every other name stays one per type. Grids: `tests/chz/spec/from_overload_test.chz`, `checker::tests::from_overloads`.
+    an annotation (Rust E0283). Only a method a visible parameterized protocol keys may repeat
+    (item 33); every other name stays one per type. Grids: `tests/chz/spec/from_overload_test.chz`, `checker::tests::from_overloads`.
 30. **`from` is a member name (done 2026-11-05).** `from` stays a keyword, but it is accepted as a
     name after `.` / `?.` and as a method name in a struct, enum, native-struct or protocol body
     (`Q.from(3)`, `fn from(x: int) -> Q`); a free `fn from` is still an error and `import X from m`
@@ -314,24 +314,35 @@ Each group below is one fact decided in two or more places (grouped 2026-10-16).
     unchanged, as Rust `std::convert::From`); every message reads `from`/`From`.
 31. **`TryFrom` and the builtin `int`/`float` conversions (done 2026-11-05).** A fallible
     conversion is `fn try_from(x: S) -> Self!`, protocol `TryFrom[S]` in `std.convert` (Rust
-    `TryFrom`); an overloaded `from` returns `Self` (`a fallible conversion is try_from`), and one
-    source has one owner (`conflicting conversion int -> Rat: from at .. and try_from at ..`).
+    `TryFrom`); an overloaded `from` returns `Self` (`a fallible conversion is try_from`). A `from`
+    and a `try_from` of one source may both be declared (item 33 deleted the one-owner rule).
     `int.from(x: bool)`, `float.from(x: bool)`, `int.try_from(x: str)`, `float.try_from(x: str)` are
     Chezzi bodies in the prelude `native struct` decls; `int`/`float` witness `[T: From[bool]]` and
     `[T: TryFrom[str]]` (witness key: the bare name). No `float.from(int)` (lossy, rustc E0277).
     A graph that names none of the prelude's bodied native methods as a member skips their bodies,
     and a process harvests the std protocol shapes once (`print(1)` run -1.5% vs before).
     Grids: `tests/chz/spec/builtin_from_test.chz`, `checker::tests::from_overloads`.
-32. **`into` / `try_into`, and one owner per conversion pair (done 2026-11-06).** A type converts
+32. **`into` / `try_into` (done 2026-11-06).** A type converts
     itself with an instance `fn into(self) -> T` (Rust `impl Into<T>`), one per target type, or
     `fn try_into(self) -> T!`; protocols `Into[T]` / `TryInto[T]` in `std.convert` (not bounds
     yet). A call on two or more names the target: `r.into[float]()`, `Rat.into[float](r)` (bottom-up
-    inference). No blanket `into` from a `from`: `r.into[Big]()` with only `Big.from(x: Rat)` says
-    `Big defines it: use Big.from(r)`. Of `B.from(A)`, `B.try_from(A)`, `A.into -> B`,
-    `A.try_into -> B!` a module declares one (`conflicting conversion Rat -> Big: into at .. and
-    from at ..`, Rust E0119), checked from the `into` side when `B` is imported. One `into` is a
-    plain method (`r.into()`, a value, a protocol witness); 2+ make the overload set. Grids:
+    inference). No blanket `into` from a `from`: `r.into[Big]()` finds only a written `into`. The
+    one-owner-per-pair rule shipped here is deleted (item 33). One `into` is a plain method
+    (`r.into()`, a value, a protocol witness); 2+ make the overload set. Grids:
     `tests/chz/spec/into_test.chz`, `checker::tests::from_overloads::into_overload_grid`.
+33. **Any parameterized protocol keys overloads; the slot is stored at the declaration (done
+    2026-11-06).** A repeated method name is an overload set when a parameterized protocol the
+    DECLARING module declares or imports keys it (`Parse[S]`'s `fn parse(x: S) -> Self`, as
+    `From[S]`'s `from`): std protocols are no longer implicit, so two `from`s need
+    `import From from std.convert`, else `method 'from' is already defined`. The slot is decided
+    once at the declaration (`from_overload::decl_slots`), stored with the type's methods (struct,
+    enum, and the prelude's `int`/`float` statics), copied on import, and read by every call site
+    in any module: a caller that imports only the struct needs no protocol import. Two visible
+    protocols that key one name differently are `protocols A and B both declare 'm' with different
+    overload keys`. The one-owner rule (`conflicting conversion ..`) is deleted: `A.into -> B`
+    beside `B.from(x: A)` is accepted (Rust's E0119 comes from a blanket impl Chezzi does not
+    have). Grids: `checker::tests::from_overloads::protocol_slot_gate_grid`,
+    `tests/chz/spec/protocol_overload_test.chz`.
 
 ### Open questions for the owner
 

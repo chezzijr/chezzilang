@@ -4,9 +4,13 @@
 # `[T]` is always written. A fallible conversion is `fn try_into(self) -> T!` (Rust
 # `impl TryInto<T>`), overloaded the same way. There is no blanket `into` from a `from`.
 #
-# The rejects (no `[T]`, no overload for the target, two `into -> float`, one owner per
-# conversion pair) are Rust checker tests (`src/checker/tests/from_overloads.rs`).
+# The module imports the protocols that key the overloads (`Into[T]`, `TryInto[T]`): without
+# them, a second `into` is "already defined".
+# The rejects (no `[T]`, no overload for the target, two `into -> float`) are Rust checker tests
+# (`src/checker/tests/from_overloads.rs`).
 # Gated by `chz_suite_passes` (`tests/chz_suite.rs`).
+
+import Into, TryInto from std.convert
 
 struct Rat:
     n: int

@@ -265,8 +265,8 @@ impl Checker {
                     );
                     // A repeated method name silently last-wins (the HashMap collapses it) — reject at
                     // hoist so the dup is the headline error, not a downstream return-type mismatch.
-                    // A repeat the overload gate admits (static `from`s) is kept as overloads.
-                    let overloaded = self.report_dup_methods(methods);
+                    // A repeat a protocol slot keys (static `from`s) is kept as overloads.
+                    let slots = self.report_dup_methods(methods);
                     // A field and a method may not share a name on the same struct (mirrors the enum
                     // variant/static disjointness below): `p.f` would be ambiguous between the two.
                     let field_names: std::collections::HashSet<&str> =
@@ -315,7 +315,7 @@ impl Checker {
                             (methods[i].name.clone(), sig)
                         })
                         .collect();
-                    let overloads = super::from_overload::overload_sets(&overloaded, &sigs);
+                    let overloads = super::from_overload::overload_sets(slots, &sigs);
                     self.record_overload_names(methods, &overloads);
                     let methods = sigs.into_iter().collect();
                     self.current_self_ty = saved_self;
@@ -396,8 +396,8 @@ impl Checker {
                     // Methods see the enum's type parameters in scope (like the struct path), so a
                     // generic `fn get(self) -> T` resolves `T`. Name-keyed exactly like struct methods.
                     // A repeated method name silently last-wins (the HashMap collapses it) — reject,
-                    // except a repeat the overload gate admits (static `from`s).
-                    let overloaded = self.report_dup_methods(methods);
+                    // except a repeat a protocol slot keys (static `from`s).
+                    let slots = self.report_dup_methods(methods);
                     // `Self` in a method sig resolves to this concrete enum (parameterized by its own
                     // type params — the `enum_type_params` table isn't inserted yet, so build the
                     // self-ty from the in-scope `type_params`, matching `enum_self_ty`'s shape).
@@ -415,7 +415,7 @@ impl Checker {
                             (methods[i].name.clone(), sig)
                         })
                         .collect();
-                    let overloads = super::from_overload::overload_sets(&overloaded, &sigs);
+                    let overloads = super::from_overload::overload_sets(slots, &sigs);
                     self.record_overload_names(methods, &overloads);
                     let method_sigs: HashMap<String, FnSig> = sigs.into_iter().collect();
                     self.current_self_ty = saved_self;

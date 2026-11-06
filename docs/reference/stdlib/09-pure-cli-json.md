@@ -93,8 +93,8 @@ their source only as the consumer pulls, so an infinite source under `islice` te
 - `chain(a, b) -> Iterator[T]`: all of `a` then all of `b` (**two args only**).
 - `islice(it, stop) -> Iterator[T]`: the first `stop` elements of any iterator; `stop<=0` = empty.
 - `imap(it, f) -> Iterator[U]` / `ifilter(it, pred) -> Iterator[T]`: the **lazy** siblings of the eager
-  `map`/`filter` (Chezzi overloads no function by argument type; only a type's conversions `from`, `try_from`, `into`
-  and `try_into` may repeat).
+  `map`/`filter` (Chezzi overloads no function by argument type; only a type's method a parameterized protocol keys,
+  such as `from`, may repeat).
 
 `islice`/`imap`/`ifilter` accept **any iterable** (a list, set, str, user `next()` struct, a `.iter()`
 cursor, or another generator) through the `[S: Iterable[T], T]` bound.
