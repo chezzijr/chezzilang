@@ -259,3 +259,50 @@ fn a_range_in_a_skipped_std_body_records_no_range_use() {
     );
     compile_graph(&reached).expect("compile");
 }
+
+/// The prelude's bodied native-struct methods (`int.from`, `int.try_from`) are checked and compiled
+/// only for a graph whose sources name one ([`crate::resolver::PreludeUse::uses_native_bodies`]):
+/// `print(1)` skips them, a member path (`int.from`, `T.from`) keeps them, and the kept program runs
+/// them (`tests/chz/spec/builtin_from_test.chz`).
+#[test]
+fn prelude_native_bodies_are_kept_only_when_named() {
+    let rows: [(&str, bool); 9] = [
+        ("print(1)\n", false),
+        // `from` the import keyword and `bytes.from_iter` name no bodied method.
+        (
+            "import is_empty from std.string\nprint(is_empty(\"\"))\n",
+            false,
+        ),
+        ("print(bytes.from_iter([1]))\n", false),
+        ("print(int.from(true))\n", true),
+        ("print(float.try_from(\"1.5\") ?? 0.0)\n", true),
+        // The decision reads tokens: a comment between `.` and the name, or holding the path.
+        ("x := (int.  # pick\n    from(true))\nprint(x)\n", true),
+        (
+            "f := (float.  # c\n    try_from)\nprint(f(\"2.5\") ?? 0.0)\n",
+            true,
+        ),
+        ("# int.from(true)\nprint(\"a.from\")\n", false),
+        (
+            "import From from std.convert\nfn lift[T: From[bool]](b: bool) -> T:\n    return T.from(b)\nprint(lift[int](true))\n",
+            true,
+        ),
+    ];
+    for (src, kept) in rows {
+        let graph = graph_of(src);
+        let prelude = module(&graph, &["std", "prelude"]);
+        assert_eq!(
+            !graph.skips_prelude_native_bodies(prelude),
+            kept,
+            "{src:?}: kept the prelude's native-struct bodies"
+        );
+        let (res, _) = crate::checker::check_graph_diags(&graph, None);
+        assert!(res.is_ok(), "{src:?}: {res:?}");
+        let program = compile_graph(&graph).expect("compile");
+        assert_eq!(
+            program.native_methods.contains_key("int"),
+            kept,
+            "{src:?}: compiled int's bodied statics"
+        );
+    }
+}

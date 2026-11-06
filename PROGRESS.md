@@ -233,7 +233,7 @@ Each group below is one fact decided in two or more places (grouped 2026-10-16).
     Rust `i64::default()`). A conversion is a method of the source type's prelude `native struct`:
     `n.to_float() -> float`, `f.to_int() -> int?` (`None` for NaN, ±inf and outside i64),
     `s.to_int()`/`s.to_float()`; display is `"{x}"`. Every `T(x)` is `T() takes no argument` with a
-    help derived from the argument type (`x.to_int()`, `"{x}"`, `x != 0`, `if x: 1 else: 0`, "already
+    help derived from the argument type (`x.to_int()`, `"{x}"`, `x != 0`, `int.from(x)` (item 31), "already
     an int"). No bool conversion (Go, Rust). Deleted: `builtin_int`/`float`/`bool`/`str` (VM),
     `reject_non_scalar_cast` and its type list, the scalar receivers' separate "no method" arm.
     `tests/scalar_conversion_grid.rs`, 99 cells; guard `a_prelude_ctor_takes_no_argument`. History:
@@ -297,6 +297,110 @@ Each group below is one fact decided in two or more places (grouped 2026-10-16).
     every pass; a guard switches it off. A wait arm takes no tuple target (`a, b := ch.recv():` is a
     parse error; bind, then unpack in the body). Grids: `tests/chz/spec/channel_closed_recv_test.chz`,
     `tests/chz/spec/wait_closed_arm_test.chz`.
+29. **A type has several `from` overloads, one per source type (done 2026-11-05).** Rust's
+    several `impl From<S>`, written in the struct or enum body: `fn from(x: int) -> Self` and
+    `fn from(x: str) -> Self`. `Rat.from(3)` picks by the argument's type (no widening); a
+    `[T: From[S]]` bound picks through the caller, which passes the chosen method as the witness
+    (one hidden witness per type param and static requirement). Overlapping overloads are rejected
+    at the declaration (`conflicting from for int`, Rust E0119); `Rat.from` as a value needs
+    an annotation (Rust E0283). Only a method a visible parameterized protocol keys may repeat
+    (item 33); every other name stays one per type. Grids: `tests/chz/spec/from_overload_test.chz`, `checker::tests::from_overloads`.
+30. **`from` is a member name (done 2026-11-05).** `from` stays a keyword, but it is accepted as a
+    name after `.` / `?.` and as a method name in a struct, enum, native-struct or protocol body
+    (`Q.from(3)`, `fn from(x: int) -> Q`); a free `fn from` is still an error and `import X from m`
+    is unchanged. First step of the `from`/`into` conversion pair (plan `2026-11-05-from-into`).
+    Grid: `parser::tests::decls_targets::from_member_name_grid`. Second step (done 2026-11-05): the
+    static `convert` / protocol `Convert[S]` are renamed `from` / `From[S]` (module `std.convert`
+    unchanged, as Rust `std::convert::From`); every message reads `from`/`From`.
+31. **`TryFrom` and the builtin `int`/`float` conversions (done 2026-11-05).** A fallible
+    conversion is `fn try_from(x: S) -> Self!`, protocol `TryFrom[S]` in `std.convert` (Rust
+    `TryFrom`); an overloaded `from` returns `Self` (`a fallible conversion is try_from`). A `from`
+    and a `try_from` of one source may both be declared (item 33 deleted the one-owner rule).
+    `int.from(x: bool)`, `float.from(x: bool)`, `int.try_from(x: str)`, `float.try_from(x: str)` are
+    Chezzi bodies in the prelude `native struct` decls; `int`/`float` witness `[T: From[bool]]` and
+    `[T: TryFrom[str]]` (witness key: the bare name). No `float.from(int)` (lossy, rustc E0277).
+    A graph that names none of the prelude's bodied native methods as a member skips their bodies,
+    and a process harvests the std protocol shapes once (`print(1)` run -1.5% vs before).
+    Grids: `tests/chz/spec/builtin_from_test.chz`, `checker::tests::from_overloads`.
+32. **`into` / `try_into` (done 2026-11-06).** A type converts
+    itself with an instance `fn into(self) -> T` (Rust `impl Into<T>`), one per target type, or
+    `fn try_into(self) -> T!`; protocols `Into[T]` / `TryInto[T]` in `std.convert` (not bounds
+    yet). A call on two or more names the target: `r.into[float]()`, `Rat.into[float](r)`, or
+    an annotation picks it (item 34). No blanket `into` from a `from`: `r.into[Big]()` finds only a written `into`. The
+    one-owner-per-pair rule shipped here is deleted (item 33). One `into` is a plain method
+    (`r.into()`, a value, a protocol witness); 2+ make the overload set. Grids:
+    `tests/chz/spec/into_test.chz`, `checker::tests::from_overloads::into_overload_grid`.
+33. **Any parameterized protocol keys overloads; the slot is stored at the declaration (done
+    2026-11-06).** A repeated method name is an overload set when a parameterized protocol the
+    DECLARING module declares or imports keys it (`Parse[S]`'s `fn parse(x: S) -> Self`, as
+    `From[S]`'s `from`): std protocols are no longer implicit, so two `from`s need
+    `import From from std.convert`, else `method 'from' is already defined`. The slot is decided
+    once at the declaration (`from_overload::decl_slots`), stored with the type's methods (struct,
+    enum, and the prelude's `int`/`float` statics), copied on import, and read by every call site
+    in any module: a caller that imports only the struct needs no protocol import. Two visible
+    protocols that key one name differently are `protocols A and B both declare 'm' with different
+    overload keys`. The one-owner rule (`conflicting conversion ..`) is deleted: `A.into -> B`
+    beside `B.from(x: A)` is accepted (Rust's E0119 comes from a blanket impl Chezzi does not
+    have). Grids: `checker::tests::from_overloads::protocol_slot_gate_grid`,
+    `tests/chz/spec/protocol_overload_test.chz`.
+34. **One pick rule for `m[X]` and annotations (done 2026-11-06).** `m[X]` names the type at the
+    method's stored protocol slot, static or instance, one decl or several: `Rat.from[str]("ab")`
+    (the source), `r.into[float]()` (the target), `W.parse[int](3)` on a user protocol. With no
+    `[X]`, an argument picks a source slot (the slot may be a later param: `Build[S]`'s
+    `build(n: int, x: S)`), the annotation a target slot (`s: str = r.into()`;
+    `n: int! = r.try_into()` by the payload). `[X]` wins; a disagreement is the assignment error. A
+    lone generic `into(self) -> T` on `Box[int]` takes `[int]`. Messages name no receiver
+    (`write .into[T]()`), so `?.`'s internal name never shows. Under `?`, `??` or `else:` the
+    annotation names a target's payload: `k: int = r.into() ?? 7` picks `into(self) -> int?`. A
+    set read as a value keys by the slot's param (`f: fn(int, str) -> M = M.build`). Only a
+    requirement of the method's receiver keys it (`Emit[T]`'s instance `parse` beside a static
+    `W.parse` is no conflict). A plain method keeps `takes no type
+    argument(s)`. One pick: `from_overload::pick_slot`. Grids:
+    `checker::tests::from_overloads::slot_pick_grid`, the three conversion spec files.
+35. **`?.` takes type arguments (done 2026-11-06).** `r?.into[str]()` and `r?.m[int](1)` parse as
+    the `.` method turbofish does, by the same speculative `[types](` parse
+    (`Parser::try_parse_type_args`), on a `T?` and a `T!E`. A one-arg bracket keeps its expression
+    reading (`OptCall::bracket`), so `h?.fs[k](10)` indexes then calls when `fs` is data
+    (TICKET-210); a bracket that is no type indexes then calls too (`h?.fs[0](10)`), as after `.`. Grids: `parser::tests::exprs_stmts::optchain_type_args`,
+    `tests/corpus/accept/optchain_type_args.chz`, `tests/chz/spec/opt_carrier_test.chz` §16.
+36. **The expected type reaches a call under `?`, `??` and `else:` (done 2026-11-06).**
+    `n: int = parse("7")?`, `opt("7") ?? 0`, `n: int = parse(s) else: ...` pin a return-only `T`
+    in every hinted position (let, return, argument, list item, map value, if/match arm, tuple
+    element, and an `if` arm under the wrapper: `(if c: parse("7") else: parse("8"))?`), as rustc
+    infers `let n: i64 = parse("7")?`. One table says what hint each child of
+    each expression kind gets (`child_hint`, `checker/infer.rs`); a field / `?.` receiver, an
+    interpolation fragment and a range bound get none, so `s: str = "{pick()}"` is `cannot infer
+    type parameter T` (rustc E0282). Grids: `checker::tests::hint_forwarding_grid`,
+    `tests/chz/spec/hint_through_try_test.chz`.
+37. **One checker entry, one `?.` error, one temp-name owner (done 2026-11-06).** The unit-test
+    `checker::check` and `compile_module_standalone` run the graph path over
+    `resolver::standalone_graph` (the real prelude, then the module), so a lone module is set up as
+    a graph module (a module's own protocol keys an overload set there too); the no-prelude seeding
+    is deleted. A protocol value's messages print its type, not its key (`Vecish`, not `v::Vecish`). A failed call under
+    `?.` reports what the plain `.` call reports: `r?.nope2(nope())` is 2 errors, not 3, and a
+    failed `r?.into()` statement adds no discarded-value warning. The carrier binders' names have
+    one owner, `ast::CarrierTemp`, which matches only the names it builds (`__opt12`, not a user's
+    `__options`).
+38. **The deadlock report lists every blocked task (Go's model, done 2026-11-06).** One header
+    (`deadlock: N tasks are blocked and none can proceed`), then `task k: <wait> at <site>` and its
+    frames for every blocked task of the run, in spawn-tree order, the same every run;
+    `chezzi test --errors=json` adds a `tasks` array. `vm/deadlock.rs` owns each wait's phrase, the
+    header, the listing and the rendering; the five old texts are gone. The listing is a snapshot
+    taken at the verdict (2026-11-07): each cut task adds its own entry at its cut, keyed by its
+    spawn-tree place (`deadlock::TaskPath`), and the driver reports it once after every join and
+    the drain, so nested nurseries no longer drop, repeat or misplace a task. Under `chezzi test`
+    a task is reported once (2026-11-07): a job a later test's report listed is not reported again
+    by the end-of-file drain. A deadlock fault no longer
+    cancels a blocked sibling, and a cut guard waiter no longer takes the guard its cut holder
+    frees. Every executor's blocked jobs are listed, by executor place, and a deadlock whose cut
+    joiner leaves its Executor finished and unjoined no longer hangs the exit drain. A
+    `parallel:` body blocked in its own wait lists its nursery's blocked tasks ahead of its own,
+    and a body blocked inside a callback (`update`) is cut by its nursery's verdict, not left hung.
+    `docs/reference/concurrency/05-cancel.md`. History: `docs/history/progress/2026-11.md`.
+39. **`CHEZZI_SCHED_STATS=1` prints the worker count (done 2026-11-06).** `run` and `test` print
+    `[sched-stats] workers=<n>` on stderr: `vm::worker_count()`, which sizes the pool and every
+    scheduler. `chezzi_threads_cli` asserts it at `CHEZZI_THREADS=1` and `2` instead of comparing
+    CPU time with wall time, which failed on a busy box. `docs/contributing/dev-commands.md`.
 
 ### Open questions for the owner
 

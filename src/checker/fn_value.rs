@@ -17,12 +17,13 @@ impl Checker {
     pub(super) fn reject_witness_fn_value(
         &mut self,
         name: &str,
-        wparams: &[String],
+        wparams: &[WitnessParam],
         span: Span,
     ) -> bool {
         if wparams.is_empty() {
             return false;
         }
+        let wparams = witness_param_names(wparams);
         self.error(
             span,
             format!(
@@ -118,7 +119,11 @@ impl Checker {
         // g(1)` printed `1`, check-clean).
         // A protocol hint (`print(ident)`, `oa(ident)` over `fn oa(v: Any)`) fixes nothing either
         // (`hint_fixes`, owner rule 2026-10-17), so the read reports as with no hint.
-        let hint = self.expected_hint.clone().filter(hint_fixes);
+        let hint = self
+            .expected_hint
+            .as_ref()
+            .map(|h| h.ty.clone())
+            .filter(hint_fixes);
         let verdict = match &hint {
             Some(h) => {
                 pin_generic_fn_value(&type_params, &declared, h, &|n| self.rigid_param(n, &[]))
@@ -344,6 +349,18 @@ impl Checker {
         head_args: Option<WrittenTypeArgs>,
         name: &str,
     ) -> Option<PathFn> {
+        self.type_member_fn_at(th, head_args, name, None)
+    }
+
+    /// [`Self::type_member_fn`] for overload `pick` of an overloaded `name` (its index in the
+    /// overload set), or the one method of that name for `None`.
+    pub(super) fn type_member_fn_at(
+        &self,
+        th: &TypeHead,
+        head_args: Option<WrittenTypeArgs>,
+        name: &str,
+        pick: Option<usize>,
+    ) -> Option<PathFn> {
         let key = &th.key;
         let params_of = |tps: &[TyParam]| {
             tps.iter()
@@ -373,15 +390,26 @@ impl Checker {
                     sig.type_params = tps.clone();
                     (sig, tps, res)
                 } else {
-                    method(tps, self.enum_methods.get(key)?.get(name)?, recv)
+                    let msig = match pick {
+                        Some(k) => self.enum_overloads_of(key)?.get(name)?.get(k)?,
+                        None => self.enum_methods.get(key)?.get(name)?,
+                    };
+                    method(tps, msig, recv)
                 }
             }
-            // A native type's methods have no proto: only a static one, which its decl declares,
-            // is a member of the type path.
+            // A native type's instance methods have no proto: only a static one, which its decl
+            // declares, is a member of the type path. A bodyless static is a `NativeStatic`; a
+            // bodied one (`int.from(x: bool)`) has a proto under the type's name, as a struct's.
             TypeHeadKind::Struct if th.native_handle => {
                 let info = self.struct_shape(key)?;
                 let msig = info.methods.get(name).filter(|s| s.is_static)?;
-                let res = Resolution::NativeStatic(NativeStatic::from_key(&th.name, name)?);
+                let res = match NativeStatic::from_key(&th.name, name) {
+                    Some(which) => Resolution::NativeStatic(which),
+                    None => Resolution::MethodFn {
+                        type_key: key.clone(),
+                        method: name.to_string(),
+                    },
+                };
                 let tps = info.type_params.clone();
                 (method_value_sig(msig, &tps, Ty::Unknown), tps, res)
             }
@@ -389,7 +417,11 @@ impl Checker {
                 let info = self.struct_shape(key)?;
                 let tps = info.type_params.clone();
                 let recv = Ty::Struct(key.clone(), params_of(&tps));
-                method(tps, info.methods.get(name)?, recv)
+                let msig = match pick {
+                    Some(k) => info.overloads.get(name)?.get(k)?,
+                    None => info.methods.get(name)?,
+                };
+                method(tps, msig, recv)
             }
             TypeHeadKind::Protocol => return None,
         };
@@ -728,7 +760,21 @@ impl Checker {
                 Some(Ty::enum_ty(key, args))
             }
             Some(Resolution::MethodFn { .. } | Resolution::NativeStatic(_)) => {
-                let pf = self.type_member_fn(&th, head_args, name)?;
+                // An overloaded name: the position's fn type picks the overload, and the compiler's
+                // `MakeMethodFunc` reads the pick off the table, as a direct call's `CallStatic`.
+                let pick = match self.head_overloads(&th, name) {
+                    Some((set, slot)) => {
+                        let Some(k) =
+                            self.pick_overload_value(&set, slot, &spelled, name, name_span)
+                        else {
+                            return Some(Ty::Unknown);
+                        };
+                        self.record_overload_call(name, slot, &set[k], name_span, name_span);
+                        Some(k)
+                    }
+                    None => None,
+                };
+                let pf = self.type_member_fn_at(&th, head_args, name, pick)?;
                 Some(self.path_fn_value_ty(obj.id, pf, None, name_span))
             }
             // U10: a payload variant is a constructor, never a value.

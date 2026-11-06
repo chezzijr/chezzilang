@@ -1,0 +1,65 @@
+# tests/chz/spec/protocol_overload_test.chz: ANY parameterized protocol keys overloads of its
+# method, not only `std.convert`'s four. `Parse[S]` declares `parse(x: S) -> Self`, so a type
+# may declare one `parse` per source `S` (Rust: `impl Parse<i64> for W` beside
+# `impl Parse<&str> for W`), and `W.parse(3)` runs the overload the argument picks. The module
+# that declares the overloads sees the protocol (declares or imports it); a caller needs neither.
+#
+# The rejects (no protocol in scope is "already defined", two protocols that key one name
+# differently) are Rust checker tests (`src/checker/tests/from_overloads.rs`).
+# Gated by `chz_suite_passes` (`tests/chz_suite.rs`).
+
+import Tag from protocol_overload_lib
+
+protocol Parse[S]:
+    fn parse(x: S) -> Self
+
+struct W:
+    n: int
+    fn parse(x: int) -> W:
+        return W(x)
+    fn parse(x: str) -> W:
+        return W(x.len() * 10)
+
+# The slot is the param that mentions the protocol's type param, here the second one.
+protocol Build[S]:
+    fn build(n: int, x: S) -> Self
+
+struct M:
+    n: int
+    fn build(n: int, x: int) -> M:
+        return M(n + x)
+    fn build(n: int, x: str) -> M:
+        return M(n * 100 + x.len())
+
+struct Lone:
+    n: int
+    fn parse(x: int) -> Lone:
+        return Lone(x * 2)
+
+fn make[S, T: Parse[S]](x: S) -> T:
+    return T.parse(x)
+
+test fn the_argument_picks_the_overload():
+    assert W.parse(3).n == 3
+    assert W.parse("ab").n == 20
+
+test fn a_bound_call_picks_the_same_overload():
+    a: W = make(4)
+    b: W = make("abc")
+    assert a.n == 4
+    assert b.n == 30
+
+test fn an_importer_of_the_struct_alone_calls_the_overloads():
+    assert Tag.parse(7).s == "int 7"
+    assert Tag.parse("x").s == "str x"
+
+test fn a_type_argument_names_the_source():
+    assert W.parse[int](3).n == 3
+    assert W.parse[str]("ab").n == 20
+    assert Lone.parse[int](4).n == 8, "one decl takes `[int]` too"
+
+test fn the_slot_may_be_a_later_param():
+    assert M.build(1, 2).n == 3
+    assert M.build(1, "ab").n == 102
+    assert M.build[str](2, "a").n == 201
+    assert M.build(3, x="abc").n == 303

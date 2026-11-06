@@ -1354,6 +1354,7 @@ pub(super) fn halt_over_backlog(
         is_timed_out: false,
         is_deadlock: false,
         is_panic: false,
+        blocked: None,
     };
     match outcome {
         T::Done(r) => (
@@ -1420,6 +1421,9 @@ pub struct ExecutorCore {
     /// its fault names the `Executor()` call instead of claiming a false
     /// `line 1, col 1`.
     pub created_at: Span,
+    /// Where this Executor sits in its creator's spawn tree: its jobs' listing entries follow the
+    /// run's tasks, in Executor order ([`super::deadlock::TaskPath::job`]).
+    pub(super) key: Vec<u64>,
 }
 
 impl ExecutorCore {

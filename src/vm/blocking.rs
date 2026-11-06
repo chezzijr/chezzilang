@@ -3,10 +3,8 @@
 //! Split out of `src/vm/netio.rs`. `super::*` is the parent module.
 
 use super::core::{Pending, PendingOp, SendOutcome, Settled};
+use super::deadlock::Wait;
 use super::netio::CLOSED_SEND;
-use super::netio::EMPTY_RECV_DEADLOCK;
-use super::netio::EMPTY_WAIT_DEADLOCK;
-use super::netio::FULL_SEND_DEADLOCK;
 use super::netio::deadline_gap_wake;
 use super::quiesce::RunHalt;
 use super::*;
@@ -190,8 +188,13 @@ impl Vm {
         // TICKET-223 — the latched deadlock verdict: every party ends with the report of the
         // first party site the verdict named. `None` while main is at a join: the report there is
         // the victims' slots (DEC-208), and the join must stay until they are recorded.
+        // The listing names each party's own wait; the latched report is the fallback for a party
+        // reached outside a wait.
         let (msg, site) = self.quiesce.deadlock_report()?;
-        Some(self.err(msg, site).deadlock())
+        Some(match self.wait_site {
+            Some((wait, at)) => self.cut_at(&self.err(String::new(), at).deadlock(), wait, at),
+            None => self.err(String::new(), site).deadlock().at_site(&msg, site),
+        })
     }
 
     /// TICKET-208 — THE predicate "a run-wide halt is pending for this party": an `os.exit` from
@@ -248,6 +251,16 @@ impl Vm {
         // precisely top-level `main` — reaches that rung). ABOVE the deadlock verdict, because an
         // `Exit` outranks a synthesized `Deadlocked` — the precedence `reduce_task_slots` encodes.
         let read = self.halt_requested();
+        // A wait its sched's verdict cut ends with its own cut, before a cancel it reads now (a cut
+        // owner's abort tripped it; a cut task cancels no sibling). A blocked `parallel:` body in a
+        // native callback is judged by no process-wide verdict, so this is its one cut. An exit, a
+        // job fault, the latched verdict and a child fault keep their rungs below.
+        if !matches!(read, Some(super::block::Halt::ChildFault { .. }))
+            && !self.run_halt_due()
+            && let Some(e) = self.sched_cut_fault(span)
+        {
+            return Err(e);
+        }
         if let Some(e) = self.blocked_halt(read, span) {
             return Err(e);
         }
@@ -296,6 +309,25 @@ impl Vm {
         // pool thread to a replacement, so the job that would unblock it can still get a thread.
         self.yield_pool_slot(Some(DEMOTE_POLL_BACKOFF));
         Ok(())
+    }
+
+    /// The fault of this thread's wait when a sched verdict cut every blocked task of the sched
+    /// ([`SchedCore::flag_deadlock`]), read by [`Vm::block_halts`] outside any core lock (it takes
+    /// each sched's): the sched this fiber runs on, or a sched whose `parallel:`
+    /// body this thread runs. A blocked body is one of the verdict's tasks: its mark
+    /// (`Vm::mark_bodies`) lifted the body's veto, so the verdict counted it stuck. `terminate`
+    /// alone is no cut: it also latches when every task is done and the body blocks.
+    pub(super) fn sched_cut_fault(&self, span: Span) -> Option<RuntimeError> {
+        let sched = self
+            .mn
+            .iter()
+            .chain(
+                self.owned_eager_scopes()
+                    .filter(|s| !s.fiber_owned)
+                    .map(|s| &s.sched),
+            )
+            .find(|s| s.lock().verdict_cut)?;
+        Some(self.cut_fault(sched, span))
     }
 
     /// Sleep until `deadline`, observing the same halts every other blocking-in-place path does
@@ -381,7 +413,7 @@ impl Vm {
             // wait consumes closes the window.
             let on = Blocked::at(
                 quiesce::PartyWait::Recv(Arc::clone(core), Some(Arc::clone(&p))),
-                EMPTY_RECV_DEADLOCK,
+                Wait::Recv.phrase(),
                 span,
             );
             let r = self.block_wait_tick(WaitSpec::Recv, on, h, core, span, |g| {
@@ -527,12 +559,7 @@ impl Vm {
         // The `Refuse` cells (the inline outermost-`parallel:` builder with no worker loop and no
         // deadline to sleep to): nothing may block, so nothing is published.
         if wait_mode == BlockMode::Refuse {
-            let msg = if has_send {
-                FULL_SEND_DEADLOCK
-            } else {
-                EMPTY_WAIT_DEADLOCK
-            };
-            return Err(self.err(msg.to_string(), span));
+            return Err(self.err(Wait::select(has_send).fault_text(), span));
         }
         if wait_mode == BlockMode::Park {
             // W7-17 — the ungated park checkpoint (see `chan_recv_step`'s): everything above settled
@@ -653,12 +680,7 @@ impl Vm {
             }
             self.pending = Some(op);
             self.rewind_op(); // re-run this WaitPoll on resume
-            let msg = if has_send {
-                FULL_SEND_DEADLOCK
-            } else {
-                EMPTY_WAIT_DEADLOCK
-            };
-            self.park_site = Some((msg, span));
+            self.park_site = Some((Wait::select(has_send).phrase(), span));
             self.wait_suspend = Some(keys.iter().map(|&(i, _, h, s)| (i, h, s)).collect());
             return Ok(());
         }
@@ -724,7 +746,7 @@ impl Vm {
             let _gated = self.gated_register(&refs);
             let on = Blocked::at(
                 quiesce::PartyWait::Wait(arms, Some(Arc::clone(&p))),
-                EMPTY_WAIT_DEADLOCK,
+                Wait::select(has_send).phrase(),
                 span,
             );
             let mut reg = self.wait_begin(wait_spec, Some(on), "wait", span)?;
@@ -788,7 +810,7 @@ impl Vm {
         }
         // Inside a native callback: the host stack cannot be unwound to park and there is no thread
         // of our own to block on (mirrors `chan_recv_step`'s callback fault).
-        Err(self.err(EMPTY_WAIT_DEADLOCK.to_string(), span))
+        Err(self.err(Wait::Select.fault_text(), span))
     }
 
     /// TICKET-185 — act on a `wait:`'s settled [`Pending`]: `Some` when it decided the `wait:` (an

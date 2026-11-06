@@ -119,7 +119,7 @@ pub struct PreludeStruct {
 }
 
 /// The structs of `std.prelude` that every module sees with no `import` line: the one list the
-/// resolver's implicit import, the graph-less checker seed, the standalone compile and the
+/// resolver's implicit import ([`prelude_struct_import`]) and the
 /// TICKET-255 method gate ([`PreludeUse`]) read. `RecvError` is built by `Channel.recv`, so a
 /// `recv` in the source (a call or a `wait:` recv arm) uses it.
 pub const PRELUDE_STRUCTS: [PreludeStruct; 2] = [
@@ -133,18 +133,33 @@ pub const PRELUDE_STRUCTS: [PreludeStruct; 2] = [
     },
 ];
 
-/// TICKET-255 — which [`PRELUDE_STRUCTS`] a graph can build, by position in that list. The checker
-/// and the compiler skip the method bodies of every prelude struct the graph does not use.
+/// TICKET-255 — which [`PRELUDE_STRUCTS`] a graph can build, by position in that list, and whether
+/// it names a bodied method of a prelude `native struct` (`int.from`). The checker and the compiler
+/// skip the method bodies of every prelude struct the graph does not use, and the bodied
+/// native-struct methods when it names none of them.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct PreludeUse([bool; PRELUDE_STRUCTS.len()]);
+pub struct PreludeUse([bool; PRELUDE_STRUCTS.len()], bool);
 
 impl PreludeUse {
-    /// Every prelude struct used: the graph-less and test graphs, and a run of the prelude itself.
-    pub const ALL: Self = Self([true; PRELUDE_STRUCTS.len()]);
+    /// Every prelude struct used: the test graph ([`standalone_graph`]) and a run of the prelude itself.
+    pub const ALL: Self = Self([true; PRELUDE_STRUCTS.len()], true);
 
-    /// The prelude structs whose [`PreludeStruct::words`] `source` holds.
-    fn named_in(source: &str) -> Self {
-        Self(PRELUDE_STRUCTS.map(|p| p.words.iter().any(|w| source.contains(w))))
+    /// The prelude structs whose [`PreludeStruct::words`] `source` holds, and whether its tokens
+    /// read a bodied prelude native-struct method ([`prelude_native_body_names`]) as a member
+    /// (`words.members`): such a method is reached only through a member path (`int.from(x)`,
+    /// `T.from(x)`, `?.from`), and `from` alone is the import keyword.
+    fn named_in(source: &str, words: &Words) -> Self {
+        Self(
+            PRELUDE_STRUCTS.map(|p| p.words.iter().any(|w| source.contains(w))),
+            prelude_native_body_names()
+                .iter()
+                .any(|n| words.members.binary_search(n).is_ok()),
+        )
+    }
+
+    /// True when the graph names a bodied method of a prelude `native struct`.
+    pub fn uses_native_bodies(&self) -> bool {
+        self.1
     }
 
     /// Record a use of prelude struct `name`.
@@ -159,6 +174,7 @@ impl PreludeUse {
         for (used, o) in self.0.iter_mut().zip(other.0) {
             *used |= o;
         }
+        self.1 |= other.1;
     }
 
     /// True when prelude struct `name` is used.
@@ -236,6 +252,12 @@ impl ModuleGraph {
         } else {
             Vec::new()
         }
+    }
+
+    /// True when `lm` is the prelude and the graph names none of its bodied native-struct methods
+    /// ([`PreludeUse::uses_native_bodies`]): desugar, the checker and the compiler skip those bodies.
+    pub fn skips_prelude_native_bodies(&self, lm: &LoadedModule) -> bool {
+        lm.dotted == ["std", "prelude"] && !self.prelude_used.uses_native_bodies()
     }
 
     /// TICKET-265 — the top-level fns of `lm` whose bodies are skipped; empty for a module the reach
@@ -483,6 +505,58 @@ pub fn graph_global_binds(graph: &ModuleGraph) -> Vec<Vec<(String, GlobalSource)
         out.push(binds);
     }
     out
+}
+
+/// TICKET-253 — the import no one wrote that gives every module but the prelude the
+/// [`PRELUDE_STRUCTS`]: `import Range, RecvError from std.prelude`, with `prelude` the prelude's id.
+pub fn prelude_struct_import(prelude: ModuleId) -> ResolvedImport {
+    ResolvedImport {
+        target: prelude,
+        import: Import::From {
+            path: vec!["std".to_string(), "prelude".to_string()],
+            names: PRELUDE_STRUCTS.map(|p| (p.name.to_string(), None)).to_vec(),
+            name_spans: vec![Span::NOWHERE; PRELUDE_STRUCTS.len()],
+        },
+        span: Span::NOWHERE,
+    }
+}
+
+/// The one-module graph of the test entry points that take a parsed module (`checker::check`,
+/// `compiler::compile_module_standalone`): `stmts` as the entry `<main>` (file 0), after the
+/// always-linked prelude as [`build_graph`] loads it (read once per process). The entry imports
+/// what a real entry imports implicitly ([`prelude_struct_import`]). With no source text to read
+/// names from, every prelude body is kept ([`PreludeUse::ALL`], no skipped fn).
+#[cfg(any(test, feature = "test-api"))]
+pub fn standalone_graph(stmts: &[crate::ast::Stmt]) -> ModuleGraph {
+    static PRELUDE: std::sync::OnceLock<LoadedModule> = std::sync::OnceLock::new();
+    let prelude = PRELUDE.get_or_init(|| {
+        let graph = build_graph_with_entry_source(Path::new("<main>.chz"), Some(String::new()))
+            .expect("the always-linked prelude resolves");
+        graph
+            .modules
+            .into_iter()
+            .find(|m| m.dotted == ["std", "prelude"])
+            .expect("a graph links the prelude")
+    });
+    let id = ModuleId(PathBuf::from("<main>"));
+    ModuleGraph {
+        entry: id.clone(),
+        prelude_used: PreludeUse::ALL,
+        skipped_fns: HashMap::new(),
+        modules: vec![
+            prelude.clone(),
+            LoadedModule {
+                id,
+                dotted: Vec::new(),
+                ast: Module {
+                    stmts: stmts.to_vec(),
+                },
+                file: 0,
+                imports: vec![prelude_struct_import(prelude.id.clone())],
+                native: None,
+            },
+        ],
+    }
 }
 
 /// One user type's identity key (see [`user_type_keys`]).
@@ -792,11 +866,18 @@ fn build_graph_impl(
     let prelude_id = ModuleId(canonical_or_abs(&prelude_file));
     b.visit(&prelude_id, &prelude_path, Span::RUNTIME)?;
     b.visit(&entry_id, &[], Span::RUNTIME)?;
-    let prelude_used = if entry_id == prelude_id {
+    let mut prelude_used = if entry_id == prelude_id {
         PreludeUse::ALL
     } else {
         b.prelude_named.get()
     };
+    // A prelude that is not the embedded one (`$CHEZZI_STD`) may declare other bodied methods than
+    // the names the sources were read for: keep its bodies.
+    if b.order.iter().any(|m| {
+        m.dotted == prelude_path && native_body_names(&m.ast) != prelude_native_body_names()
+    }) {
+        prelude_used.1 = true;
+    }
     let skipped_fns = unreached_std_fns(&b.order, &entry_id, &b.words.take());
     let mut graph = ModuleGraph {
         entry: entry_id,
@@ -1114,17 +1195,9 @@ impl Builder {
         // compiler and VM carry the types through the ordinary from-import path. `Span::NOWHERE` marks
         // it as written by no one.
         if dotted != ["std".to_string(), "prelude".to_string()] {
-            let prelude_path = vec!["std".to_string(), "prelude".to_string()];
+            let prelude_path = ["std".to_string(), "prelude".to_string()];
             let file = module_file(&prelude_path, &self.project_root, &self.std_root);
-            resolved.push(ResolvedImport {
-                target: ModuleId(canonical_or_abs(&file)),
-                import: Import::From {
-                    path: prelude_path,
-                    names: PRELUDE_STRUCTS.map(|p| (p.name.to_string(), None)).to_vec(),
-                    name_spans: vec![Span::NOWHERE; PRELUDE_STRUCTS.len()],
-                },
-                span: Span::NOWHERE,
-            });
+            resolved.push(prelude_struct_import(ModuleId(canonical_or_abs(&file))));
         }
         self.on_stack.pop();
         Ok(resolved)
@@ -1236,12 +1309,12 @@ impl Builder {
         // `Cell`, not `&mut self`: `parse` is called from `&self` contexts.
         let file = self.file_seq.get() + 1;
         self.file_seq.set(file);
-        if dotted != ["std", "prelude"] {
-            self.note_prelude_named(PreludeUse::named_in(source));
-        }
         let (ast, words) = lex_and_parse(source, dotted, file, &|x: &str| {
             !std_file && module_file(&[x.to_string()], &self.project_root, &self.std_root).exists()
         })?;
+        if dotted != ["std", "prelude"] {
+            self.note_prelude_named(PreludeUse::named_in(source, &words));
+        }
         self.words.borrow_mut().insert(file, words);
         Ok((ast, file))
     }
@@ -1393,16 +1466,48 @@ fn shared_std_parse_at(index: usize, dotted: &[String]) -> Option<&'static Share
             };
             Some(SharedStdParse {
                 module,
-                words,
                 prelude_named: if dotted == ["std", "prelude"] {
                     PreludeUse::default()
                 } else {
-                    PreludeUse::named_in(source)
+                    PreludeUse::named_in(source, &words)
                 },
+                words,
                 file,
             })
         })
         .as_ref()
+}
+
+/// The names of the bodied methods of the `native struct` decls of `module`, sorted and deduped.
+fn native_body_names(module: &Module) -> Vec<String> {
+    let mut names: Vec<String> = module
+        .stmts
+        .iter()
+        .filter_map(|s| {
+            if let StmtKind::NativeStruct { bodied_methods, .. } = &s.kind {
+                Some(bodied_methods)
+            } else {
+                None
+            }
+        })
+        .flatten()
+        .map(|m| m.name.clone())
+        .collect();
+    names.sort();
+    names.dedup();
+    names
+}
+
+/// The bodied methods of the embedded prelude's `native struct` decls (`int.from`, `int.try_from`):
+/// a graph whose non-prelude sources name none of them skips their bodies ([`PreludeUse`]). Read
+/// from the decls, once per process.
+fn prelude_native_body_names() -> &'static [String] {
+    static NAMES: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+    NAMES.get_or_init(|| {
+        std_module_ast("prelude.chz")
+            .map(native_body_names)
+            .unwrap_or_default()
+    })
 }
 
 /// The AST of the embedded std file `rel` (`"ops.chz"`), from the shared parse. The spans carry the

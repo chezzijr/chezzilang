@@ -578,10 +578,19 @@ impl Checker {
         // capture entries instead (Task 4), so its scope is left untouched below. A body whose
         // receiver is neither struct nor enum declares none and inherits none (nothing
         // there declares a proto the witness could ride on).
+        // A `from` overload keys on its internal name (`from$int`), so two overloads never
+        // share an entry.
         let witness_fn_name = match &self_ty {
             _ if saved_in_fn => None,
             None => Some(decl.name.clone()),
-            Some(Ty::Struct(k, _) | Ty::Enum(k, _)) => Some(format!("{k}.{}", decl.name)),
+            Some(Ty::Struct(k, _) | Ty::Enum(k, _)) => {
+                let m = self
+                    .witnesses
+                    .overload_names
+                    .get(&(self.graph_module_idx, decl.name_span))
+                    .unwrap_or(&decl.name);
+                Some(format!("{k}.{m}"))
+            }
             Some(_) => None,
         };
         let wparams = match &witness_fn_name {
@@ -596,9 +605,10 @@ impl Checker {
             && !wparams.is_empty()
             && let Some(fname) = witness_fn_name
         {
-            self.witnesses
-                .fns
-                .insert((self.graph_module_idx, fname), wparams.clone());
+            self.witnesses.fns.insert(
+                (self.graph_module_idx, fname),
+                wparams.iter().map(WitnessParam::tag).collect(),
+            );
         }
         // A NESTED fn inherits (Task 4 — its `MakeClosure` carries the `$w:T` entries); every other
         // body gets exactly the witness params it declares. Restoring the clone is a no-op for the
@@ -658,32 +668,21 @@ impl Checker {
                 // error` on `b1307258` and `ok: no type errors` on `dfdc7a1b`, the error reappearing
                 // only if someone CALLED `f`. So ask whether the provider exists — under the one
                 // name `desugar` would have given it — instead of assuming it does.
-                // `desugar` names a method's provider with the type's **bare** name
-                // (`synthesize_providers_into` passes `format!("{name}.{}", mth.name)` off the AST
-                // declaration), while `Ty::Struct`'s `k` is the module-scoped IDENTITY key
-                // (`<module-key>::Name`). Comparing them unstripped never matched, so
-                // `judged_by_provider` was permanently `false` for every METHOD default and the
-                // decl-site copy re-judged a `?` the provider body had already judged — two
-                // diagnostics at one span. Measured on `0104d57b`, release CLI:
-                // `struct Q: fn c(self, o: Q = mkq()?)` → **2 type errors** (the stale
-                // `'?' used in a function that returns int` plus the tailored one), where the free-fn
-                // shape `fn f(x: int = getr()?.len())` correctly gave **1**. It went unnoticed because
-                // the single-module checker test helpers key types by their BARE name, so only the
-                // CLI (and any multi-module program) could show it.
-                let owner = match &self_ty {
-                    Some(Ty::Struct(k, _) | Ty::Enum(k, _)) => {
-                        let bare = k.rsplit("::").next().unwrap_or(k.as_str());
-                        format!("{bare}.{}", decl.name)
+                // Rebuilding that name here from the host's identity key once missed for every
+                // METHOD default (`<module-key>::Name` vs desugar's bare `Name`, measured on
+                // `0104d57b`: two diagnostics at one span).
+                // So the name is read off the sig's slots, which the one owner builder named
+                // (`provider_name::method_owner`, an overload's ordinal included).
+                let provider = sig.slots.iter().flatten().find_map(|s| {
+                    if s.name.as_deref() != Some(param.name.as_str()) {
+                        return None;
                     }
-                    _ => decl.name.clone(),
-                };
-                let judged_by_provider =
-                    self.functions
-                        .contains_key(&crate::base::provider_name::param_provider_name(
-                            def.span.file,
-                            &owner,
-                            &param.name,
-                        ));
+                    if let Some(crate::desugar::Dflt::Provider { name }) = &s.default {
+                        return Some(name);
+                    }
+                    None
+                });
+                let judged_by_provider = provider.is_some_and(|n| self.functions.contains_key(n));
                 let saved_ret = self.current_ret.clone();
                 let saved_in_fn = self.in_fn_body;
                 if judged_by_provider {

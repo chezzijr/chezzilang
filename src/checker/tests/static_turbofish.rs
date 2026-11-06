@@ -781,6 +781,47 @@ fn self_typed_method_rejected_on_a_protocol_existential() {
     );
 }
 
+/// A message names a protocol, struct or enum by its display name, never by its identity key
+/// (`lib::Pr`, `main::Pr`, `<main>::Pr`): each cell's types live in a named module (`lib`, imported
+/// by `main`), in the named entry `main` itself, and in the `check` entry `<main>`.
+#[test]
+fn messages_name_no_type_key() {
+    let decls = "protocol Pr:\n    fn add(self, other: Self) -> Self\nprotocol Gp[T]:\n    fn get(self) -> T\nstruct N:\n    x: int\nenum E:\n    A\n    B(int)\n";
+    let cells = [
+        "fn f(a: Pr, b: Pr) -> Pr:\n    return a.add(b)\n",
+        "fn f(a: Pr):\n    a.nope()\n",
+        "fn f(a: Gp[int]):\n    a.nope()\n",
+        "fn f(a: N):\n    a.nope()\n",
+        "fn f(a: E):\n    a.nope()\n",
+        "x := E.C\n",
+        "fn f(a: Pr):\n    pass\nf(N(1))\n",
+        "x: E = N(1)\n",
+        "fn f(a: Gp[int]):\n    x: Gp[str] = a\n    print(x)\n",
+    ];
+    let mut failed = Vec::new();
+    for body in cells {
+        let imported = format!("import Pr, Gp, N, E from lib\n{body}");
+        let local = format!("{decls}{body}");
+        let runs = [
+            (
+                "lib",
+                check_files(&[("lib.chz", decls), ("main.chz", &imported)]),
+            ),
+            ("main", check_files(&[("main.chz", &local)])),
+            ("<main>", check_src(&local)),
+        ];
+        for (home, errs) in runs {
+            let leaks = errs.iter().any(|e| {
+                e.message.contains("::") || e.help.as_deref().is_some_and(|h| h.contains("::"))
+            });
+            if errs.is_empty() || leaks {
+                failed.push(format!("{home}: {body}=> {errs:?}"));
+            }
+        }
+    }
+    assert!(failed.is_empty(), "{}", failed.join("\n"));
+}
+
 /// A protocol value cannot WITNESS a generic type param whose bound needs a `Self`-parameterized
 /// method — two slots of one param would then hold two different witnesses, which is the same hole
 /// the operator arms have, reached by a different route. Rejected whether the `Self` method is the
@@ -949,11 +990,9 @@ fn index_and_slice_on_a_protocol_existential() {
 #[test]
 fn builtin_callables_all_have_builtin_sig() {
     // `builtin_sig` is now a Checker METHOD (phase 3a): the nine migrated universe builtins source
-    // their sig from the always-linked std/prelude.chz, seeded here via `seed_native_prelude_sigs`
-    // (the single-module `check` path does the same). `print` + the container/runtime ctors stay
-    // hard-coded, so they resolve without the seed too.
-    let mut c = Checker::new();
-    c.seed_native_prelude_sigs();
+    // their sig from the always-linked std/prelude.chz, which `prelude_checker` has checked.
+    // `print` + the container/runtime ctors stay hard-coded.
+    let c = prelude_checker();
     for name in builtin_callables() {
         assert!(
             c.builtin_sig(name).is_some(),
@@ -992,8 +1031,7 @@ fn prelude_table_is_single_source_of_truth() {
     assert!(prelude_fn("Channel").is_none());
 
     // (2) Every prelude builtin has a checker `builtin_sig` (editor hover, value-position typing).
-    let mut chk = Checker::new();
-    chk.seed_native_prelude_sigs();
+    let chk = prelude_checker();
     let prelude: Vec<Builtin> = Builtin::ALL
         .into_iter()
         .filter(|b| b.lowering() != Lowering::Opcode)
@@ -1042,8 +1080,7 @@ fn prelude_table_is_single_source_of_truth() {
 
     // Each parsed FnSig must equal its HISTORICAL hand-built shape (byte-identical migration). Read the
     // sigs through a prelude-seeded checker (same path production uses).
-    let mut sc = Checker::new();
-    sc.seed_native_prelude_sigs();
+    let sc = prelude_checker();
     let hist: &[(&str, Vec<Ty>, Ty)] = &[
         ("ord", vec![Ty::Str], Ty::Int),
         ("chr", vec![Ty::Int], Ty::Str),

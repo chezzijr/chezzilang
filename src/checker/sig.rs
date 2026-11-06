@@ -280,7 +280,7 @@ impl Checker {
                 }
             })
             .collect();
-        let wparams = self.witness_params_of(decl);
+        let wparams = self.witness_reqs(&self.witness_params_of(decl), &type_params);
         FnSig {
             // Trailing defaulted parameters are filled by the CALLEE's own prologue, so a call may
             // omit them. Same predicate the compiler sizes `Proto::min_arity` with — and because
@@ -306,15 +306,21 @@ impl Checker {
             // consumer reads this one answer instead of re-deriving it.
             witness_params: wparams,
             variadic: decl.params.iter().position(|p| p.is_variadic),
-            slots: Some(self.decl_param_slots(decl, span.file)),
+            slots: Some(self.decl_param_slots(decl, span.file, 0)),
             native: None,
             c_variadic: false,
         }
     }
 
     /// The call-binding slots of `decl`, named as `desugar::synthesize_providers` named its
-    /// providers: owner `f` for a free fn, `S.m` for a method of the host `current_self_ty`.
-    fn decl_param_slots(&self, decl: &FnDecl, file: u32) -> Vec<crate::desugar::SlotSpec> {
+    /// providers: owner `f` for a free fn, `S.m` for a method of the host `current_self_ty`, with
+    /// `nth` the count of earlier same-named methods ([`crate::base::provider_name::method_owner`]).
+    pub(super) fn decl_param_slots(
+        &self,
+        decl: &FnDecl,
+        file: u32,
+        nth: usize,
+    ) -> Vec<crate::desugar::SlotSpec> {
         let (owner, bare, host_tps) = match &self.current_self_ty {
             Some(Ty::Struct(k, a) | Ty::Enum(k, a)) => {
                 let bare = k.rsplit("::").next().unwrap_or(k.as_str()).to_string();
@@ -356,7 +362,8 @@ impl Checker {
                         | Ty::Var(_) => None,
                     })
                     .collect();
-                (format!("{bare}.{}", decl.name), Some(bare), tps)
+                let owner = crate::base::provider_name::method_owner(&bare, &decl.name, nth);
+                (owner, Some(bare), tps)
             }
             _ => (decl.name.clone(), None, Vec::new()),
         };

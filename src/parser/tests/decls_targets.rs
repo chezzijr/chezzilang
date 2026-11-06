@@ -1635,3 +1635,39 @@ fn enum_without_variant_is_rejected_for_every_body() {
     }
     parse_ok(&format!("enum Z:\n    A\n{f}"));
 }
+
+/// `from` is a hard keyword, but a member or method name may be `from`: after `.` / `?.`, and as a
+/// method name in a struct, enum, native-struct or protocol body. A free `fn from` stays an error.
+#[test]
+fn from_member_name_grid() {
+    let accept = [
+        "struct Q:\n    n: int\n    fn from(x: int) -> Q:\n        return Q(x)\n",
+        "struct Q:\n    n: int\n    test fn from(self):\n        pass\n",
+        "enum E:\n    A\n    fn from(x: int) -> E:\n        return E.A\n",
+        "native struct S:\n    native fn from(x: int) -> S\n",
+        "native struct S:\n    fn from(x: int) -> int:\n        return x\n",
+        "protocol P[S]:\n    fn from(x: S) -> Self\n",
+        "y := Q.from(3)\n",
+        "y := q?.from\n",
+        "y := q?.from(3)\n",
+        "import a from m\n",
+    ];
+    for src in accept {
+        parse(crate::lexer::tokenize(src).unwrap())
+            .unwrap_or_else(|e| panic!("{src:?} must parse, got: {e}"));
+    }
+    let reject = [
+        "fn from(x: int):\n    pass\n",
+        "test fn from():\n    pass\n",
+        "native fn from(x: int) -> int\n",
+        "fn f():\n    fn from(x: int):\n        pass\n",
+    ];
+    for src in reject {
+        let e = parse_err(src);
+        assert!(
+            e.message.contains("reserved keyword 'from'"),
+            "{src:?}: {}",
+            e.message
+        );
+    }
+}

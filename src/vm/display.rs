@@ -286,7 +286,10 @@ impl Vm {
                 }
                 // Raw display fallback (no method dispatch here): `Name(inner)`. The `str(self)`
                 // override is honored by `stringify` (the path print and interpolation use).
-                Obj::Func { proto, .. } => Ok(format!("<fn {}>", self.program.protos[*proto].name)),
+                Obj::Func { proto, .. } => Ok(format!(
+                    "<fn {}>",
+                    crate::base::provider_name::display_fn_name(&self.program.protos[*proto].name)
+                )),
                 Obj::Closure { .. } => Ok("<closure>".to_string()),
                 Obj::Module(m) => Ok(format!("<module {}>", m.names().name)),
                 Obj::Native { name, .. } => Ok(format!("<native fn {name}>")),
@@ -692,7 +695,11 @@ impl Vm {
                 }
             }
             Obj::Func { proto, .. } => {
-                let _ = write!(out, "<fn {}>", self.program.protos[proto].name);
+                let _ = write!(
+                    out,
+                    "<fn {}>",
+                    crate::base::provider_name::display_fn_name(&self.program.protos[proto].name)
+                );
             }
             Obj::Closure { .. } => out.push_str("<closure>"),
             Obj::Module(m) => {

@@ -12,6 +12,15 @@ use super::sched::spawn_worker_thread;
 use super::*;
 
 impl Vm {
+    /// A nursery's sched-wide deadlock fault: a blocked task of `parallel:` at `span`, for a task
+    /// whose own wait no site named. Every cut that knows its wait re-sites it
+    /// ([`RuntimeError::at_site`]).
+    fn nursery_deadlock_err(&self, span: Span) -> RuntimeError {
+        self.err(String::new(), span)
+            .deadlock()
+            .at_site(super::deadlock::Wait::Nursery.phrase(), span)
+    }
+
     /// Launch a fiber's initial task in the (already swapped-in) child context: push the callee's
     /// frame and return; the scheduler then runs it. The callee always pushes a frame (TICKET-235,
     /// [`Vm::task_entry`]), so a call that waits inside the task has an `ip` to rewind.
@@ -130,7 +139,11 @@ impl Vm {
         };
         match target {
             SpawnTarget::Nursery => self.register_task(task, span),
-            SpawnTarget::Scope { sched, settle } => {
+            SpawnTarget::Scope {
+                sched,
+                settle,
+                executor,
+            } => {
                 let rw = self.prepare_worker(task)?;
                 // A job's values are objects of the run's one heap, which `live_bytes` counts
                 // already, so the starter is charged no worker heap of its own.
@@ -147,6 +160,7 @@ impl Vm {
                     sched.reserve_job_slot(&mut c, &mut fiber, settle);
                     sched.claim_runners(&mut c)
                 };
+                fiber.ctx.task = super::deadlock::TaskPath::job(&executor, fiber.task_index);
                 // TICKET-230 — once another runner exists, main hands its permit over at slice
                 // ends, at every worker count (one runner budget of N, main included).
                 if self.mn.is_none() && !wids.is_empty() {
@@ -584,7 +598,7 @@ impl Vm {
             // scope 0 — the outermost nursery.
             fibers.push(self.prepare_worker(t.call)?.into_fiber(i, 0));
         }
-        let deadlock_err = self.err(DEADLOCK_MSG.to_string(), nursery_span).deadlock();
+        let deadlock_err = self.nursery_deadlock_err(nursery_span);
         // Worker count must account for the early-enlisted OUTER scopes' tasks too (case-A: `main`'s `O`),
         // so a multi-task inner nursery + outer siblings still gets real parallelism. We don't yet know
         // the outer totals here, so size to a reasonable upper bound (core count) capped by total work
@@ -702,7 +716,7 @@ impl Vm {
         // correct for it.
         if self.owns_nested_sched(sched) {
             sched.lock().scopes[scope_id].deadlock_err =
-                Some(self.err(DEADLOCK_MSG.to_string(), nursery_span).deadlock());
+                Some(self.nursery_deadlock_err(nursery_span));
         }
         let wid = self.wid;
         {
@@ -958,7 +972,7 @@ impl Vm {
             Some(core) => Arc::clone(&core.cancel),
             None => Arc::new(AtomicBool::new(false)),
         };
-        let deadlock_err = self.err(DEADLOCK_MSG.to_string(), span).deadlock();
+        let deadlock_err = self.nursery_deadlock_err(span);
         // wid 0 = the body's thread (body, then inline joiner), wid 1 = the dedicated raw drainer
         // below, wids 2..=n = the raw runners `Vm::start_runners` starts on a claim (TICKET-211).
         // An Executor claims wids 1..=n. `MnSched::new` allocates the per-worker local queues up front (`locals: (0..nworkers)`), so the count must
@@ -1071,8 +1085,7 @@ impl Vm {
             sched.register_scope_seeded(Arc::clone(&cancel), self.scope_ancestors(), Vec::new());
         {
             let mut c = sched.lock();
-            c.scopes[scope].deadlock_err =
-                Some(self.err(DEADLOCK_MSG.to_string(), nursery_span).deadlock());
+            c.scopes[scope].deadlock_err = Some(self.nursery_deadlock_err(nursery_span));
             // TICKET-125 — this scope's fibers can only be fed once the OWNING fiber's own join
             // returns; a family faulting that fiber (`flag_deadlock_leaves`) must treat this scope
             // as interior, not a leaf, or the owner is dropped without unwinding it (W13-4).

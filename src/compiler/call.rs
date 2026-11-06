@@ -296,10 +296,26 @@ impl Compiler {
                     return Ok(());
                 }
                 Resolution::WitnessStatic(t) => {
-                    let w = fc.witness_ref(&t).ok_or_else(|| CompileError {
-                        message: format!("internal: no witness for type parameter '{t}' here"),
-                        span,
-                    })?;
+                    // The slot the checker picked for this call (`WitnessTable::statics`): its
+                    // value names the type and the method.
+                    let tag = self
+                        .witnesses
+                        .statics
+                        .get(&crate::checker::witness_key(
+                            self.current_module_idx,
+                            self.kw_frag_ctx,
+                            self.kw_frag_ord,
+                            *name_span,
+                        ))
+                        .cloned();
+                    let w =
+                        tag.and_then(|tag| fc.witness_ref(&tag))
+                            .ok_or_else(|| CompileError {
+                                message: format!(
+                                    "internal: no witness for type parameter '{t}' here"
+                                ),
+                                span,
+                            })?;
                     let argc = self.compile_call_args(fc, call_id, callee, args, named, span)?;
                     fc.emit_witness(w, span);
                     fc.emit(
@@ -411,8 +427,11 @@ impl Compiler {
                     argc: argc + w,
                     ic,
                 },
+                // An `into` overload: the checker's pick for this call, by the witness key.
                 None => Op::CallMethod {
-                    name: name.clone(),
+                    name: self
+                        .overload_pick(*name_span)
+                        .unwrap_or_else(|| name.clone()),
                     argc: argc + w,
                     ic,
                 },

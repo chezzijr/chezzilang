@@ -300,6 +300,9 @@ fn pinned_away(judge: Judge, has_site: bool) -> bool {
 #[derive(Default)]
 pub(super) struct QuiesceState {
     parties: Mutex<Vec<Party>>,
+    /// The run's deadlock listing: every task the verdict cut, added at its cut. Each `SchedCore` of
+    /// the run holds the same `Arc` ([`MnSched::join_run`]).
+    pub(super) listing: Arc<super::deadlock::Listing>,
     /// TICKET-236 — the run's epoch: the one owner of "a waker left the counts a verdict reads".
     /// A judge reads scheds one lock at a time, so a job can send and finish between two of its
     /// reads: each read is true and the pair describes no instant. Every way out of those counts

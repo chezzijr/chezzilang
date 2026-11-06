@@ -40,17 +40,33 @@ pub enum WitnessCallee {
     Member,
 }
 
-/// M24 — where ONE witness argument at a call site comes from.
+/// M24 — where ONE witness argument at a call site comes from. One witness slot per (type param,
+/// static requirement), so the slot's value names the METHOD as well as the type: the caller picks
+/// the `from` overload, because the caller knows the source type.
 #[derive(Debug, Clone, PartialEq)]
 pub enum WitnessSrc {
     /// The concrete type's runtime IDENTITY KEY (`<module-key>::Name`) — the exact key
-    /// `Vm::do_static_call` resolves against `Program::structs` / `Program::enum_methods`.
-    Concrete(String),
-    /// FORWARDING (slice 2): the callee's slot is filled by the CALLER's own still-abstract type
-    /// param of this name, so the argument is a load of the caller's `$w:<name>` local rather than a
-    /// constant. Recorded only when that local is directly reachable at the call site
+    /// `Vm::do_static_call` resolves against `Program::structs` / `Program::enum_methods` — and
+    /// the method that witnesses the requirement there (an overload's internal name, `from$int`).
+    Concrete { type_key: String, method: String },
+    /// FORWARDING (slice 2): the callee's slot is filled by the CALLER's own witness for its
+    /// still-abstract type param `param` and the requirement `req` (equal after substitution), so
+    /// the argument is a load of the caller's [`witness_tag`] local rather than a constant.
+    /// Recorded only when that local is directly reachable at the call site
     /// (`Checker::witness_scope`) — which is exactly what the compiler can lower.
-    Forward(String),
+    Forward { param: String, req: String },
+}
+
+/// The name of ONE witness slot: its type param and its requirement (`T:from(int)`). The
+/// compiler's hidden `$w:` local is named by it. The ONE place the spelling is decided;
+/// [`witness_tag_param`] reads it back.
+pub fn witness_tag(param: &str, req: &str) -> String {
+    format!("{param}:{req}")
+}
+
+/// The type param a [`witness_tag`] belongs to (a type param is a bare identifier, never `:`).
+pub fn witness_tag_param(tag: &str) -> &str {
+    tag.split(':').next().unwrap_or(tag)
 }
 
 /// M24 static-witness passing — BOTH halves of the contract, produced by the checker and CONSUMED
@@ -59,17 +75,28 @@ pub enum WitnessSrc {
 /// the backend does not do.
 ///
 /// * `fns` — a generic fn that needs hidden trailing witness parameters, keyed `(graph module index,
-///   fn name)`; the value is the witness TYPE-PARAM names in declaration order. One hidden trailing
-///   param `$w:<name>` per entry, appended after the declared params, ALWAYS (whether or not the
+///   fn name)`; the value is the witness slots' [`witness_tag`]s (type param + requirement) in
+///   declaration order. One hidden trailing param `$w:<tag>` per entry, appended after the declared params, ALWAYS (whether or not the
 ///   body uses it) so a fn's arity is a property of its declaration alone. Only MODULE-LEVEL free
 ///   fns are recorded (a nested `fn` never is, so a name collision between the two cannot
 ///   mis-arity the nested one).
 /// * `calls` — what fills each witness slot at one call site, keyed by [`WitnessKey`], parallel to
 ///   the callee's `fns` entry.
+/// * `overload_names` — each `from` overload's internal name (`from$int`, decided by
+///   `from_overload::internal_name`), keyed `(graph module index, decl name span)`. The compiler
+///   names the overload's proto and its method-table entry with it.
+/// * `overload_calls` — the overload's internal name a direct `Type.from(x)` call picks (by the
+///   argument's type), keyed by [`WitnessKey`]. A call with no entry names the method as written.
+/// * `statics` — the witness slot ([`witness_tag`]) a `T.m(args)` call reads, keyed by
+///   [`WitnessKey`] of its member-name token: with two `From` bounds on one `T`, the argument's
+///   type picks the requirement.
 #[derive(Debug, Clone, Default)]
 pub struct WitnessTable {
     pub fns: HashMap<(usize, String), Vec<String>>,
     pub calls: HashMap<WitnessKey, Vec<WitnessSrc>>,
+    pub statics: HashMap<WitnessKey, String>,
+    pub overload_names: HashMap<(usize, Span), String>,
+    pub overload_calls: HashMap<WitnessKey, String>,
 }
 
 /// W7-43 — the [`CarrierTable`] key. The same four components as [`WitnessKey`],
@@ -997,6 +1024,15 @@ impl Ty {
                 Named(t, Some(&names)).to_string()
             }
         })
+    }
+
+    /// Render `self` with each nominal type spelled by its identity KEY, not its bare name: two
+    /// distinct types never render alike (`a::P`, `b::P`). For an internal name, never a message.
+    pub(crate) fn render_keyed(&self) -> String {
+        let mut keys = std::collections::BTreeSet::new();
+        self.collect_nominal_keys(&mut keys);
+        let names: HashMap<String, String> = keys.into_iter().map(|k| (k.clone(), k)).collect();
+        Named(self, Some(&names)).to_string()
     }
 
     /// Every nominal (struct/enum/protocol) identity key inside `self`, at any depth, plus the

@@ -2,7 +2,6 @@
 //! outcome classification, wakes, the sched registry.
 //! Split out of `src/vm/sched.rs`. `super::*` is the parent module.
 
-use super::netio::GUARD_DEADLOCK;
 use super::sched::GatedReg;
 use super::sched::JoinCover;
 #[cfg(test)]
@@ -214,12 +213,13 @@ impl Vm {
         what: &str,
         span: Span,
     ) -> Result<(), RuntimeError> {
+        let wait = super::deadlock::Wait::guard(key.lock.kind).phrase();
         self.wait_demote(
             reg,
             WaitSpec::Guard,
             Some(Blocked::at(
                 quiesce::PartyWait::Guard(key, self.guard_token),
-                GUARD_DEADLOCK,
+                wait,
                 span,
             )),
             what,
@@ -976,6 +976,9 @@ impl Vm {
         let mut first_cancel_fault: Option<(RuntimeError, Vec<TraceFrame>)> = None;
         // TICKET-284 — how much exit output this reduce took; its take counted each one.
         let mut exits = 0;
+        // Whether a slot ended with the verdict's cut: then this join's fault is the verdict's, and
+        // the run's listing reports its tasks ([`super::deadlock::Listing`]).
+        let mut cut = false;
         for slot in slots {
             // W7-60 — a `None` here means the slot was already drained by `MnSched::take_finished_streams`
             // on a `join_executor` bail-out (its output is flushed, its outcome consumed), which is
@@ -1025,6 +1028,7 @@ impl Vm {
                     // fault output ordering is a separate, pre-existing nondeterminism (see the
                     // single-producer case covered by the test
                     // `parallel_faulting_task_flushes_partial_output_3engine`).
+                    cut |= err.blocked.is_some();
                     if first_hard_fault.is_none() && (executor_hard_halt(&err) || err.is_deadlock) {
                         first_hard_fault = Some((err.clone(), trace.clone()));
                     }
@@ -1035,6 +1039,7 @@ impl Vm {
                     }
                 }
                 TaskOutcome::Deadlocked { err, out, stderr } => {
+                    cut |= err.blocked.is_some();
                     // The M:N deadlock detector recorded EVERY still-parked fiber with this synthetic
                     // outcome (`flag_deadlock`). Unlike a real `Fault`, ALL parked buffers flush at
                     // their task-order slot (no `is_none()` gate) — so with two-or-more parked fibers
@@ -1081,8 +1086,11 @@ impl Vm {
         // TICKET-208 — the run-wide halt, read through its one funnel after a slot's own exit and
         // before any slot fault: a `recover:` around this nursery must not catch a sibling fault
         // and outlive a job fault that ends the run. Every slot's output is already flushed.
+        // The latched deadlock verdict is the one a cut slot reports, and a deadlock fault is
+        // fatal, so no `recover:` catches it either.
         if first_exit.is_none()
             && let Some(e) = self.run_exit_err(Span::RUNTIME)
+            && !(e.is_deadlock && cut)
         {
             return (Err(e), None);
         }

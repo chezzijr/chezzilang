@@ -24,6 +24,7 @@ impl Checker {
                 .map(|(n, t)| (n.to_string(), t))
                 .collect(),
             methods: HashMap::new(),
+            overloads: Default::default(),
             origin: StructOrigin::Builtin,
             doc: None,
             defaulted_fields: Vec::new(),
@@ -200,6 +201,7 @@ impl Checker {
                     // transiently visible so a method return type can reference a sibling native
                     // struct, e.g. `Listener.accept -> Result[Socket]`).
                     methods: HashMap::new(),
+                    overloads: Default::default(),
                     origin: StructOrigin::Builtin,
                     doc: None,
                     defaulted_fields: Vec::new(),
@@ -325,14 +327,7 @@ impl Checker {
                     .qualified_builtin_ty(name, &owner_args)
                     .unwrap_or_else(|| self.struct_self_ty(name));
                 for m in bodied_methods {
-                    let mut fsig = self.fn_sig(m, m.name_span, Some(&owner));
-                    if !fsig.params.is_empty() {
-                        fsig.params.remove(0);
-                        fsig.min_params = fsig.min_params.saturating_sub(1);
-                    }
-                    if !fsig.labels.is_empty() {
-                        fsig.labels.remove(0);
-                    }
+                    let fsig = self.bodied_native_method_sig(m, &owner);
                     table.insert(m.name.clone(), fsig);
                 }
                 self.exit_type_params(saved);
@@ -506,6 +501,23 @@ impl Checker {
         sig
     }
 
+    /// The method-table sig of a BODIED method of a `native struct` whose type is `owner`: its
+    /// [`Self::fn_sig`], with an instance method's leading `self` dropped (the shape of
+    /// [`Self::harvest_native_method_sig`]). A method with no `self` is static (`int.from(x)`).
+    fn bodied_native_method_sig(&mut self, m: &crate::ast::FnDecl, owner: &Ty) -> FnSig {
+        let mut fsig = self.fn_sig(m, m.name_span, Some(owner));
+        if !fsig.is_static {
+            if !fsig.params.is_empty() {
+                fsig.params.remove(0);
+                fsig.min_params = fsig.min_params.saturating_sub(1);
+            }
+            if !fsig.labels.is_empty() {
+                fsig.labels.remove(0);
+            }
+        }
+        fsig
+    }
+
     /// Harvest the METHOD table of every `native struct` of a parsed module AST, by bare name. The
     /// always-linked `std/prelude.chz` declares the reserved universe types this way (`List`, `Map`,
     /// `Set`, `Channel`, `str`, `bytes`, `bytearray`): their identity is the reserved `Ty` (not a
@@ -521,21 +533,41 @@ impl Checker {
                 name,
                 type_params,
                 methods,
+                bodied_methods,
                 ..
             } = &s.kind
             {
                 let saved = self.enter_type_params(type_params);
-                let table: HashMap<String, FnSig> = methods
+                let mut table: HashMap<String, FnSig> = methods
                     .iter()
                     .map(|m| (m.name.clone(), self.harvest_native_method_sig(m)))
                     .collect();
+                // A bodied method (`int.from(x: bool)`) is in the same table, as the native-module
+                // harvest puts it.
+                if !bodied_methods.is_empty() {
+                    let owner_args: Vec<Ty> = type_params
+                        .iter()
+                        .map(|tp| Ty::Param(tp.name.clone()))
+                        .collect();
+                    let owner = self
+                        .qualified_builtin_ty(name, &owner_args)
+                        .unwrap_or_else(|| self.struct_self_ty(name));
+                    for m in bodied_methods {
+                        let fsig = self.bodied_native_method_sig(m, &owner);
+                        table.insert(m.name.clone(), fsig);
+                    }
+                }
                 self.exit_type_params(saved);
+                // A bodied conversion (`int.from(x: bool)`) is a protocol slot, as a struct's: the
+                // prelude is a std module, so it sees every std protocol.
+                let slots = self.decl_slots(bodied_methods);
                 out.push((
                     name.clone(),
                     StructInfo {
                         type_params: self.resolve_bounds(type_params, s.span),
                         fields: Vec::new(),
                         methods: table,
+                        overloads: super::from_overload::overload_sets(slots, &[]),
                         origin: StructOrigin::Builtin,
                         doc: None,
                         defaulted_fields: Vec::new(),
@@ -704,7 +736,7 @@ impl Checker {
         self.type_params = saved;
         Some(ProtocolInfo {
             type_params: type_params.iter().map(|tp| tp.name.clone()).collect(),
-            methods: sigs,
+            methods: std::sync::Arc::new(sigs),
             embeds,
         })
     }
@@ -713,7 +745,8 @@ impl Checker {
     /// method signature or embed may name itself or a protocol declared after it (Go
     /// `type item interface { eq(c item) bool }`). The first pass inserts every protocol and meets
     /// names not inserted yet, so its diagnostics are dropped; the second pass re-resolves each one
-    /// with all of them in place. The one loop for std protocols and for a user module's protocols.
+    /// with all of them in place. The loop for a user module's protocols; the std set, whose
+    /// harvest reports nothing, seeds every name first instead (`seed_std_protocols`).
     pub(super) fn insert_protocols_in_two_passes(&mut self, mut insert_all: impl FnMut(&mut Self)) {
         for pass in 0..2 {
             let mark = self.diag_mark();
@@ -727,16 +760,45 @@ impl Checker {
     /// Fill `self.protocols` from the `protocol` declarations in `std/*.chz` (`std_protocol_decls`),
     /// the one source of which protocols exist and their shapes. Runs as stdlib, so the declarations
     /// resolve names no user module sees.
+    ///
+    /// The shapes depend only on the embedded std sources, so a process harvests them once and
+    /// every later checker (`chezzi run` builds two) copies that table. A shape may name a
+    /// protocol declared after it, so every name and arity is in the table before the one harvest
+    /// pass (half the cost of two full passes).
     pub(super) fn seed_std_protocols(&mut self) {
+        static SHAPES: std::sync::OnceLock<Vec<(String, ProtocolInfo)>> =
+            std::sync::OnceLock::new();
+        if let Some(shapes) = SHAPES.get() {
+            self.protocols.extend(shapes.iter().cloned());
+            return;
+        }
         let outer_std = std::mem::replace(&mut self.current_module_is_stdlib, true);
-        self.insert_protocols_in_two_passes(|c| {
-            for d in super::graph_pass::std_protocol_decls() {
-                if let Some(info) = c.harvest_protocol_stmt(&d.stmt) {
-                    c.protocols.insert(d.name.clone(), info);
-                }
+        let mark = self.errors.len() + self.warnings.len();
+        for d in super::graph_pass::std_protocol_decls() {
+            if let StmtKind::Protocol { type_params, .. } = &d.stmt.kind {
+                let info = ProtocolInfo {
+                    type_params: type_params.iter().map(|tp| tp.name.clone()).collect(),
+                    methods: std::sync::Arc::default(),
+                    embeds: Vec::new(),
+                };
+                self.protocols.insert(d.name.clone(), info);
             }
-        });
+        }
+        for d in super::graph_pass::std_protocol_decls() {
+            if let Some(info) = self.harvest_protocol_stmt(&d.stmt) {
+                self.protocols.insert(d.name.clone(), info);
+            }
+        }
         self.current_module_is_stdlib = outer_std;
+        // A diagnostic would be this checker's own; a clean harvest is the same for every checker.
+        if self.errors.len() + self.warnings.len() == mark {
+            let _ = SHAPES.set(
+                super::graph_pass::std_protocol_decls()
+                    .iter()
+                    .filter_map(|d| Some((d.name.clone(), self.protocols.get(&d.name)?.clone())))
+                    .collect(),
+            );
+        }
     }
 
     /// Phase 4c — look up a method sig on a reserved native handle type in the harvested method table

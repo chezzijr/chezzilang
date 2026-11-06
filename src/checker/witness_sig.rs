@@ -156,8 +156,8 @@ impl Checker {
     }
 
     /// Does `n` name a protocol with ANY STATIC method requirement (first param NOT `self`), directly OR
-    /// through a transitively-embedded protocol? Such a protocol (e.g. `Convert`'s static-ctor
-    /// `convert(x: S) -> Self`, or a bundle `protocol MakeInt: Convert[int]` that EMBEDS it) is
+    /// through a transitively-embedded protocol? Such a protocol (e.g. `From`'s static-ctor
+    /// `from(x: S) -> Self`, or a bundle `protocol MakeInt: From[int]` that EMBEDS it) is
     /// witnessable only by a STATIC method — a VALUE cannot invoke it — so it is usable ONLY as a generic
     /// bound `[T: P]`, never as a value-annotation type. Keys on the STRUCTURAL property (own + flattened
     /// embed requirements), so a future/user static-ctor protocol — and any bundle embedding one — is
@@ -291,6 +291,37 @@ impl Checker {
             .collect()
     }
 
+    /// M24 — the witness slots of a fn whose witnessed type params are `names` (from
+    /// [`Self::witness_params_of`]) and whose resolved params are `tps`: one per (type param, static
+    /// requirement of its bounds, own or embedded), in declaration order, requirements by name. Two
+    /// bounds with the same requirement (same name and param types) share one slot.
+    pub(super) fn witness_reqs(&self, names: &[String], tps: &[TyParam]) -> Vec<WitnessParam> {
+        let mut out: Vec<WitnessParam> = Vec::new();
+        for tp in tps.iter().filter(|tp| names.contains(&tp.name)) {
+            for b in &tp.bounds {
+                let map = self.bound_subst(&tp.name, b);
+                for m in self.protocol_method_names(&b.name) {
+                    let Some(msig) = self.protocol_method_sig(&b.name, &m) else {
+                        continue;
+                    };
+                    if !msig.is_static {
+                        continue;
+                    }
+                    let w = WitnessParam {
+                        param: tp.name.clone(),
+                        method: m,
+                        params: msig.params.iter().map(|t| subst(t, &map)).collect(),
+                        ret: subst(&msig.ret, &map),
+                    };
+                    if !out.iter().any(|o| o.tag() == w.tag()) {
+                        out.push(w);
+                    }
+                }
+            }
+        }
+        out
+    }
+
     /// M24 — `decl`'s type params with at least one bound (declared or `where`) whose protocol
     /// carries a STATIC requirement: the CANDIDATES for a hidden witness argument, before any body
     /// question. Read by [`Self::witness_params_of`].
@@ -362,7 +393,7 @@ impl Checker {
             && sig
                 .witness_params
                 .iter()
-                .all(|w| Self::ty_param_in_params(sig, w, &c.supplied));
+                .all(|w| Self::ty_param_in_params(sig, &w.param, &c.supplied));
         !args_pin_the_witnesses
     }
 
@@ -494,7 +525,7 @@ impl Checker {
     }
 
     /// Find the first STATIC-CTOR protocol embedded ANYWHERE in a (possibly nested) already-resolved
-    /// `Ty` — directly (`Convert[int]`), or nested under a container / `Option` / tuple / `Result` /
+    /// `Ty` — directly (`From[int]`), or nested under a container / `Option` / tuple / `Result` /
     /// `Func` / struct-or-enum type arg. Read-only. This is the value-position gate for a `Ty` that
     /// arrives ALREADY RESOLVED — a cross-module type-alias body, computed by the `&self` read-only
     /// resolver (`resolve_ty_ro_d`) which cannot emit — so the mutable `resolve_type` arm gate never

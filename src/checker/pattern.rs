@@ -34,10 +34,6 @@ impl BareName {
     }
 }
 
-/// The name prefix of the scratch binding `scratch_operand` declares for a `?.` / `??` operand.
-/// No user code can name it, and the hole check does not judge it (TICKET-238).
-pub(super) const OPT_RECV_PREFIX: &str = "__optrecv";
-
 impl Checker {
     pub(super) fn bare_pattern_name(&self, name: &str) -> BareName {
         if let Some(iv) = self.imported_variants.get(name) {

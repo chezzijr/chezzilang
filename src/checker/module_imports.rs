@@ -159,6 +159,7 @@ impl Checker {
         self.enums.clear();
         self.enum_type_params.clear();
         self.enum_methods.clear();
+        self.enum_overloads.clear();
         self.variants.clear();
         self.variant_owners.clear();
         self.struct_names.clear();
@@ -176,7 +177,8 @@ impl Checker {
     }
 
     /// Check one module's statements with its imports bound first; returns its public signature.
-    /// `id` is `Some` for a graph module (enables import binding), `None` for a lone `check`.
+    /// `id` is `Some` for a graph module (enables import binding), `None` for a test that checks
+    /// statements outside a graph.
     pub(super) fn check_module(
         &mut self,
         stmts: &[Stmt],
@@ -379,6 +381,8 @@ impl Checker {
             self.enum_type_params
                 .insert(key.clone(), edef.type_params.clone());
             self.enum_methods.insert(key.clone(), edef.methods.clone());
+            self.enum_overloads
+                .insert(key.clone(), edef.overloads.clone());
             for (vname, vinfo) in edef.variant_names.iter().zip(&edef.variants) {
                 let mut vi = vinfo.clone();
                 vi.enum_name = key.clone();
@@ -564,6 +568,8 @@ impl Checker {
                         self.enum_type_params
                             .insert(key.clone(), edef.type_params.clone());
                         self.enum_methods.insert(key.clone(), edef.methods.clone());
+                        self.enum_overloads
+                            .insert(key.clone(), edef.overloads.clone());
                         for (vname, vinfo) in edef.variant_names.iter().zip(&edef.variants) {
                             let mut vi = vinfo.clone();
                             vi.enum_name = key.clone();

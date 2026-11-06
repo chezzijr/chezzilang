@@ -175,6 +175,33 @@ saving is per run (prelude parse plus protocol scan). A std import still costs a
 encoded ASTs take 601,653 bytes; the release binary grows from 15,760,960 to 16,875,240 bytes (the
 artifact plus the `borsh` code for every AST type).
 
+Std protocol shapes and prelude native bodies (2026-11-06, `TryFrom` + `int.from`): `print(1)`,
+release, `perf stat -e instructions:u`, median of 5, base `a3149cda` in its own target dir. `run`:
+8,737,303 base, 8,608k branch (-1.5%); `check`: 5,870k base, 6,017k branch (+2.5%). Before the two
+fixes the branch was +6.8% on `run`: one 2-line std protocol cost +62k instructions per `run`
+(+32k per `check`), because each checker (a `run` builds two, `check_graph_diags` and
+`compile_tables_pass`) harvested every std protocol twice (`insert_protocols_in_two_passes`), about
+309k per checker. Now one process harvests them once (`seed_std_protocols`, a `OnceLock`) and
+`ProtocolInfo::methods` is an `Arc`, so a copy copies no signature. The 4 prelude bodies cost
++500k per `run` (decoded, desugared, checked, compiled); a graph whose sources name none of them as
+a member (`int.from`, `T.from`) now skips them (`PreludeUse::uses_native_bodies`). The `check`
+remainder is the harvested sigs of the 4 bodied methods (~55k) and the `TryFrom` shape.
+
+One-pass std protocol harvest (2026-11-06, with `Into` + `TryInto`): `print(1)`, release,
+`perf stat -e instructions:u`, median of 5, base `6ae90b8d` in its own target dir. `run`: 8,610,999
+base, 8,560,578 branch (-0.59%); `check`: 6,015,034 base, 5,940,376 branch (-1.24%). The two new
+protocols and the `into` gate alone were `run` +1.12%, `check` +1.22%; `seed_std_protocols` now
+seeds every std protocol's name and arity and harvests each once, instead of two full passes.
+
+Protocol slots in scope + per-kind hint table (2026-11-06): `print(1)`, release,
+`perf stat -e instructions:u`, median of 5, base `6668505a` in its own target dir. `run`: 8,530,799
+base, 8,570,945 branch (+0.47%); `check`: 5,922,610 base, 5,960,819 branch (+0.65%). The first cut
+of the scope-aware slot gate was `run` +17.7%: each type body rebuilt the visible-protocol set (in a
+std module every std protocol, with a linear `module_sigs` walk per miss) and deep-cloned each
+requirement's `FnSig`. Now a slot is `{name, protocol key, slot}` behind an `Arc`, and the std
+modules filter one per-process table (`std_slot_table`, a `OnceLock`). The remainder is that table's
+one-time derivation (~15k) and the prelude `int`/`float` slots.
+
 ### Peak memory vs Go
 
 Peak process RSS, `benches/maxrss.py`, median of 3, 2026-07-25 after the four memory levers

@@ -44,15 +44,8 @@ pub(crate) mod run_for_tests;
 #[cfg(test)]
 mod tests;
 
-/// The name a builtin resolves to.
-/// ROOT REDESIGN — the module key used to qualify user-type identity keys in the single-source
-/// (standalone / `<main>`) compile + run paths, where there is no module graph to derive a real
-/// label from. The checker, compiler, and VM must all agree on it, so it lives here as one constant. Only
-/// the test-only standalone paths use it (the CLI always runs the module-graph path).
-#[cfg(any(test, feature = "test-api"))]
-pub const STANDALONE_MODULE_KEY: &str = "<main>";
-
-/// M24 — the UNSPELLABLE local name holding the runtime type witness for type param `t`. `$` is not
+/// M24 — the UNSPELLABLE local name holding the runtime type witness for the slot tagged `t`
+/// (`crate::checker::witness_tag`). `$` is not
 /// an identifier character, so no source binding can shadow or read it.
 fn witness_local(t: &str) -> String {
     format!("{WITNESS_PREFIX}{t}")
@@ -143,6 +136,7 @@ pub fn compile_graph(graph: &ModuleGraph) -> Result<Program, CompileError> {
     let binds = crate::resolver::graph_global_binds(graph);
     for (idx, lm) in graph.modules.iter().enumerate() {
         c.skip_fns = graph.fn_skips(lm);
+        c.skip_native_bodies = graph.skips_prelude_native_bodies(lm);
         let toplevel =
             c.compile_module(idx, &lm.ast, &lm.imports, idx == entry_idx, &binds[idx])?;
         let global_slots = std::mem::take(&mut c.global_slots);
@@ -198,102 +192,14 @@ pub fn compile_source(src: &str) -> Result<Program, CompileError> {
 
 #[cfg(any(test, feature = "test-api"))]
 pub fn compile_module_standalone(module: &Module) -> Result<Program, CompileError> {
-    // Mirror the file-backed path: normalize named/default call arguments before compiling.
+    // Mirror the file-backed path: normalize named/default call arguments, then compile the
+    // one-module graph (the prelude, then `module`) as `compile_graph` compiles any graph.
     let mut module = module.clone();
-    // TICKET-253: every module sees the prelude's structs (`resolver::PRELUDE_STRUCTS`); a standalone
-    // module has no graph, so it carries each declaration itself (unless it declares one).
-    let struct_name = |s: &Stmt| {
-        if let StmtKind::Struct { name, .. } = &s.kind {
-            Some(name.clone())
-        } else {
-            None
-        }
-    };
-    let prelude = crate::resolver::std_source(&["std".to_string(), "prelude".to_string()])
-        .ok()
-        .and_then(|src| crate::lexer::tokenize(&src).ok())
-        .and_then(|toks| crate::parser::parse(toks).ok())
-        .map(|m| m.stmts)
-        .unwrap_or_default();
-    let print_defaults = call::prelude_print_defaults(&prelude)?;
-    let declared: Vec<String> = module.stmts.iter().filter_map(struct_name).collect();
-    module.stmts.extend(prelude.into_iter().filter(|s| {
-        struct_name(s).is_some_and(|n| {
-            crate::resolver::PRELUDE_STRUCTS.iter().any(|p| p.name == n) && !declared.contains(&n)
-        })
-    }));
     crate::desugar::run_standalone(&mut module).map_err(|e| CompileError {
         message: e.message,
         span: e.span,
     })?;
-    let module = &module;
-    let mut c = Compiler::new();
-    // Single-module: every type is locally declared, keyed `<main>::Name` (the standalone module
-    // key). Record the declared type names (for the engines' from-import skip) and the per-module set.
-    c.module_types = vec![std::collections::HashSet::new()];
-    for s in &module.stmts {
-        if let StmtKind::Struct { name, .. }
-        | StmtKind::Enum { name, .. }
-        | StmtKind::TypeAlias { name, .. } = &s.kind
-        {
-            c.module_types[0].insert(name.clone());
-            c.type_keys.insert(
-                (0, name.clone()),
-                format!("{STANDALONE_MODULE_KEY}::{name}"),
-            );
-        }
-    }
-    c.hoist_types(0, &module.stmts)?;
-    // SINGLE-RESOLVER: extern C types come from the checker's standalone pass — the SAME resolver the
-    // multi-file CLI uses (no second backend resolver exists). The backend reads this table verbatim.
-    c.extern_sigs = crate::checker::resolve_extern_signatures_standalone(&module.stmts);
-    let (kw, wt, ct, ns, rc, conflicts, rs, nf, wr, ht, hc, fw) =
-        crate::checker::resolve_call_tables_standalone(&module.stmts);
-    reject_table_conflicts(conflicts)?;
-    c.hook_table = ht;
-    c.hook_calls = hc;
-    c.field_widths = fw;
-    c.fall_off = nf;
-    c.call_plans = kw;
-    c.witnesses = wt;
-    c.carriers = ct;
-    c.sum_seeds = ns;
-    c.resolutions = rs;
-    c.ret_coerce = rc;
-    c.wraps = wr;
-    let binds = crate::resolver::module_global_binds(&[], &module.stmts, None, &|_, _| {
-        unreachable!("a standalone module has no import")
-    });
-    let toplevel = c.compile_module(0, module, &[], true, &binds)?;
-    let global_slots = std::mem::take(&mut c.global_slots);
-    let let_lines = std::mem::take(&mut c.global_let_lines);
-    debug_assert_eq!(let_lines.len(), global_slots.len());
-    // A synthetic module id so the run driver has something to key the namespace cache on.
-    let id = crate::base::module_id::ModuleId(std::path::PathBuf::from("<main>"));
-    c.program.modules.push(ModuleProto {
-        id,
-        label: "<main>".to_string(),
-        toplevel,
-        imports: Vec::new(),
-        native: None,
-        std: false,
-        global_slots,
-        let_lines,
-        file: 0,
-    });
-    c.program.field_ic_sites = c.field_ic_next;
-    c.program.task_entry = c.spawn_entry_proto("<task entry>", None, 0, Span::RUNTIME);
-    c.program.method_ic_sites = c.method_ic_next;
-    let graph = crate::checker::standalone_graph(&module.stmts);
-    c.program.range_key =
-        crate::resolver::prelude_struct_key(&graph, crate::resolver::RANGE_STRUCT);
-    c.program.recv_error_key =
-        crate::resolver::prelude_struct_key(&graph, crate::resolver::RECV_ERROR_STRUCT);
-    c.program.print_defaults = print_defaults;
-    c.program.rebuild_struct_names(&c.field_widths);
-    c.build_provider_table()?;
-    c.build_hooks();
-    Ok(c.program)
+    compile_graph(&crate::resolver::standalone_graph(&module.stmts))
 }
 
 /// A compiler-synthesized fn value, keyed by (item, the type args its body depends on)
@@ -321,6 +227,9 @@ struct Compiler {
     /// their prelude methods are not compiled, and [`Compiler::emit_new_struct`] stops a build that
     /// emits one.
     unused_prelude_structs: Vec<&'static str>,
+    /// Set per module from [`ModuleGraph::skips_prelude_native_bodies`]: the prelude's bodied
+    /// native-struct methods (`int.from`) are compiled only for a graph that names one.
+    skip_native_bodies: bool,
     /// TICKET-265 — set per module from [`ModuleGraph::fn_skips`]: the top-level fns of a std module
     /// that the program does not reach. They get no proto and their global slot stays unset.
     skip_fns: crate::resolver::SkippedFns,
@@ -399,8 +308,7 @@ struct Compiler {
     /// FFI ROOT FIX (fix4): the checker-resolved C signature of every `extern` fn, keyed by `(graph
     /// module index, fn name)`. The extern lowering consumes THIS instead of re-resolving alias names
     /// itself — so every qualified/imported/aliased width resolves in its DEFINING module's scope
-    /// (collision-proof). Filled once in `compile_graph` (multi-file) or by
-    /// `resolve_extern_signatures_standalone` (single-file) — the ONE extern-type resolver.
+    /// (collision-proof). Filled once in `compile_graph` — the ONE extern-type resolver.
     extern_sigs: crate::checker::ExternTable,
     /// The checker's argument slot plan per bound call, keyed `(graph module index, call NodeId)`
     /// (see [`crate::checker::CallPlanTable`]). Filled in `compile_graph`/`compile_module_standalone`
@@ -438,8 +346,8 @@ struct Compiler {
     /// one compilation is all that is ever needed — and this makes it true by construction rather
     /// than by argument.
     next_opt_tmp: usize,
-    /// M24 — the witness TYPE-PARAM names the NEXT [`Self::compile_fn_body`] declares as trailing
-    /// `$w:T` params, in declaration order. DECLARATION only: a nested body's REACH is read off the
+    /// M24 — the witness slot tags (`crate::checker::witness_tag`) the NEXT
+    /// [`Self::compile_fn_body`] declares as trailing `$w:<tag>` params, in declaration order. DECLARATION only: a nested body's REACH is read off the
     /// frame it is emitting into ([`FnComp::witness_ref`]), never from here, so this cannot drift
     /// from what was actually captured.
     witness_locals: Vec<String>,
@@ -473,6 +381,19 @@ struct Compiler {
 /// has no params, is a STATIC (associated) method (`FnDecl::takes_self`).
 fn is_static_method(m: &FnDecl) -> bool {
     !m.takes_self()
+}
+
+impl Compiler {
+    /// The name method `m` of module `module_idx` is compiled and tabled under: a `from`
+    /// overload's internal name (`from$int`) from the checker's
+    /// [`crate::checker::WitnessTable::overload_names`], else its own name.
+    fn method_name(&self, module_idx: usize, m: &FnDecl) -> String {
+        self.witnesses
+            .overload_names
+            .get(&(module_idx, m.name_span))
+            .cloned()
+            .unwrap_or_else(|| m.name.clone())
+    }
 }
 
 /// Key into [`Compiler::static_methods`]: the type's runtime key + the method name, joined by a
@@ -653,6 +574,7 @@ impl Compiler {
         Compiler {
             program,
             unused_prelude_structs: Vec::new(),
+            skip_native_bodies: false,
             skip_fns: crate::resolver::SkippedFns::default(),
             hook_table: crate::checker::HookTable::new(),
             hook_calls: crate::checker::HookCallTable::new(),
@@ -838,7 +760,8 @@ impl Compiler {
                     // site classifies it as `Op::CallStatic`, mirroring the checker's classification.
                     for m in methods {
                         if is_static_method(m) {
-                            self.static_methods.insert(static_key(&key, &m.name));
+                            let mname = self.method_name(module_idx, m);
+                            self.static_methods.insert(static_key(&key, &mname));
                         }
                     }
                     if self.program.structs.contains_key(&key) {
@@ -883,7 +806,8 @@ impl Compiler {
                     }
                     for m in methods {
                         if is_static_method(m) {
-                            self.static_methods.insert(static_key(&key, &m.name));
+                            let mname = self.method_name(module_idx, m);
+                            self.static_methods.insert(static_key(&key, &mname));
                         }
                     }
                 }
@@ -988,11 +912,12 @@ impl Compiler {
                 // TICKET-255 — a prelude struct's methods are compiled only for a graph that uses it.
                 let skip = module_idx == 0 && self.unused_prelude_structs.contains(&name.as_str());
                 for m in methods.iter().filter(|_| !skip) {
-                    self.pending_witnesses = self.member_witnesses(module_idx, &key, &m.name);
+                    let mname = self.method_name(module_idx, m);
+                    self.pending_witnesses = self.member_witnesses(module_idx, &key, &mname);
                     let pid = self.compile_fn(m, false)?;
                     let def = self.program.structs.get_mut(&key).expect("hoisted");
                     def.module_idx = module_idx;
-                    def.methods.insert(m.name.clone(), pid);
+                    def.methods.insert(mname, pid);
                     if m.is_test {
                         test_methods.push(m.name.clone());
                         suite_tests.push((m.name.clone(), pid));
@@ -1032,9 +957,10 @@ impl Compiler {
                     self.hook_sets.insert(key.clone(), *set);
                 }
                 for m in methods {
-                    self.pending_witnesses = self.member_witnesses(module_idx, &key, &m.name);
+                    let mname = self.method_name(module_idx, m);
+                    self.pending_witnesses = self.member_witnesses(module_idx, &key, &mname);
                     let pid = self.compile_fn(m, false)?;
-                    compiled.insert(m.name.clone(), pid);
+                    compiled.insert(mname, pid);
                 }
                 self.program
                     .enum_methods
@@ -1057,7 +983,7 @@ impl Compiler {
                 ..
             } = &stmt.kind
             {
-                if bodied_methods.is_empty() {
+                if bodied_methods.is_empty() || self.skip_native_bodies {
                     continue;
                 }
                 let mut compiled: HashMap<String, ProtoId> = HashMap::new();
@@ -1116,8 +1042,7 @@ impl Compiler {
             // extern C fns: register a CffiDef and bind the name to a `Cffi` value at module init,
             // exactly like a top-level `fn`. SINGLE-RESOLVER (fix5): each param/return CType comes
             // VERBATIM from the CHECKER-RESOLVED `extern_sigs` table — the ONLY extern-type resolver
-            // (the multi-file CLI fills it via `resolve_extern_signatures`, the standalone path via
-            // `resolve_extern_signatures_standalone`). The backend does ZERO alias/qualified/struct
+            // (`compile_graph` fills it via `resolve_compile_tables`). The backend does ZERO alias/qualified/struct
             // resolution of its own, so a second resolver cannot exist or drift.
             if let StmtKind::Extern { lib, fns } = &stmt.kind {
                 for ef in fns {
@@ -1515,6 +1440,7 @@ fn expr_has_bare_spawn(e: &Expr) -> bool {
             expr_has_bare_spawn(obj)
                 || call.as_ref().is_some_and(|c| {
                     c.args.iter().any(expr_has_bare_spawn)
+                        || c.bracket.as_deref().is_some_and(expr_has_bare_spawn)
                         || c.named.iter().any(|(_, v)| expr_has_bare_spawn(v))
                 })
         }

@@ -22,12 +22,14 @@ use std::fmt;
 
 pub(crate) use crate::base::builtin::{Builtin, Lowering};
 pub(crate) use builtin_type::BuiltinType;
+#[cfg(any(test, feature = "test-api"))]
+pub use from_overload::std_target_keyed_protocols;
 pub use graph_pass::std_protocol_owner;
 pub use ty::Ty;
 pub use ty::{
     ArgFill, CallPlanTable, CarrierKey, CarrierMode, CarrierTable, FallOff, FallOffTable, FnLabels,
     Resolution, ResolutionTable, RetCoerce, RetCoerceTable, SumSeed, SumSeedTable, WitnessCallee,
-    WitnessKey, WitnessSrc, WitnessTable, Wrap, WrapTable,
+    WitnessKey, WitnessSrc, WitnessTable, Wrap, WrapTable, witness_tag, witness_tag_param,
 };
 use ty::{compatible, param_invariant};
 
@@ -381,6 +383,27 @@ struct CallCtx {
     consumed: bool,
     /// The expression reading of a one-arg call bracket (`ExprKind::Call::bracket`).
     bracket: Option<Expr>,
+    /// The call's expected type is a payload hint (`Hint::payload`): a carrier result
+    /// binds its payload against it (`Checker::hint_shape`).
+    payload_hint: bool,
+}
+
+/// The expected type `Checker::expected_hint` carries, with how it is read. One value, so a take,
+/// a clear or a restore moves the payload marker with its type.
+#[derive(Clone, Debug)]
+struct Hint {
+    ty: Ty,
+    /// A PAYLOAD hint (`ChildHint::Unwrap` in `checker/infer.rs`): the value is a `T!E` or a
+    /// `T?`, its carrier not yet known, whose `T` is `ty`. Set only by `with_child_hint`;
+    /// `infer_call` copies it into its `CallCtx`.
+    payload: bool,
+}
+
+impl Hint {
+    /// A plain expected type: a slot's type or a seed.
+    fn plain(ty: Ty) -> Self {
+        Hint { ty, payload: false }
+    }
 }
 
 /// A protocol bound with its type args RESOLVED (`Conv[S]` -> name `Conv`, args `[Ty::Param("S")]`).
@@ -390,6 +413,42 @@ struct CallCtx {
 struct TyBound {
     name: String,
     args: Vec<Ty>,
+}
+
+/// M24 — ONE hidden witness slot of a generic fn: a static-bounded type param and one static
+/// requirement of its bounds (`T` and `from(x: int) -> T` for `T: From[int]`), spelled in the
+/// fn's own type params (`Self` is `T`). Two `From` bounds on one `T` are two slots, so the caller
+/// can pick a different overload for each. Built by [`Checker::witness_reqs`].
+#[derive(Clone, Debug, PartialEq)]
+struct WitnessParam {
+    param: String,
+    method: String,
+    /// The requirement's param types after substitution: with `method`, its identity.
+    params: Vec<Ty>,
+    ret: Ty,
+}
+
+impl WitnessParam {
+    /// The requirement half of the slot's [`witness_tag`]: `from(int)`.
+    fn req(&self) -> String {
+        let ps: Vec<String> = self.params.iter().map(Ty::render_keyed).collect();
+        format!("{}({})", self.method, ps.join(", "))
+    }
+
+    fn tag(&self) -> String {
+        witness_tag(&self.param, &self.req())
+    }
+}
+
+/// The type params `ws` witness, each once, in order: what a diagnostic names.
+fn witness_param_names(ws: &[WitnessParam]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for w in ws {
+        if !out.contains(&w.param) {
+            out.push(w.param.clone());
+        }
+    }
+    out
 }
 
 /// A declared type parameter with its bounds resolved once in the declaring scope (TICKET-202) by
@@ -451,9 +510,10 @@ struct FnSig {
     /// native/synthetic sigs). Purely informational — surfaced on LSP hover, never affects checking
     /// (excluded from `fn_sig_eq`). Covers free fns AND methods/static methods (all reuse `FnSig`).
     doc: Option<String>,
-    /// M24 — the type params this fn takes a hidden trailing `$w:T` witness argument for, in
-    /// declaration order (empty for everything else, which is nearly every signature). Computed by
-    /// [`Checker::witness_params_of`] at the signature hoist — where the declaration BODY is still
+    /// M24 — the hidden trailing witness slots this fn takes, one per (type param, static
+    /// requirement) ([`WitnessParam`]), in declaration order (empty for everything else, which is
+    /// nearly every signature). Computed by [`Checker::witness_params_of`] +
+    /// [`Checker::witness_reqs`] at the signature hoist — where the declaration BODY is still
     /// available — then re-derived to a fixpoint over the module's free fns (and re-passed once over
     /// its members) in [`Checker::hoist`], since forwarding makes the answer depend on the callees'.
     /// [`FnSig::min_params`] is DERIVED from this and is rewritten wherever this is, so the two can
@@ -463,7 +523,7 @@ struct FnSig {
     /// [`ModuleSig`]. Excluded from `fn_sig_eq` (a lowering detail, not type identity). On a METHOD's
     /// sig it is inert — slice A threads witnesses for module-level FREE fns only, and every consumer
     /// reaches this field through a free-fn table.
-    witness_params: Vec<String>,
+    witness_params: Vec<WitnessParam>,
     /// `Some(i)` iff parameter `i` is variadic (`fn f(...xs: T)`) — its slot type is the collapsed
     /// `List[T]`, and everything after index `i` is keyword-only. Surface-only: the desugar pass
     /// collapses surplus positionals into a `List` literal before checking, so this drives arity /
@@ -565,6 +625,10 @@ struct StructInfo {
     type_params: Vec<TyParam>,
     fields: Vec<(String, Ty)>,
     methods: HashMap<String, FnSig>,
+    /// The protocol-slot methods, decided at the declaration: each slotted name's slot, and each
+    /// overload set (a slotted name declared 2+ times, Rust's several `impl From<S>`) to its sigs
+    /// in declaration order. `methods` keeps one entry per name.
+    overloads: from_overload::Overloads,
     origin: StructOrigin,
     /// The struct's own decl docstring (the `#` block above `struct X:`), captured in `capture_sig`
     /// from `name_docs` so it crosses the module boundary to an importer's hover. Editor-only; `None`
@@ -587,7 +651,9 @@ struct StructInfo {
 #[derive(Clone)]
 struct ProtocolInfo {
     type_params: Vec<String>,
-    methods: Vec<(String, FnSig)>,
+    /// Shared: a copy of the table (each checker's seed of the std protocols, an import) copies
+    /// no signature.
+    methods: std::sync::Arc<Vec<(String, FnSig)>>,
     /// Embedded (super-)protocols (M22): `protocol Vector: Add + Sub` carries `[Add, Sub]`. A type
     /// satisfies this protocol iff it satisfies every embed (transitively) AND has every OWN method
     /// in `methods`. Empty for an ordinary protocol. Reuses [`Bound`] — an embed ref is identical to
@@ -772,6 +838,8 @@ struct EnumSigInfo {
     /// The enum's methods (`fn area(self) …`), name-keyed like `StructInfo.methods`. Ferried across
     /// the module boundary so an imported enum's methods resolve in the importer.
     methods: HashMap<String, FnSig>,
+    /// The enum's protocol-slot methods, as [`StructInfo`]'s `overloads`. Ferried with `methods`.
+    overloads: from_overload::Overloads,
     /// The enum's own decl docstring, carried across the module boundary for an importer's hover
     /// (see [`StructInfo::doc`]). Editor-only; never read by checking/codegen.
     doc: Option<String>,
@@ -835,6 +903,8 @@ struct Checker {
     /// enum name (runtime key) → its methods (`fn area(self) …`), name-keyed exactly like
     /// `StructInfo.methods`. Resolves `enumval.method(args)` and protocol satisfaction for enums.
     enum_methods: HashMap<String, HashMap<String, FnSig>>,
+    /// enum name (runtime key) → its overload sets, as [`StructInfo`]'s `overloads`.
+    enum_overloads: HashMap<String, from_overload::Overloads>,
     /// Keyed by `(enum_name, variant_name)`: variants are scoped under their enum, so two enums may
     /// declare the same variant name. Resolution always carries the enum (a qualified `Enum.Variant`
     /// or, in a pattern slot, the scrutinee's enum) — there is no bare-name lookup.
@@ -930,8 +1000,9 @@ struct Checker {
     /// type" text of `check_return`. Saved/restored beside `ret_declared`.
     ret_owner: Option<String>,
     /// The untyped-call probe of `infer_inline_fn_ret`: `Some(None)` while an inline body is
-    /// walked, `Some(Some(span))` once a call in it typed to `Unknown`. `Checker::infer` is the
-    /// one writer; no call site knows about it.
+    /// walked, `Some(Some(span))` once a call in it typed to `Unknown`, `span` being the last such
+    /// call to finish (an outer call after the calls in its arguments). `Checker::infer` is the one
+    /// writer; no call site knows about it.
     untyped_call: Option<Option<Span>>,
     /// Public surfaces of already-checked modules (multi-file programs), keyed by module id.
     module_sigs: HashMap<ModuleId, ModuleSig>,
@@ -1072,7 +1143,7 @@ struct Checker {
     /// carrier nested inside another carrier's operand can never shadow it. Mirrors the desugar
     /// walker's `next_tmp`; never reset (uniqueness within one checked graph is free).
     next_opt_tmp: usize,
-    /// M24 — the witness TYPE-PARAM names whose `$w:T` binding is reachable at the statement
+    /// M24 — the witness slots whose `$w:` binding is reachable at the statement
     /// currently being checked: the witness params of the enclosing MODULE-LEVEL free fn or of the
     /// enclosing MEMBER (Task 5 — a method/static method declares its own `[T]`, and the hidden
     /// argument rides on its frame the same way), and empty everywhere else.
@@ -1088,7 +1159,7 @@ struct Checker {
     /// is exactly what the compiler can lower (`compiler::FnComp::witness_ref` is the other half).
     /// A type param of the enclosing TYPE (`struct Bx[T]`) is never in here: its
     /// witness would have to live in the instance, which is a different mechanism.
-    witness_scope: Vec<String>,
+    witness_scope: Vec<WitnessParam>,
     /// M24-2 — every METHOD NAME in the program that some declaration takes a hidden witness for (a
     /// method of a struct / enum declaring a type param with a static-carrying bound).
     /// Graph-wide and never cleared per module — modules are checked deps-first, so an imported
@@ -1171,7 +1242,7 @@ struct Checker {
     /// the params the arguments left free — turbofish > args > annotation. This breaks the
     /// `Heap([], fn(x, y): x < y)` deadlock: the annotation pins `T`, which then pins the closure
     /// params. Mirrors the existing closure-vs-fn-annotation checking-mode (`infer_arg`).
-    expected_hint: Option<Ty>,
+    expected_hint: Option<Hint>,
     /// TICKET-227 -- the node `expected_hint` was installed FOR (its slot's value). Only `infer` of
     /// that node may wrap it into the hint's carrier; every other reader treats the hint as a seed.
     hint_owner: Option<crate::ast::NodeId>,
@@ -1208,7 +1279,7 @@ struct Checker {
     /// `["Listener"]`) by [`seed_stdlib_structs`] so `socket.read(...)` / `listener.accept(...)` resolve
     /// via the normal method path in every module. Bare-name annotation stays import-gated by
     /// `builtin_binds` + `resolve_type`'s builtin arm — the seed adds NO bare licensing. `None` until
-    /// std.net is harvested (and on the single-module `check` path, which has no graph).
+    /// std.net is harvested (a program that imports no `std.net`).
     net_socket_seed: Option<StructInfo>,
     net_listener_seed: Option<StructInfo>,
     /// R2 — the harvested `StructInfo` (method table) for std.io's reserved `Writer` handle, captured
@@ -1260,9 +1331,7 @@ struct Checker {
     /// the `.chz` decls are now the single source of truth for these signatures. `builtin_sig` reads
     /// this registry (falling back to the still-hard-coded `print`/container arms). Populated once when
     /// the prelude module is hoisted (it's always linked before the entry, so this is filled before any
-    /// user module's inference reads it). Empty on the lone single-module `check` path (no graph → no
-    /// prelude), where `builtin_sig` returns `None` for these names — the same as before this table for
-    /// hover-only queries; every real program goes through `check_graph` with the prelude linked.
+    /// user module's inference reads it).
     native_prelude_sigs: HashMap<String, FnSig>,
     /// TICKET-255 — set per module by `run_graph_pass` from [`ModuleGraph::skipped_prelude_structs`]:
     /// the prelude structs whose method bodies are not checked, because the graph builds no value
@@ -1365,6 +1434,7 @@ mod flow;
 mod fn_call;
 mod fn_value;
 mod fn_writes;
+mod from_overload;
 mod globals;
 mod infer;
 mod infer_access;

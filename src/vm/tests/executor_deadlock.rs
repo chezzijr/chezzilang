@@ -121,12 +121,10 @@ ch.send(42)
     let (serial, mn) = rx
         .recv_timeout(std::time::Duration::from_secs(60))
         .expect("a job blocked on its own joiner must fault, not hang");
-    let serial = serial
-        .expect_err("serial: this program is a deadlock")
-        .message;
-    let mn = mn.expect_err("M:N: this program is a deadlock").message;
+    let serial = err_text(&serial.expect_err("serial: this program is a deadlock"));
+    let mn = err_text(&mn.expect_err("M:N: this program is a deadlock"));
     assert!(
-        serial.contains("recv on an empty channel: deadlock"),
+        serial.contains("recv() on an empty channel"),
         "serial fault was: {serial}"
     );
     assert_eq!(serial, mn, "the deadlock verdict must be engine-identical");
@@ -165,11 +163,9 @@ ex.shutdown()
     let mn = rx
         .recv_timeout(std::time::Duration::from_secs(60))
         .expect("two jobs deadlocked in one executor must fault, not hang");
-    let msg = mn
-        .expect_err("both jobs wait on a channel nobody can fill — a deadlock")
-        .message;
+    let msg = err_text(&mn.expect_err("both jobs wait on a channel nobody can fill — a deadlock"));
     assert!(
-        msg.contains("recv on an empty channel: deadlock"),
+        msg.contains("recv() on an empty channel"),
         "fault was: {msg}"
     );
 }
@@ -208,11 +204,9 @@ y.shutdown()
         "two mutually-deadlocked executors must fault, not hang — or this host has <2 free pool \
              threads (see the sibling test above)",
     );
-    let msg = mn
-        .expect_err("each executor's job waits for the other's — a deadlock")
-        .message;
+    let msg = err_text(&mn.expect_err("each executor's job waits for the other's — a deadlock"));
     assert!(
-        msg.contains("recv on an empty channel: deadlock"),
+        msg.contains("recv() on an empty channel"),
         "fault was: {msg}"
     );
 }
@@ -232,9 +226,9 @@ fn a_deadlocked_job_is_reported_at_its_own_recv_not_at_the_executor() {
         .expect("a job parked on a channel nobody feeds must fault, not hang");
     let err = res.expect_err("the job waits on a channel nobody sends to — a deadlock");
     assert!(
-        err.message.contains("recv on an empty channel: deadlock"),
+        err_text(&err).contains("recv() on an empty channel"),
         "fault was: {}",
-        err.message
+        err_text(&err)
     );
     assert_eq!(
         err.span.line, 4,
@@ -272,11 +266,9 @@ ex.submit(fn(): print("job got {ch.recv()}"))
     let mn = rx
         .recv_timeout(std::time::Duration::from_secs(60))
         .expect("the exit drain must fault on a deadlocked job, not hang");
-    let msg = mn
-        .expect_err("the job waits on a channel nobody can fill — a deadlock")
-        .message;
+    let msg = err_text(&mn.expect_err("the job waits on a channel nobody can fill — a deadlock"));
     assert!(
-        msg.contains("recv on an empty channel: deadlock"),
+        msg.contains("recv() on an empty channel"),
         "fault was: {msg}"
     );
 }
@@ -374,10 +366,10 @@ wait:
     let msg = rx
         .recv_timeout(std::time::Duration::from_secs(60))
         .expect("an all-open, unfeedable wait must reach the deadlock verdict, not hang")
-        .expect_err("nothing can feed c1 or c2 — this is a deadlock")
-        .message;
+        .expect_err("nothing can feed c1 or c2 — this is a deadlock");
+    let msg = err_text(&msg);
     assert!(
-        msg.contains("wait on channels that are all empty: deadlock"),
+        msg.contains("wait: on channels that are all empty"),
         "fault was: {msg}"
     );
 }

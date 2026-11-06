@@ -82,6 +82,53 @@ struct FaultSite {
     pos: String,
     line: usize,
     frames: Vec<String>,
+    /// A deadlock verdict's blocked tasks ([`crate::vm::deadlock::listing`]): `frames` then holds
+    /// their rendered listing, and `--errors=json` lists them as `tasks`. Empty for any other fault.
+    tasks: Vec<crate::vm::deadlock::BlockedTask>,
+    /// `tasks` as `--errors=json`'s `tasks` array ([`tasks_json`]); empty when there are none.
+    tasks_json: String,
+}
+
+/// A deadlock listing as the `--errors=json` `tasks` array: each blocked task's `wait`, its site
+/// (`file`, `line`, `col`) and its `frames` (`function` and the call site), innermost first. A span
+/// with no module coordinate carries no `file`.
+fn tasks_json(tasks: &[crate::vm::deadlock::BlockedTask], files: &[(u32, PathBuf)]) -> String {
+    let site = |span: crate::ast::Span| {
+        let file = files
+            .iter()
+            .find(|(f, _)| *f == span.file)
+            .map(|(_, p)| crate::lexer::display_path(p).to_string_lossy().into_owned());
+        let mut s = String::new();
+        if let Some(file) = file {
+            s.push_str(&format!("\"file\":{},", json_string(&file)));
+        }
+        s.push_str(&format!("\"line\":{},\"col\":{}", span.line, span.col));
+        s
+    };
+    let mut s = String::from("[");
+    for (i, t) in tasks.iter().enumerate() {
+        if i > 0 {
+            s.push(',');
+        }
+        s.push_str(&format!(
+            "{{\"wait\":{},{},\"frames\":[",
+            json_string(&t.wait),
+            site(t.span)
+        ));
+        for (j, f) in t.frames.iter().enumerate() {
+            if j > 0 {
+                s.push(',');
+            }
+            s.push_str(&format!(
+                "{{\"function\":{},{}}}",
+                json_string(&f.function),
+                site(f.span)
+            ));
+        }
+        s.push_str("]}");
+    }
+    s.push(']');
+    s
 }
 
 /// One test's verdict. `assert` is the ONE intended failure signal of a (void) `test fn`, so an
@@ -210,20 +257,55 @@ fn fault_site(
     files: &[(u32, PathBuf)],
     fallback: &Path,
 ) -> FaultSite {
+    let trace = vm.take_fault_trace();
+    traced_fault_site(vm, e, trace, files, fallback)
+}
+
+/// [`fault_site`] with the trace taken already. A deadlock verdict's fault reports the run's
+/// listing ([`Vm::take_listing`]), sited at its first task; the listing is taken either way, so
+/// the next test starts with none.
+fn traced_fault_site(
+    vm: &Vm,
+    e: &crate::vm::RuntimeError,
+    trace: Vec<crate::vm::TraceFrame>,
+    files: &[(u32, PathBuf)],
+    fallback: &Path,
+) -> FaultSite {
+    let trace: Vec<crate::vm::TraceFrame> =
+        trace.into_iter().filter(|f| f.span.file != 0).collect();
+    let listed = vm.take_listing();
+    let tasks = if e.blocked.is_some() && !listed.is_empty() {
+        listed
+    } else {
+        crate::vm::deadlock::listing(e, &trace)
+    };
+    let tasks: Vec<crate::vm::deadlock::BlockedTask> = tasks
+        .into_iter()
+        .map(|mut t| {
+            t.frames.retain(|f| f.span.file != 0);
+            t
+        })
+        .collect();
+    let span = tasks.first().map_or(e.span, |t| t.span);
     let path = files
         .iter()
-        .find(|(f, _)| *f == e.span.file)
+        .find(|(f, _)| *f == span.file)
         .map(|(_, p)| p.as_path())
         .unwrap_or(fallback);
-    let trace: Vec<crate::vm::TraceFrame> = vm
-        .take_fault_trace()
-        .into_iter()
-        .filter(|f| f.span.file != 0)
-        .collect();
     FaultSite {
-        pos: crate::lexer::render_span(e.span, Some(path)),
-        line: e.span.line as usize,
-        frames: crate::vm::format_frames(&trace, files),
+        pos: crate::lexer::render_span(span, Some(path)),
+        line: span.line as usize,
+        frames: if tasks.is_empty() {
+            crate::vm::format_frames(&trace, files)
+        } else {
+            crate::vm::deadlock::render(&tasks, files)
+        },
+        tasks_json: if tasks.is_empty() {
+            String::new()
+        } else {
+            tasks_json(&tasks, files)
+        },
+        tasks,
     }
 }
 
@@ -232,7 +314,10 @@ fn fault_site(
 /// unwinding — the abort re-stamps the marker onto whatever propagates, and it crosses the worker→
 /// parent boundary WITH the error, so a spawned task's runaway aborts on either engine). Else an
 /// `assert` failure → `Fail`, anything else → `Error`.
-fn verdict_from_fault(e: crate::vm::RuntimeError, site: FaultSite) -> Verdict {
+fn verdict_from_fault(mut e: crate::vm::RuntimeError, site: FaultSite) -> Verdict {
+    if !site.tasks.is_empty() {
+        e.message = crate::vm::deadlock::header(site.tasks.len());
+    }
     // `is_timed_out` checked FIRST. It is mutually exclusive with `is_over_memory` in practice (a
     // timeout trips at a loop back-edge, over-memory at a GC boundary — a single abort carries one
     // marker), so the order only fixes a nominal tie; either way the abort buckets, never FAIL/ERROR.
@@ -584,7 +669,7 @@ fn render_line(report: &mut Vec<u8>, o: &Outcome, opts: &RunOpts) {
     }
 }
 
-/// Build the `--errors=json` document: `{"tests":[{name,file,line?,status,message?,duration_ms},…],"totals":{…}}`.
+/// Build the `--errors=json` document: `{"tests":[{name,file,line?,status,message?,tasks?,duration_ms},…],"totals":{…}}` (`tasks`: a deadlock listing, [`tasks_json`]).
 /// Diverges from `check`/`run`'s bare array (it needs `totals`), but reuses the flag name + the
 /// suppress-all-human-output behavior for CLI consistency.
 #[allow(clippy::too_many_arguments)]
@@ -645,6 +730,11 @@ fn render_json(
         ));
         if let Some(msg) = verdict_msg(&o.verdict) {
             s.push_str(&format!(",\"message\":{}", json_string(msg)));
+        }
+        if let Verdict::Error { site, .. } = &o.verdict
+            && !site.tasks_json.is_empty()
+        {
+            s.push_str(&format!(",\"tasks\":{}", site.tasks_json));
         }
         s.push_str(&format!(",\"duration_ms\":{}}}", o.duration.as_millis()));
     }
@@ -812,20 +902,26 @@ fn invoke_all(
         let mark = vm.exec_registry_mark();
         // TICKET-200 — `rank_end` before the reap: the reap takes the slots `rank_end` reads.
         let ran = vm.invoke_test(*proto);
-        let mut verdict = match vm.rank_end(ran) {
+        let ran = vm.rank_end(ran);
+        // The test's trace is taken before the reap, whose joins may latch their own.
+        let trace = vm.take_fault_trace();
+        // Join this test's own detached executors (A2). A fault here upgrades a `Pass` only — a
+        // test that already failed keeps its own bucket, and its jobs are still joined either way.
+        // The site is read after the reap: a deadlock's listing holds the reaped jobs too.
+        let reaped = vm.reap_executors_since(mark);
+        let mut verdict = match ran {
             Ok(()) => Verdict::Pass,
             Err(e) => {
-                let site = fault_site(&mut vm, &e, &files, &fallback);
+                let site = traced_fault_site(&vm, &e, trace, &files, &fallback);
                 verdict_from_fault(e, site)
             }
         };
-        // Join this test's own detached executors (A2). A fault here upgrades a `Pass` only — a
-        // test that already failed keeps its own bucket, and its jobs are still joined either way.
-        if let Err(e) = vm.reap_executors_since(mark)
-            && matches!(verdict, Verdict::Pass)
-        {
-            let site = fault_site(&mut vm, &e, &files, &fallback);
-            verdict = verdict_from_fault(e, site);
+        match reaped {
+            Err(e) if matches!(verdict, Verdict::Pass) => {
+                let site = fault_site(&mut vm, &e, &files, &fallback);
+                verdict = verdict_from_fault(e, site);
+            }
+            Err(_) | Ok(()) => {}
         }
         let duration = start.elapsed();
         let verdict = apply_timeout_overrun(verdict, duration, opts);
@@ -1024,6 +1120,9 @@ fn run_suite(
             let site = fault_site(vm, &e, files, fallback);
             verdict = verdict_from_fault(e, site);
         }
+        // A reap whose fault this test does not report leaves its cut jobs in the run's listing:
+        // drop them, so the next test's listing is its own.
+        vm.take_listing();
         let duration = start.elapsed();
         let verdict = apply_timeout_overrun(verdict, duration, opts);
         let captured = vm.take_out_bytes();

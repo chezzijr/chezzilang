@@ -1,0 +1,4 @@
+# rule: fnDecl
+# expect: reserved keyword 'from'
+fn from(x: int):
+    pass

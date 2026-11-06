@@ -917,6 +917,19 @@ fn overlay_roles() {
     assert_eq!(role_at(&toks, 1, 11), Some(VARIABLE), "param use");
 }
 
+/// `from` is a keyword, but as a member or method name it is highlighted as one; `import a from m`
+/// keeps the keyword.
+#[test]
+fn from_member_name_roles() {
+    let src = "import a from m\nstruct Q:\n    fn from(x: int) -> int:\n        return x\nprotocol P:\n    fn from(x: int) -> int\nb := Q.from(2)\nc := q?.from\n";
+    let toks = semantic_tokens(src);
+    assert_eq!(role_at(&toks, 0, 9), Some(KEYWORD), "import ... from");
+    assert_eq!(role_at(&toks, 2, 7), Some(FUNCTION), "struct method name");
+    assert_eq!(role_at(&toks, 5, 7), Some(FUNCTION), "protocol method name");
+    assert_eq!(role_at(&toks, 6, 7), Some(FUNCTION), "static call");
+    assert_ne!(role_at(&toks, 7, 8), Some(KEYWORD), "optional-chain member");
+}
+
 #[test]
 fn overlay_graceful_on_parse_error() {
     // A mid-edit unparseable buffer: the overlay is empty and semantic_tokens degrades to

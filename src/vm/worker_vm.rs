@@ -127,8 +127,10 @@ impl Vm {
         }
         // The callee and args are in no root set from here to `into_fiber` (`vm/gc_door.rs`).
         let payload = super::gc_door::PayloadInFlight::new();
+        let mut worker = self.spawn_worker();
+        worker.task = self.task.child();
         Ok(ReadyWorker {
-            worker: self.spawn_worker(),
+            worker,
             call: ReadyCall::Invoke { callee, args },
             span,
             payload,
@@ -165,7 +167,10 @@ impl Vm {
         let slack = usize::from(self.owns_nested_sched(&sched));
         let mut reg = self.wait_begin(
             WaitSpec::Join,
-            Some(Blocked::on(PartyWait::Join(Arc::clone(&sched), slack))),
+            Some(
+                Blocked::on(PartyWait::Join(Arc::clone(&sched), slack))
+                    .named(super::deadlock::Wait::ExecutorJoin, span),
+            ),
             "an Executor join",
             span,
         )?;
@@ -179,7 +184,7 @@ impl Vm {
             if let Some(m) = self.mn.clone()
                 && self.in_place_cut(&m.lock(), reg.tok())
             {
-                break Some(m.deadlock_err.clone());
+                break Some(self.cut_fault(&m, span));
             }
             self.wait_door(&[], |_| sched.join_tick(slack, DEMOTE_POLL_BACKOFF));
         };

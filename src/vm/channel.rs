@@ -2,12 +2,9 @@
 //! Split out of `src/vm/netio.rs`. `super::*` is the parent module.
 
 use super::core::{ChanState, Pending, PendingOp, RecvReady, SendOutcome, Settled};
+use super::deadlock::Wait;
 use super::netio::CLOSED_SEND;
-use super::netio::EMPTY_RECV_DEADLOCK;
-use super::netio::FULL_SEND_DEADLOCK;
-use super::netio::RENDEZVOUS_SEND_DEADLOCK;
 use super::netio::deadline_gap_wake;
-use super::netio::send_deadlock_msg;
 use super::*;
 use crate::base::builtin_method::ChannelMethod;
 
@@ -230,7 +227,7 @@ impl Vm {
             SendOutcome::Closed => return Err(self.err(CLOSED_SEND.to_string(), span)),
             SendOutcome::Full => {
                 self.wait_halt(span)?;
-                return Err(self.err(send_deadlock_msg(core.cap).to_string(), span));
+                return Err(self.err(Wait::send(core.cap).fault_text(), span));
             }
             SendOutcome::Offered => {}
         }
@@ -270,11 +267,7 @@ impl Vm {
         op: PendingOp,
         span: Span,
     ) -> Result<SendStep, RuntimeError> {
-        let msg = if core.cap == Some(0) {
-            RENDEZVOUS_SEND_DEADLOCK
-        } else {
-            FULL_SEND_DEADLOCK
-        };
+        let msg = Wait::send(core.cap).phrase();
         let p = Arc::clone(&op.p);
         let mut r = Ok(());
         while p.is_queued() {
@@ -352,7 +345,7 @@ impl Vm {
         self.push(value); // its one arg, back on top
         self.rewind_op();
         self.send_suspend = Some(h);
-        self.park_site = Some((send_deadlock_msg(cap), span));
+        self.park_site = Some((Wait::send(cap).phrase(), span));
     }
 
     /// Bounded-channel backpressure — after a `recv` frees a slot on a BOUNDED channel, wake any fiber
@@ -559,7 +552,7 @@ impl Vm {
         }
         // A native callback with no thread of its own to block on: the host stack cannot be unwound
         // to park either. Fault, as before.
-        Err(self.err(EMPTY_RECV_DEADLOCK.to_string(), span))
+        Err(self.err(Wait::Recv.fault_text(), span))
     }
 
     /// TICKET-194 — THE ready decision of a channel receive, made in the caller's `core.q` hold
@@ -595,6 +588,6 @@ impl Vm {
         self.push(Value::obj(h));
         self.rewind_op();
         self.suspend = Some(h);
-        self.park_site = Some((EMPTY_RECV_DEADLOCK, span));
+        self.park_site = Some((Wait::Recv.phrase(), span));
     }
 }

@@ -501,7 +501,7 @@ impl Checker {
                 type_params: Vec::new(),
                 where_bounds: Vec::new(),
                 min_params,
-                // Carry the protocol requirement's static-ness (e.g. `Convert`'s `convert(x: S)` is
+                // Carry the protocol requirement's static-ness (e.g. `From`'s `from(x: S)` is
                 // STATIC) so `method_matches` can reject an instance/self-slot witness of a static slot.
                 // Instance-method requirements keep `is_static == false`, so this is inert for them.
                 is_static: msig.is_static,
@@ -516,7 +516,18 @@ impl Checker {
             // Pre-substitute the receiving type's params into the ACTUAL (user) method signature so
             // its `Box[T]` becomes `Box[int]` before the comparison. Only the actual side is bound —
             // a genuinely wrong sig (`add(self, o: int) -> int`) stays a mismatch, no laundering.
-            let actual_owned = methods.get(mname).map(|actual| {
+            // An overloaded name witnesses with THE pick (`witness_overload`, the record's too);
+            // no unique pick is the bound's miss, never a fall back to the last overload.
+            let actual = match self.witness_overload(ty, mname, &want.params) {
+                Some(Ok(sig)) => Some(sig),
+                Some(Err(why)) => {
+                    return Err(ReqMiss::Shape(format!(
+                        "type {ty} does not satisfy {protocol_display} ({why})"
+                    )));
+                }
+                None => methods.get(mname),
+            };
+            let actual_owned = actual.map(|actual| {
                 if tymap.is_empty() {
                     actual.clone()
                 } else {
@@ -613,7 +624,7 @@ impl Checker {
         let protocol_display = crate::base::words::bare_display(protocol);
         let native_methods = self.structs.get(key).map(|i| &i.methods);
         let mut table: HashMap<String, FnSig> = HashMap::new();
-        for (mname, _) in &pinfo.methods {
+        for (mname, _) in pinfo.methods.iter() {
             if self.std_internal_hidden(mname) {
                 continue;
             }

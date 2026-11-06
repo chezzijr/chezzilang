@@ -91,15 +91,17 @@ declares `struct int`, `int` in a type position is that struct.
 its std module: `Add`, `Sub`, `Mul`, `Div`, `Mod`, `Neg`, `BitAnd`, `BitOr`, `BitXor`, `Shl`, `Shr`,
 `Arithmetic`, `Num`, `Index`, `IndexSet`, `Slice` and `Contains` (`std.ops`); `Eq`, `Comparable` and
 `Hashable` (`std.cmp`); `Iterator` and `Iterable` (`std.iter`); `Stringable` (`std.string`);
-`PathLike` (`std.path`); `Convert` (`std.convert`).
+`PathLike` (`std.path`); `From` (`std.convert`).
 
 - Their shapes are plain `protocol` decls in those `std/*.chz` files, the only source. Intrinsic
   conformance (for example `int` satisfies `Add` with no method) and operator binding (`+`→`add`,
   `<`→`compare`, `for`→`Iterator`, `[]`→`Index`, `[a..b]`→`Slice`) are built into the compiler.
-- The syntax a protocol backs (an operator, indexing, `for`, `in`, `T.convert(...)`, interpolation, map
-  keys, `!` and `recover:`) needs no import. Only a bound or a value type that names the protocol does.
-- `Convert[S]` (`fn convert(x: S) -> Self`, a static method, Rust's `From`) is bound-only
-  (`[T: Convert[str]]`; a value annotation is rejected) and callable through the bound (§7a).
+- The syntax a protocol backs (an operator, indexing, `for`, `in`, `T.from(...)`, interpolation, map
+  keys, `!` and `recover:`) needs no import. Only a bound or a value type that names the protocol
+  does, and so does declaring overloads it keys (two `from`s need `import From from std.convert`);
+  calling them needs none.
+- `From[S]` (`fn from(x: S) -> Self`, a static method, Rust's `From`) is bound-only
+  (`[T: From[str]]`; a value annotation is rejected) and callable through the bound (§7a).
 - `PathLike` (`fn as_path(self) -> bytes`) is the path input of the std filesystem surface:
   `str`/`bytes`/`bytearray` satisfy it and `path.Path` satisfies it structurally, so `fs.exists("x")`,
   `fs.exists(b"x")` and `fs.exists(p)` all work. See [`stdlib.md`](../stdlib/01-builtins.md).
@@ -119,6 +121,9 @@ So `None` always means the absent value (or "returns nothing"), and no enum has 
 local, a parameter or a loop variable may shadow a builtin function or type name (`print := 5`,
 `fn f(int: int)`, `for len in xs:`); a later call of the shadowed name reports `int is not callable`.
 `self` is not a keyword: `self := 5` in a method rebinds it for the rest of the body.
+One exception: `from` may be a MEMBER name, a method in a struct, enum, native-struct or protocol
+body (`fn from(x: int) -> Q`) and a name after `.` or `?.` (`Q.from(3)`, `q.from`). A free
+`fn from()` or `from := 1` is still rejected.
 
 ### What an import binds
 

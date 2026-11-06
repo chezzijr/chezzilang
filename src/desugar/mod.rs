@@ -389,6 +389,7 @@ pub fn run(graph: &mut ModuleGraph) -> Result<(), ResolveError> {
             builds_range: false,
             counting_iterand: false,
             skipped_fns: graph.fn_skips(&graph.modules[mi]),
+            skips_native_bodies: graph.skips_prelude_native_bodies(&graph.modules[mi]),
         };
         let ast: &mut Module = &mut graph.modules[mi].ast;
         walker.walk_block(&mut ast.stmts)?;
@@ -423,6 +424,7 @@ pub fn run_standalone(module: &mut Module) -> Result<(), ResolveError> {
         builds_range: false,
         counting_iterand: false,
         skipped_fns: crate::resolver::SkippedFns::default(),
+        skips_native_bodies: false,
     };
     walker.walk_block(&mut module.stmts)?;
     Ok(())
@@ -573,8 +575,9 @@ fn synthesize_providers_into(stmts: &mut Vec<Stmt>, file: u32) {
                         Dflt::Inline(_) | Dflt::CalleeFilled | Dflt::Literal(_) => {}
                     }
                 }
-                for mth in methods {
-                    let owner = format!("{name}.{}", mth.name);
+                for (i, mth) in methods.iter().enumerate() {
+                    let nth = methods[..i].iter().filter(|m| m.name == mth.name).count();
+                    let owner = crate::base::provider_name::method_owner(name, &mth.name, nth);
                     push_param_providers(
                         &mut new_fns,
                         file,
@@ -592,8 +595,9 @@ fn synthesize_providers_into(stmts: &mut Vec<Stmt>, file: u32) {
                 ..
             } => {
                 let stps: Vec<String> = type_params.iter().map(|t| t.name.clone()).collect();
-                for mth in methods {
-                    let owner = format!("{name}.{}", mth.name);
+                for (i, mth) in methods.iter().enumerate() {
+                    let nth = methods[..i].iter().filter(|m| m.name == mth.name).count();
+                    let owner = crate::base::provider_name::method_owner(name, &mth.name, nth);
                     push_param_providers(
                         &mut new_fns,
                         file,
@@ -611,8 +615,12 @@ fn synthesize_providers_into(stmts: &mut Vec<Stmt>, file: u32) {
                 ..
             } => {
                 let stps: Vec<String> = type_params.iter().map(|t| t.name.clone()).collect();
-                for mth in bodied_methods {
-                    let owner = format!("{name}.{}", mth.name);
+                for (i, mth) in bodied_methods.iter().enumerate() {
+                    let nth = bodied_methods[..i]
+                        .iter()
+                        .filter(|m| m.name == mth.name)
+                        .count();
+                    let owner = crate::base::provider_name::method_owner(name, &mth.name, nth);
                     push_param_providers(
                         &mut new_fns,
                         file,
@@ -813,6 +821,9 @@ fn walk_idents_and_types(e: &Expr, f: &mut impl FnMut(&str), tf: &mut impl FnMut
             walk_idents_and_types(obj, f, tf);
             if let Some(c) = call {
                 c.args.iter().for_each(|a| walk_idents_and_types(a, f, tf));
+                c.bracket
+                    .iter()
+                    .for_each(|b| walk_idents_and_types(b, f, tf));
                 c.named
                     .iter()
                     .for_each(|(_, a)| walk_idents_and_types(a, f, tf));
@@ -888,6 +899,9 @@ struct Walker<'a> {
     /// TICKET-265 — this module's [`ModuleGraph::fn_skips`]. The checker and the compiler skip those
     /// bodies, so a range literal inside one records no `Range` use.
     skipped_fns: crate::resolver::SkippedFns,
+    /// [`crate::resolver::ModuleGraph::skips_prelude_native_bodies`] for this module: the checker
+    /// and the compiler skip those bodies, so the walk does too.
+    skips_native_bodies: bool,
 }
 
 /// TICKET-109 / W12-12 — how deep `fn` declarations may nest. A top-level `fn`, a `test fn` or a
@@ -1211,7 +1225,8 @@ impl Walker<'_> {
                 bodied_methods,
                 ..
             } => {
-                for m in bodied_methods.iter_mut() {
+                let skip = self.skips_native_bodies;
+                for m in bodied_methods.iter_mut().filter(|_| !skip) {
                     for p in m.params.iter_mut() {
                         if let Some(d) = &mut p.default {
                             self.walk_expr(d)?;
@@ -1416,6 +1431,9 @@ impl Walker<'_> {
                     for a in c.args.iter_mut() {
                         self.walk_expr(a)?;
                     }
+                    if let Some(b) = c.bracket.as_mut() {
+                        self.walk_expr(b)?;
+                    }
                     for (_, v) in c.named.iter_mut() {
                         self.walk_expr(v)?;
                     }
@@ -1520,7 +1538,7 @@ fn lower_carrier_option_as(expr: &mut Expr, tmp: usize, void: bool) {
         k.set(k.get() + 1);
         base.carrier_child(k.get())
     };
-    let c = format!("__opt{tmp}");
+    let c = crate::ast::CarrierTemp::Payload.name(tmp);
     let kind = std::mem::replace(&mut expr.kind, ExprKind::Bool(false));
     expr.kind = match kind {
         ExprKind::NullCoalesce { lhs, rhs, .. } => {
@@ -1569,21 +1587,14 @@ fn lower_carrier_option_as(expr: &mut Expr, tmp: usize, void: bool) {
             // `__optN.field` or `__optN.method(args)`, then wrapped in `Some(...)`.
             let access = match call {
                 None => field,
-                Some(OptCall {
-                    args,
-                    named,
-                    type_args,
-                }) => Expr {
-                    id: nid(),
-                    kind: ExprKind::Call {
-                        callee: Box::new(field),
-                        args,
-                        named,
-                        type_args,
-                        bracket: None,
-                    },
-                    span,
-                },
+                Some(call) => {
+                    let id = nid();
+                    Expr {
+                        id,
+                        kind: opt_call_kind(field, call, span, nid),
+                        span,
+                    }
+                }
             };
             // Drawn before the branch, so the void form skips no id.
             let (wrap_id, some_id) = (nid(), nid());
@@ -1684,7 +1695,7 @@ pub fn lower_carrier_result_coalesce(expr: &mut Expr, tmp: usize) {
         k.set(k.get() + 1);
         base.carrier_child(k.get())
     };
-    let c = format!("__opt{tmp}");
+    let c = crate::ast::CarrierTemp::Payload.name(tmp);
     let kind = std::mem::replace(&mut expr.kind, ExprKind::Bool(false));
     let ExprKind::NullCoalesce { lhs, rhs, .. } = kind else {
         unreachable!("lower_carrier_result_coalesce applies to '??' only");
@@ -1762,18 +1773,48 @@ pub fn lower_carrier_try(expr: &mut Expr) {
     };
     expr.kind = match call {
         None => field.kind,
-        Some(OptCall {
-            args,
-            named,
-            type_args,
-        }) => ExprKind::Call {
-            callee: Box::new(field),
-            args,
-            named,
-            type_args,
-            bracket: None,
-        },
+        Some(call) => opt_call_kind(field, call, span, nid),
     };
+}
+
+/// The call of a `?.` method link on its synthesized callee `field`: `field(args)`, or, when
+/// the bracket has no type reading (`h?.fs[0](10)`, `OptCall::bracket`), `field[i](args)`
+/// as the parser builds it after `.`. Only the index form draws an id (`index_id`), so a plain
+/// link's ids are unchanged.
+fn opt_call_kind(
+    field: Expr,
+    call: OptCall,
+    span: Span,
+    index_id: impl FnOnce() -> crate::ast::NodeId,
+) -> ExprKind {
+    let OptCall {
+        args,
+        named,
+        type_args,
+        bracket,
+    } = call;
+    let (callee, bracket) = match bracket {
+        Some(index) if type_args.is_empty() => (
+            Expr {
+                id: index_id(),
+                kind: ExprKind::Index {
+                    obj: Box::new(field),
+                    index: Some(index),
+                    types: Vec::new(),
+                },
+                span,
+            },
+            None,
+        ),
+        bracket => (field, bracket),
+    };
+    ExprKind::Call {
+        callee: Box::new(callee),
+        args,
+        named,
+        type_args,
+        bracket,
+    }
 }
 
 /// A module's top-level names that hide a full module path's head (TICKET-175): `let`, `fn` and
@@ -2236,7 +2277,9 @@ mod tests {
         };
         assert_eq!(*name, crate::ast::private_name("Ok"));
         assert_eq!(bindings.len(), 1);
-        assert!(matches!(&bindings[0], Pattern::Ident(n, _, _) if n == "__opt0"));
+        assert!(
+            matches!(&bindings[0], Pattern::Ident(n, _, _) if *n == crate::ast::CarrierTemp::Payload.name(0))
+        );
         let Pattern::Variant { name, bindings, .. } = &arms[1].pattern else {
             panic!("expected a variant pattern, got {:?}", arms[1].pattern)
         };

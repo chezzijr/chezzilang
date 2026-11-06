@@ -698,7 +698,7 @@ print(\"after\")
     for t in THREADS {
         let g = run("dl", src, Mode::Run, t, None);
         if g.code != Some(1)
-            || !g.err.contains("recv on an empty channel: deadlock")
+            || !g.err.contains("task 1: recv() on an empty channel at ")
             || g.out.contains("got")
             || g.out.contains("after")
         {

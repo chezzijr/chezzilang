@@ -64,9 +64,11 @@ fn nested_nursery_deadlock_faults_at_one_worker_like_every_other_count() {
         "expected a nonzero exit for an undetected deadlock, got {status} (stderr: {stderr})"
     );
     assert!(
-        stderr.contains("dd6.chz:3:5): deadlock:"),
-        "expected a `deadlock: …` fault naming the INNER nursery's span (dd6.chz:3:5), like every \
-         other worker count, got: {stderr}"
+        stderr.contains("dd6.chz:4:15): deadlock: 1 task is blocked")
+            && stderr.contains("(called at /")
+            && stderr.contains("dd6.chz:3:5)"),
+        "expected a `deadlock: …` fault listing the INNER nursery's task (its recv at dd6.chz:4:15, \
+         spawned at 3:5), like every other worker count, got: {stderr}"
     );
 
     let _ = std::fs::remove_dir_all(&dir);

@@ -1,0 +1,73 @@
+# tests/chz/spec/into_test.chz: a type converts ITSELF into another with an instance
+# `fn into(self) -> T` (Rust `impl Into<T> for Rat`), overloaded by the return type, one per
+# target. The call names the target with `r.into[float]()` (Rust `Into::<f64>::into(r)`) or with
+# an annotation (`f: float = r.into()`, Rust `let f: f64 = r.into()`). A fallible conversion is `fn try_into(self) -> T!` (Rust
+# `impl TryInto<T>`), overloaded the same way. There is no blanket `into` from a `from`.
+#
+# The module imports the protocols that key the overloads (`Into[T]`, `TryInto[T]`): without
+# them, a second `into` is "already defined".
+# The rejects (no `[T]` and no annotation, no overload for the target, two `into -> float`) are Rust checker tests
+# (`src/checker/tests/from_overloads.rs`).
+# Gated by `chz_suite_passes` (`tests/chz_suite.rs`).
+
+import Into, TryInto from std.convert
+
+struct Rat:
+    n: int
+    d: int
+    fn into(self) -> float:
+        return self.n.to_float() / self.d.to_float()
+    fn into(self) -> str:
+        return "{self.n}/{self.d}"
+    fn try_into(self) -> int!:
+        if self.d != 1:
+            return !"{self.n}/{self.d} is not an int"
+        return self.n
+
+enum Sign:
+    Pos
+    Neg
+    fn into(self) -> int:
+        match self:
+            Sign.Pos: return 1
+            Sign.Neg: return -1
+
+struct Box[T]:
+    v: T
+    fn into(self) -> T:
+        return self.v
+
+fn as_int(r: Rat) -> int!:
+    return r.try_into[int]()? + 1
+
+test fn into_picks_the_overload_by_its_target():
+    assert Rat(1, 2).into[float]() == 0.5
+    assert Rat(1, 2).into[str]() == "1/2"
+    r := Rat(3, 4)
+    s: str = r.into[str]()
+    assert s == "3/4"
+
+test fn try_into_returns_an_error_value():
+    assert (Rat(4, 1).try_into[int]() ?? -1) == 4
+    assert (as_int(Rat(4, 1)) ?? -1) == 5
+    match Rat(1, 2).try_into[int]():
+        ?v: assert false, "converted {v}"
+        !e: assert e.message() == "1/2 is not an int"
+
+test fn an_enum_has_an_into():
+    assert Sign.Pos.into[int]() == 1
+    assert Sign.Neg.into[int]() == -1
+
+test fn an_annotation_picks_the_overload():
+    f: float = Rat(1, 4).into()
+    s: str = Rat(1, 4).into()
+    assert f == 0.25
+    assert s == "1/4"
+    n: int! = Rat(6, 1).try_into()
+    assert (n ?? -1) == 6, "a carrier annotation picks the try_into by its payload"
+    t: str = Rat.into(Rat(2, 3))
+    assert t == "2/3", "through the type too"
+
+test fn a_target_type_argument_names_the_receivers_type_arg():
+    assert Box(7).into[int]() == 7, "a lone `into(self) -> T` on `Box[int]` returns int"
+    assert Rat.into[str](Rat(5, 6)) == "5/6"

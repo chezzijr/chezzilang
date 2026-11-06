@@ -18,25 +18,6 @@ macro_rules! core_accessor {
     };
 }
 
-/// The shared fault for a `send` on a FULL bounded channel that cannot park (top level with no
-/// nursery, or inside a native callback). ONE const so every non-parkable full-send path emits
-/// byte-identical text (parity). Mirrors `chan_recv_step`'s empty-recv deadlock note.
-///
-/// §2c1 — a spawned task starts running at its `spawn`, not at the nursery's join, so this verdict
-/// means no task that could receive is spawned at all, or the one that was has already exited: the
-/// hint names that rather than a nursery-ordering quirk.
-pub(super) const FULL_SEND_DEADLOCK: &str = "send on a full channel: deadlock — the bounded channel is at \
-    capacity and no runnable task can receive to free a slot. (Make sure a task that receives from \
-    this channel is spawned with `spawn:` and is still running.)";
-
-/// The rendezvous (cap 0) sibling of [`FULL_SEND_DEADLOCK`] (TICKET-136, W14-35): a rendezvous
-/// channel has no slots, so "at capacity" is false for it — the send can never complete because no
-/// receiver is coming. Picked by [`send_deadlock_msg`] wherever the channel's cap is known.
-pub(super) const RENDEZVOUS_SEND_DEADLOCK: &str = "send on a rendezvous channel: deadlock — the channel has \
-    no buffer and no runnable task can receive from it. (Make sure a task that receives from this \
-    channel is spawned with `spawn:` and is still running.)";
-
-/// The send-deadlock text for a channel of capacity `cap` (`Some(0)` = rendezvous).
 /// The `Err` text of a would-block socket op in a context whose table cell is `Refuse` (an eager
 /// `Executor` job, `block::mode`'s Socket/Connect row). One copy for every socket op.
 pub(super) fn sock_would_block_msg(op: &str) -> String {
@@ -48,35 +29,9 @@ pub(super) fn sock_would_block_msg(op: &str) -> String {
     )
 }
 
-pub(super) fn send_deadlock_msg(cap: Option<usize>) -> &'static str {
-    if cap == Some(0) {
-        RENDEZVOUS_SEND_DEADLOCK
-    } else {
-        FULL_SEND_DEADLOCK
-    }
-}
-
-/// The shared fault for a `send` to a CLOSED channel. ONE const for the same reason
-/// [`FULL_SEND_DEADLOCK`] is one: the top-of-`send` guard, the `wait:` send arm and the eager
+/// The shared fault for a `send` to a CLOSED channel. ONE const: the top-of-`send` guard, the `wait:` send arm and the eager
 /// blocked-sender loop must all emit byte-identical text. Go panics `send on closed channel` here.
 pub(super) const CLOSED_SEND: &str = "send on a closed channel";
-
-/// The shared fault for a `recv` on an EMPTY channel that cannot park. Raised by the native-callback
-/// arm of [`Vm::chan_recv_step`], which cannot block at all, and by any party that blocked in place
-/// and was then judged deadlocked by the process-wide verdict ([`crate::vm::quiesce`]): ONE const so
-/// every spelling of the same verdict is byte-identical.
-pub(super) const EMPTY_RECV_DEADLOCK: &str = "recv on an empty channel: deadlock — no runnable task can send. \
-    (Make sure a task that sends to this channel is spawned with `spawn:` and is still running.)";
-
-/// The `wait:` sibling of [`EMPTY_RECV_DEADLOCK`] — every arm empty and nobody left to send.
-pub(super) const EMPTY_WAIT_DEADLOCK: &str = "wait on channels that are all empty: deadlock — no runnable task \
-    can send. (Make sure a task that sends to one of these channels is spawned with `spawn:` and is \
-    still running.)";
-
-/// TICKET-223 — the report of a party blocked on a `Shared`/`RwShared` guard when the deadlock
-/// verdict names it. Replaces the "parallel: block" text the guard wait used to borrow.
-pub(super) const GUARD_DEADLOCK: &str = "update guard wait: deadlock — the task holding this Shared/RwShared \
-    guard is blocked and no runnable task can release it";
 
 /// W7-17 — end a timer park EARLY, because the run's `--timeout` expired before the timer's own
 /// deadline. Used by both `timer(ms)` park sites ([`Vm::chan_recv_step`]'s timer branch and
@@ -277,7 +232,8 @@ impl Vm {
 
     /// TICKET-193/194 — THE guard order: wait for the guard to look free holding no width permit,
     /// take the permit back ([`Vm::wait_retake`]), then take the guard with no wait. So the permit
-    /// comes before the guard; a lost race gives it back again. `Ok(None)` is still held after `budget`, or lost the race.
+    /// comes before the guard; a lost race gives it back again. `Ok(None)` is still held after `budget`, or lost the race;
+    /// `Err` is a halt or this wait's deadlock cut.
     /// Stage 1 of [`Vm::take_update_guard`] and [`Vm::guard_wait_block`] both call it. The `ticket`
     /// stays live across the permit handoff.
     ///
@@ -301,6 +257,15 @@ impl Vm {
             Ok(true) => {}
         }
         self.block_halts(span)?;
+        // A deadlock verdict's cut of the holder frees the guard too, and is no progress: the
+        // holder is a blocked task of the verdict, so a cut wait ends here with its own wait
+        // instead of taking the guard. Both stages leave on it at once (stage 1 no longer spins
+        // to its budget first).
+        if let Some(sched) = self.mn.as_ref().map(Arc::clone)
+            && self.in_place_cut(&sched.lock(), reg.tok())
+        {
+            return Err(self.cut_fault(&sched, span));
+        }
         self.wait_retake(reg);
         // A registered waiter marks its take before it tries (`core::GuardWait::taking`).
         let mark = |on: bool| {
@@ -368,7 +333,7 @@ impl Vm {
                     drop(c);
                     // The waiter names its own wait (the text and span its party site carries
                     // above), as on the process-wide verdict: a guard wait is not a channel wait.
-                    break Err(sched.deadlock_err.at_site(GUARD_DEADLOCK, span));
+                    break Err(self.cut_fault(&sched, span));
                 }
                 if sched.is_deadlocked(&c) {
                     // TICKET-232 — the next pass ends the wait through the run halt or `terminate`.

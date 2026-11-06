@@ -52,6 +52,11 @@ type each pin the called generic's type parameters, which then fix dependent clo
   (`h: Heap[int] = if rev: Heap([], fn(x, y): x > y) else: Heap([], fn(x, y): x < y)`) and both
   operands of a binary operator (`xs: List[G[int]] = mkl() + mkl()`). So `c: List[Any] = [1] + ["a"]`
   prints `[1, 'a']`, as CPython does.
+- It reaches through `?`, `??` and `else:` to the payload of the carrier they unwrap:
+  `n: int = parse("7")?`, `n: int = opt("7") ?? 0` and `n: int = parse(s) else: return 0` pin `T`
+  in `fn parse[T: TryFrom[str]](s: str) -> T!` / `fn opt[...](s: str) -> T?` (rustc infers
+  `let n: i64 = parse("7")?`). A field receiver (`mk().v`), an interpolation fragment
+  (`"{pick()}"`) and a range bound get no hint.
 - Gap: it does not reach a generic ctor inside a container literal
   (`a: List[Heap[int]] = [Heap([], fn(x, y): x < y)]`). Annotate the closure params or use a turbofish.
 

@@ -29,9 +29,9 @@ fn witness_static_call_accepted_shapes_ok() {
     entry_ok(
         "protocol Conv:\n    fn conv(x: int) -> Self\nstruct Wrap:\n    v: int\n    fn conv(x: int) -> Wrap:\n        return Wrap(x * 2)\nfn mk[T: Conv](seed: T, n: int) -> T:\n    return T.conv(n)\nfn main():\n    print(mk(Wrap(0), 21).v)\nmain()\n",
     );
-    // the RESERVED `Convert[S]` protocol — the slice-3 close-out this milestone re-opened
+    // the RESERVED `From[S]` protocol — the slice-3 close-out this milestone re-opened
     entry_ok(
-        "import Convert from std.convert\nstruct Port:\n    v: int\n    fn convert(x: int) -> Port:\n        return Port(x + 1)\nfn make[T: Convert[int]](seed: T, n: int) -> T:\n    return T.convert(n)\nfn main():\n    print(make(Port(0), 41).v)\nmain()\n",
+        "import From from std.convert\nstruct Port:\n    v: int\n    fn from(x: int) -> Port:\n        return Port(x + 1)\nfn make[T: From[int]](seed: T, n: int) -> T:\n    return T.from(n)\nfn main():\n    print(make(Port(0), 41).v)\nmain()\n",
     );
     // no value argument at all: `T` pinned by a turbofish…
     entry_ok(&format!(
@@ -406,9 +406,9 @@ fn witness_only_charged_when_the_body_uses_it_ok() {
             "import lib\nfn main():\n    print(lib.label(lib.N(2)))\nmain()\n",
         ),
     ]);
-    // The same for the RESERVED `Convert[S]` bound with a body that never converts.
+    // The same for the RESERVED `From[S]` bound with a body that never converts.
     entry_ok(
-        "import Convert from std.convert\nstruct Port:\n    v: int\n    fn convert(x: int) -> Port:\n        return Port(x + 1)\nfn wrap[T: Convert[int]](seed: T, n: int) -> T:\n    return seed\nfn main():\n    g := wrap[Port]\n    print(wrap(Port(1), 2).v)\nmain()\n",
+        "import From from std.convert\nstruct Port:\n    v: int\n    fn from(x: int) -> Port:\n        return Port(x + 1)\nfn wrap[T: From[int]](seed: T, n: int) -> T:\n    return seed\nfn main():\n    g := wrap[Port]\n    print(wrap(Port(1), 2).v)\nmain()\n",
     );
 }
 

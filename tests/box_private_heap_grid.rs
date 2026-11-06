@@ -136,7 +136,8 @@ fn a_child_task_reading_the_box_inside_its_own_closure_is_a_deadlock_fault_not_a
             let r = chezzi(&["run", path.to_str().unwrap()], threads, 30);
             assert_eq!(r.code, Some(1), "{kind} at {threads:?}: {}", r.stderr);
             assert!(
-                r.stderr.contains("update guard wait: deadlock")
+                r.stderr
+                    .contains(&format!("task 1: waiting for the {kind} guard at "))
                     && r.stderr.contains("main.chz:4:")
                     && r.stdout.is_empty(),
                 "{kind} at {threads:?}: stdout {:?} stderr {}",
@@ -198,16 +199,16 @@ fn a_child_fault_cuts_its_owner_inside_a_box_closure() {
 /// - `nursery`: the closure opens its own `parallel:` whose child waits. Base reports
 ///   `deadlock` and exits 1 at every worker count. The inner nursery must join the task's
 ///   enclosing sched (M3.3: the closure runs in the caller's context, so it is the caller's own).
-/// - `direct`: the closure waits on the channel itself. Base hangs; the verdict declines. The
-///   cell pins that no wrong verdict appears: the run never passes the call.
+/// - `direct`: the closure waits on the channel itself. Base hangs (its verdict declined a body
+///   blocked inside a callback); no task can ever send on `ch` or `ch2`, so this is a deadlock as
+///   Go reports it, and the nursery verdict now ends it: `deadlock`, exit 1, at every worker count.
 #[test]
 fn a_deadlock_inside_a_box_closure_is_judged_as_on_the_caller() {
     let waits = [
-        ("direct", "    _ := ch.recv()", false),
+        ("direct", "    _ := ch.recv()"),
         (
             "nursery",
             "    parallel:\n        spawn:\n            _ := ch.recv()",
-            true,
         ),
     ];
     let calls = [
@@ -216,28 +217,20 @@ fn a_deadlock_inside_a_box_closure_is_judged_as_on_the_caller() {
         ("RwShared", "w.write(park)"),
         ("Shared", "w.update(fn(x): nested(x))"),
     ];
-    for (wname, wait, faults) in waits {
+    for (wname, wait) in waits {
         for (i, (kind, call)) in calls.into_iter().enumerate() {
             let src = format!(
                 "import std.concurrency\nch := Channel[int](0)\nch2 := Channel[int](0)\ninner := concurrency.Shared(0)\nfn park(x: int) -> int:\n{wait}\n    return x\nfn nested(x: int) -> int:\n    inner.update(park)\n    return x\nw := concurrency.{kind}(0)\nparallel:\n    spawn:\n        _ := ch2.recv()\n    {call}\n    print(\"after\")\n"
             );
             let path = write_program(&format!("dl-{wname}-{i}"), &src);
             for threads in [Some("1"), Some("2"), None] {
-                let r = chezzi(
-                    &["run", path.to_str().unwrap()],
-                    threads,
-                    if faults { 20 } else { 2 },
-                );
+                let r = chezzi(&["run", path.to_str().unwrap()], threads, 20);
                 let cell = format!(
                     "{wname} / {call} at {threads:?}: code {:?} stdout {:?} stderr {}",
                     r.code, r.stdout, r.stderr
                 );
                 assert!(r.stdout.is_empty(), "{cell}");
-                if faults {
-                    assert!(r.code == Some(1) && r.stderr.contains("deadlock"), "{cell}");
-                } else {
-                    assert_eq!(r.code, None, "{cell}");
-                }
+                assert!(r.code == Some(1) && r.stderr.contains("deadlock"), "{cell}");
             }
         }
     }

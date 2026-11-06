@@ -570,7 +570,7 @@ fn poke_live_scheds_takes_each_sched_core_lock_before_notifying() {
 }
 
 /// D2b/U4: every not-done fiber parked, none running, run queue empty ⇒ deadlock. `take_runnable`
-/// detects it, records a `Deadlocked` outcome (`err.message == DEADLOCK_MSG`) for every parked
+/// detects it, records a `Deadlocked` outcome (`err.message == crate::vm::deadlock::Wait::Nursery.phrase()`) for every parked
 /// fiber, and terminates.
 #[test]
 fn mnsched_deadlock_when_all_parked_runq_empty() {
@@ -590,7 +590,7 @@ fn mnsched_deadlock_when_all_parked_runq_empty() {
     assert_eq!(slots.len(), 2);
     for s in slots {
         assert!(
-            matches!(s, Some(TaskOutcome::Deadlocked { err, .. }) if err.message == DEADLOCK_MSG)
+            matches!(s, Some(TaskOutcome::Deadlocked { err, .. }) if err.message == crate::vm::deadlock::Wait::Nursery.phrase())
         );
     }
 }

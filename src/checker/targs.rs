@@ -171,6 +171,26 @@ impl Checker {
         sub
     }
 
+    /// The expected type a generic call's seeds ([`Self::slot_seed`], `seed_from_hint`,
+    /// [`Self::widen_targs_from_hint`]) read, and the result shape they read it against. A payload
+    /// hint (`CallCtx::payload_hint`: the call is the operand of `?`, `??` or `else:`) names the
+    /// `T` of a carrier result, so the seeds read the result's payload: `n: int = parse("7")?`
+    /// binds `T := int` in `-> T!`, as rustc infers `let n: i64 = parse("7")?`. A seed only: the
+    /// call keeps its carrier type. A result that is no carrier gets no hint.
+    pub(super) fn hint_shape<'a>(
+        &self,
+        hint: Option<&'a Ty>,
+        ret: &'a Ty,
+    ) -> (Option<&'a Ty>, &'a Ty) {
+        if hint.is_none() || !self.call_ctx.as_ref().is_some_and(|c| c.payload_hint) {
+            return (hint, ret);
+        }
+        match ret.carrier_payload() {
+            Some(p) => (hint, p),
+            None => (None, ret),
+        }
+    }
+
     /// TICKET-239 — the one pre-argument substitution of a generic call, read by all six generic
     /// paths through [`Checker::infer_generic_arg_tys`]. Returns `(owned, seed)`. `owned` binds
     /// what is written before any argument is read: the explicit type arguments (`targs`, from
@@ -550,6 +570,14 @@ impl Checker {
             let Some(actual) = methods.get(&mname) else {
                 continue;
             };
+            // An overloaded name (2+ `from`s) has no one witnessing sig, so it recovers nothing
+            // and a free `S` stays "cannot infer" (Rust `E0283`); the caller pins it.
+            if self
+                .nominal_overloads(ty)
+                .is_some_and(|o| o.contains_key(&mname))
+            {
+                continue;
+            }
             if msig.params.len() != actual.params.len() || msig.is_static != actual.is_static {
                 continue;
             }
@@ -804,7 +832,7 @@ impl Checker {
 
     /// The first bound of type param `tname` whose protocol declares `method` with a sig `pick`
     /// accepts, that sig, and its map: `Self` ↦ `Ty::Param(tname)` (the body is still checked
-    /// abstractly) plus each protocol param ↦ the bound's arg (`Convert[int]` ⇒ `S ↦ int`). The one
+    /// abstractly) plus each protocol param ↦ the bound's arg (`From[int]` ⇒ `S ↦ int`). The one
     /// bound search, read by the static-witness call, a bound-param receiver's method call and
     /// the path value `T.m`.
     pub(super) fn bound_method(
@@ -819,6 +847,13 @@ impl Checker {
                 .filter(|s| pick(s))
                 .map(|s| (b.clone(), s))
         })?;
+        let map = self.bound_subst(tname, &bound);
+        Some((bound, msig, map))
+    }
+
+    /// The substitution that spells a requirement of `bound` on the type param `tname`: `Self` is
+    /// `tname`, each protocol param is the bound's argument.
+    pub(super) fn bound_subst(&self, tname: &str, bound: &TyBound) -> HashMap<String, Ty> {
         let mut map = HashMap::from([("Self".to_string(), Ty::Param(tname.to_string()))]);
         let ptps = self
             .protocol_shape(&bound.name)
@@ -827,7 +862,7 @@ impl Checker {
         for (pn, parg) in ptps.iter().zip(&bound.args) {
             map.insert(pn.clone(), parg.clone());
         }
-        Some((bound, msig, map))
+        map
     }
 
     /// The return of a bound's method (sig `msig`, map `map`): the requirement's declared return

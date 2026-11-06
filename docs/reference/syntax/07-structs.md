@@ -116,6 +116,17 @@ q := Path(b"/a/b")                 # sets the field
 **Enums** get static methods too (for example `from_str(s) -> Color?`). A variant and a static method
 may not share a name (a declaration-time error), so `Color.Red` is always the variant.
 
+A type declares each method name once (`method 'show' is already defined`). The one exception is a
+method a parameterized protocol keys, when the declaring module declares or imports that protocol
+([`09-protocols.md`](09-protocols.md#a-parameterized-protocol-keys-overloads)): a static `from`
+(after `import From from std.convert`), one per source type, picked by the argument's type
+(`Rat.from(3)`, `Rat.from("1/3")`) or by a `[S]` naming the source (`Rat.from[str]("1/3")`). A conversion that can fail is a static
+`try_from(x: S) -> Self!`, overloaded the same way. A type converts itself with an instance
+`into(self) -> T`, one per target type and picked by the call's `[T]` (`r.into[float]()`) or its
+annotation (`f: float = r.into()`), and
+`try_into(self) -> T!` when it can fail. The rules are in
+[`05-conversions.md`](../spec/05-conversions.md).
+
 **Generic static methods** take a **type-level turbofish** (the type's args sit on the type):
 
 ```chezzi
@@ -148,7 +159,8 @@ b := Box[int].make[str]("hi")         # combined turbofish: T=int + U=str ⇒ Bo
 
 - A method type param may not shadow an enclosing one (`fn make[T]` inside `Box[T]` is an error).
 - A member turbofish on a member with no type params (or a builtin like `xs.len[int]()` /
-  `xs.iter[int]()`) is an arity error.
+  `xs.iter[int]()`) is an arity error, except on a method a protocol keys, where `[X]` names the
+  key (`Rat.from[int](3)`, `r.into[float]()`).
 - Instance methods take the member turbofish, multi-arg: `pair.first[int, str](1, "x")`.
 
 #### Static protocol requirements — calling `T.method(...)` through a bound
@@ -188,13 +200,15 @@ that only *has* such a bound (`fn tagged[T: Spawnable](x: T) -> str: return x.ta
   (`h.make(x)`, `Holder.build(x)`, `h.make[Counter](x)`)
 - the call inside a closure (also one that escapes), a nested `fn`, `defer:`, and `spawn:`/`parallel:`
   (the witness is a value, so it crosses)
-- the reserved `Convert[S]` protocol, whose witness is a static `convert(x: S) -> Self`:
+- the reserved `From[S]` protocol, whose witness is a static `from(x: S) -> Self`, and its fallible
+  twin `TryFrom[S]` (`try_from(x: S) -> Self!`); the builtins `int` and `float` witness both
+  (`int.from(x: bool)`, `int.try_from(x: str)`):
 
 ```chezzi
-import Convert from std.convert
+import From from std.convert
 
-fn make[T: Convert[int]](seed: T, n: int) -> T:
-    return T.convert(n)
+fn make[T: From[int]](seed: T, n: int) -> T:
+    return T.from(n)
 ```
 
 **What does not** (each has a diagnostic that names the workaround):

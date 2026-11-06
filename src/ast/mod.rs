@@ -7,8 +7,11 @@
 
 pub use crate::lexer::Span;
 
+mod carrier_temp;
 pub mod codec;
 pub mod consteval;
+
+pub use carrier_temp::CarrierTemp;
 
 /// A whole parsed source file: a flat sequence of top-level statements.
 #[derive(Debug, Clone, PartialEq, borsh::BorshSerialize, borsh::BorshDeserialize)]
@@ -1300,9 +1303,9 @@ pub enum ExprKind {
         obj: Box<Expr>,
         name: String,
         /// Source span of the field NAME token (`name`), distinct from the node's `span` which (like
-        /// every postfix expr) inherits the receiver's start. Purely diagnostic metadata for editor
-        /// tooling (LSP hover keys field-name hovers on this true position); runtime-inert — never
-        /// read by desugar/compiler/vm, so it is behavior-neutral.
+        /// every postfix expr) inherits the receiver's start. LSP hover keys field-name hovers on
+        /// this position, and the compiler keys a `from` overload pick on it
+        /// (`WitnessTable.overload_calls`, read by `Compiler::overload_pick`).
         name_span: Span,
     },
     /// `head[X…]`: one bracket node carrying both readings (TICKET-222). `index` is the bracket read
@@ -1511,6 +1514,10 @@ pub struct OptCall {
     pub args: Vec<Expr>,
     pub named: Vec<(String, Expr)>,
     pub type_args: Vec<Type>,
+    /// The one-arg bracket's expression reading, as [`ExprKind::Call`]'s `bracket`
+    /// (`r?.fs[k](10)` indexes then calls when `fs` is data, TICKET-210). With no `type_args` the
+    /// bracket is no type list (`r?.fs[0](10)`): desugar indexes then calls, as after `.`.
+    pub bracket: Option<Box<Expr>>,
 }
 
 /// One arm of an expression-position `match`: `pattern [if guard]: value-expr`.
@@ -1715,6 +1722,7 @@ pub fn expr_recover_blocks<'a>(e: &'a Expr, out: &mut Vec<&'a Block>) {
             go(obj);
             if let Some(c) = call {
                 c.args.iter().for_each(&mut go);
+                c.bracket.iter().for_each(|b| go(b));
                 c.named
                     .iter()
                     .for_each(|(_, v)| expr_recover_blocks(v, out));
@@ -2199,6 +2207,9 @@ fn ids_in_expr(e: &mut Expr, f: &mut dyn FnMut(&mut NodeId, Span, u32)) {
             if let Some(c) = call {
                 for a in &mut c.args {
                     go(a, f);
+                }
+                if let Some(b) = &mut c.bracket {
+                    go(b, f);
                 }
                 for (_, a) in &mut c.named {
                     go(a, f);

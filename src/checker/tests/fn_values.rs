@@ -1284,8 +1284,7 @@ fn print_sep_non_str_rejects() {
 #[test]
 fn print_builtin_sig_present_after_port() {
     // print retains a builtin_sig (hover) after retiring the synthetic sig_print.
-    let mut c = Checker::new();
-    c.seed_native_prelude_sigs();
+    let c = prelude_checker();
     assert!(c.builtin_sig("print").is_some());
 }
 

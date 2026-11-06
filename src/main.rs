@@ -58,7 +58,7 @@ FLAGS:
     --show-output    Surface a FAILING test's captured stdout byte-exactly, indented under its line
                      (default: discard). Its captured stderr goes to fd 2 instead, as one block per
                      test.
-    --errors=json    Emit ONLY a JSON document ({tests:[{name,file,line?,status,message?,duration_ms}],totals})
+    --errors=json    Emit ONLY a JSON document ({tests:[{name,file,line?,status,message?,tasks?,duration_ms}],totals})
                      for CI/editors — suppresses the human PASS/FAIL lines (mirrors `check --errors=json`).
     -q, --quiet      Dots (`.`/`F`/`E`/`M`/`T`) per test + the summary only (no per-test lines).
     -v, --verbose    Per-test lines + per-test timing (`(Nms)`) + a total (`-q`/`-v` are exclusive).
@@ -96,8 +96,8 @@ fn main() -> ExitCode {
         "tokens" => cmd_tokens(args.get(1)),
         "ast" => cmd_ast(args.get(1)),
         "check" => cmd_check(&args[1..]),
-        "run" => report_sched_seed(cmd_run(&args[1..])),
-        "test" => report_sched_seed(cmd_test(&args[1..])),
+        "run" => report_sched_stats(report_sched_seed(cmd_run(&args[1..]))),
+        "test" => report_sched_stats(report_sched_seed(cmd_test(&args[1..]))),
         "init" => cmd_init(&args[1..]),
         "docs" => cmd_docs(&args[1..]),
         other => {
@@ -492,6 +492,15 @@ fn apply_env_sched_seed(cmd: &str) {
             "chezzi {cmd}: ignoring invalid CHEZZI_SCHED_SEED='{bad}' (expected an unsigned 64-bit integer)"
         ),
     }
+}
+
+/// Under `CHEZZI_SCHED_STATS=1`, print the run's worker count to stderr: `[sched-stats] workers=<n>`.
+/// It is [`vm::worker_count`], the one count the pool, every scheduler and the eager gate are sized by.
+fn report_sched_stats(code: ExitCode) -> ExitCode {
+    if std::env::var_os("CHEZZI_SCHED_STATS").is_some() {
+        chezzi::errln!("[sched-stats] workers={}", vm::worker_count());
+    }
+    code
 }
 
 /// TICKET-167 — on a nonzero exit under a seeded run, print the seed and worker count so the failure
@@ -1528,8 +1537,8 @@ mod diags_json_tests {
     /// resolver's one lex seam (`resolver::Builder::parse`'s doc comment) — a `chezzi check
     /// --errors=json` integration test cannot construct a file-less diagnostic, so this pins the
     /// renderer directly with a synthesized `Span`, the same way `resolver`'s own unit tests construct
-    /// a synthetic single-module `ModuleGraph` with `file: 0` for the identical reason (see
-    /// `checker::resolve_extern_signatures_standalone`).
+    /// a synthetic module with `file: 0` for the identical reason (see
+    /// `resolver::standalone_graph`).
     #[test]
     fn omits_file_key_when_span_file_is_zero() {
         let span = lexer::Span {

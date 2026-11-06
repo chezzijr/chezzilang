@@ -77,6 +77,7 @@ impl Checker {
             enums: HashMap::new(),
             enum_type_params: HashMap::new(),
             enum_methods: HashMap::new(),
+            enum_overloads: HashMap::new(),
             variants: HashMap::new(),
             variant_owners: HashMap::new(),
             struct_names: std::collections::HashSet::new(),
@@ -322,6 +323,8 @@ impl Checker {
                     self.enum_type_params
                         .insert(key.clone(), edef.type_params.clone());
                     self.enum_methods.insert(key.clone(), edef.methods.clone());
+                    self.enum_overloads
+                        .insert(key.clone(), edef.overloads.clone());
                     for (vname, vinfo) in edef.variant_names.iter().zip(&edef.variants) {
                         let mut vi = vinfo.clone();
                         vi.enum_name = key.clone();
@@ -788,6 +791,13 @@ impl Checker {
         self.enum_methods
             .get(key)
             .or_else(|| self.owning_enum_def(key).map(|e| &e.methods))
+    }
+
+    /// An enum's overload sets by identity key: local table first, else the owning `ModuleSig`.
+    pub(super) fn enum_overloads_of(&self, key: &str) -> Option<&super::from_overload::Overloads> {
+        self.enum_overloads
+            .get(key)
+            .or_else(|| self.owning_enum_def(key).map(|e| &e.overloads))
     }
 
     /// An enum's type params by identity key: local table first, else the owning `ModuleSig`.

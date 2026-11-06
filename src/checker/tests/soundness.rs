@@ -1936,7 +1936,7 @@ fn qualified_embed_static_requirement_stays_bound_only() {
         &[
             (
                 "shapes.chz",
-                "import Convert from std.convert\nprotocol MakeInt:\n    Convert[int]\n",
+                "import From from std.convert\nprotocol MakeInt:\n    From[int]\n",
             ),
             (
                 "main.chz",

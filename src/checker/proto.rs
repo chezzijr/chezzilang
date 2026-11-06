@@ -544,7 +544,7 @@ impl Checker {
                     .unwrap_or(Ty::Nil);
                 // A protocol method whose first param is NOT `self` (or which has no params) is a STATIC
                 // (associated) requirement — mirrors `Checker::fn_sig`'s rule for concrete methods. This
-                // is load-bearing for `Convert`-style static-ctor protocols: it drives both the
+                // is load-bearing for `From`-style static-ctor protocols: it drives both the
                 // static-slot witnessing check (`method_matches`) and the bound-only value-position gate
                 // (`protocol_has_static_method`). Ordinary `fn get(self, …)` requirements are instance
                 // methods (`is_static == false`), unchanged.
@@ -597,7 +597,7 @@ impl Checker {
             key,
             ProtocolInfo {
                 type_params: type_params.iter().map(|tp| tp.name.clone()).collect(),
-                methods: sigs,
+                methods: std::sync::Arc::new(sigs),
                 // Names only: an embed arg may name a protocol declared LATER, so
                 // `resolve_protocol_embeds` fills the args once every protocol is hoisted, before
                 // any reader runs (TICKET-202).
@@ -776,7 +776,7 @@ impl Checker {
             if !seen.insert(emb.name.clone()) {
                 continue; // already merged on this walk — a shared subtree, not new work
             }
-            for (mn, ms) in &pinfo.methods {
+            for (mn, ms) in pinfo.methods.iter() {
                 merge(mn, ms, &mut conflict);
             }
             path.push(emb.name.clone());

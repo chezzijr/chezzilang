@@ -153,6 +153,20 @@ impl Compiler {
         ))
     }
 
+    /// The internal name of the `from` overload the checker picked for the call or value read
+    /// at `name_span` (`WitnessTable::overload_calls`); `None` for a name with one method.
+    pub(super) fn overload_pick(&self, name_span: Span) -> Option<String> {
+        self.witnesses
+            .overload_calls
+            .get(&crate::checker::witness_key(
+                self.current_module_idx,
+                self.kw_frag_ctx,
+                self.kw_frag_ord,
+                name_span,
+            ))
+            .cloned()
+    }
+
     /// Push `args` and emit `Op::CallStatic` for a `Type.method(args)` static call. The six call
     /// sites differ only in how they derive `type_key` (bare / qualified / turbofish); this collapses
     /// the identical push-then-emit tail — including the hidden witness arguments of a generic static
@@ -172,10 +186,14 @@ impl Compiler {
             Some(srcs) => self.emit_witness_args(fc, &srcs, name, span)?,
             None => 0,
         };
+        // A `from` overload: the checker's pick for this call, by the witness key.
+        let method = self
+            .overload_pick(name_span)
+            .unwrap_or_else(|| name.to_string());
         fc.emit(
             Op::CallStatic {
                 type_key,
-                method: name.to_string(),
+                method,
                 argc: argc + w,
             },
             span,
@@ -510,9 +528,10 @@ impl Compiler {
             snapshot
                 .iter()
                 .filter(|e| match e.name.strip_prefix(WITNESS_PREFIX) {
-                    // The suffix is the whole type-PARAM name (`witness_local` formats exactly
-                    // `$w:<t>`, and a type param is a bare identifier — never module-qualified).
-                    Some(t) => free.is_none_or(|f| {
+                    // The suffix is the slot's tag (`witness_local` formats exactly `$w:<tag>`),
+                    // whose type param `witness_tag_param` reads back.
+                    Some(tag) => free.is_none_or(|f| {
+                        let t = crate::checker::witness_tag_param(tag);
                         nested_body_needs_witness(f, t, &|m, n| self.call_may_take_witnesses(m, n))
                     }),
                     None => false,
@@ -577,13 +596,17 @@ impl Compiler {
     ) -> Result<usize, CompileError> {
         for src in srcs {
             match src {
-                crate::checker::WitnessSrc::Concrete(k) => fc.emit(Op::ConstStr(k.clone()), span),
-                // FORWARDING: the caller's own witness for `p` IS the argument — its `$w:p` local,
-                // or (Task 4, inside a nested body) the capture of it. The checker records this only
-                // where that witness is reachable (`Checker::witness_scope`), so a missing one is an
-                // internal invariant break, never a short `argc`.
-                crate::checker::WitnessSrc::Forward(p) => {
-                    let Some(w) = fc.witness_ref(p) else {
+                // The witness value is the static-method key: the type AND the method the caller
+                // picked (a `from` overload), which `CallStaticDyn` splits.
+                crate::checker::WitnessSrc::Concrete { type_key, method } => {
+                    fc.emit(Op::ConstStr(static_key(type_key, method)), span)
+                }
+                // FORWARDING: the caller's own witness for `p` and this requirement IS the argument
+                // — its `$w:` local, or (Task 4, inside a nested body) the capture of it. The checker
+                // records this only where that witness is reachable (`Checker::witness_scope`), so a
+                // missing one is an internal invariant break, never a short `argc`.
+                crate::checker::WitnessSrc::Forward { param: p, req } => {
+                    let Some(w) = fc.witness_ref(&crate::checker::witness_tag(p, req)) else {
                         return Err(CompileError {
                             message: format!(
                                 "internal: no type witness in scope to forward as '{p}' into \

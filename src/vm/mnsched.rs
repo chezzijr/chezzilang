@@ -363,6 +363,7 @@ impl MnSched {
         MnSched {
             core: Mutex::new(SchedCore {
                 left: quiesce.epoch(),
+                listing: Arc::clone(&quiesce.listing),
                 global: std::collections::VecDeque::new(),
                 parked: std::collections::HashMap::new(),
                 slots: (0..total).map(|_| None).collect(),
@@ -442,7 +443,9 @@ impl MnSched {
     /// `MnSched::quiesce` directly, or the core keeps moving an epoch no judge of the run reads.
     pub(super) fn join_run(&mut self, q: &Arc<quiesce::QuiesceState>) {
         self.quiesce = Arc::clone(q);
-        self.core.get_mut().unwrap_or_else(|e| e.into_inner()).left = q.epoch();
+        let c = self.core.get_mut().unwrap_or_else(|e| e.into_inner());
+        c.left = q.epoch();
+        c.listing = Arc::clone(&q.listing);
     }
 
     /// TICKET-236 — THE way off `inflight`. Moves the epoch FIRST: `inflight` is read under no
@@ -1234,6 +1237,7 @@ pub(super) fn arm_timer_sleep(sched: Arc<MnSched>, mut fiber: Fiber, t: TimerSle
             is_timed_out: false,
             is_deadlock: false,
             is_panic: false,
+            blocked: None,
         })
     } else {
         None

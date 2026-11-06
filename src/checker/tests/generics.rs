@@ -2082,8 +2082,7 @@ fn resolver_diffs(
     let n_decls = module.stmts.len() - annotations.len();
     let (decl_stmts, probe_stmts) = module.stmts.split_at(n_decls);
     crate::on_frontend_stack_scoped(|| {
-        let mut c = Checker::new();
-        c.seed_native_prelude_sigs();
+        let mut c = prelude_checker();
         let mut imports = Vec::new();
         let dep_mid =
             dep.map(|_| crate::base::module_id::ModuleId(std::path::PathBuf::from("/m.chz")));

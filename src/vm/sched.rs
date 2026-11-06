@@ -9,10 +9,12 @@ pub(super) enum SpawnTarget {
     /// The innermost open `parallel:` of the calling party (`spawn`).
     Nursery,
     /// The own tail scope of `sched`, with no nursery open on the caller (`Executor.submit`).
-    /// `settle` is the job's [`JobSettle`] (TICKET-219, `_submit_settled`).
+    /// `settle` is the job's [`JobSettle`] (TICKET-219, `_submit_settled`); `executor` is the
+    /// Executor's key ([`super::deadlock::TaskPath::job`]).
     Scope {
         sched: Arc<MnSched>,
         settle: JobSettle,
+        executor: Vec<u64>,
     },
 }
 

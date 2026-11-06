@@ -489,7 +489,11 @@ impl Checker {
         // that program is `ok: no type errors`.
         // TICKET-227: after every clause, the hint's ELEMENT payload (never the whole
         // type) is the element expression's slot, so a plain element wraps into a carrier.
-        let outer_hint = self.expected_hint.take().filter(ty_fully_concrete);
+        let outer_hint = self
+            .expected_hint
+            .take()
+            .map(|h| h.ty)
+            .filter(ty_fully_concrete);
         self.push_scope();
         for clause in clauses {
             // `for_bindings` infers the iter IN the current scope, so later clauses see earlier
@@ -579,10 +583,10 @@ impl Checker {
     /// inferred with `E` as a seed hint and must fit `E`; the value is that `T!E`. The operand must
     /// satisfy the `Error` protocol.
     fn infer_err_val(&mut self, node: &Expr, inner: &Expr) -> Ty {
-        let hint = self.expected_hint.take();
+        let hint = self.expected_hint.take().map(|h| h.ty);
         let t = match hint.as_ref().and_then(|h| h.carrier_parts()) {
             Some((_, _, Some(e))) => {
-                self.expected_hint = Some(e.clone());
+                self.expected_hint = Some(Hint::plain(e.clone()));
                 let t = self.infer_value(inner);
                 self.expected_hint = None;
                 t
@@ -617,7 +621,7 @@ impl Checker {
     /// closes is `T?`), and in the return-inference walk. Under an expected carrier
     /// whose payload is open the value is the carrier over its operand's type.
     fn infer_wrap_val(&mut self, node: &Expr, inner: &Expr) -> Ty {
-        let hint = self.expected_hint.take();
+        let hint = self.expected_hint.take().map(|h| h.ty);
         let (payload, w) = match hint.as_ref().and_then(|h| h.carrier_parts()) {
             Some((w, p, _)) => (p.clone(), w),
             None => {
@@ -703,7 +707,7 @@ impl Checker {
     /// Infer the right operand of `l OP rhs` under `hint`: the one call both `infer_binary` and a
     /// compound assignment (`x OP= rhs` is `x = x OP rhs`, owner rule U15) make. The operand is an
     /// arithmetic child: it gets `hint` as a seed (never wraps) and meets no width slot of its own.
-    pub(super) fn infer_binary_rhs(&mut self, rhs: &Expr, hint: Option<Ty>) -> Ty {
+    pub(super) fn infer_binary_rhs(&mut self, rhs: &Expr, hint: Option<Hint>) -> Ty {
         let covered = std::mem::replace(&mut self.arith_parent, true);
         self.expected_hint = hint;
         let r = self.infer_value(rhs);

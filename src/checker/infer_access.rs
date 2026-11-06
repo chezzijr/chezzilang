@@ -3,7 +3,7 @@
 //! Split out of `src/checker/pattern.rs`. `super::*` is the parent module.
 
 use super::fn_value::fn_spelling;
-use super::pattern::OPT_RECV_PREFIX;
+use super::infer::{ChildHint, child_hint};
 use super::setup::{HeadBinding, TypeRead};
 use super::*;
 
@@ -118,7 +118,7 @@ impl Checker {
             }
             _ => {}
         }
-        let obj_ty = self.infer(obj);
+        let obj_ty = self.with_child_hint(child_hint(&e.kind), |c| c.infer(obj));
         match &obj_ty {
             // `t.0`, `t.1`, … — tuple element access. The field name is the element index as a
             // decimal string; out-of-range or non-numeric is an error.
@@ -143,8 +143,8 @@ impl Checker {
                     // through its TYPE (`Bx[int].get`, receiver first) is the value form.
                     if info.methods.contains_key(name) {
                         let recv = match obj.kind.as_ident() {
-                            Some(n) => n.as_str(),
-                            None => "x",
+                            Some(n) if crate::ast::CarrierTemp::of(n).is_none() => n.as_str(),
+                            Some(_) | None => "x",
                         };
                         self.error(
                             name_span,
@@ -608,7 +608,7 @@ impl Checker {
     fn scratch_operand(&mut self, t: Ty) -> Expr {
         let n = self.next_opt_tmp;
         self.next_opt_tmp += 1;
-        let name = format!("{OPT_RECV_PREFIX}{n}");
+        let name = crate::ast::CarrierTemp::Operand.name(n);
         self.push_scope();
         self.declare(&name, t);
         Expr {
@@ -687,7 +687,7 @@ impl Checker {
         span: Span,
     ) -> Ty {
         let m = self.tyvar_mark();
-        let t = self.infer_value(obj);
+        let t = self.with_child_hint(child_hint(&carrier.kind), |c| c.infer_value(obj));
         let t = self.close_operand(m, t);
         let key = crate::checker::carrier_key(
             self.graph_module_idx,
@@ -715,6 +715,7 @@ impl Checker {
                 // "returns no value" error. `infer_value` then rejects it wherever a value is
                 // needed. The mode is recorded only after this attempt decides: `carriers` is
                 // not rolled back.
+                let mut failed = false;
                 if matches!(carrier.kind, ExprKind::OptChain { call: Some(_), .. }) {
                     let mut c = carrier.clone();
                     let scratch = self.scratch_operand(t.clone());
@@ -725,9 +726,15 @@ impl Checker {
                     self.next_opt_tmp += 1;
                     crate::desugar::lower_carrier_option_void(&mut c, tmp);
                     let mark = self.diag_mark();
+                    // A call that types `Unknown` (its own error: a failed pick) is not void:
+                    // the `pass` arm alone makes the match `Nil`. The value form keeps that one
+                    // error, with no "returns no value" after it.
+                    let armed = self.untyped_call.replace(None);
                     let r = self.infer(&c);
+                    let untyped = std::mem::replace(&mut self.untyped_call, armed).flatten();
                     self.pop_scope();
-                    if r == Ty::Nil {
+                    failed = untyped == Some(span);
+                    if r == Ty::Nil && !failed {
                         self.record_carrier(key, CarrierMode::OptionVoid, span, "?.");
                         return Ty::Nil;
                     }
@@ -744,7 +751,9 @@ impl Checker {
                 crate::desugar::lower_carrier_option(&mut c, tmp);
                 let r = self.infer(&c);
                 self.pop_scope();
-                r
+                // A failed call has no value, as under `.`: `Unknown`, not `Option[Unknown]`,
+                // so no reader (the discarded-value warning, a binding) cascades on it.
+                if failed { Ty::Unknown } else { r }
             }
             // The operand already errored (its diagnostic stands, un-truncated) — adding a second
             // one here would be the cascade `Ty::Unknown` exists to suppress.
@@ -848,7 +857,7 @@ impl Checker {
     pub(super) fn infer_null_coalesce(&mut self, carrier: &Expr, lhs: &Expr, op_span: Span) -> Ty {
         // Same operand-scratch shape as `infer_opt_chain`, same reason.
         let m = self.tyvar_mark();
-        let t = self.infer_value(lhs);
+        let t = self.with_child_hint(child_hint(&carrier.kind), |c| c.infer_value(lhs));
         let t = self.close_operand(m, t);
         let key = crate::checker::carrier_key(
             self.graph_module_idx,
@@ -952,9 +961,10 @@ impl Checker {
         }
     }
 
-    pub(super) fn infer_try(&mut self, inner: &Expr, span: Span) -> Ty {
+    /// `rule` is the node's [`super::infer::child_hint`]: the operand's hint.
+    pub(super) fn infer_try(&mut self, inner: &Expr, span: Span, rule: ChildHint) -> Ty {
         let m = self.tyvar_mark();
-        let t = self.infer(inner);
+        let t = self.with_child_hint(rule, |c| c.infer(inner));
         let t = self.close_operand(m, t);
         // The innermost block around the `?` that stops it decides (`boundary::RULES`). A recover
         // block is its target (try-block style): its error type is `Error` and its result is a

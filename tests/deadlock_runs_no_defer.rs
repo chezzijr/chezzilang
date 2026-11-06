@@ -74,7 +74,7 @@ fn nursery_verdict_deadlock_runs_no_defer() {
         let (stdout, stderr, code) = run_at("nursery_verdict.chz", &src, threads);
         assert_eq!(code, Some(1), "threads={threads:?} stderr: {stderr}");
         assert!(
-            stderr.contains("deadlock: every task in this parallel: block is blocked"),
+            stderr.contains("deadlock: 2 tasks are blocked and none can proceed"),
             "threads={threads:?} stderr: {stderr}"
         );
         assert_eq!(

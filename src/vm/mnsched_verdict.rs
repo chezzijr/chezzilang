@@ -43,15 +43,24 @@ impl MnSched {
     ) -> (bool, bool) {
         let mut c = self.lock();
         debug_assert!(Arc::ptr_eq(&c.left, &self.quiesce.epoch()));
+        let job_fault = self.publish_job_fault(&c, scope_id, &outcome);
+        c.leave_running();
+        // A task that ends with a deadlock verdict's fault cancels no sibling when every other
+        // party of this sched is stuck too: the sched-wide verdict cut them all at once, or (a
+        // verdict on one leaf family, ended through its owner) nothing else here can move. A trip
+        // turned such a sibling into a cancelled task, so the report missed it, and which task was
+        // reported depended on which woke first. Each stuck sibling is then judged by the next
+        // verdict, and the join lists every one in task order.
+        let cut_end = matches!(&outcome, TaskOutcome::Fault { err, .. } if err.is_deadlock)
+            && (c.cut_in_place() || self.is_deadlocked(&c));
         // The outcome the worker handed in, before the W7-26r conversion below: that conversion
         // trips the scope's own flag, for a backlog only.
         if let Some(flag) = trip
             && outcome.aborts()
+            && !cut_end
         {
             crate::vm::trip_cancel_flag(flag);
         }
-        let job_fault = self.publish_job_fault(&c, scope_id, &outcome);
-        c.leave_running();
         // W7-26r — this thread is the only party that can observe the cap for a nursery whose parent
         // is blocked in the join (see `core::halt_over_backlog`). These slots live outside every
         // `Heap`, so `live_bytes` never counted them either: this is the accounting AND the
@@ -72,7 +81,7 @@ impl MnSched {
         } else {
             outcome
         };
-        let aborts = outcome.aborts();
+        let aborts = outcome.aborts() && !cut_end;
         // A job the deadlock verdict ended: the verdict cut the sched (it latched `terminate`, or a
         // demoted fiber is left to settle), so a released held job would never run and its `None`
         // slot would hang the join. It reads as a latched verdict.
@@ -320,12 +329,28 @@ impl MnSched {
     ) {
         let buckets: Vec<(usize, Vec<ParkedEntry>)> = c.parked.drain().collect();
         let mut drained = 0usize;
+        // A fiber requeued while the run's deadlock verdict is latched (a cut owner's abort
+        // cancelled its scope) is one of the verdict's blocked tasks: it is parked at a wait that
+        // nothing can satisfy, so it joins the run's listing here, as the verdict found it.
+        let listing = (self.quiesce.run_halt() == crate::vm::quiesce::RunHalt::Deadlock)
+            .then(|| Arc::clone(&c.listing));
+        let list = |f: &Fiber| {
+            if let (Some(l), Some((wait, span))) = (&listing, f.park_site) {
+                l.add(
+                    &f.ctx.task,
+                    wait,
+                    span,
+                    super::frames::raw_frames(&f.ctx.frames),
+                );
+            }
+        };
         for (key, v) in buckets {
             let mut keep: Vec<ParkedEntry> = Vec::new();
             for entry in v {
                 match entry {
                     ParkedEntry::Recv(mut f) => {
                         if wake(&f) {
+                            list(&f);
                             drained += 1;
                             f.state = FiberState::Ready;
                             c.global.push_back(f);
@@ -335,6 +360,7 @@ impl MnSched {
                     }
                     ParkedEntry::Send(mut f) => {
                         if wake(&f) {
+                            list(&f);
                             drained += 1;
                             f.state = FiberState::Ready;
                             c.global.push_back(f);
@@ -375,6 +401,7 @@ impl MnSched {
                             .unwrap_or_else(|e| e.into_inner())
                             .take()
                             .expect("WaitPark fiber claimed twice");
+                        list(&f);
                         drained += 1;
                         f.state = FiberState::Ready;
                         c.global.push_back(f);
@@ -890,6 +917,7 @@ impl MnSched {
                     is_timed_out: false,
                     is_deadlock: false,
                     is_panic: false,
+                    blocked: None,
                 }),
                 Err(p) => Err(panic_to_fault(p, span)),
             };

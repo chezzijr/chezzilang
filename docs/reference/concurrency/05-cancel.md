@@ -392,6 +392,47 @@ deadlock inside that executor's own join keeps its `deadlock` verdict. A job cut
 party's frames, never the frames of the owner that received it. A run that ends in a deadlock verdict
 still drains its executors, so a finished job's buffered output is not lost.
 
+**The deadlock report lists every blocked task (Go's `all goroutines are asleep`).** A verdict cuts
+every blocked task at once; each ends with its own wait at its own site, and none of them cancels a
+sibling, so the report does not depend on which task woke first. The report is a snapshot taken at
+the verdict: each task the verdict cut adds its own entry at its cut (its wait, its site, its
+frames), once, and the run reports them after every join and the executor drain, so no join or
+unwind can drop or repeat a task. The entries are in spawn-tree order: a task's place is its
+parent's place and the order in which its parent spawned it. A task blocked only in its
+`parallel:` join has no entry (its nursery's blocked tasks stand in its place); a task whose body
+is blocked in its own wait too (inside a callback such as `update` as well) comes after its
+nursery's tasks. The blocked jobs of every executor follow the run's own tasks, by the executor's
+place (where its creator made it), then in submission order. The jobs of an executor made inside a
+job come after every job of an executor a run task made, and among themselves by the creating
+job's place. Under `chezzi test` a task is reported once: a job one test leaves blocked that a
+later test's verdict cuts is listed, with its frames, in that test's report, and the end-of-file
+drain does not report it again as an `(executor job)` row. The report is one header, then one
+entry per task with its frames:
+
+```
+deadlock: 2 tasks are blocked and none can proceed
+  task 1: recv() on an empty channel at g.chz:5:10
+    at take (called at g.chz:14:45)
+    at <closure> (called at g.chz:14:13)
+    at <spawned task> (called at g.chz:13:9)
+  task 2: waiting for the Shared guard at g.chz:17:13
+    at <spawned task> (called at g.chz:15:9)
+```
+
+The waits are `recv() on an empty channel`, `send() on a full channel`, `send() on a rendezvous
+channel`, `wait: on channels that are all empty`, `wait: on channels none of which can proceed`,
+`waiting for the Shared guard`, `waiting for the RwShared guard`, `waiting for an Executor join`,
+`waiting on a socket`, and `blocked in a parallel: block` for a report whose cut task named no wait
+and whose run listed none (owner `vm/deadlock.rs`, `Wait::phrase`; the listing is
+`deadlock::Listing`). One task reads `deadlock: 1 task is blocked and cannot
+proceed`. The error's position is the first task's site. `chezzi test --errors=json` gives the
+header as the test's `message` and the entries as `tasks`: `[{"wait", "file", "line", "col",
+"frames": [{"function", "file", "line", "col"}]}]`. A guard that a cut holder frees as it unwinds is
+not progress: a waiter the verdict cut reports its wait and does not take the guard. A wait that
+cannot block where it is (a native callback with no thread of its own) faults at once with
+`deadlock: <wait>: <why>`, e.g. `deadlock: recv() on an empty channel: no runnable task can send.`
+That fault is an ordinary fault, not a verdict, and lists no tasks.
+
 **Cross-task output order is NOT part of the contract.** One `print` = one locked write = line-atomic;
 the *order* of prints from different tasks is nondeterministic (a cancelled task's already-printed
 lines are kept, not retracted). Compare the **set of lines**, the **exit code** and **whether the

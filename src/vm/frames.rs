@@ -196,18 +196,26 @@ impl Vm {
     /// Build a stack trace from the live frames (innermost first), skipping module-toplevel frames.
     /// Valid only while the frames are intact — i.e. on the uncaught-error path, before unwinding.
     pub(super) fn capture_trace(&self) -> Vec<TraceFrame> {
-        self.frames
-            .iter()
-            .rev()
-            .filter(|f| !f.is_toplevel)
-            .map(|f| TraceFrame {
+        self.trace_of(&self.raw_frames())
+    }
+
+    /// The live frames as [`raw_frames`] lists them: what [`Vm::capture_trace`] names.
+    pub(super) fn raw_frames(&self) -> Vec<(ProtoId, Span)> {
+        raw_frames(&self.frames)
+    }
+
+    /// Name the frames `raw` (a proto and the call site that entered it, innermost first): a live
+    /// trace, or a parked fiber's frames ([`TaskOutcome::Deadlocked`]).
+    pub(super) fn trace_of(&self, raw: &[(ProtoId, Span)]) -> Vec<TraceFrame> {
+        raw.iter()
+            .map(|&(proto, span)| TraceFrame {
                 // Rendered, not raw: a W7-51 default-argument provider's internal name is
                 // deliberately unspellable (`$def$2$f.x$`) and would be unreadable in a trace.
                 function: crate::base::provider_name::display_fn_name(
-                    &self.program.protos[f.proto].name,
+                    &self.program.protos[proto].name,
                 )
                 .into_owned(),
-                span: f.call_span,
+                span,
             })
             .collect()
     }
@@ -669,6 +677,7 @@ impl Vm {
         // TICKET-287 — at a fiber's outermost loop the unwind parks at a fiber-owned nursery that
         // is not done, instead of running other fibers on this stack while it waits.
         let rte = if fatal {
+            // The aborted nurseries' cut tasks are in the run's listing already.
             self.unwind_no_defer(target);
             rte
         } else {
@@ -1064,6 +1073,15 @@ impl Vm {
     }
 
     pub(super) fn read_halts(&mut self, read: Option<Halt>, span: Span) -> Option<RuntimeError> {
+        // The latched deadlock verdict cut this wait before any cancel it now reads: a cut owner's
+        // abort tripped that cancel, and a task the verdict cut cancels no sibling. The wait ends
+        // with its own cut, as it would had it woken first.
+        if matches!(read, Some(Halt::Cancelled))
+            && self.quiesce.run_halt() == RunHalt::Deadlock
+            && let Some(e) = self.run_exit_err(span)
+        {
+            return Some(e);
+        }
         if let Some(h) = read {
             return Some(self.deliver_halt(h, span));
         }
@@ -1298,4 +1316,16 @@ impl Vm {
     pub(super) fn pop(&mut self) -> Value {
         self.stack.pop().expect("operand stack underflow")
     }
+}
+
+/// `frames` as a proto and the call site that entered it, innermost first, skipping
+/// module-toplevel frames: a live trace ([`Vm::raw_frames`]) or a parked fiber's
+/// ([`SchedCore::record_deadlocked`]).
+pub(super) fn raw_frames(frames: &[CallFrame]) -> Vec<(ProtoId, Span)> {
+    frames
+        .iter()
+        .rev()
+        .filter(|f| !f.is_toplevel)
+        .map(|f| (f.proto, f.call_span))
+        .collect()
 }

@@ -149,7 +149,7 @@ impl Checker {
                             {
                                 self.report_const_fault(f, span);
                             }
-                            self.infer_binary_rhs(value, Some(target_ty))
+                            self.infer_binary_rhs(value, Some(Hint::plain(target_ty)))
                         }
                     } else {
                         self.infer_value(value)
@@ -306,7 +306,16 @@ impl Checker {
                 let is_suite = methods.iter().any(|m| m.is_test);
                 // The type's runtime key — the table the members' stored `witness_params` live under.
                 let host_key = self.bare_key(name);
-                for m in methods {
+                if let Some(ov) = self
+                    .structs
+                    .get(&host_key)
+                    .map(|info| &info.overloads)
+                    .filter(|ov| !ov.is_empty())
+                    .cloned()
+                {
+                    self.check_overload_decls(methods, &ov, type_params, &self_ty);
+                }
+                for (i, m) in methods.iter().enumerate() {
                     // TICKET-255 — a graph that builds no value of a prelude struct skips its bodies.
                     if self.skipped_prelude_structs.contains(&name.as_str()) {
                         continue;
@@ -322,17 +331,16 @@ impl Checker {
                     // otherwise a bare-`name` miss silently SKIPS body checking entirely.
                     // A duplicate-named method already produced a clear hoist-time "already defined"
                     // error; its body would be checked against the collapsed-map SURVIVOR's signature,
-                    // emitting a misleading return-type mismatch. Skip so the dup error is the sole
-                    // signal (guarded on count>1 so unique methods still get their bodies checked).
-                    if methods.iter().filter(|x| x.name == m.name).count() > 1 {
-                        continue;
-                    }
-                    if let Some(sig) = self
-                        .structs
-                        .get(&self.bare_key(name))
-                        .and_then(|s| s.methods.get(&m.name))
-                        .cloned()
-                    {
+                    // emitting a misleading return-type mismatch, so `method_decl_sig` skips it. An
+                    // admitted overload is checked against its own sig.
+                    if let Some(sig) = self.structs.get(&self.bare_key(name)).and_then(|s| {
+                        super::from_overload::method_decl_sig(
+                            methods,
+                            i,
+                            &s.methods,
+                            Some(&s.overloads),
+                        )
+                    }) {
                         self.record_method_decl_hover(m.name_span, &sig);
                         self.check_fn_body(m, Some(self_ty.clone()), sig);
                     }
@@ -383,23 +391,30 @@ impl Checker {
                 let host_key = self.bare_key(name);
                 let saved_binders =
                     std::mem::replace(&mut self.default_binders, method_binders(methods, name));
-                for m in methods {
+                if let Some(ov) = self
+                    .enum_overloads_of(&host_key)
+                    .filter(|ov| !ov.is_empty())
+                    .cloned()
+                {
+                    self.check_overload_decls(methods, &ov, type_params, &self_ty);
+                }
+                for (i, m) in methods.iter().enumerate() {
                     if m.is_test {
                         self.validate_test_fn_shape(m, Some(&host_key));
                     } else if is_suite && is_lifecycle_hook(&m.name) {
                         self.validate_lifecycle_hook(m, &host_key);
                     }
-                    // Skip a duplicate-named method's body check (see the struct arm) — its clear
-                    // hoist-time dup error stands alone instead of a misleading return-type mismatch.
-                    if methods.iter().filter(|x| x.name == m.name).count() > 1 {
-                        continue;
-                    }
-                    if let Some(sig) = self
-                        .enum_methods
-                        .get(&self.bare_key(name))
-                        .and_then(|ms| ms.get(&m.name))
-                        .cloned()
-                    {
+                    // A duplicate-named method's body check is skipped (see the struct arm); an
+                    // admitted overload is checked against its own sig.
+                    let key = self.bare_key(name);
+                    if let Some(sig) = self.enum_methods.get(&key).and_then(|ms| {
+                        super::from_overload::method_decl_sig(
+                            methods,
+                            i,
+                            ms,
+                            self.enum_overloads.get(&key),
+                        )
+                    }) {
                         self.record_method_decl_hover(m.name_span, &sig);
                         self.check_fn_body(m, Some(self_ty.clone()), sig);
                     }
@@ -759,7 +774,8 @@ impl Checker {
                 .and_then(|s| s.methods.get(name))
                 .or_else(|| self.enum_methods.get(k).and_then(|ms| ms.get(name))),
         };
-        sig.map(|s| s.witness_params.clone()).unwrap_or_default()
+        sig.map(|s| witness_param_names(&s.witness_params))
+            .unwrap_or_default()
     }
 
     /// M24 Task 5 — `chezzi test` invokes a `test fn` (and each lifecycle hook) BY NAME at a fixed

@@ -485,7 +485,7 @@ fn golden_static_methods_chz_matches_expected_and_interp() {
 
 /// M24 static-witness golden: `examples/static_witness.chz` — a protocol's STATIC (no-`self`)
 /// requirement called THROUGH a generic bound (`T.default()` inside `fn reset[T: Default]`), on a
-/// struct, an enum and the reserved `Convert[int]`; `T` pinned by turbofish and by an annotated
+/// struct, an enum and the reserved `From[int]`; `T` pinned by turbofish and by an annotated
 /// result; witness FORWARDING (`twice`); a MEMBER's own `[T]` (instance + static); and the witness
 /// reaching an escaping closure, a nested `fn`, a `defer:` block and a `spawn:` block. The witness
 /// is a hidden trailing argument, so nothing is monomorphized and the runtime stays erased —

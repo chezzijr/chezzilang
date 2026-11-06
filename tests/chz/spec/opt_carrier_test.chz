@@ -19,6 +19,7 @@
 #
 # Gated by `chz_suite_passes` (`tests/chz_suite.rs`).
 import Shared from std.concurrency
+import Into from std.convert
 
 struct MyErr:
     code: int
@@ -546,3 +547,60 @@ test fn a_written_none_carries_its_payload_type():
         None:
             assert false, "x was written to Some(1)"
     assert (x ?? 0) + 1 == 2, "got {x ?? 0}"
+
+# ---- 16: `?.` takes type arguments, as `.` does ----
+#
+# `r?.into[str]()` is `r?.into()` with the target `str`: it picks the `into -> str` of two. A one-arg
+# bracket on a data member keeps its index reading (TICKET-210): `h?.fs[k](10)` indexes then calls.
+
+struct Rat:
+    n: int
+    d: int
+    fn into(self) -> float:
+        return self.n.to_float() / self.d.to_float()
+    fn into(self) -> str:
+        return "{self.n}/{self.d}"
+
+struct Fns:
+    fs: List[fn(int) -> int]
+
+fn rat_ok() -> Rat!:
+    return Rat(1, 2)
+
+fn rat_err() -> Rat!:
+    return !"no rat"
+
+fn rat_text(f: fn() -> Rat!) -> str!:
+    return f()?.into[str]()
+
+test fn an_optchain_call_takes_type_arguments():
+    r: Rat? = ?Rat(1, 2)
+    assert r?.into[str]() == ?"1/2", "got {r?.into[str]()}"
+    none: Rat? = None
+    assert none?.into[str]() == None, "got {none?.into[str]()}"
+
+test fn an_optchain_call_on_a_result_takes_type_arguments():
+    assert (rat_text(rat_ok) ?? "err") == "1/2"
+    match rat_text(rat_err):
+        ?v:
+            assert false, "got ?{v}"
+        !e:
+            assert e.message() == "no rat", "got {e.message()}"
+
+test fn an_optchain_bracket_on_a_data_member_still_indexes():
+    k := 1
+    h: Fns? = ?Fns([fn(x): x + 1, fn(x): x * 2])
+    assert h?.fs[k](10) == ?20, "got {h?.fs[k](10)}"
+
+struct Tbl:
+    fs: List[fn(int) -> int]
+    m: Map[str, fn(int) -> int]
+
+test fn an_optchain_bracket_that_is_no_type_indexes_then_calls():
+    k := 0
+    h: Tbl? = ?Tbl([fn(x): x + 1], {"a": fn(x): x - 1})
+    assert h?.fs[0](10) == ?11, "got {h?.fs[0](10)}"
+    assert h?.m["a"](10) == ?9
+    assert h?.fs[k + 0](10) == ?11, "got {h?.fs[k + 0](10)}"
+    none: Tbl? = None
+    assert none?.fs[0](10) == None, "got {none?.fs[0](10)}"

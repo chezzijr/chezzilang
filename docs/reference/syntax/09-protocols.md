@@ -23,7 +23,7 @@ type names it after an import (`import Add from std.ops`). Without the import th
 | `std.iter` | `Iterator`, `Iterable` |
 | `std.string` | `Stringable` |
 | `std.path` | `PathLike` |
-| `std.convert` | `Convert` |
+| `std.convert` | `From`, `TryFrom`, `Into`, `TryInto` (`Into` and `TryInto` are not bounds yet) |
 
 `Iterator[T]` as a value type (a generator's return type) needs `import Iterator from std.iter`, or
 the qualified `iter.Iterator[T]` after `import std.iter as iter`. The `protocol` declarations in
@@ -472,6 +472,47 @@ fn first[X: Container[int]](c: X) -> int:   # T pinned to int; c.get(0) is int
 fn first(c: Container[int]) -> int:   # existential value slot
     return c.get(0) + 1               # c.get(0) recovers to int
 ```
+
+#### A parameterized protocol keys overloads
+
+A type may declare one method name several times when a parameterized protocol keys it, one
+declaration per argument (Rust's several `impl Parse<S> for W`). The key is the requirement's
+parameter that names the protocol's type parameter (a static `fn parse(x: S) -> Self`: the argument
+picks), or the return of a `self`-only method that is the type parameter (`fn into(self) -> T`: the
+call's `[T]` or its annotation picks). `m[X]` names the type at the key, one declaration or several:
+`W.parse[str]("ab")` runs the `str` overload, `r.into[float]()` the `float` one. `std.convert`'s `From`, `TryFrom`, `Into` and `TryInto` are such protocols;
+any user protocol is too:
+
+```chezzi
+protocol Parse[S]:
+    fn parse(x: S) -> Self
+
+struct W:
+    n: int
+    fn parse(x: int) -> W:
+        return W(x)
+    fn parse(x: str) -> W:
+        return W(x.len())
+
+a := W.parse(3)       # the int overload
+b := W.parse("ab")    # the str overload
+```
+
+- Only a protocol the DECLARING module declares or imports keys its methods: overloading `from`
+  needs `import From from std.convert`. Without one, a repeat is *method 'parse' is already defined*,
+  as is every repeated plain method (no free overloading, as in Rust, Go and Python).
+- The key is decided once, at the declaration, and travels with the type: a module that imports only
+  `W` calls `W.parse("a")` with no import of `Parse`.
+- The receiver decides which protocols can key a method: a static `parse` is keyed only by a
+  static requirement (`Parse[S]`'s `parse(x: S)`), an instance one only by an instance requirement
+  (`Emit[T]`'s `parse(self) -> T`), so both protocols in scope do not conflict. Two visible
+  protocols whose requirements of one receiver key one name differently (`parse(x: S)` and
+  `parse(n: int, x: S)`) are *protocols Parse[S] and Pick[S] both declare 'parse' with different
+  overload keys*.
+- The key may be a later parameter: `protocol Build[S]: fn build(n: int, x: S) -> Self` picks by
+  the second argument (`M.build(1, "ab")`, `M.build(1, x="ab")`, `M.build[str](1, "ab")`).
+- The declaration rules (shape, overlap) and the picks are the conversions' rules:
+  [`05-conversions.md`](../spec/05-conversions.md).
 
 > **A protocol crosses a module boundary like any other declaration.** `mod.Named` and
 > `import Named from mod` (with or without `as`) resolve, in a bound too: `[T: mod.Named]`,

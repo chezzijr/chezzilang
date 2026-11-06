@@ -21,6 +21,10 @@ fn capture_names_of(src: &str, proto: &str) -> Vec<Vec<String>> {
         .collect()
 }
 
+/// The hidden local of `T`'s one witness slot (`T` and its requirement `default()`), as
+/// `crate::checker::witness_tag` spells it.
+const W_T: &str = "$w:T:default()";
+
 /// The shared preamble: a static requirement, a type that answers it, and a witness-taking free fn.
 const W_PRELUDE: &str = "protocol Default:\n    fn default() -> Self\n\
      struct Counter:\n    n: int\n    fn default() -> Counter:\n        return Counter(0)\n\
@@ -57,7 +61,7 @@ fn m24_2_a_sibling_closure_that_calls_the_static_keeps_its_witness() {
         caps[0]
     );
     assert!(
-        caps[1].contains(&"$w:T".to_string()),
+        caps[1].contains(&W_T.to_string()),
         "the `T.default()` closure keeps its witness: {:?}",
         caps[1]
     );
@@ -77,7 +81,7 @@ fn m24_2_a_witness_two_levels_down_keeps_both_captures() {
         let caps = capture_names_of(&src, name);
         assert_eq!(caps.len(), 1, "one `{name}` proto");
         assert!(
-            caps[0].contains(&"$w:T".to_string()),
+            caps[0].contains(&W_T.to_string()),
             "`{name}` keeps the witness: {:?}",
             caps[0]
         );
@@ -95,7 +99,7 @@ fn m24_2_a_nested_body_that_only_forwards_keeps_its_witness() {
     let caps = capture_names_of(&src, "<closure>");
     assert_eq!(caps.len(), 1, "one closure proto");
     assert!(
-        caps[0].contains(&"$w:T".to_string()),
+        caps[0].contains(&W_T.to_string()),
         "a forwarding body needs the witness: {:?}",
         caps[0]
     );
@@ -115,7 +119,7 @@ fn m24_2_a_nested_body_forwarding_through_a_member_keeps_its_witness() {
     let caps = capture_names_of(&src, "<closure>");
     assert_eq!(caps.len(), 1, "one closure proto");
     assert!(
-        caps[0].contains(&"$w:T".to_string()),
+        caps[0].contains(&W_T.to_string()),
         "a member forward needs the witness: {:?}",
         caps[0]
     );
@@ -314,12 +318,12 @@ print(probe())
 
 /// W7-49 (2/3) — `CarrierTable`. An Option-mode `?.` inside `lib.chz`'s default-parameter
 /// expression and a Result-mode `?.` in `main.chz` land their NAME TOKENs at the same `line:col`
-/// (both `5:36`), so before `Span::file` they shared one `CarrierKey` and main's `Result` carrier
+/// (both `5:26`), so before `Span::file` they shared one `CarrierKey` and main's `Result` carrier
 /// got the `Option` lowering.
 ///
 /// Fails on `19f7696a` with `3` then `runtime error … no match arm for variant 'Ok'`, under a clean
 /// `chezzi check`,. CONTROL: widening main's `vvv…` binder by one character (so its
-/// `len` lands at col 37) makes `19f7696a` print `3` / `4` — the fault is the KEY, not the lowering.
+/// `len` lands at col 27) makes `19f7696a` print `3` / `4` — the fault is the KEY, not the lowering.
 #[test]
 fn a_spliced_default_carrier_does_not_alias_the_callers_carrier() {
     let dir = std::env::temp_dir().join(format!("chezzi_w749_carrier_{}", std::process::id()));
@@ -329,7 +333,7 @@ fn a_spliced_default_carrier_does_not_alias_the_callers_carrier() {
     std::fs::write(
         dir.join("lib.chz"),
         r#"# four pad lines put `fn f` on line 5, so its
-# `len` name token lands at exactly 5:36 — the
+# `len` name token lands at exactly 5:26 — the
 # same line:col as main's Result-mode carrier.
 # The default is SELF-CONTAINED (no lib global).
 fn f(x: int? = (?"abc")?.len()) -> int:
@@ -346,8 +350,8 @@ fn f(x: int? = (?"abc")?.len()) -> int:
 fn getr() -> str!str:
     return ?"wxyz"
 fn probe() -> int!str:
-    vvvvvvvvvvvvvvvvvvv := getr()?.len()
-    return ?vvvvvvvvvvvvvvvvvvv
+    vvvvvvvvv := getr()?.len()
+    return ?vvvvvvvvv
 print(f())
 match probe():
     ?n: print(n)
@@ -355,16 +359,13 @@ match probe():
 "#,
     )
     .unwrap();
-    let graph = crate::resolver::build_graph(&entry).expect("resolve");
-    // TICKET-228: the migrated default `(?"abc")?.len()` is rejected at check time: the slot's
-    // `int` reaches the `?` operand. The run below never happens; the reject is the assertion.
-    let errs = crate::checker::check_graph(&graph).expect_err("the migrated default is rejected");
+    // The two `len` name tokens share `5:26`; a shared CarrierKey gives main's Result carrier the
+    // Option lowering. (Before the per-kind hint table, the slot's `int` leaked into the `?x`
+    // operand and rejected this default, so the run never happened.)
+    let (vo, _ve, vr, _vc) = run_file(&entry);
     let _ = std::fs::remove_dir_all(&dir);
-    assert!(
-        errs.iter()
-            .any(|e| e.message.contains("'?' value: expected int, found str")),
-        "{errs:?}"
-    );
+    assert!(vr.is_ok(), "VM faulted (shared carrier key): {vr:?}");
+    assert_eq!(vo, "3\n4\n", "f() is Option-mode, probe() is Result-mode");
 }
 
 /// W7-49 (3/3) — `WitnessTable`. `lib.chz`'s default `empty[Counter]()` and `main.chz`'s
@@ -1187,8 +1188,9 @@ fn a_provider_frame_in_a_trace_is_readable() {
 
 /// TICKET-048 (W8-14 residual) — a nursery-deadlock fault's headline must name a real file and
 /// position, not the placeholder `Span::RUNTIME` used at `run_mn_nursery_outermost`'s
-/// `DEADLOCK_MSG` sites (`sched.rs:503`, `:800`). It currently renders `line 1, col 1` with no file,
-/// unlike an ordinary in-task fault one line away, which renders the true `path:line:col`.
+/// nursery deadlock sites. It rendered `line 1, col 1` with no file, unlike an ordinary in-task
+/// fault one line away. Since the deadlock listing, the headline is the first blocked task's own
+/// wait (this test and the two below).
 #[test]
 fn nursery_deadlock_headline_has_a_real_position() {
     let dir = std::env::temp_dir().join(format!("chezzi_t048_deadlock_{}", std::process::id()));
@@ -1208,8 +1210,8 @@ fn nursery_deadlock_headline_has_a_real_position() {
         "expected a real file/position on the deadlock headline, got:\n{trace}"
     );
     assert!(
-        trace.contains("main.chz:3:5"),
-        "expected the headline to name the parallel: keyword's position, got:\n{trace}"
+        trace.contains("main.chz:5:28): deadlock: 1 task is blocked"),
+        "expected the headline to name the first blocked task's own wait, got:\n{trace}"
     );
 }
 
@@ -1234,8 +1236,8 @@ fn implicit_fn_nursery_deadlock_headline_names_the_body_start() {
         "expected a real file/position on the deadlock headline, got:\n{trace}"
     );
     assert!(
-        trace.contains("main.chz:2:5"),
-        "expected the headline to name the body's first statement, got:\n{trace}"
+        trace.contains("main.chz:3:12): deadlock: 2 tasks are blocked"),
+        "expected the headline to name the first blocked task's own wait, got:\n{trace}"
     );
 }
 
@@ -1260,8 +1262,8 @@ fn implicit_module_nursery_deadlock_headline_names_the_first_statement() {
         "expected a real file/position on the deadlock headline, got:\n{trace}"
     );
     assert!(
-        trace.contains("main.chz:3:1"),
-        "expected the headline to name the module's first statement, got:\n{trace}"
+        trace.contains("main.chz:4:8): deadlock: 2 tasks are blocked"),
+        "expected the headline to name the first blocked task's own wait, got:\n{trace}"
     );
 }
 

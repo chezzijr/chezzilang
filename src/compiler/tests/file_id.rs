@@ -248,7 +248,8 @@ fn single_module_compile_has_no_file_id() {
     let module = crate::parser::parse(tokens).expect("parse");
     let program = compile_module_standalone(&module).expect("compile");
 
-    assert_eq!(program.modules.len(), 1);
-    assert_eq!(program.modules[0].file, 0);
+    // The prelude, then the entry.
+    assert_eq!(program.modules.len(), 2);
+    assert_eq!(program.modules[1].file, 0);
     assert_eq!(program.file_path(0), None);
 }

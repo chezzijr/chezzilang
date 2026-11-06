@@ -30,7 +30,9 @@ impl Parser {
     /// `fn` is not listed: a nested `fn` is a first-class local function, owned by `parse_stmt`.
     pub(super) fn item_keyword(tok: &Token) -> Option<(&'static str, ItemParser)> {
         let item: (&'static str, ItemParser) = match tok {
-            Token::Test => ("test fn", |p| Ok(StmtKind::Fn(p.parse_test_fn(true)?))),
+            Token::Test => ("test fn", |p| {
+                Ok(StmtKind::Fn(p.parse_test_fn(true, false)?))
+            }),
             Token::Struct => ("struct", Parser::parse_struct),
             Token::Enum => ("enum", Parser::parse_enum),
             Token::Protocol => ("protocol", Parser::parse_protocol),
@@ -161,7 +163,7 @@ impl Parser {
     /// Both `defer` forms are: `defer` is block-scoped, so an inline body would be its whole block.
     fn compound_keyword(tok: &Token, next: &Token) -> Option<ItemParser> {
         let parse: ItemParser = match tok {
-            Token::Fn if next != &Token::LParen => |p| Ok(StmtKind::Fn(p.parse_fn(true)?)),
+            Token::Fn if next != &Token::LParen => |p| Ok(StmtKind::Fn(p.parse_fn(true, false)?)),
             Token::If => Parser::parse_if,
             Token::For => Parser::parse_for,
             Token::While => Parser::parse_while,

@@ -262,11 +262,12 @@ pub enum Op {
         argc: usize,
     },
     /// M24 — `T.method(args)` through a generic bound's STATIC requirement: [`Op::CallStatic`] whose
-    /// `type_key` arrives as a VALUE instead of being baked in. Stack: `[arg0, …, witness]` — the
-    /// `argc` args, then the type's runtime identity key as a `str` on top (loaded from the callee's
-    /// hidden `$w:T` local). Pops the key, leaving the args exactly as `CallStatic` expects, and runs
-    /// the same `vm::Vm::do_static_call`. The site is polymorphic by construction, so no
-    /// inline cache.
+    /// `type_key` AND method arrive as a VALUE instead of being baked in. Stack: `[arg0, …,
+    /// witness]` — the `argc` args, then `<type key>\u{1}<method>` as a `str` on top (loaded from the
+    /// callee's hidden `$w:` local; the caller picked the method, a `from` overload). Pops it,
+    /// leaving the args exactly as `CallStatic` expects, and runs the same
+    /// `vm::Vm::do_static_call`. `method` is the requirement's name as written. The site is
+    /// polymorphic by construction, so no inline cache.
     CallStaticDyn {
         method: String,
         argc: usize,

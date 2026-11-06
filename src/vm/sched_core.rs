@@ -115,14 +115,21 @@ impl SchedCore {
         // DEC-048.
         // TICKET-208 — else, on an `Executor`'s sched, the fiber's own blocking op: the text and
         // span the in-place path raises there. Else the sched-wide `err`.
-        let scope_err = match (&self.scopes[sid].deadlock_err, f.park_site) {
-            (Some(e), _) => e.clone(),
-            (None, Some((msg, span))) if self.leaf_site => err.at_site(msg, span),
-            _ => err.clone(),
-        };
+        // Each task names its own wait: its park site, else its scope's own fault (an owner
+        // parked at a join names no site), else the sched-wide `err`.
         // M1.4 — take the context out of the registry before any field moves: this thread may not
         // be attached to the GC (see `RootRegistry::roots`).
         let ctx = f.ctx.into_inner();
+        // A fiber parked at a wait is one entry of the run's listing, with its frames; an owner
+        // parked at a join is not (its blocked children stand in its place).
+        let scope_err = match (f.park_site, &self.scopes[sid].deadlock_err) {
+            (Some((msg, span)), _) => {
+                let frames = super::frames::raw_frames(&ctx.frames);
+                self.listing.cut(err, &ctx.task, msg, span, frames)
+            }
+            (None, Some(e)) => e.clone(),
+            (None, None) => err.clone(),
+        };
         self.slots[ti] = Some(TaskOutcome::Deadlocked {
             err: scope_err,
             out: ctx.out,
@@ -519,6 +526,7 @@ pub(super) fn panic_to_fault(payload: Box<dyn std::any::Any + Send>, span: Span)
         is_timed_out: false,
         is_deadlock: false,
         is_panic: false,
+        blocked: None,
     }
 }
 
@@ -604,6 +612,7 @@ impl ReadyWorker {
             executors: worker.executors,
             // M19 Phase 3 — the intern cache holds the worker's own strings; they are this fiber's.
             str_intern: worker.str_intern,
+            task: worker.task,
             ..FiberCtx::default()
         };
         debug_assert!(ctx.start.is_some(), "a Pending fiber holds its task");

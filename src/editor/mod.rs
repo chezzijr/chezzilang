@@ -496,7 +496,7 @@ fn semantic_tokens_inner(source: &str) -> Vec<SemTok> {
     // the buffer doesn't parse, so a mid-edit document never errors or loses its base highlighting.
     let overlay = semantic_overlay(source);
 
-    for tok in &toks {
+    for (i, tok) in toks.iter().enumerate() {
         // `as usize`: `Span` is `u32`-wide (see `Span`'s doc); u32 → usize never truncates.
         let line = tok.span.line as usize;
         let col = tok.span.col as usize;
@@ -509,6 +509,17 @@ fn semantic_tokens_inner(source: &str) -> Vec<SemTok> {
                 overlay.get(&(line, col)).copied().unwrap_or(VARIABLE),
                 name.chars().count(),
             ),
+            // `from` is a keyword, but the parser takes it as a member or method name after `.`,
+            // `?.` and `fn` (`Q.from(3)`, `fn from(x: int)`): the AST role if it has one, else a
+            // method name there (a protocol sig has no name span), else the keyword.
+            Token::From => {
+                let after_member = i.checked_sub(1).is_some_and(|j| {
+                    matches!(toks[j].kind, Token::Dot | Token::QuestionDot | Token::Fn)
+                });
+                let role = overlay.get(&(line, col)).copied();
+                let fallback = if after_member { FUNCTION } else { KEYWORD };
+                (role.unwrap_or(fallback), "from".len())
+            }
             Token::Int(_) | Token::IntMinMagnitude | Token::Float(_) => {
                 (NUMBER, measure_number(&chars, start_abs))
             }
@@ -548,7 +559,6 @@ fn semantic_tokens_inner(source: &str) -> Vec<SemTok> {
             | other @ Token::Import
             | other @ Token::Extern
             | other @ Token::Native
-            | other @ Token::From
             | other @ Token::As
             | other @ Token::Const
             | other @ Token::And
@@ -1049,6 +1059,7 @@ fn overlay_expr(expr: &crate::ast::Expr, map: &mut std::collections::HashMap<(us
             }
         }
         ExprKind::Try(e) => overlay_expr(e, map),
+        // `bracket` spans the same text as `type_args`, which color it (as `Call`).
         ExprKind::OptChain { obj, call, .. } => {
             overlay_expr(obj, map);
             if let Some(c) = call {
@@ -1057,6 +1068,9 @@ fn overlay_expr(expr: &crate::ast::Expr, map: &mut std::collections::HashMap<(us
                 }
                 for (_, v) in &c.named {
                     overlay_expr(v, map);
+                }
+                for t in &c.type_args {
+                    overlay_type(t, map);
                 }
             }
         }

@@ -96,6 +96,7 @@ impl Vm {
                     is_timed_out: false,
                     is_deadlock: false,
                     is_panic: false,
+                    blocked: None,
                 });
             }
             Op::GetLocal(slot) => {
@@ -292,15 +293,21 @@ impl Vm {
             // dispatch exactly like `CallStatic`. The compiler only emits this reading a `$w:T`
             // local it itself initialized from a `ConstStr`, so a non-`str` here is an internal
             // invariant break — surfaced as a clear runtime error, never a panic.
+            // The witness is `<type key>\u{1}<method>` (the compiler's `static_key`): the caller
+            // picked the method (a `from` overload), so it is read from the witness; `method`
+            // is the requirement's name as written.
             Op::CallStaticDyn { method, argc } => {
                 let w = self.pop();
-                let Some(key) = self.val_str(w) else {
+                let Some((key, picked)) = self.val_str(w).and_then(|s| {
+                    s.split_once('\u{1}')
+                        .map(|(k, m)| (k.to_string(), m.to_string()))
+                }) else {
                     return Err(self.err(
                         format!("internal: static witness for '{method}' is not a type key"),
                         span,
                     ));
                 };
-                self.do_static_call(&key, method, *argc, span)?
+                self.do_static_call(&key, &picked, *argc, span)?
             }
             Op::CallBuiltin(b, argc) => self.do_builtin(*b, *argc, span)?,
             Op::CallNativeStatic(which, argc) => self.do_native_static(*which, *argc, span)?,

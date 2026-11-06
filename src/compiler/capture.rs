@@ -338,6 +338,9 @@ pub(super) fn find_boundary_free_expr(e: &Expr, out: &mut HashSet<String>) {
             find_boundary_free_expr(obj, out);
             if let Some(c) = call {
                 c.args.iter().for_each(|a| find_boundary_free_expr(a, out));
+                c.bracket
+                    .iter()
+                    .for_each(|b| find_boundary_free_expr(b, out));
                 c.named
                     .iter()
                     .for_each(|(_, v)| find_boundary_free_expr(v, out));
@@ -969,14 +972,20 @@ pub(crate) fn free_names_expr(e: &Expr, bound: &HashSet<String>, out: &mut FreeN
                 // `a?.m(…)` is a member call `record_call_site` never sees — and a member call is a
                 // possible witness call (see [`FreeNames::opaque_calls`] / `member_calls`).
                 out.opaque_calls = true;
-                // No type-argument channel on an `?.` call (`a?.m[T]()` does not parse), and the
-                // arguments are the ordinary ones — so the forward question is asked exactly as it
-                // is for a plain member call.
+                // The type arguments and arguments are the ordinary ones, so the forward question
+                // is asked exactly as it is for a plain member call.
                 if out.record_members {
-                    out.member_calls
-                        .push(member_call(name, &c.args, &c.named, Vec::new()));
+                    out.member_calls.push(member_call(
+                        name,
+                        &c.args,
+                        &c.named,
+                        c.type_args.clone(),
+                    ));
                 }
                 c.args.iter().for_each(|a| free_names_expr(a, bound, out));
+                if let Some(b) = &c.bracket {
+                    free_names_expr(b, bound, out);
+                }
                 c.named
                     .iter()
                     .for_each(|(_, v)| free_names_expr(v, bound, out));
@@ -1118,6 +1127,9 @@ pub(super) fn collect_frame_binds_expr(e: &Expr, out: &mut impl Extend<String>) 
             collect_frame_binds_expr(obj, out);
             if let Some(c) = call {
                 c.args.iter().for_each(|a| collect_frame_binds_expr(a, out));
+                c.bracket
+                    .iter()
+                    .for_each(|b| collect_frame_binds_expr(b, out));
                 c.named
                     .iter()
                     .for_each(|(_, v)| collect_frame_binds_expr(v, out));

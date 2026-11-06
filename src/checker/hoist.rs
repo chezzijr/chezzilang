@@ -265,10 +265,8 @@ impl Checker {
                     );
                     // A repeated method name silently last-wins (the HashMap collapses it) — reject at
                     // hoist so the dup is the headline error, not a downstream return-type mismatch.
-                    self.report_dup_names(
-                        methods.iter().map(|m| (m.name.as_str(), m.name_span)),
-                        "method",
-                    );
+                    // A repeat a protocol slot keys (static `from`s) is kept as overloads.
+                    let slots = self.report_dup_methods(methods);
                     // A field and a method may not share a name on the same struct (mirrors the enum
                     // variant/static disjointness below): `p.f` would be ambiguous between the two.
                     let field_names: std::collections::HashSet<&str> =
@@ -311,10 +309,15 @@ impl Checker {
                             .collect(),
                     );
                     let saved_self = self.current_self_ty.replace(self_ty.clone());
-                    let methods = methods
-                        .iter()
-                        .map(|m| (m.name.clone(), self.fn_sig(m, m.name_span, Some(&self_ty))))
+                    let sigs: Vec<(String, FnSig)> = (0..methods.len())
+                        .map(|i| {
+                            let sig = self.method_sig_at(methods, i, &self_ty);
+                            (methods[i].name.clone(), sig)
+                        })
                         .collect();
+                    let overloads = super::from_overload::overload_sets(slots, &sigs);
+                    self.record_overload_names(methods, &overloads);
+                    let methods = sigs.into_iter().collect();
                     self.current_self_ty = saved_self;
                     self.exit_type_params(saved);
                     let origin = if self.current_module_is_stdlib {
@@ -337,6 +340,7 @@ impl Checker {
                             type_params: rtps,
                             fields,
                             methods,
+                            overloads,
                             origin,
                             // Decl docstring is attached later in `capture_sig` (from `name_docs`),
                             // only for the module's exported sig; the in-checker layout doesn't need it.
@@ -391,11 +395,9 @@ impl Checker {
                     }
                     // Methods see the enum's type parameters in scope (like the struct path), so a
                     // generic `fn get(self) -> T` resolves `T`. Name-keyed exactly like struct methods.
-                    // A repeated method name silently last-wins (the HashMap collapses it) — reject.
-                    self.report_dup_names(
-                        methods.iter().map(|m| (m.name.as_str(), m.name_span)),
-                        "method",
-                    );
+                    // A repeated method name silently last-wins (the HashMap collapses it) — reject,
+                    // except a repeat a protocol slot keys (static `from`s).
+                    let slots = self.report_dup_methods(methods);
                     // `Self` in a method sig resolves to this concrete enum (parameterized by its own
                     // type params — the `enum_type_params` table isn't inserted yet, so build the
                     // self-ty from the in-scope `type_params`, matching `enum_self_ty`'s shape).
@@ -407,10 +409,15 @@ impl Checker {
                             .collect(),
                     );
                     let saved_self = self.current_self_ty.replace(self_ty.clone());
-                    let method_sigs: HashMap<String, FnSig> = methods
-                        .iter()
-                        .map(|m| (m.name.clone(), self.fn_sig(m, m.name_span, Some(&self_ty))))
+                    let sigs: Vec<(String, FnSig)> = (0..methods.len())
+                        .map(|i| {
+                            let sig = self.method_sig_at(methods, i, &self_ty);
+                            (methods[i].name.clone(), sig)
+                        })
                         .collect();
+                    let overloads = super::from_overload::overload_sets(slots, &sigs);
+                    self.record_overload_names(methods, &overloads);
+                    let method_sigs: HashMap<String, FnSig> = sigs.into_iter().collect();
                     self.current_self_ty = saved_self;
                     // Variant names and STATIC-method names must be DISJOINT: `Enum.name` always
                     // resolves the variant first (see `infer_call`), so a static method named after a
@@ -428,7 +435,8 @@ impl Checker {
                     // TICKET-027 + TICKET-202: keyed bounds, args resolved in the declaring scope.
                     let rtps = self.resolve_bounds(type_params, s.span);
                     self.enum_type_params.insert(key.clone(), rtps);
-                    self.enum_methods.insert(key, method_sigs);
+                    self.enum_methods.insert(key.clone(), method_sigs);
+                    self.enum_overloads.insert(key, overloads);
                 }
                 StmtKind::Extern { fns, .. } => {
                     // Dynamic C-ABI FFI (`dlopen`/libffi) is unix-only — `int` marshals as C `long`,
@@ -764,7 +772,11 @@ impl Checker {
         for _ in 0..fn_decls.len() {
             let mut changed = false;
             for d in &fn_decls {
-                let w = self.witness_params_of(d);
+                let names = self.witness_params_of(d);
+                let w = match self.functions.get(&d.name) {
+                    Some(sig) => self.witness_reqs(&names, &sig.type_params),
+                    None => continue,
+                };
                 if let Some(sig) = self.functions.get_mut(&d.name)
                     && sig.witness_params != w
                 {
@@ -821,42 +833,26 @@ impl Checker {
                 | StmtKind::Expr(_) => continue,
             };
             for m in methods {
-                let w = self.witness_params_of(m);
-                let slot = match &s.kind {
-                    StmtKind::Struct { .. } => self
-                        .structs
+                let names = self.witness_params_of(m);
+                let is_struct = matches!(s.kind, StmtKind::Struct { .. });
+                let tps = if is_struct {
+                    self.structs.get(&key).and_then(|s| s.methods.get(&m.name))
+                } else {
+                    self.enum_methods.get(&key).and_then(|ms| ms.get(&m.name))
+                }
+                .map(|sig| sig.type_params.clone());
+                let Some(tps) = tps else {
+                    continue;
+                };
+                let w = self.witness_reqs(&names, &tps);
+                let slot = if is_struct {
+                    self.structs
                         .get_mut(&key)
-                        .and_then(|s| s.methods.get_mut(&m.name)),
-                    StmtKind::Let { .. }
-                    | StmtKind::Assign { .. }
-                    | StmtKind::Fn(_)
-                    | StmtKind::Protocol { .. }
-                    | StmtKind::Enum { .. }
-                    | StmtKind::TypeAlias { .. }
-                    | StmtKind::If { .. }
-                    | StmtKind::For { .. }
-                    | StmtKind::While { .. }
-                    | StmtKind::Match { .. }
-                    | StmtKind::Return(_)
-                    | StmtKind::Yield(_)
-                    | StmtKind::Defer(_)
-                    | StmtKind::Parallel { .. }
-                    | StmtKind::Spawn(_)
-                    | StmtKind::Wait { .. }
-                    | StmtKind::Break
-                    | StmtKind::Continue
-                    | StmtKind::Pass
-                    | StmtKind::Import(_)
-                    | StmtKind::Extern { .. }
-                    | StmtKind::Native(_)
-                    | StmtKind::NativeStruct { .. }
-                    | StmtKind::NativeEnum { .. }
-                    | StmtKind::NativeType { .. }
-                    | StmtKind::Assert { .. }
-                    | StmtKind::Expr(_) => self
-                        .enum_methods
+                        .and_then(|s| s.methods.get_mut(&m.name))
+                } else {
+                    self.enum_methods
                         .get_mut(&key)
-                        .and_then(|ms| ms.get_mut(&m.name)),
+                        .and_then(|ms| ms.get_mut(&m.name))
                 };
                 if let Some(sig) = slot {
                     sig.witness_params = w;
@@ -877,99 +873,13 @@ impl Checker {
     }
 
     /// Register one `native fn`/`native ctor` decl's signature into [`Checker::native_prelude_sigs`]
-    /// (the single source of truth for the eight migrated universe builtins). Shared by the `hoist`
-    /// pass (graph path) and [`seed_native_prelude_sigs`] (single-module `check` path). Applies the
+    /// (the single source of truth for the eight migrated universe builtins), from the `hoist` pass
+    /// of the prelude module. Applies the
     /// native-decl dynamic convention: an UNANNOTATED param → `Ty::Unknown`; no `-> ret` → `Ty::Unknown`
     /// return (native/never, how `panic` is spelled).
     pub(super) fn register_native_decl(&mut self, decl: &NativeDecl) {
         let sig = self.harvest_native_fn_sig(decl, false);
         self.native_prelude_sigs.insert(decl.name.clone(), sig);
-    }
-
-    /// The parsed `std/prelude.chz`, for the test-only paths that check a program with no prelude
-    /// module in a graph; `seed_native_prelude_sigs` is their one seed.
-    /// Same source chain as the resolver ($CHEZZI_STD → embedded) — no reader bypasses it.
-    /// Parsed once per process, so every checker of one process reads the same node ids (a call
-    /// plan's `Inline` fill of a prelude default, such as `print`'s `sep`, names one node).
-    #[cfg(any(test, feature = "test-api"))]
-    fn parse_prelude_source() -> Option<crate::ast::Module> {
-        static PRELUDE: std::sync::OnceLock<Option<crate::ast::Module>> =
-            std::sync::OnceLock::new();
-        PRELUDE
-            .get_or_init(|| {
-                let src = crate::resolver::std_source(&["std".to_string(), "prelude".to_string()])
-                    .ok()?;
-                let toks = crate::lexer::tokenize(&src).ok()?;
-                let mut module = crate::parser::parse(toks).ok()?;
-                // A std file never probes the project root (as `Resolver::parse` classifies it).
-                crate::ast::classify_variant_imports(&mut module, &|_| false);
-                Some(module)
-            })
-            .clone()
-    }
-
-    /// Populate [`Checker::native_prelude_sigs`] from the always-linked `std/prelude.chz` on the
-    /// SINGLE-MODULE `check` path (test-only — the graph path hoists the prelude module directly, which
-    /// registers these during `hoist`). Without this, a single-module `check` (`ok()`/`check_src`) has
-    /// no prelude in scope, so `ord`/`panic` value-position typing + hover would silently regress.
-    /// Reads, parses, and registers only the file's `native` decls; the prelude imports nothing and its
-    /// param/return types are reserved primitives (`str`/`int`/`bytes`/…), so no module scope is needed.
-    #[cfg(any(test, feature = "test-api"))]
-    pub(super) fn seed_native_prelude_sigs(&mut self) {
-        if !self.native_prelude_sigs.is_empty() {
-            return;
-        }
-        let Some(module) = Self::parse_prelude_source() else {
-            return;
-        };
-        // The carriers come first: the native sigs and container tables below name `Option[T]` /
-        // `Result[T, E]`, and those resolve through the enum tables. This reads the prelude, a std
-        // module, so the carriers' names are in scope for it.
-        let outer_std = std::mem::replace(&mut self.current_module_is_stdlib, true);
-        self.carrier_seeds = self.harvest_native_enums(&module);
-        self.seed_carrier_enums();
-        self.seed_prelude_structs(&module);
-        self.seed_std_protocols();
-        for s in &module.stmts {
-            if let StmtKind::Native(decl) = &s.kind {
-                self.register_native_decl(decl);
-            }
-        }
-        // The single-module `check` path never builds a graph, so the graph capture of the prelude's
-        // native struct method tables (into `container_seeds`, re-seeded by `seed_stdlib_structs`)
-        // never runs here. Harvest them straight into `self.structs` too, so method calls resolve on
-        // the graph-less path as on the graph path. `begin_module` re-seeds from `container_seeds`,
-        // so the test-only graph with no prelude module (`standalone_graph`) keeps these tables too.
-        for (tn, info) in self.harvest_native_struct_tables(&module) {
-            self.container_seeds.insert(tn.clone(), info.clone());
-            self.structs.insert(tn, info);
-        }
-        self.current_module_is_stdlib = outer_std;
-        // Re-seed under the caller's module, which may be a user module.
-        self.seed_carrier_enums();
-    }
-
-    /// TICKET-253 — the [`crate::resolver::PRELUDE_STRUCTS`] (`Range`, `RecvError`) are structs of
-    /// the prelude that every module sees with no `import` (the resolver adds
-    /// `import Range, RecvError from std.prelude` on the graph path). The graph-less path hoists
-    /// their declarations straight into this checker so `Range(0, 3)` resolves here too.
-    #[cfg(any(test, feature = "test-api"))]
-    pub(super) fn seed_prelude_structs(&mut self, module: &crate::ast::Module) {
-        let names = crate::resolver::PRELUDE_STRUCTS.map(|p| p.name);
-        let decls: Vec<Stmt> = module
-            .stmts
-            .iter()
-            .filter(|s| matches!(&s.kind, StmtKind::Struct { name, .. } if names.contains(&name.as_str())))
-            .cloned()
-            .collect();
-        let outer = std::mem::replace(&mut self.current_module_is_stdlib, true);
-        self.hoist(&decls);
-        self.current_module_is_stdlib = outer;
-        for name in names {
-            if let Some(info) = self.structs.get(name).cloned() {
-                self.bind_imported_struct_name(name, name, &info, true);
-            }
-        }
     }
 
     /// Is this surface extern `Type` a RETURN-ONLY marshalling form (`owned_str`, `str?`, or

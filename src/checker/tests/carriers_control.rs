@@ -1324,8 +1324,104 @@ fn opt_chain_on_non_option_does_not_leak_temp_name() {
     let errs = check_desugared("x := 5\ny := x?.f\n");
     assert!(!errs.is_empty(), "non-option opt-chain should error");
     assert!(
-        !errs.iter().any(|e| e.message.contains("__opt")),
+        !errs.iter().any(|e| e
+            .message
+            .contains(crate::ast::CarrierTemp::Payload.prefix())),
         "internal temp name leaked into a diagnostic: {errs:?}"
+    );
+}
+
+/// A call under `?.` that fails reports what `.` reports, once: no `__opt` temp in the message
+/// (the receiver is not printed) and no "returns no value" / index cascade after it. A void call
+/// with a bad argument still reports the argument once (TICKET-239).
+#[test]
+fn a_failed_optchain_call_reports_once_and_names_no_temp() {
+    let k = "import Into from std.convert\nstruct K:\n    n: int\n    fn into(self) -> int:\n        return self.n\n    fn into(self) -> str:\n        return \"k\"\n    fn get[U](self, u: U) -> U:\n        return u\n    fn put(self, x: int):\n        pass\n";
+    let cells = [
+        (
+            "    r: K? = K(1)\n    x := r?.into()\n    print(x)\n",
+            "into on K needs a target type",
+        ),
+        (
+            "    r: K? = K(1)\n    xs := [10]\n    g := fn(): r?.get[xs[0]](3)\n    print(g())\n",
+            "'get' is a method",
+        ),
+        (
+            "    r: K? = K(1)\n    r?.put(\"s\")\n",
+            "expected int, found str",
+        ),
+    ];
+    let mut failed = Vec::new();
+    for (body, needle) in cells {
+        let src = format!("{k}fn main():\n{body}main()\n");
+        let errs = check_desugared(&src);
+        if errs.len() != 1
+            || !errs[0].message.contains(needle)
+            || errs[0]
+                .message
+                .contains(crate::ast::CarrierTemp::Payload.prefix())
+        {
+            failed.push(format!("{body}=> wanted one {needle:?}, got {errs:?}"));
+        }
+    }
+    assert!(failed.is_empty(), "{}", failed.join("\n"));
+}
+
+/// A failed pick under `?.` in statement position reports what `.` reports, once: the pick error
+/// and no discarded-value warning (the failed call has no value to discard).
+#[test]
+fn a_failed_optchain_pick_statement_reports_only_the_pick_error() {
+    let src = "import Into from std.convert\nstruct R:\n    n: int\n    fn into(self) -> float:\n        return 1.0\n    fn into(self) -> str:\n        return \"s\"\nr: R? = ?R(1)\nr?.into()\n";
+    let t = TmpDir::new();
+    let entry = t.write("main.chz", src);
+    let graph = crate::resolver::build_graph(&entry).expect("resolve should succeed");
+    let (res, warns) = check_graph_diags(&graph, None);
+    let errs = res.expect_err("the pick fails");
+    assert_eq!(errs.len(), 1, "{errs:?}");
+    assert!(
+        errs[0].message.contains("into on R needs a target type"),
+        "{errs:?}"
+    );
+    assert!(
+        warns.is_empty(),
+        "no warning beside the pick error: {warns:?}"
+    );
+}
+
+/// A user name that merely starts like a compiler temp (`__options`) is the user's name: the
+/// bound-method help spells it back.
+#[test]
+fn a_user_name_with_the_temp_prefix_is_named_in_help() {
+    let src = "struct Bx[T]:\n    v: T\n    fn get(self) -> T:\n        return self.v\n__options := Bx(1)\nf := __options.get\n";
+    let errs = check_desugared(src);
+    assert_eq!(errs.len(), 1, "{errs:?}");
+    assert!(errs[0].message.contains("`__options.get(…)`"), "{errs:?}");
+}
+
+/// A double fault under `?.` (an unknown method AND an unknown name in its argument) reports the
+/// errors the plain `.` call reports, no more: the receiver type reads `K` in both.
+#[test]
+fn a_double_fault_under_optchain_reports_what_the_plain_call_reports() {
+    let k = "struct K:\n    n: int\n";
+    let run = |call: &str| {
+        let src =
+            format!("{k}fn main():\n    r: K? = K(1)\n    x := {call}\n    print(x)\nmain()\n");
+        let mut msgs: Vec<String> = check_desugared(&src)
+            .into_iter()
+            .map(|e| e.message)
+            .collect();
+        msgs.sort();
+        msgs
+    };
+    let plain = run("r.nope2(nope())");
+    let opt = run("r?.nope2(nope())");
+    assert_eq!(plain.len(), 2, "{plain:?}");
+    assert_eq!(
+        opt,
+        plain
+            .iter()
+            .map(|m| m.replace("K?", "K"))
+            .collect::<Vec<_>>()
     );
 }
 
@@ -1347,7 +1443,9 @@ fn carrier_operand_scratch_name_never_leaks_into_a_diagnostic() {
         let errs = check_desugared(src);
         assert!(!errs.is_empty(), "expected a diagnostic for: {src}");
         assert!(
-            !errs.iter().any(|e| e.message.contains("__optrecv")),
+            !errs.iter().any(|e| e
+                .message
+                .contains(crate::ast::CarrierTemp::Operand.prefix())),
             "operand-scratch name leaked into a diagnostic: {errs:?}"
         );
     }

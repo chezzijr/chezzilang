@@ -309,129 +309,129 @@ fn extern_owned_str_param_via_alias_rejected() {
 }
 
 #[test]
-fn convert_bound_binds_and_arity_checked() {
-    // Slice 1 of Convert/From: the reserved `Convert[S]` protocol binds as a generic bound. This checks
+fn from_bound_binds_and_arity_checked() {
+    // Slice 1 of From/From: the reserved `From[S]` protocol binds as a generic bound. This checks
     // ONLY that the bound RESOLVES (no "unknown protocol") and is arity-checked against its 1 type param.
-    // NOT tested here: that a concrete type SATISFIES it (witnessing = slice 2), nor `T.convert(..)`
+    // NOT tested here: that a concrete type SATISFIES it (witnessing = slice 2), nor `T.from(..)`
     // through the bound (slice 3 — still errors "unknown name 'T'"). So `foo` stays UNCALLED — invoking
     // it would fire slice-2 conformance, which is intentionally not wired yet.
     entry_ok(
-        "import Convert from std.convert\nfn foo[T: Convert[int]](x: T) -> T:\n    return x\nfn main():\n    print(1)\nmain()\n",
+        "import From from std.convert\nfn foo[T: From[int]](x: T) -> T:\n    return x\nfn main():\n    print(1)\nmain()\n",
     );
-    // `[T: Convert]` — 0 args for a 1-param protocol → arity error (mirrors `Iterator[Elem]`).
+    // `[T: From]` — 0 args for a 1-param protocol → arity error (mirrors `Iterator[Elem]`).
     let errs = check_entry(
-        "import Convert from std.convert\nfn foo[T: Convert](x: T) -> T:\n    return x\nfn main():\n    print(1)\nmain()\n",
+        "import From from std.convert\nfn foo[T: From](x: T) -> T:\n    return x\nfn main():\n    print(1)\nmain()\n",
     );
     assert!(
-        errs.iter().any(|e| e.message.contains("Convert")
+        errs.iter().any(|e| e.message.contains("From")
             && e.message.contains("takes 1 type argument(s), found 0")),
-        "[T: Convert] must be an arity error, got: {errs:?}"
+        "[T: From] must be an arity error, got: {errs:?}"
     );
-    // `[T: Convert[int, str]]` — 2 args for a 1-param protocol → arity error.
+    // `[T: From[int, str]]` — 2 args for a 1-param protocol → arity error.
     let errs = check_entry(
-        "import Convert from std.convert\nfn foo[T: Convert[int, str]](x: T) -> T:\n    return x\nfn main():\n    print(1)\nmain()\n",
+        "import From from std.convert\nfn foo[T: From[int, str]](x: T) -> T:\n    return x\nfn main():\n    print(1)\nmain()\n",
     );
     assert!(
-        errs.iter().any(|e| e.message.contains("Convert")
+        errs.iter().any(|e| e.message.contains("From")
             && e.message.contains("takes 1 type argument(s), found 2")),
-        "[T: Convert[int, str]] must be an arity error, got: {errs:?}"
+        "[T: From[int, str]] must be an arity error, got: {errs:?}"
     );
 }
 
 #[test]
-fn convert_witness_static_slot_only() {
-    // Slice 2 of Convert/From — SOUND structural witnessing. A concrete type witnesses `Convert[int]`
-    // (i.e. satisfies the bound `[T: Convert[int]]` at a call site) IFF it has a STATIC method
-    // `convert(x: int) -> Self`. `use2` has a trivial body (does NOT call `T.convert` — that's slice 3),
+fn from_witness_static_slot_only() {
+    // Slice 2 of From/From — SOUND structural witnessing. A concrete type witnesses `From[int]`
+    // (i.e. satisfies the bound `[T: From[int]]` at a call site) IFF it has a STATIC method
+    // `from(x: int) -> Self`. `use2` has a trivial body (does NOT call `T.from` — that's slice 3),
     // so the bound-check runs at the call site then erases.
     // POSITIVE — a genuine static ctor witness.
     entry_ok(
-        "import Convert from std.convert\nstruct Port:\n    n: int\n    fn convert(x: int) -> Port:\n        return Port(n=x)\nfn use2[T: Convert[int]](x: int) -> int:\n    return x\nfn main():\n    print(use2[Port](5))\nmain()\n",
+        "import From from std.convert\nstruct Port:\n    n: int\n    fn from(x: int) -> Port:\n        return Port(n=x)\nfn use2[T: From[int]](x: int) -> int:\n    return x\nfn main():\n    print(use2[Port](5))\nmain()\n",
     );
-    // IMPOSTER 1 — self-only `convert(self) -> Self`: arity matches the static `convert(x: S)` slot (1
+    // IMPOSTER 1 — self-only `from(self) -> Self`: arity matches the static `from(x: S)` slot (1
     // param each), so ONLY the `is_static` check rejects it. This is the exact value-model hole: a value
     // cannot invoke a static ctor. Pre-fix this FALSELY witnessed (self param → Unknown, compatible with
     // int, ret matches, is_static never compared).
     entry_rejects(
-        "import Convert from std.convert\nstruct Bad:\n    n: int\n    fn convert(self) -> Bad:\n        return self\nfn use2[T: Convert[int]](x: int) -> int:\n    return x\nfn main():\n    print(use2[Bad](5))\nmain()\n",
-        "does not satisfy Convert",
+        "import From from std.convert\nstruct Bad:\n    n: int\n    fn from(self) -> Bad:\n        return self\nfn use2[T: From[int]](x: int) -> int:\n    return x\nfn main():\n    print(use2[Bad](5))\nmain()\n",
+        "does not satisfy From",
     );
-    // IMPOSTER 2 — instance-slot `convert(self, x: int) -> Self` (arity 2 vs the static 1): rejected.
+    // IMPOSTER 2 — instance-slot `from(self, x: int) -> Self` (arity 2 vs the static 1): rejected.
     entry_rejects(
-        "import Convert from std.convert\nstruct Bad2:\n    n: int\n    fn convert(self, x: int) -> Bad2:\n        return self\nfn use2[T: Convert[int]](x: int) -> int:\n    return x\nfn main():\n    print(use2[Bad2](5))\nmain()\n",
-        "does not satisfy Convert",
+        "import From from std.convert\nstruct Bad2:\n    n: int\n    fn from(self, x: int) -> Bad2:\n        return self\nfn use2[T: From[int]](x: int) -> int:\n    return x\nfn main():\n    print(use2[Bad2](5))\nmain()\n",
+        "does not satisfy From",
     );
-    // IMPOSTER 3 — wrong source: static `convert(x: str)` under `Convert[int]` → rejected.
+    // IMPOSTER 3 — wrong source: static `from(x: str)` under `From[int]` → rejected.
     entry_rejects(
-        "import Convert from std.convert\nstruct Bad3:\n    n: int\n    fn convert(x: str) -> Bad3:\n        return Bad3(n=1)\nfn use2[T: Convert[int]](x: int) -> int:\n    return x\nfn main():\n    print(use2[Bad3](5))\nmain()\n",
-        "does not satisfy Convert",
+        "import From from std.convert\nstruct Bad3:\n    n: int\n    fn from(x: str) -> Bad3:\n        return Bad3(n=1)\nfn use2[T: From[int]](x: int) -> int:\n    return x\nfn main():\n    print(use2[Bad3](5))\nmain()\n",
+        "does not satisfy From",
     );
-    // IMPOSTER 4 — wrong return: static `convert(x: int) -> Other` (not Self) → rejected.
+    // IMPOSTER 4 — wrong return: static `from(x: int) -> Other` (not Self) → rejected.
     entry_rejects(
-        "import Convert from std.convert\nstruct Other:\n    z: int\nstruct Bad4:\n    n: int\n    fn convert(x: int) -> Other:\n        return Other(z=x)\nfn use2[T: Convert[int]](x: int) -> int:\n    return x\nfn main():\n    print(use2[Bad4](5))\nmain()\n",
-        "does not satisfy Convert",
+        "import From from std.convert\nstruct Other:\n    z: int\nstruct Bad4:\n    n: int\n    fn from(x: int) -> Other:\n        return Other(z=x)\nfn use2[T: From[int]](x: int) -> int:\n    return x\nfn main():\n    print(use2[Bad4](5))\nmain()\n",
+        "does not satisfy From",
     );
-    // IMPOSTER 5 — missing `convert` entirely → rejected.
+    // IMPOSTER 5 — missing `from` entirely → rejected.
     entry_rejects(
-        "import Convert from std.convert\nstruct Bad5:\n    n: int\nfn use2[T: Convert[int]](x: int) -> int:\n    return x\nfn main():\n    print(use2[Bad5](5))\nmain()\n",
-        "does not satisfy Convert",
+        "import From from std.convert\nstruct Bad5:\n    n: int\nfn use2[T: From[int]](x: int) -> int:\n    return x\nfn main():\n    print(use2[Bad5](5))\nmain()\n",
+        "does not satisfy From",
     );
 }
 
 #[test]
-fn convert_bound_only_not_value_type() {
-    // Slice 2 — BOUND-ONLY enforcement. `Convert[S]` has a STATIC method requirement, so a VALUE cannot
+fn from_bound_only_not_value_type() {
+    // Slice 2 — BOUND-ONLY enforcement. `From[S]` has a STATIC method requirement, so a VALUE cannot
     // witness it (a value can't invoke a static ctor). It is usable ONLY as a generic bound
-    // `[T: Convert[S]]`, and REJECTED in every value-annotation position. The gate keys on the STRUCTURAL
+    // `[T: From[S]]`, and REJECTED in every value-annotation position. The gate keys on the STRUCTURAL
     // property (protocol has a static-slot requirement), not the literal name.
     let needle = "has a static method";
     // param type
     entry_rejects(
-        "import Convert from std.convert\nfn takes(c: Convert[int]):\n    pass\nfn main():\n    pass\nmain()\n",
+        "import From from std.convert\nfn takes(c: From[int]):\n    pass\nfn main():\n    pass\nmain()\n",
         needle,
     );
     // struct field
     entry_rejects(
-        "import Convert from std.convert\nstruct S:\n    c: Convert[int]\nfn main():\n    pass\nmain()\n",
+        "import From from std.convert\nstruct S:\n    c: From[int]\nfn main():\n    pass\nmain()\n",
         needle,
     );
     // return type
     entry_rejects(
-        "import Convert from std.convert\nfn f() -> Convert[int]:\n    pass\nfn main():\n    pass\nmain()\n",
+        "import From from std.convert\nfn f() -> From[int]:\n    pass\nfn main():\n    pass\nmain()\n",
         needle,
     );
     // let-binding annotation
     entry_rejects(
-        "import Convert from std.convert\nstruct Port:\n    n: int\n    fn convert(x: int) -> Port:\n        return Port(n=x)\nfn main():\n    x: Convert[int] = Port(n=1)\n    print(x)\nmain()\n",
+        "import From from std.convert\nstruct Port:\n    n: int\n    fn from(x: int) -> Port:\n        return Port(n=x)\nfn main():\n    x: From[int] = Port(n=1)\n    print(x)\nmain()\n",
         needle,
     );
     // bare protocol name (no args) used as a value type
     entry_rejects(
-        "import Convert from std.convert\nfn takes(c: Convert):\n    pass\nfn main():\n    pass\nmain()\n",
+        "import From from std.convert\nfn takes(c: From):\n    pass\nfn main():\n    pass\nmain()\n",
         needle,
     );
     // nested inside a container / Option / tuple / type alias — the resolve_type recursion must gate
     // every position, not just the top-level annotation.
     entry_rejects(
-        "import Convert from std.convert\nfn takes(c: List[Convert[int]]):\n    pass\nfn main():\n    pass\nmain()\n",
+        "import From from std.convert\nfn takes(c: List[From[int]]):\n    pass\nfn main():\n    pass\nmain()\n",
         needle,
     );
     entry_rejects(
-        "import Convert from std.convert\nfn takes(c: Convert[int]?):\n    pass\nfn main():\n    pass\nmain()\n",
+        "import From from std.convert\nfn takes(c: From[int]?):\n    pass\nfn main():\n    pass\nmain()\n",
         needle,
     );
     entry_rejects(
-        "import Convert from std.convert\nfn takes(c: (int, Convert[int])):\n    pass\nfn main():\n    pass\nmain()\n",
+        "import From from std.convert\nfn takes(c: (int, From[int])):\n    pass\nfn main():\n    pass\nmain()\n",
         needle,
     );
     entry_rejects(
-        "import Convert from std.convert\ntype A = Convert[int]\nfn takes(c: A):\n    pass\nfn main():\n    pass\nmain()\n",
+        "import From from std.convert\ntype A = From[int]\nfn takes(c: A):\n    pass\nfn main():\n    pass\nmain()\n",
         needle,
     );
-    // KEEP-WORKING: the legal bound `[T: Convert[int]]` is UNAFFECTED (its args, not the protocol name,
+    // KEEP-WORKING: the legal bound `[T: From[int]]` is UNAFFECTED (its args, not the protocol name,
     // flow through resolve_type).
     entry_ok(
-        "import Convert from std.convert\nfn foo[T: Convert[int]](x: T) -> T:\n    return x\nfn main():\n    print(1)\nmain()\n",
+        "import From from std.convert\nfn foo[T: From[int]](x: T) -> T:\n    return x\nfn main():\n    print(1)\nmain()\n",
     );
 }
 
@@ -445,9 +445,9 @@ fn static_call_through_type_param_is_clear_error() {
     // survives, narrowed: it now fires when NO bound declares the static method, which is still an
     // erased call with nothing to dispatch to. The `Box[int].empty()` keep-working case is
     // unchanged (a concrete turbofish type was never the erased case).
-    // NOW OK — `T.convert(x)` under `[T: Convert[int]]`, the Convert/From driver.
+    // NOW OK — `T.from(x)` under `[T: From[int]]`, the From/From driver.
     entry_ok(
-        "import Convert from std.convert\nstruct Port:\n    n: int\n    fn convert(x: int) -> Port:\n        return Port(n=x)\nfn build[T: Convert[int]](x: int) -> T:\n    return T.convert(x)\nfn main():\n    print(build[Port](5).n)\nmain()\n",
+        "import From from std.convert\nstruct Port:\n    n: int\n    fn from(x: int) -> Port:\n        return Port(n=x)\nfn build[T: From[int]](x: int) -> T:\n    return T.from(x)\nfn main():\n    print(build[Port](5).n)\nmain()\n",
     );
     // STILL AN ERROR — `mk[T]` has NO bound at all, so nothing declares a static `empty`.
     entry_rejects(
@@ -476,19 +476,19 @@ fn user_static_ctor_protocol_bound_only_and_instance_regression() {
 }
 
 #[test]
-fn convert_embed_launders_static_requirement_bound_only() {
+fn from_embed_launders_static_requirement_bound_only() {
     // BUG 1 (adversarial): a protocol that EMBEDS a static-ctor protocol inherits the static requirement
     // transitively, so it too is bound-only — a VALUE still cannot witness the embedded static ctor.
-    // Pre-fix `protocol_has_static_method` scanned only OWN methods, so `protocol MakeInt: Convert[int]`
+    // Pre-fix `protocol_has_static_method` scanned only OWN methods, so `protocol MakeInt: From[int]`
     // (no own static method) returned false and was admitted as a value-annotation type, re-opening the
     // exact spike hole (a plain value inhabiting a static-ctor existential).
     entry_rejects(
-        "import Convert from std.convert\nprotocol MakeInt:\n    Convert[int]\nstruct Port:\n    n: int\n    fn convert(x: int) -> Port:\n        return Port(n=x)\nfn takes(c: MakeInt) -> int:\n    return 0\nfn main():\n    p := Port(n=7)\n    print(takes(p))\nmain()\n",
+        "import From from std.convert\nprotocol MakeInt:\n    From[int]\nstruct Port:\n    n: int\n    fn from(x: int) -> Port:\n        return Port(n=x)\nfn takes(c: MakeInt) -> int:\n    return 0\nfn main():\n    p := Port(n=7)\n    print(takes(p))\nmain()\n",
         "has a static method",
     );
-    // Two levels deep — a bundle embedding a bundle that embeds `Convert` is still gated.
+    // Two levels deep — a bundle embedding a bundle that embeds `From` is still gated.
     entry_rejects(
-        "import Convert from std.convert\nprotocol MakeInt:\n    Convert[int]\nprotocol MakeInt2:\n    MakeInt\nfn takes(c: MakeInt2):\n    pass\nfn main():\n    pass\nmain()\n",
+        "import From from std.convert\nprotocol MakeInt:\n    From[int]\nprotocol MakeInt2:\n    MakeInt\nfn takes(c: MakeInt2):\n    pass\nfn main():\n    pass\nmain()\n",
         "has a static method",
     );
     // REGRESSION — a bundle embedding ONLY an instance-method protocol stays a valid value type (the
@@ -499,16 +499,16 @@ fn convert_embed_launders_static_requirement_bound_only() {
 }
 
 #[test]
-fn convert_cross_module_alias_bound_only() {
+fn from_cross_module_alias_bound_only() {
     // BUG 2 (adversarial): a static-ctor protocol reaches VALUE position through a CROSS-MODULE type
     // alias whose body was computed by the read-only resolver (which cannot emit the gate). The
-    // `import Foo from a` / `import a; a.Foo` consumers return the pre-resolved `Ty::Protocol('Convert',
+    // `import Foo from a` / `import a; a.Foo` consumers return the pre-resolved `Ty::Protocol('From',
     // [int])` DIRECTLY, so the mutable resolve_type arm gate never runs. Pre-fix both forms type-checked
     // a plain VALUE in a static-ctor annotation.
     let t = TmpDir::new();
     t.write(
         "a.chz",
-        "import Convert from std.convert\ntype Foo = Convert[int]\n",
+        "import From from std.convert\ntype Foo = From[int]\n",
     );
     let check = |src: &str| -> Vec<CheckError> {
         let entry = t.write("main.chz", src);
@@ -520,7 +520,7 @@ fn convert_cross_module_alias_bound_only() {
     };
     // selective-import form (`import X from mod`)
     let errs = check(
-        "import Foo from a\nstruct Port:\n    n: int\n    fn convert(x: int) -> Port:\n        return Port(n=x)\nfn takes(c: Foo):\n    pass\nfn main():\n    takes(Port(n=1))\nmain()\n",
+        "import Foo from a\nstruct Port:\n    n: int\n    fn from(x: int) -> Port:\n        return Port(n=x)\nfn takes(c: Foo):\n    pass\nfn main():\n    takes(Port(n=1))\nmain()\n",
     );
     assert!(
         errs.iter()
@@ -529,7 +529,7 @@ fn convert_cross_module_alias_bound_only() {
     );
     // qualified form `import a` + `a.Foo`
     let errs = check(
-        "import a\nstruct Port:\n    n: int\n    fn convert(x: int) -> Port:\n        return Port(n=x)\nfn takes(c: a.Foo):\n    pass\nfn main():\n    takes(Port(n=1))\nmain()\n",
+        "import a\nstruct Port:\n    n: int\n    fn from(x: int) -> Port:\n        return Port(n=x)\nfn takes(c: a.Foo):\n    pass\nfn main():\n    takes(Port(n=1))\nmain()\n",
     );
     assert!(
         errs.iter()
@@ -539,14 +539,14 @@ fn convert_cross_module_alias_bound_only() {
     // nested — a cross-module alias body wrapping the protocol in a container must be gated too.
     t.write(
         "c.chz",
-        "import Convert from std.convert\ntype Bar = List[Convert[int]]\n",
+        "import From from std.convert\ntype Bar = List[From[int]]\n",
     );
     let errs =
         check("import Bar from c\nfn takes(c: Bar):\n    pass\nfn main():\n    pass\nmain()\n");
     assert!(
         errs.iter()
             .any(|e| e.message.contains("has a static method")),
-        "nested cross-module alias (List[Convert[int]]) must be bound-only, got: {errs:?}"
+        "nested cross-module alias (List[From[int]]) must be bound-only, got: {errs:?}"
     );
 }
 

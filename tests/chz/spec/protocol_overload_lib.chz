@@ -1,0 +1,13 @@
+# Helper MODULE for `protocol_overload_test.chz`: a user protocol `Parse[S]` and a struct that
+# overloads its `parse`, declared in ANOTHER module. Not a `*_test.chz`, so `chezzi test` never
+# runs it alone. The importer names only the struct: the slot is stored with the type.
+
+protocol Parse[S]:
+    fn parse(x: S) -> Self
+
+struct Tag:
+    s: str
+    fn parse(x: int) -> Tag:
+        return Tag("int {x}")
+    fn parse(x: str) -> Tag:
+        return Tag("str {x}")
