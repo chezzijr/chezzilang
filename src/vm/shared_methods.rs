@@ -797,7 +797,10 @@ impl Vm {
         //
         // Termination: a picked core is marked `shut` AND joined, and a join on this thread always
         // has `slack == 0` (`main` is never a fiber of the Executor's sched), so it ends with the
-        // scope taken, or with an `Err` that leaves the loop.
+        // scope taken, or with an `Err` that leaves the loop. A deadlock is the one `Err` that
+        // continues: its join took the scope, and every later Executor's blocked jobs belong in
+        // the same listing (Go lists every blocked goroutine), folded in creation order.
+        let mut deadlock: Option<RuntimeError> = None;
         loop {
             let next = self
                 .exec_registry
@@ -812,10 +815,22 @@ impl Vm {
             // TICKET-048 — the program-exit drain has no call site of its own, so it names where
             // this Executor was created.
             if let Err(e) = self.join_executor(&core, core.created_at) {
+                if e.blocked.is_some() && core.sched().is_none() {
+                    deadlock = Some(match deadlock {
+                        None => e,
+                        Some(first) => {
+                            let mut tasks = super::deadlock::listing(&first, &[]);
+                            tasks.extend(super::deadlock::listing(&e, &[]));
+                            super::deadlock::fold(first, tasks)
+                        }
+                    });
+                    continue;
+                }
                 if self.join_leave_flushes(&e) {
                     self.flush_finished_jobs_from(from);
                 }
-                return Err(e);
+                // The first fault stands: a deadlock already listed outranks a later one.
+                return Err(deadlock.unwrap_or(e));
             }
             if self.pending_exit.is_some() {
                 // A joined job called os.exit — hard halt, stop joining.
@@ -826,6 +841,6 @@ impl Vm {
                 break;
             }
         }
-        Ok(())
+        deadlock.map_or(Ok(()), Err)
     }
 }

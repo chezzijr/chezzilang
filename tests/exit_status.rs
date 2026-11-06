@@ -1586,3 +1586,134 @@ fn mask_durations(out: &str) -> String {
     s.push_str(rest);
     s
 }
+
+// A deadlock whose blocked tasks sit in two Executors and a nursery: the reap drains every
+// Executor, so each one's blocked job is listed, in Executor creation order after the test's own
+// task. Before, the drain stopped at the first Executor's deadlock and the second one's job was
+// reported apart, as an `(executor job)` error.
+#[test]
+fn a_deadlock_lists_the_blocked_jobs_of_every_executor() {
+    let t = TmpDir::new();
+    let entry = t.write(
+        "exec_test.chz",
+        r#"import std.concurrency
+
+fn w(c: Channel[int]):
+    _ := c.recv() else: panic("closed")
+
+test fn two_executors():
+    a := Channel[int]()
+    ex1 := concurrency.Executor()
+    _ := ex1.submit(fn(): w(a))
+    ex2 := concurrency.Executor()
+    _ := ex2.submit(fn(): w(a))
+    parallel:
+        spawn w(a)
+"#,
+    );
+    let job = |line: u32| {
+        format!(
+            "  task {}: recv() on an empty channel at <dir>/exec_test.chz:4:10\n    \
+             at w (called at <dir>/exec_test.chz:{line}:27)\n    \
+             at <closure> (called at <native:std.concurrency>:127:19)\n    \
+             at _run_outcome (called at <native:std.concurrency>:106:36)\n    \
+             at <closure> (called at <native:std.concurrency>:106:9)\n",
+            if line == 9 { 2 } else { 3 }
+        )
+    };
+    let want = format!(
+        "ERROR two_executors (<dir>/exec_test.chz:4:10) deadlock: 3 tasks are blocked and none \
+         can proceed\n  \
+         task 1: recv() on an empty channel at <dir>/exec_test.chz:4:10\n    \
+         at w (called at <dir>/exec_test.chz:13:15)\n{}{}\n\
+         1 test(s): 0 passed, 0 failed, 1 errored\n",
+        job(9),
+        job(11)
+    );
+    for threads in ["1", "2", "4"] {
+        for (i, out) in concurrent_test_runs(&entry, &["--timeout=2000"], threads, 16)
+            .iter()
+            .enumerate()
+        {
+            assert_eq!(out, &want, "threads={threads}: run {i}");
+        }
+    }
+}
+
+// A deadlock that ends in two Executors, one of them joined by a nursery task the verdict cut:
+// `joiner` blocks in `ex.shutdown()` on its own Executor's stuck job, its sibling and `main`'s
+// Executor job wait on `b`. After the nursery's verdict, `main`'s exit drain joins its own
+// Executor first. Before, its idle runner declined the standing verdict for as long as the cut
+// joiner's Executor sat finished and unjoined, which the drain reaches only after: a hang in some
+// runs at two or more workers. Each run must report the same four tasks.
+#[test]
+fn a_deadlock_with_an_unjoined_finished_executor_reports_every_run() {
+    let t = TmpDir::new();
+    let entry = t.write(
+        "d7.chz",
+        r#"import std.concurrency
+
+fn w(c: Channel[int]):
+    _ := c.recv() else: panic("closed")
+
+fn joiner(a: Channel[int]):
+    ex := concurrency.Executor()
+    _ := ex.submit(fn(): w(a))
+    ex.shutdown()
+
+fn main():
+    a := Channel[int]()
+    b := Channel[int]()
+    ex := concurrency.Executor()
+    _ := ex.submit(fn(): w(b))
+    parallel:
+        spawn joiner(a)
+        spawn w(b)
+    print("done")
+
+main()
+"#,
+    );
+    let dir = t.0.display().to_string();
+    let job = |k: u32, line: u32| {
+        format!(
+            "  task {k}: recv() on an empty channel at <dir>/d7.chz:4:10\n    \
+             at w (called at <dir>/d7.chz:{line}:26)\n    \
+             at <closure> (called at <native:std.concurrency>:127:19)\n    \
+             at _run_outcome (called at <native:std.concurrency>:106:36)\n    \
+             at <closure> (called at <native:std.concurrency>:106:9)\n"
+        )
+    };
+    let want = format!(
+        "runtime error (<dir>/d7.chz:9:5): deadlock: 4 tasks are blocked and none can proceed\n  \
+         task 1: waiting for an Executor join at <dir>/d7.chz:9:5\n    \
+         at joiner (called at <dir>/d7.chz:17:15)\n  \
+         task 2: recv() on an empty channel at <dir>/d7.chz:4:10\n    \
+         at w (called at <dir>/d7.chz:18:15)\n{}{}",
+        job(3, 15),
+        job(4, 8)
+    );
+    for threads in ["2", "4"] {
+        for batch in 0..4 {
+            let runs: Vec<_> = std::thread::scope(|s| {
+                let hs: Vec<_> = (0..25)
+                    .map(|_| {
+                        s.spawn(|| hang_deadline::run_with_hang_deadline(&entry, Some(threads)))
+                    })
+                    .collect();
+                hs.into_iter().map(|h| h.join().unwrap()).collect()
+            });
+            for (i, run) in runs.into_iter().enumerate() {
+                let out =
+                    run.unwrap_or_else(|| panic!("threads={threads}: run {} hung", batch * 25 + i));
+                let err = String::from_utf8_lossy(&out.stderr).replace(&dir, "<dir>");
+                assert_eq!(
+                    (out.status.code(), err.as_str()),
+                    (Some(1), want.as_str()),
+                    "threads={threads}: run {}",
+                    batch * 25 + i
+                );
+            }
+        }
+    }
+}

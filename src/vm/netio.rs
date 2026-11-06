@@ -232,7 +232,8 @@ impl Vm {
 
     /// TICKET-193/194 — THE guard order: wait for the guard to look free holding no width permit,
     /// take the permit back ([`Vm::wait_retake`]), then take the guard with no wait. So the permit
-    /// comes before the guard; a lost race gives it back again. `Ok(None)` is still held after `budget`, or lost the race.
+    /// comes before the guard; a lost race gives it back again. `Ok(None)` is still held after `budget`, or lost the race;
+    /// `Err` is a halt or this wait's deadlock cut.
     /// Stage 1 of [`Vm::take_update_guard`] and [`Vm::guard_wait_block`] both call it. The `ticket`
     /// stays live across the permit handoff.
     ///
@@ -257,12 +258,13 @@ impl Vm {
         }
         self.block_halts(span)?;
         // A deadlock verdict's cut of the holder frees the guard too, and is no progress: the
-        // holder is a blocked task of the verdict, so a cut wait reports its own wait (the caller's
-        // loop) instead of taking the guard.
+        // holder is a blocked task of the verdict, so a cut wait ends here with its own wait
+        // instead of taking the guard. Both stages leave on it at once (stage 1 no longer spins
+        // to its budget first).
         if let Some(sched) = self.mn.as_ref().map(Arc::clone)
             && self.in_place_cut(&sched.lock(), reg.tok())
         {
-            return Ok(Ok(None));
+            return Err(self.cut_fault(&sched, span));
         }
         self.wait_retake(reg);
         // A registered waiter marks its take before it tries (`core::GuardWait::taking`).

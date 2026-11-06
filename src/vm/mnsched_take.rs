@@ -572,7 +572,9 @@ impl MnSched {
     /// Three clauses per peer (Digest gotchas 2-4, measured on the planning spike):
     /// 1. no incomplete scope and no open body — the peer has FINISHED but its owner thread has not
     ///    yet dropped its `BlockedOwnerGuard`. Faulting in that gap drops a live feeder (`g3`,
-    ///    `d2a`): decline.
+    ///    `d2a`): decline. Not for an Executor's sched, which has no owner thread: its joiner is a
+    ///    registered party the process-wide verdict judges, and a finished, unjoined Executor
+    ///    would decline every verdict the drain's join waits on (a hang).
     /// 2. no incomplete scope but an OPEN body — a finished-looking peer whose body is still open is
     ///    NOT that window; treating it as a veto hung `j2.chz` at every run. Skip it (matches
     ///    [`MnSched::peer_can_move`]'s own first clause).
@@ -599,7 +601,10 @@ impl MnSched {
                 Err(std::sync::TryLockError::Poisoned(p)) => p.into_inner(),
             };
             if !c.any_scope_incomplete() {
-                if !c.any_body_open() {
+                // An Executor has no owner thread: whoever joins it is a party of the process-wide
+                // verdict, so a finished Executor is not that window (an unjoined one stays
+                // finished until a join that may come only after this verdict).
+                if !c.any_body_open() && s.detached.is_none() {
                     return false; // clause 1 — finished, guard not yet dropped
                 }
                 continue; // clause 2 — finished-looking but body open: not that window

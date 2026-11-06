@@ -396,8 +396,9 @@ still drains its executors, so a finished job's buffered output is not lost.
 every blocked task at once; each ends with its own wait at its own site, and none of them cancels a
 sibling, so the report does not depend on which task woke first. A join folds the blocked tasks of
 its slots in task order, and an enclosing join folds again, so the report lists every blocked task
-of the run in spawn-tree order (a nursery's tasks in place of the task that opened it). An executor's
-blocked jobs, drained at the end of the run, follow the run's own tasks. The report is one header,
+of the run in spawn-tree order (a nursery's tasks in place of the task that opened it). The blocked jobs
+of every executor, drained at the end of the run, follow the run's own tasks, in executor creation
+order. The report is one header,
 then one entry per task with its frames:
 
 ```
