@@ -715,6 +715,7 @@ impl Checker {
                 // "returns no value" error. `infer_value` then rejects it wherever a value is
                 // needed. The mode is recorded only after this attempt decides: `carriers` is
                 // not rolled back.
+                let mut failed = false;
                 if matches!(carrier.kind, ExprKind::OptChain { call: Some(_), .. }) {
                     let mut c = carrier.clone();
                     let scratch = self.scratch_operand(t.clone());
@@ -732,7 +733,8 @@ impl Checker {
                     let r = self.infer(&c);
                     let untyped = std::mem::replace(&mut self.untyped_call, armed).flatten();
                     self.pop_scope();
-                    if r == Ty::Nil && untyped != Some(span) {
+                    failed = untyped == Some(span);
+                    if r == Ty::Nil && !failed {
                         self.record_carrier(key, CarrierMode::OptionVoid, span, "?.");
                         return Ty::Nil;
                     }
@@ -749,7 +751,9 @@ impl Checker {
                 crate::desugar::lower_carrier_option(&mut c, tmp);
                 let r = self.infer(&c);
                 self.pop_scope();
-                r
+                // A failed call has no value, as under `.`: `Unknown`, not `Option[Unknown]`,
+                // so no reader (the discarded-value warning, a binding) cascades on it.
+                if failed { Ty::Unknown } else { r }
             }
             // The operand already errored (its diagnostic stands, un-truncated) — adding a second
             // one here would be the cascade `Ty::Unknown` exists to suppress.

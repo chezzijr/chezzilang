@@ -377,8 +377,10 @@ Each group below is one fact decided in two or more places (grouped 2026-10-16).
     `resolver::standalone_graph` (the real prelude, then the module), so a lone module is set up as
     a graph module (a module's own protocol keys an overload set there too); the no-prelude seeding
     is deleted. A protocol value's messages print its type, not its key (`Vecish`, not `v::Vecish`). A failed call under
-    `?.` reports what the plain `.` call reports: `r?.nope2(nope())` is 2 errors, not 3. The carrier
-    binders' names have one owner, `ast::CarrierTemp`.
+    `?.` reports what the plain `.` call reports: `r?.nope2(nope())` is 2 errors, not 3, and a
+    failed `r?.into()` statement adds no discarded-value warning. The carrier binders' names have
+    one owner, `ast::CarrierTemp`, which matches only the names it builds (`__opt12`, not a user's
+    `__options`).
 38. **The deadlock report lists every blocked task (Go's model, done 2026-11-06).** One header
     (`deadlock: N tasks are blocked and none can proceed`), then `task k: <wait> at <site>` and its
     frames for every blocked task of the run, in spawn-tree order, the same every run;

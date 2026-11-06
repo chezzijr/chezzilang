@@ -1367,6 +1367,37 @@ fn a_failed_optchain_call_reports_once_and_names_no_temp() {
     assert!(failed.is_empty(), "{}", failed.join("\n"));
 }
 
+/// A failed pick under `?.` in statement position reports what `.` reports, once: the pick error
+/// and no discarded-value warning (the failed call has no value to discard).
+#[test]
+fn a_failed_optchain_pick_statement_reports_only_the_pick_error() {
+    let src = "import Into from std.convert\nstruct R:\n    n: int\n    fn into(self) -> float:\n        return 1.0\n    fn into(self) -> str:\n        return \"s\"\nr: R? = ?R(1)\nr?.into()\n";
+    let t = TmpDir::new();
+    let entry = t.write("main.chz", src);
+    let graph = crate::resolver::build_graph(&entry).expect("resolve should succeed");
+    let (res, warns) = check_graph_diags(&graph, None);
+    let errs = res.expect_err("the pick fails");
+    assert_eq!(errs.len(), 1, "{errs:?}");
+    assert!(
+        errs[0].message.contains("into on R needs a target type"),
+        "{errs:?}"
+    );
+    assert!(
+        warns.is_empty(),
+        "no warning beside the pick error: {warns:?}"
+    );
+}
+
+/// A user name that merely starts like a compiler temp (`__options`) is the user's name: the
+/// bound-method help spells it back.
+#[test]
+fn a_user_name_with_the_temp_prefix_is_named_in_help() {
+    let src = "struct Bx[T]:\n    v: T\n    fn get(self) -> T:\n        return self.v\n__options := Bx(1)\nf := __options.get\n";
+    let errs = check_desugared(src);
+    assert_eq!(errs.len(), 1, "{errs:?}");
+    assert!(errs[0].message.contains("`__options.get(…)`"), "{errs:?}");
+}
+
 /// A double fault under `?.` (an unknown method AND an unknown name in its argument) reports the
 /// errors the plain `.` call reports, no more: the receiver type reads `K` in both.
 #[test]
