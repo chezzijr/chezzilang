@@ -1423,7 +1423,7 @@ pub struct ExecutorCore {
     pub created_at: Span,
     /// Where this Executor sits in its creator's spawn tree: its jobs' listing entries follow the
     /// run's tasks, in Executor order ([`super::deadlock::TaskPath::job`]).
-    pub(super) key: Vec<u32>,
+    pub(super) key: Vec<u64>,
 }
 
 impl ExecutorCore {

@@ -402,7 +402,11 @@ parent's place and the order in which its parent spawned it. A task blocked only
 `parallel:` join has no entry (its nursery's blocked tasks stand in its place); a task whose body
 is blocked in its own wait too (inside a callback such as `update` as well) comes after its
 nursery's tasks. The blocked jobs of every executor follow the run's own tasks, by the executor's
-place (where its creator made it), then in submission order. The report is one header, then one
+place (where its creator made it), then in submission order. The jobs of an executor made inside a
+job come after every job of an executor a run task made, and among themselves by the creating
+job's place. Under `chezzi test` a task is reported once: a job one test leaves blocked that a
+later test's verdict cuts is listed, with its frames, in that test's report, and the end-of-file
+drain does not report it again as an `(executor job)` row. The report is one header, then one
 entry per task with its frames:
 
 ```

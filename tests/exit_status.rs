@@ -2023,6 +2023,23 @@ fn listing_shapes() -> Vec<ListingShape> {
                 format!("recv() on an empty channel at <f>:23:14\n    at {main}"),
             ],
         },
+        ListingShape {
+            name: "nest",
+            own_head: false,
+            src: "fn job0(a: Channel[int]):\n    inner := concurrency.Executor()\n    _ := inner.submit(fn(): w(a))\n    w(a)\n\nfn main():\n    a := Channel[int]()\n    ex := concurrency.Executor()\n    _ := ex.submit(fn(): job0(a))\n    _ := ex.submit(fn(): w(a))\n    w(a)\n",
+            // The jobs of an Executor made inside a job follow every job of an Executor made by a
+            // run task, by the creating job's place.
+            entries: vec![
+                format!("{}\n    at {main}", w("22:5")),
+                job("15:5").replacen(
+                    "\n    at <closure>",
+                    "\n    at job0 (called at <f>:20:26)\n    at <closure>",
+                    1,
+                ),
+                job("21:26"),
+                job("14:29"),
+            ],
+        },
     ]
 }
 
@@ -2098,4 +2115,40 @@ fn every_deadlock_shape_lists_each_cut_task_once_in_spawn_tree_order() {
         }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// A job a test submits to a module-level Executor and leaves blocked is cut by a later test's
+/// verdict: that test lists it once, with its frames, and the end-of-file drain does not report it
+/// again as an `(executor job)` row.
+#[test]
+fn a_job_a_test_lists_is_not_reported_again_by_the_end_of_file_drain() {
+    let t = TmpDir::new();
+    let entry = t.write(
+        "glob_test.chz",
+        "import std.concurrency\n\nfn w(c: Channel[int]):\n    _ := c.recv() else: panic(\"closed\")\n\n\
+         ex := concurrency.Executor()\nz := Channel[int]()\n\ntest fn a_submit_passes():\n    \
+         _ := ex.submit(fn(): w(z))\n    assert true\n\ntest fn b_deadlock():\n    \
+         q := Channel[int]()\n    w(q)\n\ntest fn c_passes():\n    assert true\n\n\
+         test fn d_deadlock():\n    q := Channel[int]()\n    w(q)\n",
+    );
+    let f = "<dir>/glob_test.chz";
+    let want = format!(
+        "PASS a_submit_passes ({f})\n\
+         ERROR b_deadlock ({f}:4:10) deadlock: 2 tasks are blocked and none can proceed\n  \
+         task 1: recv() on an empty channel at {f}:4:10\n    at w (called at {f}:15:5)\n  \
+         task 2: recv() on an empty channel at {f}:4:10\n    at w (called at {f}:10:26)\n    \
+         at <closure> (called at <native:std.concurrency>:127:19)\n    \
+         at _run_outcome (called at <native:std.concurrency>:106:36)\n    \
+         at <closure> (called at <native:std.concurrency>:106:9)\n\
+         PASS c_passes ({f})\n\
+         ERROR d_deadlock ({f}:4:10) deadlock: 1 task is blocked and cannot proceed\n  \
+         task 1: recv() on an empty channel at {f}:4:10\n    at w (called at {f}:22:5)\n\n\
+         4 test(s): 2 passed, 0 failed, 2 errored\n"
+    );
+    for threads in ["1", "2", "4"] {
+        let runs = concurrent_test_runs(&entry, &["--timeout=2000"], threads, 8);
+        if let Some((i, out)) = runs.iter().enumerate().find(|(_, o)| **o != want) {
+            panic!("threads={threads} run {i}:\n--- want\n{want}--- got\n{out}");
+        }
+    }
 }

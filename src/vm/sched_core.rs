@@ -117,20 +117,19 @@ impl SchedCore {
         // span the in-place path raises there. Else the sched-wide `err`.
         // Each task names its own wait: its park site, else its scope's own fault (an owner
         // parked at a join names no site), else the sched-wide `err`.
-        let scope_err = match (f.park_site, &self.scopes[sid].deadlock_err) {
-            (Some((msg, span)), _) => err.at_site(msg, span),
-            (None, Some(e)) => e.clone(),
-            (None, None) => err.clone(),
-        };
         // M1.4 — take the context out of the registry before any field moves: this thread may not
         // be attached to the GC (see `RootRegistry::roots`).
         let ctx = f.ctx.into_inner();
         // A fiber parked at a wait is one entry of the run's listing, with its frames; an owner
         // parked at a join is not (its blocked children stand in its place).
-        if let Some((msg, span)) = f.park_site {
-            let frames = super::frames::raw_frames(&ctx.frames);
-            self.listing.add(&ctx.task, msg, span, frames);
-        }
+        let scope_err = match (f.park_site, &self.scopes[sid].deadlock_err) {
+            (Some((msg, span)), _) => {
+                let frames = super::frames::raw_frames(&ctx.frames);
+                self.listing.cut(err, &ctx.task, msg, span, frames)
+            }
+            (None, Some(e)) => e.clone(),
+            (None, None) => err.clone(),
+        };
         self.slots[ti] = Some(TaskOutcome::Deadlocked {
             err: scope_err,
             out: ctx.out,

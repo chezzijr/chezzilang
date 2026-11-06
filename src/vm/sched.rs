@@ -14,7 +14,7 @@ pub(super) enum SpawnTarget {
     Scope {
         sched: Arc<MnSched>,
         settle: JobSettle,
-        executor: Vec<u32>,
+        executor: Vec<u64>,
     },
 }
 

@@ -388,7 +388,9 @@ Each group below is one fact decided in two or more places (grouped 2026-10-16).
     header, the listing and the rendering; the five old texts are gone. The listing is a snapshot
     taken at the verdict (2026-11-07): each cut task adds its own entry at its cut, keyed by its
     spawn-tree place (`deadlock::TaskPath`), and the driver reports it once after every join and
-    the drain, so nested nurseries no longer drop, repeat or misplace a task. A deadlock fault no longer
+    the drain, so nested nurseries no longer drop, repeat or misplace a task. Under `chezzi test`
+    a task is reported once (2026-11-07): a job a later test's report listed is not reported again
+    by the end-of-file drain. A deadlock fault no longer
     cancels a blocked sibling, and a cut guard waiter no longer takes the guard its cut holder
     frees. Every executor's blocked jobs are listed, by executor place, and a deadlock whose cut
     joiner leaves its Executor finished and unjoined no longer hangs the exit drain. A

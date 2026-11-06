@@ -122,6 +122,9 @@ pub struct Blocked {
     /// task the fault ends ([`listing`]). `false` once the run's listing replaced it
     /// ([`super::Vm::list_blocked`]).
     own: bool,
+    /// The cut task's key in the run's [`Listing`], when the cut added it there: a later report
+    /// of this fault finds the task already listed ([`super::Vm::list_blocked`]).
+    key: Option<Vec<Step>>,
 }
 
 /// The fault of one blocked task the verdict cut: the header, and the task's own `wait` at `span`.
@@ -137,6 +140,7 @@ pub(super) fn cut(base: &RuntimeError, wait: &str, span: Span) -> RuntimeError {
             frames: Vec::new(),
         }],
         own: true,
+        key: None,
     }));
     e
 }
@@ -171,17 +175,28 @@ pub fn listing(err: &RuntimeError, trace: &[TraceFrame]) -> Vec<BlockedTask> {
 
 /// A task's place in the run's spawn tree: its parent's path and its index among the tasks and
 /// Executors its parent made, in the order it made them. The run's own tasks sit under [`RUN`],
-/// an Executor's jobs under [`JOBS`], by the Executor's place then the job's submission index, so
-/// every job follows every task of the run. Travels with its task ([`super::Vm::swap_task`]).
+/// an Executor's jobs under [`JOBS`], by the Executor's place (its creator's path, then the
+/// creator's index for it) then the job's submission index, so every job follows every task of
+/// the run. A job's own path starts with [`JOBS`], so the jobs of an Executor a job made follow
+/// every job of an Executor a run task made, and sort among themselves by the creating job's
+/// place. Travels with its task ([`super::Vm::swap_task`]).
 #[derive(Clone, Debug)]
 pub(crate) struct TaskPath {
-    path: Vec<u32>,
-    /// The index of the next task or Executor this task makes.
-    next: u32,
+    path: Vec<u64>,
+    /// The index of the next task or Executor this task makes. `u64`: a run never makes 2^64.
+    next: u64,
 }
 
-const RUN: u32 = 0;
-const JOBS: u32 = 1;
+const RUN: u64 = 0;
+const JOBS: u64 = 1;
+
+/// One step of a listing key: a child index of the path, or the task's own entry, which sorts
+/// after every child of the same task (a task's own wait follows its nursery's tasks).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum Step {
+    Child(u64),
+    Own,
+}
 
 impl Default for TaskPath {
     /// The run's root task (`main`, a `test fn`).
@@ -195,7 +210,7 @@ impl Default for TaskPath {
 
 impl TaskPath {
     /// The next child's place: a task this task spawns, or the key of an Executor it creates.
-    fn next_child(&mut self) -> Vec<u32> {
+    fn next_child(&mut self) -> Vec<u64> {
         let mut path = self.path.clone();
         path.push(self.next);
         self.next += 1;
@@ -211,24 +226,27 @@ impl TaskPath {
     }
 
     /// The key of the Executor this task creates now ([`TaskPath::job`]).
-    pub(super) fn executor(&mut self) -> Vec<u32> {
+    pub(super) fn executor(&mut self) -> Vec<u64> {
         self.next_child()
     }
 
     /// The path of job `index` of the Executor keyed `executor`.
-    pub(super) fn job(executor: &[u32], index: usize) -> TaskPath {
+    pub(super) fn job(executor: &[u64], index: usize) -> TaskPath {
         let mut path = vec![JOBS];
         path.extend_from_slice(executor);
-        path.push(u32::try_from(index).unwrap_or(u32::MAX - 1));
+        path.push(u64::try_from(index).unwrap_or(u64::MAX));
         TaskPath { path, next: 0 }
     }
 }
 
 /// One entry of the run's listing: the wait, its site, and the task's frames (innermost first).
+/// `reported` once a report took it ([`Listing::take`]); the entry stays, so the task is not
+/// reported twice.
 struct Entry {
     wait: &'static str,
     span: Span,
     frames: Vec<(ProtoId, Span)>,
+    reported: bool,
 }
 
 /// THE deadlock listing of a run: one entry per task the verdict cut, added at the cut and keyed by
@@ -236,33 +254,79 @@ struct Entry {
 /// a join or unwind reached first. One per run, shared by every sched of the run
 /// (`QuiesceState::listing`).
 #[derive(Default)]
-pub(crate) struct Listing(Mutex<BTreeMap<Vec<u32>, Entry>>);
+pub(crate) struct Listing(Mutex<BTreeMap<Vec<Step>, Entry>>);
+
+/// What [`Listing::take`] hands a report: one entry's wait, site and frames.
+type Taken = (&'static str, Span, Vec<(ProtoId, Span)>);
 
 impl Listing {
-    /// The cut task at `task` waits on `wait` at `span`, with `frames`. A task's own entry follows
-    /// its children's (a nursery's tasks in place of the task that opened it, then its own wait).
-    /// A task is listed once: the first cut stands.
+    /// The cut task at `task` waits on `wait` at `span`, with `frames`; returns its key. A task's
+    /// own entry follows its children's (a nursery's tasks in place of the task that opened it,
+    /// then its own wait). A task is listed once: the first cut stands.
     pub(super) fn add(
         &self,
         task: &TaskPath,
         wait: &'static str,
         span: Span,
         frames: Vec<(ProtoId, Span)>,
-    ) {
-        let mut key = task.path.clone();
-        key.push(u32::MAX);
+    ) -> Vec<Step> {
+        let key: Vec<Step> = task
+            .path
+            .iter()
+            .map(|&i| Step::Child(i))
+            .chain([Step::Own])
+            .collect();
         self.0
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .entry(key)
-            .or_insert(Entry { wait, span, frames });
+            .entry(key.clone())
+            .or_insert(Entry {
+                wait,
+                span,
+                frames,
+                reported: false,
+            });
+        key
     }
 
-    /// Take every entry, in spawn-tree order.
-    fn take(&self) -> Vec<Entry> {
-        std::mem::take(&mut *self.0.lock().unwrap_or_else(|e| e.into_inner()))
-            .into_values()
+    /// The fault of the task at `task`, cut on `wait` at `span` with `frames`, from the verdict's
+    /// fault `base`: the task's entry ([`Listing::add`]), and the fault that names it. THE one way
+    /// a cut task enters the listing.
+    pub(super) fn cut(
+        &self,
+        base: &RuntimeError,
+        task: &TaskPath,
+        wait: &'static str,
+        span: Span,
+        frames: Vec<(ProtoId, Span)>,
+    ) -> RuntimeError {
+        let key = self.add(task, wait, span, frames);
+        let mut e = base.at_site(wait, span);
+        if let Some(b) = e.blocked.as_mut() {
+            b.key = Some(key);
+        }
+        e
+    }
+
+    /// Every entry no report took yet, in spawn-tree order; each is reported from now on.
+    fn take(&self) -> Vec<Taken> {
+        let mut map = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        map.values_mut()
+            .filter(|e| !e.reported)
+            .map(|e| {
+                e.reported = true;
+                (e.wait, e.span, e.frames.clone())
+            })
             .collect()
+    }
+
+    /// True when `key`'s task is in the listing and a report took it.
+    fn reported(&self, key: &[Step]) -> bool {
+        self.0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(key)
+            .is_some_and(|e| e.reported)
     }
 }
 
@@ -277,36 +341,51 @@ impl super::Vm {
     ) -> RuntimeError {
         self.quiesce
             .listing
-            .add(&self.task, wait, span, self.raw_frames());
-        base.at_site(wait, span)
+            .cut(base, &self.task, wait, span, self.raw_frames())
     }
 
-    /// Take the run's listing, in spawn-tree order, each entry's frames named. Empties it, so a
-    /// `chezzi test` run takes each test's listing alone.
+    /// Take the run's listing: every entry no report took yet, in spawn-tree order, each entry's
+    /// frames named. A `chezzi test` run so takes each test's listing alone, and reports each task
+    /// once.
     pub fn take_listing(&self) -> Vec<BlockedTask> {
         self.quiesce
             .listing
             .take()
             .into_iter()
-            .map(|e| BlockedTask {
-                wait: e.wait.to_string(),
-                span: e.span,
-                frames: self.trace_of(&e.frames),
+            .map(|(wait, span, frames)| BlockedTask {
+                wait: wait.to_string(),
+                span,
+                frames: self.trace_of(&frames),
             })
             .collect()
     }
 
     /// A run's end, for a driver: a deadlock verdict's fault reports the run's listing, its first
-    /// task's site and the header. Every other result is returned as is. The listing is taken
-    /// either way.
+    /// task's site and the header. A cut whose task an earlier report listed (a job a test's
+    /// verdict cut, joined by the end-of-file drain), with no task left to list, is no fault: the
+    /// task is reported once. Every other result is returned as is. The listing is taken either
+    /// way.
     pub(crate) fn list_blocked(&self, r: Result<(), RuntimeError>) -> Result<(), RuntimeError> {
         let tasks = self.take_listing();
         match r {
             Err(mut e) if e.blocked.is_some() && !tasks.is_empty() => {
                 e.message = header(tasks.len());
                 e.span = tasks[0].span;
-                e.blocked = Some(Box::new(Blocked { tasks, own: false }));
+                e.blocked = Some(Box::new(Blocked {
+                    tasks,
+                    own: false,
+                    key: None,
+                }));
                 Err(e)
+            }
+            Err(e)
+                if e.blocked.as_ref().is_some_and(|b| {
+                    b.key
+                        .as_ref()
+                        .is_some_and(|k| self.quiesce.listing.reported(k))
+                }) =>
+            {
+                Ok(())
             }
             r => r,
         }
@@ -335,4 +414,26 @@ pub fn render(tasks: &[BlockedTask], files: &[(u32, std::path::PathBuf)]) -> Vec
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A child counter at the `u32` boundary neither wraps nor collides with its parent's own
+    /// entry: both children are listed, before the parent.
+    #[test]
+    fn a_child_past_u32_max_is_listed_before_its_parent() {
+        let mut parent = TaskPath {
+            path: vec![RUN],
+            next: u32::MAX.into(),
+        };
+        let (a, b) = (parent.child(), parent.child());
+        let listing = Listing::default();
+        for (task, wait) in [(&a, "a"), (&b, "b"), (&parent, "parent")] {
+            listing.add(task, wait, Span::default(), Vec::new());
+        }
+        let waits: Vec<_> = listing.take().into_iter().map(|e| e.0).collect();
+        assert_eq!(waits, ["a", "b", "parent"]);
+    }
 }
