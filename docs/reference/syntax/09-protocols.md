@@ -503,8 +503,12 @@ b := W.parse("ab")    # the str overload
   as is every repeated plain method (no free overloading, as in Rust, Go and Python).
 - The key is decided once, at the declaration, and travels with the type: a module that imports only
   `W` calls `W.parse("a")` with no import of `Parse`.
-- Two visible protocols that key one method name differently (`parse(x: S)` and `parse(self) -> T`)
-  are *protocols Emit[T] and Parse[S] both declare 'parse' with different overload keys*.
+- The receiver decides which protocols can key a method: a static `parse` is keyed only by a
+  static requirement (`Parse[S]`'s `parse(x: S)`), an instance one only by an instance requirement
+  (`Emit[T]`'s `parse(self) -> T`), so both protocols in scope do not conflict. Two visible
+  protocols whose requirements of one receiver key one name differently (`parse(x: S)` and
+  `parse(n: int, x: S)`) are *protocols Parse[S] and Pick[S] both declare 'parse' with different
+  overload keys*.
 - The key may be a later parameter: `protocol Build[S]: fn build(n: int, x: S) -> Self` picks by
   the second argument (`M.build(1, "ab")`, `M.build(1, x="ab")`, `M.build[str](1, "ab")`).
 - The declaration rules (shape, overlap) and the picks are the conversions' rules:

@@ -197,7 +197,13 @@ impl Checker {
     /// `infer` of `e` may wrap `e` into the hint's carrier. Without, the hint is a seed (it guides
     /// inference and never wraps). A synthesized node never owns a hint.
     pub(super) fn install_hint(&mut self, e: &Expr, hint: Ty, slot: bool) {
-        self.expected_hint = Some(Hint::plain(hint));
+        self.install_whole_hint(e, Hint::plain(hint), slot);
+    }
+
+    /// [`Self::install_hint`] with the hint's payload marker kept: a branch arm forwards its
+    /// node's whole hint ([`ChildHint::Same`]), a payload hint under `?`, `??` or `else:` included.
+    pub(super) fn install_whole_hint(&mut self, e: &Expr, hint: Hint, slot: bool) {
+        self.expected_hint = Some(hint);
         self.hint_owner = (slot && e.id.0 != crate::ast::NodeId::SYNTH.0).then_some(e.id);
     }
 

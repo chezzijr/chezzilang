@@ -530,6 +530,29 @@ fn protocol_slot_gate_grid() {
                 main("print(W.from(3).n)")
             ),
         ),
+        // The receiver decides which requirements can key a declaration before any conflict:
+        // an instance `Emit[T].parse(self) -> T` cannot key a static `parse`.
+        (
+            "an instance protocol beside a static one keys two static parse",
+            format!(
+                "{parse}protocol Emit[T]:\n    fn parse(self) -> T\n{two_parse}{}",
+                main("print(W.parse(3).n + W.parse(\"ab\").n)")
+            ),
+        ),
+        (
+            "an instance protocol beside a static one, one static parse",
+            format!(
+                "{parse}protocol Emit[T]:\n    fn parse(self) -> T\nstruct W:\n    n: int\n    fn parse(x: int) -> W:\n        return W(x)\n{}",
+                main("print(W.parse(1).n)")
+            ),
+        ),
+        (
+            "an instance protocol beside a static one keys two instance parse",
+            format!(
+                "{parse}protocol Emit[T]:\n    fn parse(self) -> T\nstruct V:\n    n: int\n    fn parse(self) -> int:\n        return self.n\n    fn parse(self) -> str:\n        return \"v\"\n{}",
+                main("n: int = V(1).parse()\n    print(n)")
+            ),
+        ),
         (
             "A into -> B beside B from(x: A)",
             "import From, Into from std.convert\nstruct A:\n    n: int\n    fn into(self) -> B:\n        return B(self.n)\nstruct B:\n    n: int\n    fn from(x: A) -> B:\n        return B(x.n)\nfn main():\n    b: B = A(1).into()\n    print(B.from(A(2)).n + b.n)\nmain()\n".to_string(),
@@ -555,12 +578,12 @@ fn protocol_slot_gate_grid() {
             "method 'add' is already defined",
         ),
         (
-            "two visible protocols key parse differently",
+            "two visible static protocols key parse differently",
             format!(
-                "{parse}protocol Emit[T]:\n    fn parse(self) -> T\n{two_parse}{}",
+                "{parse}protocol Pick[S]:\n    fn parse(n: int, x: S) -> Self\n{two_parse}{}",
                 main("print(1)")
             ),
-            "protocols Emit[T] and Parse[S] both declare 'parse' with different overload keys",
+            "protocols Parse[S] and Pick[S] both declare 'parse' with different overload keys",
         ),
     ];
     let mut failures = Vec::new();
@@ -614,6 +637,8 @@ fn slot_pick_grid() {
     let bx = "struct Box[T]:\n    v: T\n    fn into(self) -> T:\n        return self.v\n";
     let parse = "protocol Parse[S]:\n    fn parse(x: S) -> Self\nstruct W:\n    n: int\n    fn parse(x: int) -> W:\n        return W(x)\n    fn make(x: int) -> W:\n        return W(x)\n";
     let mk = "protocol Mk[S]:\n    fn mk(n: int, x: S) -> Self\nstruct M:\n    n: int\n    fn mk(n: int, x: int) -> M:\n        return M(n + x)\n    fn mk(n: int, x: str) -> M:\n        return M(n + x.len())\n";
+    let opt_f = "struct R:\n    n: int\n    fn into(self) -> int?:\n        return None\n    fn into(self) -> float:\n        return 1.0\n";
+    let opt_i = "struct R:\n    n: int\n    fn into(self) -> int:\n        return 1\n    fn into(self) -> int?:\n        return None\n";
     let gbox = "struct Box[T]:\n    v: T\n    fn from(x: T) -> Box[T]:\n        return Box(x)\n";
     let accept: Vec<(&str, String)> = vec![
         (
@@ -660,6 +685,36 @@ fn slot_pick_grid() {
         (
             "a Param(1) slot picks by a keyword argument",
             prog(mk, "m := M.mk(1, x=\"ab\")"),
+        ),
+        // A value read of a `Param(1)` set keys by the slot's param, at the requirement's arity.
+        (
+            "a Param(1) set read as a value picks by param 2",
+            prog(
+                mk,
+                "f: fn(int, str) -> M = M.mk\n    g: fn(int, int) -> M = M.mk\n    print(f(1, \"ab\").n + g(2, 3).n)",
+            ),
+        ),
+        // A payload hint (`?`, `??`, `else:`) names the `T` of a `T?` target as of a `T!` one.
+        (
+            "?? picks an into -> int? beside into -> float",
+            prog(opt_f, "k: int = R(1).into() ?? 7\n    print(k)"),
+        ),
+        (
+            "?? picks an into -> int? beside into -> int",
+            prog(opt_i, "k: int = R(1).into() ?? 7\n    print(k)"),
+        ),
+        (
+            "else: picks an into -> int? beside into -> float",
+            prog(
+                opt_f,
+                "k: int = R(1).into() else:\n        return\n    print(k)",
+            ),
+        ),
+        (
+            "? picks an into -> int? beside into -> float",
+            format!(
+                "{CONV}{opt_f}fn go(r: R) -> int?:\n    k: int = r.into()?\n    return k\nprint(go(R(1)))\n"
+            ),
         ),
     ];
     let reject: Vec<(&str, String, &str)> = vec![

@@ -144,8 +144,8 @@ impl Checker {
                     // through its TYPE (`Bx[int].get`, receiver first) is the value form.
                     if info.methods.contains_key(name) {
                         let recv = match obj.kind.as_ident() {
-                            Some(n) => n.as_str(),
-                            None => "x",
+                            Some(n) if !crate::desugar::is_carrier_temp(n) => n.as_str(),
+                            Some(_) | None => "x",
                         };
                         self.error(
                             name_span,
@@ -726,9 +726,14 @@ impl Checker {
                     self.next_opt_tmp += 1;
                     crate::desugar::lower_carrier_option_void(&mut c, tmp);
                     let mark = self.diag_mark();
+                    // A call that types `Unknown` (its own error: a failed pick) is not void:
+                    // the `pass` arm alone makes the match `Nil`. The value form keeps that one
+                    // error, with no "returns no value" after it.
+                    let armed = self.untyped_call.replace(None);
                     let r = self.infer(&c);
+                    let untyped = std::mem::replace(&mut self.untyped_call, armed).flatten();
                     self.pop_scope();
-                    if r == Ty::Nil {
+                    if r == Ty::Nil && untyped != Some(span) {
                         self.record_carrier(key, CarrierMode::OptionVoid, span, "?.");
                         return Ty::Nil;
                     }

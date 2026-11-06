@@ -1329,6 +1329,38 @@ fn opt_chain_on_non_option_does_not_leak_temp_name() {
     );
 }
 
+/// A call under `?.` that fails reports what `.` reports, once: no `__opt` temp in the message
+/// (the receiver is not printed) and no "returns no value" / index cascade after it. A void call
+/// with a bad argument still reports the argument once (TICKET-239).
+#[test]
+fn a_failed_optchain_call_reports_once_and_names_no_temp() {
+    let k = "import Into from std.convert\nstruct K:\n    n: int\n    fn into(self) -> int:\n        return self.n\n    fn into(self) -> str:\n        return \"k\"\n    fn get[U](self, u: U) -> U:\n        return u\n    fn put(self, x: int):\n        pass\n";
+    let cells = [
+        (
+            "    r: K? = K(1)\n    x := r?.into()\n    print(x)\n",
+            "into on K needs a target type",
+        ),
+        (
+            "    r: K? = K(1)\n    xs := [10]\n    g := fn(): r?.get[xs[0]](3)\n    print(g())\n",
+            "'get' is a method",
+        ),
+        (
+            "    r: K? = K(1)\n    r?.put(\"s\")\n",
+            "expected int, found str",
+        ),
+    ];
+    let mut failed = Vec::new();
+    for (body, needle) in cells {
+        let src = format!("{k}fn main():\n{body}main()\n");
+        let errs = check_desugared(&src);
+        if errs.len() != 1 || !errs[0].message.contains(needle) || errs[0].message.contains("__opt")
+        {
+            failed.push(format!("{body}=> wanted one {needle:?}, got {errs:?}"));
+        }
+    }
+    assert!(failed.is_empty(), "{}", failed.join("\n"));
+}
+
 #[test]
 fn carrier_operand_scratch_name_never_leaks_into_a_diagnostic() {
     // The operand-scratch binding `Checker::scratch_operand` declares (so the lowered clone infers

@@ -439,10 +439,23 @@ fn optchain_type_args() {
     let (name, c) = opt_call("x := r?.fs[k](1)\n");
     assert_eq!(name, "fs");
     assert!(matches!(c.bracket.map(|b| b.kind), Some(ExprKind::Ident(k)) if k == "k"));
-    // A bracket that is no type list stays an index on the chain.
+    // A one-arg bracket that is no type list indexes then calls, as after `.`: it is the call's
+    // `bracket` with no type argument.
+    for (src, want) in [
+        ("x := r?.fs[0](1)\n", "Int"),
+        ("x := r?.m[\"a\"](1)\n", "Str"),
+        ("x := r?.fs[k+0](1)\n", "Binary"),
+    ] {
+        let (_, c) = opt_call(src);
+        assert!(c.type_args.is_empty(), "{src}: {c:?}");
+        let b = c.bracket.unwrap_or_else(|| panic!("{src}: no bracket"));
+        assert!(format!("{:?}", b.kind).starts_with(want), "{src}: {b:?}");
+        assert_eq!(c.args.len(), 1, "{src}");
+    }
+    // With no call after it the bracket stays a subscript of the chain.
     assert!(matches!(
-        let_value("x := r?.fs[0](1)\n").kind,
-        ExprKind::Call { .. }
+        let_value("x := r?.fs[0]\n").kind,
+        ExprKind::Index { .. }
     ));
 }
 

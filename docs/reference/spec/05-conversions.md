@@ -191,7 +191,9 @@ b := Rat.from("ab")    # the str overload: Rat(2, 3)
   return, a typed list element), and so does a generic slot's param type: `[1, 2].map(Rat.from)`
   is the `int` overload. With no fn type there, `g := Rat.from` and
   `print(Rat.from)` are *type annotations needed: Rat.from has 2 overloads (int, str)*, as
-  Rust's `let g = Rat::from;` is `E0283`. A type with one `from` reads as a value as before.
+  Rust's `let g = Rat::from;` is `E0283`. A type with one `from` reads as a value as before. A
+  later-param key picks by that param: `f: fn(int, str) -> M = M.build` (`Build[S]`'s
+  `build(n: int, x: S)`) is the `str` overload.
 
 **`into`: a conversion on the source.** A struct or enum converts ITSELF with an instance
 `fn into(self) -> T` (Rust `impl Into<T> for Rat`), one per target type, and with
@@ -223,7 +225,10 @@ n := r.try_into[int]()     # an error value: 1/2 is not an int
 - Two or more `into`s are an overload set. The `[T]` picks the overload whose return is `T`, exactly
   (Rust's `Into<T>`). With no `[T]`, the annotation picks (Rust `let f: f64 = r.into()`):
   `f: float = r.into()`, and a carrier annotation picks a `try_into` by its payload
-  (`n: int! = r.try_into()`). `[T]` wins over the annotation, so `x: int = r.into[str]()` is the
+  (`n: int! = r.try_into()`). Under `?`, `??` or `else:` the annotation names the payload of a
+  carrier target: `k: int = r.into() ?? 7` picks `into(self) -> int?` (and `n: int =
+  r.try_into()?` the `-> int!`); with no carrier target of that payload it picks as a plain
+  annotation. `[T]` wins over the annotation, so `x: int = r.into[str]()` is the
   assignment's *cannot assign str to variable of type int*. With neither, `x := r.into()` is *into
   on Rat needs a target type: write `.into[T]()`* (no message names the receiver); a target with
   no overload is *type Rat has no into for int (it has: float, str)*, the one error of the call.

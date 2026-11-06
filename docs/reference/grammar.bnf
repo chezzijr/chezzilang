@@ -722,9 +722,10 @@
             # The parser steals the type list + arg list whenever the receiver is a member access and the
             # `[ <typeList> ] (` shape is present (SPECULATIVE: a non-type-then-call subscript such as
             # `obj.items[0]` or the numeric `arr[0].h[0](x)` backtracks and keeps its plain index meaning).
-            # UNIFORM RULE: `recv.name[X](args)` always parses as a method turbofish on ANY receiver, so
-            # index-then-call of a fn-VALUED field needs parens — `(recv.name[k])(args)` — on any receiver
-            # (this matches the bare-ident receiver, which already required parens). The COMBINED form
+            # A ONE-arg bracket that also parses as an expression keeps both readings, and the CHECKER
+            # picks (TICKET-210): when the member is data (a fn-VALUED field) it indexes then calls with
+            # no parens (`h.fs[k](10)`), as a bare local does (`fs[k](10)`); else it is the method's
+            # type argument. A bracket that is no type list (`h.fs[0](10)`) is a plain index. The COMBINED form
             # `Box[int].make[str](x)` (enclosing-type args from PART 1 + this method `[str]`) likewise
             # parses through these productions (the receiver `Box[int]` is itself a postfix) and the
             # CHECKER threads both arg sets; a method turbofish on a generic VARIANT ctor is an error.
@@ -739,11 +740,13 @@
             | <postfix> "QUESTIONDOT" "INT"
             | <postfix> "QUESTIONDOT" <memberName> "LPAREN" "RPAREN"
             | <postfix> "QUESTIONDOT" <memberName> "LPAREN" <argList> "RPAREN"
-            # `?.` takes the `.` method turbofish by the same speculative `[ <typeList> ] (` parse
-            # (`r?.into[str]()`); a one-arg bracket keeps its expression reading, so the checker
-            # indexes then calls when the member is data (`h?.fs[k](10)`, TICKET-210).
-            | <postfix> "QUESTIONDOT" <memberName> "LBRACKET" <typeList> "RBRACKET" "LPAREN" "RPAREN"
-            | <postfix> "QUESTIONDOT" <memberName> "LBRACKET" <typeList> "RBRACKET" "LPAREN" <argList> "RPAREN"
+            # `?.` reads its bracket as `.` does: the method turbofish by the same speculative
+            # `[ <typeList> ] (` parse (`r?.into[str]()`); a one-arg bracket keeps its expression
+            # reading, so the checker indexes then calls when the member is data (`h?.fs[k](10)`,
+            # TICKET-210); and a <subscript> that is no type list indexes then calls inside the chain
+            # (`h?.fs[0](10)`, `h?.m["a"](10)`). With no `(` after it the bracket indexes the chain.
+            | <postfix> "QUESTIONDOT" <memberName> "LBRACKET" <bracket> "RBRACKET" "LPAREN" "RPAREN"
+            | <postfix> "QUESTIONDOT" <memberName> "LBRACKET" <bracket> "RBRACKET" "LPAREN" <argList> "RPAREN"
 
 # The inside of a subscript `[ … ]`: one expression. A `Range` value in it (`xs[a..b]`, `xs[2..]`,
 # `xs[..]`, `xs[Range(0, 10, 2)]`) is a slice; any other value is an index or a map key. The colon

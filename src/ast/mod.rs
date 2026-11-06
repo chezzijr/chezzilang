@@ -1512,7 +1512,8 @@ pub struct OptCall {
     pub named: Vec<(String, Expr)>,
     pub type_args: Vec<Type>,
     /// The one-arg bracket's expression reading, as [`ExprKind::Call`]'s `bracket`
-    /// (`r?.fs[k](10)` indexes then calls when `fs` is data, TICKET-210).
+    /// (`r?.fs[k](10)` indexes then calls when `fs` is data, TICKET-210). With no `type_args` the
+    /// bracket is no type list (`r?.fs[0](10)`): desugar indexes then calls, as after `.`.
     pub bracket: Option<Box<Expr>>,
 }
 

@@ -102,6 +102,42 @@ fn a_return_only_generic_call_is_pinned_under_every_wrapper_in_every_position() 
     );
 }
 
+/// An `if` arm forwards its node's hint whole (`ChildHint::Same`): under `?`, `??` and
+/// `else:` that is the payload hint, so a return-only generic call in an arm is pinned as it is
+/// outside one (rustc: `let n: i64 = (if c { parse("7") } else { parse("8") })?`).
+#[test]
+fn a_branch_arm_keeps_the_payload_hint() {
+    let cell = |ret: &str, body: &str| {
+        format!("{PRELUDE}fn cell(c: bool, k: int) -> {ret}:\n{body}print(cell(true, 0))\n")
+    };
+    let arms = [
+        ("int!", "parse(\"7\")", "parse(\"8\")"),
+        ("int?", "opt(\"7\")", "opt(\"8\")"),
+    ];
+    let mut failed = Vec::new();
+    for (ret, a, b) in arms {
+        // A multi-line `match` is a whole value (no `(match ...)?`), so the arms are `if`'s.
+        let iff = format!("(if c: {a} else: {b})");
+        let elif = format!("(if c: {a} elif k == 1: {b} else: {a})");
+        for v in [&iff, &elif] {
+            for src in [
+                cell(ret, &format!("    n: int = {v}?\n    return n\n")),
+                cell("int", &format!("    n: int = {v} ?? 0\n    return n\n")),
+                cell(
+                    "int",
+                    &format!("    n: int = {v} else:\n        return 0\n    return n\n"),
+                ),
+            ] {
+                let errs = check_src(&src);
+                if !errs.is_empty() {
+                    failed.push(format!("{src}\n=> {:?}", errs[0].message));
+                }
+            }
+        }
+    }
+    assert!(failed.is_empty(), "{}", failed.join("\n\n"));
+}
+
 const LEAK_PRELUDE: &str = "struct Box[T]:
     v: T
 fn mk[T]() -> Box[T]:

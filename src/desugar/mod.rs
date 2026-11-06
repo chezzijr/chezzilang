@@ -1504,6 +1504,21 @@ fn variant_pat(id: crate::ast::NodeId, name: &str, bindings: Vec<Pattern>) -> Pa
     }
 }
 
+/// The name prefix of the payload binder the carrier lowerings bind (`__opt{tmp}`); the
+/// checker's operand scratch (`__optrecv{n}`) shares it. No user source spells it.
+const CARRIER_TEMP: &str = "__opt";
+
+/// The payload binder of the carrier lowering numbered `tmp`.
+fn carrier_temp(tmp: usize) -> String {
+    format!("{CARRIER_TEMP}{tmp}")
+}
+
+/// Is `name` a binder a carrier lowering synthesized? A message that would print it prints no
+/// receiver instead (`?.` desugars its receiver to one).
+pub fn is_carrier_temp(name: &str) -> bool {
+    name.starts_with(CARRIER_TEMP)
+}
+
 /// Lower an `OptChain` / `NullCoalesce` carrier (in place) to an expression-position `match` —
 /// the **Option** lowering:
 ///   `a ?? b`     → `match a: Some(__optN): __optN; None: b`
@@ -1538,7 +1553,7 @@ fn lower_carrier_option_as(expr: &mut Expr, tmp: usize, void: bool) {
         k.set(k.get() + 1);
         base.carrier_child(k.get())
     };
-    let c = format!("__opt{tmp}");
+    let c = carrier_temp(tmp);
     let kind = std::mem::replace(&mut expr.kind, ExprKind::Bool(false));
     expr.kind = match kind {
         ExprKind::NullCoalesce { lhs, rhs, .. } => {
@@ -1587,22 +1602,14 @@ fn lower_carrier_option_as(expr: &mut Expr, tmp: usize, void: bool) {
             // `__optN.field` or `__optN.method(args)`, then wrapped in `Some(...)`.
             let access = match call {
                 None => field,
-                Some(OptCall {
-                    args,
-                    named,
-                    type_args,
-                    bracket,
-                }) => Expr {
-                    id: nid(),
-                    kind: ExprKind::Call {
-                        callee: Box::new(field),
-                        args,
-                        named,
-                        type_args,
-                        bracket,
-                    },
-                    span,
-                },
+                Some(call) => {
+                    let id = nid();
+                    Expr {
+                        id,
+                        kind: opt_call_kind(field, call, span, nid),
+                        span,
+                    }
+                }
             };
             // Drawn before the branch, so the void form skips no id.
             let (wrap_id, some_id) = (nid(), nid());
@@ -1703,7 +1710,7 @@ pub fn lower_carrier_result_coalesce(expr: &mut Expr, tmp: usize) {
         k.set(k.get() + 1);
         base.carrier_child(k.get())
     };
-    let c = format!("__opt{tmp}");
+    let c = carrier_temp(tmp);
     let kind = std::mem::replace(&mut expr.kind, ExprKind::Bool(false));
     let ExprKind::NullCoalesce { lhs, rhs, .. } = kind else {
         unreachable!("lower_carrier_result_coalesce applies to '??' only");
@@ -1781,19 +1788,48 @@ pub fn lower_carrier_try(expr: &mut Expr) {
     };
     expr.kind = match call {
         None => field.kind,
-        Some(OptCall {
-            args,
-            named,
-            type_args,
-            bracket,
-        }) => ExprKind::Call {
-            callee: Box::new(field),
-            args,
-            named,
-            type_args,
-            bracket,
-        },
+        Some(call) => opt_call_kind(field, call, span, nid),
     };
+}
+
+/// The call of a `?.` method link on its synthesized callee `field`: `field(args)`, or, when
+/// the bracket has no type reading (`h?.fs[0](10)`, `OptCall::bracket`), `field[i](args)`
+/// as the parser builds it after `.`. Only the index form draws an id (`index_id`), so a plain
+/// link's ids are unchanged.
+fn opt_call_kind(
+    field: Expr,
+    call: OptCall,
+    span: Span,
+    index_id: impl FnOnce() -> crate::ast::NodeId,
+) -> ExprKind {
+    let OptCall {
+        args,
+        named,
+        type_args,
+        bracket,
+    } = call;
+    let (callee, bracket) = match bracket {
+        Some(index) if type_args.is_empty() => (
+            Expr {
+                id: index_id(),
+                kind: ExprKind::Index {
+                    obj: Box::new(field),
+                    index: Some(index),
+                    types: Vec::new(),
+                },
+                span,
+            },
+            None,
+        ),
+        bracket => (field, bracket),
+    };
+    ExprKind::Call {
+        callee: Box::new(callee),
+        args,
+        named,
+        type_args,
+        bracket,
+    }
 }
 
 /// A module's top-level names that hide a full module path's head (TICKET-175): `let`, `fn` and

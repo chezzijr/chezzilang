@@ -223,7 +223,8 @@ impl Checker {
         // arm BODIES, the tail values). It is re-installed before each arm body below — every arm
         // is equally the value, and `infer_call` drains the single take()-once slot, so without
         // re-installing per arm only the first-inferred arm would get the hint (branch-order bug).
-        let hint = self.expected_hint.take().map(|h| h.ty);
+        let whole = self.expected_hint.take();
+        let hint = whole.as_ref().map(|h| h.ty.clone());
         // Set by `infer_null_coalesce` for the `match` it lowers `??` to: a mismatch names `??`.
         let coalesce = std::mem::take(&mut self.coalesce_join);
         let pats: Vec<&Pattern> = arms.iter().map(|a| &a.pattern).collect();
@@ -252,9 +253,9 @@ impl Checker {
             has_wildcard |= irref && arm.guard.is_none();
             has_wildcard |= Self::bool_domain_closed(&kind, &covered);
             has_wildcard |= self.exh_add(&mut exh, &arm.pattern, arm.guard.is_some());
-            match &hint {
-                Some(h) if owned || h.carrier_parts().is_some() => {
-                    self.install_hint(&arm.body, h.clone(), owned)
+            match &whole {
+                Some(h) if owned || h.payload || h.ty.carrier_parts().is_some() => {
+                    self.install_whole_hint(&arm.body, h.clone(), owned)
                 }
                 Some(_) => self.expected_hint = None,
                 None => match self.branch_slot(beside, &mut sib, &arm.body) {
@@ -301,8 +302,8 @@ impl Checker {
         // re-installing it the second-inferred branch would lose the hint and a generic ctor there
         // would deadlock (acceptance would depend on branch order).
         // A seed (an unowned hint) wraps nothing, so it never hides the `None` sibling slot.
-        let hint = self.expected_hint.take().map(|h| h.ty);
-        let (hint, owned) = match hint {
+        let whole = self.expected_hint.take();
+        let (hint, owned) = match whole.as_ref().map(|h| h.ty.clone()) {
             h if h.is_none() || !owned => {
                 let mut leaves = vec![then];
                 let mut tail = els;
@@ -325,16 +326,19 @@ impl Checker {
         // Each branch value owns the hint when this if owns it (TICKET-227): it wraps on its own.
         // A seed that is not a carrier tells a branch nothing it may use: an `!e` branch takes no
         // success type from `bool` or `Any`, so it stays open for the frame close to judge.
-        let branch_hint = hint
-            .clone()
-            .filter(|h| owned || h.carrier_parts().is_some());
+        // A payload hint (`?`, `??`, `else:` over the `if`) forwards whole: it names a carrier.
+        let branch_hint = match whole {
+            Some(w) if w.payload && hint.as_ref() == Some(&w.ty) => Some(w),
+            _ => hint.clone().map(Hint::plain),
+        }
+        .filter(|h| owned || h.payload || h.ty.carrier_parts().is_some());
         match &branch_hint {
-            Some(h) => self.install_hint(then, h.clone(), owned),
+            Some(h) => self.install_whole_hint(then, h.clone(), owned),
             None => self.expected_hint = None,
         }
         let t_then = self.infer(then);
         match &branch_hint {
-            Some(h) => self.install_hint(els, h.clone(), owned),
+            Some(h) => self.install_whole_hint(els, h.clone(), owned),
             None => self.expected_hint = None,
         }
         // A nested-`IfElse` `els` is the `elif` tail — recurse DIRECTLY (it owns the hint exactly

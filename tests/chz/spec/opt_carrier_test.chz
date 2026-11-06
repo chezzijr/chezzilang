@@ -591,3 +591,16 @@ test fn an_optchain_bracket_on_a_data_member_still_indexes():
     k := 1
     h: Fns? = ?Fns([fn(x): x + 1, fn(x): x * 2])
     assert h?.fs[k](10) == ?20, "got {h?.fs[k](10)}"
+
+struct Tbl:
+    fs: List[fn(int) -> int]
+    m: Map[str, fn(int) -> int]
+
+test fn an_optchain_bracket_that_is_no_type_indexes_then_calls():
+    k := 0
+    h: Tbl? = ?Tbl([fn(x): x + 1], {"a": fn(x): x - 1})
+    assert h?.fs[0](10) == ?11, "got {h?.fs[0](10)}"
+    assert h?.m["a"](10) == ?9
+    assert h?.fs[k + 0](10) == ?11, "got {h?.fs[k + 0](10)}"
+    none: Tbl? = None
+    assert none?.fs[0](10) == None, "got {none?.fs[0](10)}"

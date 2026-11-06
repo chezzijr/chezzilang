@@ -486,10 +486,13 @@ impl Parser {
                     } else {
                         (self.expect_member_name()?, true)
                     };
-                    // `obj?.m[T](args)` takes type arguments by the `.` arm's speculative parse; a
-                    // bracket that is not `[types](` stays a postfix index on the chain.
+                    // `obj?.m[X](args)` reads its bracket as after `.`: a `[types](` by the `.`
+                    // arm's speculative parse, else a one-arg subscript that a `(` follows indexes
+                    // then calls (`h?.fs[0](10)`, TICKET-210). A bracket no `(` follows stays a
+                    // postfix index on the chain.
                     let typed = if is_ident && self.check(&Token::LBracket) {
                         self.try_parse_type_args(true)
+                            .or_else(|| self.try_parse_index_call(&name, name_span))
                     } else {
                         None
                     };
@@ -830,6 +833,38 @@ impl Parser {
         // (`fs[k](10)`). The parser reads no scope (DEC-204).
         let bracket = self.bracket_expression(headed, &type_args, save, save_depth, save_fold);
         Some((type_args, bracket))
+    }
+
+    /// The bracket of `?.name[i](args)` that is no type list, read as the `.` arm reads
+    /// `recv.name[i]` ([`Self::parse_bracket`] on the member `name`), kept when it is a one-arg
+    /// index that a `(` follows: `(vec![], Some(i))`, the call's `bracket` with no type argument,
+    /// which desugar lowers to index-then-call. `None` (position, `depth` and `fold_depth`
+    /// restored) otherwise. Assumes the `[` has NOT been consumed.
+    fn try_parse_index_call(
+        &mut self,
+        name: &str,
+        name_span: Span,
+    ) -> Option<(Vec<Type>, Option<Box<Expr>>)> {
+        let (save, save_depth, save_fold) = (self.pos, self.depth, self.fold_depth);
+        let head = Expr {
+            id: crate::ast::NodeId::SYNTH,
+            kind: ExprKind::Ident(name.to_string()),
+            span: name_span,
+        };
+        match self.parse_bracket(head, name_span) {
+            Ok(Expr {
+                kind: ExprKind::Index {
+                    index: Some(index), ..
+                },
+                ..
+            }) if self.check(&Token::LParen) => Some((Vec::new(), Some(index))),
+            _ => {
+                self.pos = save;
+                self.depth = save_depth;
+                self.fold_depth = save_fold;
+                None
+            }
+        }
     }
 
     /// The expression reading of the bracket `[X]` that `try_parse_type_arg_call` just read as one

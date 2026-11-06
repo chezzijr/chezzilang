@@ -350,19 +350,24 @@ Each group below is one fact decided in two or more places (grouped 2026-10-16).
     `build(n: int, x: S)`), the annotation a target slot (`s: str = r.into()`;
     `n: int! = r.try_into()` by the payload). `[X]` wins; a disagreement is the assignment error. A
     lone generic `into(self) -> T` on `Box[int]` takes `[int]`. Messages name no receiver
-    (`write .into[T]()`), so `?.`'s internal name never shows. A plain method keeps `takes no type
+    (`write .into[T]()`), so `?.`'s internal name never shows. Under `?`, `??` or `else:` the
+    annotation names a target's payload: `k: int = r.into() ?? 7` picks `into(self) -> int?`. A
+    set read as a value keys by the slot's param (`f: fn(int, str) -> M = M.build`). Only a
+    requirement of the method's receiver keys it (`Emit[T]`'s instance `parse` beside a static
+    `W.parse` is no conflict). A plain method keeps `takes no type
     argument(s)`. One pick: `from_overload::pick_slot`. Grids:
     `checker::tests::from_overloads::slot_pick_grid`, the three conversion spec files.
 35. **`?.` takes type arguments (done 2026-11-06).** `r?.into[str]()` and `r?.m[int](1)` parse as
     the `.` method turbofish does, by the same speculative `[types](` parse
     (`Parser::try_parse_type_args`), on a `T?` and a `T!E`. A one-arg bracket keeps its expression
     reading (`OptCall::bracket`), so `h?.fs[k](10)` indexes then calls when `fs` is data
-    (TICKET-210). Grids: `parser::tests::exprs_stmts::optchain_type_args`,
+    (TICKET-210); a bracket that is no type indexes then calls too (`h?.fs[0](10)`), as after `.`. Grids: `parser::tests::exprs_stmts::optchain_type_args`,
     `tests/corpus/accept/optchain_type_args.chz`, `tests/chz/spec/opt_carrier_test.chz` §16.
 36. **The expected type reaches a call under `?`, `??` and `else:` (done 2026-11-06).**
     `n: int = parse("7")?`, `opt("7") ?? 0`, `n: int = parse(s) else: ...` pin a return-only `T`
     in every hinted position (let, return, argument, list item, map value, if/match arm, tuple
-    element), as rustc infers `let n: i64 = parse("7")?`. One table says what hint each child of
+    element, and an `if` arm under the wrapper: `(if c: parse("7") else: parse("8"))?`), as rustc
+    infers `let n: i64 = parse("7")?`. One table says what hint each child of
     each expression kind gets (`child_hint`, `checker/infer.rs`); a field / `?.` receiver, an
     interpolation fragment and a range bound get none, so `s: str = "{pick()}"` is `cannot infer
     type parameter T` (rustc E0282). Grids: `checker::tests::hint_forwarding_grid`,
