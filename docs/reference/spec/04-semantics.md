@@ -120,7 +120,10 @@ struct Meters:
   left free (precedence: **turbofish > arguments > annotation**), so `h: Heap[int] = Heap([], fn(x, y):
   x < y)` type-checks. A generic fn used as a VALUE is pinned the same way (`g := ident[int]`,
   `h: fn(int) -> int = ident`); an unpinned one is solved within ONE statement, else rejected at the
-  read. The hint does not reach a generic ctor nested inside a container literal. **Untyped constants**
+  read. It reaches the operand of `?`, `??` and `else:` as the payload of its carrier
+  (`n: int = parse("7")?` pins `T` in `-> T!`, as rustc does), and never a field receiver, an
+  interpolation fragment or a range bound (`s: str = "{pick()}"` is `cannot infer type parameter
+  T`). The hint does not reach a generic ctor nested inside a container literal. **Untyped constants**
   (Go's model): a literal or constant expression meets the slot it lands in, and a value outside a C
   width there is `constant 256 does not fit int8 (-128..127)`. See `syntax.md` "A GENERIC fn as a value".
 

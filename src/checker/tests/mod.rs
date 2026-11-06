@@ -630,6 +630,7 @@ mod fn_values;
 mod from_overloads;
 mod generics;
 mod hashable_keys;
+mod hint_forwarding_grid;
 mod late_bounds;
 mod names;
 mod none_carriers;

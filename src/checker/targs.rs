@@ -171,6 +171,26 @@ impl Checker {
         sub
     }
 
+    /// The expected type a generic call's seeds ([`Self::slot_seed`], `seed_from_hint`,
+    /// [`Self::widen_targs_from_hint`]) read, and the result shape they read it against. A payload
+    /// hint (`CallCtx::payload_hint`: the call is the operand of `?`, `??` or `else:`) names the
+    /// `T` of a carrier result, so the seeds read the result's payload: `n: int = parse("7")?`
+    /// binds `T := int` in `-> T!`, as rustc infers `let n: i64 = parse("7")?`. A seed only: the
+    /// call keeps its carrier type. A result that is no carrier gets no hint.
+    pub(super) fn hint_shape<'a>(
+        &self,
+        hint: Option<&'a Ty>,
+        ret: &'a Ty,
+    ) -> (Option<&'a Ty>, &'a Ty) {
+        if hint.is_none() || !self.call_ctx.as_ref().is_some_and(|c| c.payload_hint) {
+            return (hint, ret);
+        }
+        match ret.carrier_payload() {
+            Some(p) => (hint, p),
+            None => (None, ret),
+        }
+    }
+
     /// TICKET-239 — the one pre-argument substitution of a generic call, read by all six generic
     /// paths through [`Checker::infer_generic_arg_tys`]. Returns `(owned, seed)`. `owned` binds
     /// what is written before any argument is read: the explicit type arguments (`targs`, from

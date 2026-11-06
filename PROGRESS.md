@@ -359,6 +359,14 @@ Each group below is one fact decided in two or more places (grouped 2026-10-16).
     reading (`OptCall::bracket`), so `h?.fs[k](10)` indexes then calls when `fs` is data
     (TICKET-210). Grids: `parser::tests::exprs_stmts::optchain_type_args`,
     `tests/corpus/accept/optchain_type_args.chz`, `tests/chz/spec/opt_carrier_test.chz` §16.
+36. **The expected type reaches a call under `?`, `??` and `else:` (done 2026-11-06).**
+    `n: int = parse("7")?`, `opt("7") ?? 0`, `n: int = parse(s) else: ...` pin a return-only `T`
+    in every hinted position (let, return, argument, list item, map value, if/match arm, tuple
+    element), as rustc infers `let n: i64 = parse("7")?`. One table says what hint each child of
+    each expression kind gets (`child_hint`, `checker/infer.rs`); a field / `?.` receiver, an
+    interpolation fragment and a range bound get none, so `s: str = "{pick()}"` is `cannot infer
+    type parameter T` (rustc E0282). Grids: `checker::tests::hint_forwarding_grid`,
+    `tests/chz/spec/hint_through_try_test.chz`.
 
 ### Open questions for the owner
 

@@ -119,7 +119,11 @@ impl Checker {
         // g(1)` printed `1`, check-clean).
         // A protocol hint (`print(ident)`, `oa(ident)` over `fn oa(v: Any)`) fixes nothing either
         // (`hint_fixes`, owner rule 2026-10-17), so the read reports as with no hint.
-        let hint = self.expected_hint.clone().filter(hint_fixes);
+        let hint = self
+            .expected_hint
+            .as_ref()
+            .map(|h| h.ty.clone())
+            .filter(hint_fixes);
         let verdict = match &hint {
             Some(h) => {
                 pin_generic_fn_value(&type_params, &declared, h, &|n| self.rigid_param(n, &[]))

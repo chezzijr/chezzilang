@@ -149,7 +149,7 @@ impl Checker {
                             {
                                 self.report_const_fault(f, span);
                             }
-                            self.infer_binary_rhs(value, Some(target_ty))
+                            self.infer_binary_rhs(value, Some(Hint::plain(target_ty)))
                         }
                     } else {
                         self.infer_value(value)

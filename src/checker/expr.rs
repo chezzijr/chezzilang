@@ -116,6 +116,7 @@ impl Checker {
             pack_origin: crate::checker::witness_key_span(callee, span),
             consumed: false,
             bracket: bracket.cloned(),
+            payload_hint: self.expected_hint.as_ref().is_some_and(|h| h.payload),
         };
         let saved = self.call_ctx.replace(ctx);
         let t = self.infer_call_dispatch(callee, args, named, type_args, span);
@@ -148,7 +149,7 @@ impl Checker {
         // call only. `take()` clears the slot so a nested arg call (inferred later inside the ctor/call
         // dispatchers) sees `None` — the hint never leaks past the outermost call it was set for. It is
         // threaded into the generic ctor / generic fn-call dispatchers below to pre-seed `T`.
-        let expected = self.expected_hint.take();
+        let expected = self.expected_hint.take().map(|h| h.ty);
         let expected = expected.as_ref();
         // What the callee names: ONE answer from the rule table (`resolve.rs`). Every arm below takes
         // its branch from it and none re-decides what the path is.

@@ -383,6 +383,27 @@ struct CallCtx {
     consumed: bool,
     /// The expression reading of a one-arg call bracket (`ExprKind::Call::bracket`).
     bracket: Option<Expr>,
+    /// The call's expected type is a payload hint (`Hint::payload`): a carrier result
+    /// binds its payload against it (`Checker::hint_shape`).
+    payload_hint: bool,
+}
+
+/// The expected type `Checker::expected_hint` carries, with how it is read. One value, so a take,
+/// a clear or a restore moves the payload marker with its type.
+#[derive(Clone, Debug)]
+struct Hint {
+    ty: Ty,
+    /// A PAYLOAD hint (`ChildHint::Unwrap` in `checker/infer.rs`): the value is a `T!E` or a
+    /// `T?`, its carrier not yet known, whose `T` is `ty`. Set only by `with_child_hint`;
+    /// `infer_call` copies it into its `CallCtx`.
+    payload: bool,
+}
+
+impl Hint {
+    /// A plain expected type: a slot's type or a seed.
+    fn plain(ty: Ty) -> Self {
+        Hint { ty, payload: false }
+    }
 }
 
 /// A protocol bound with its type args RESOLVED (`Conv[S]` -> name `Conv`, args `[Ty::Param("S")]`).
@@ -1220,7 +1241,7 @@ struct Checker {
     /// the params the arguments left free — turbofish > args > annotation. This breaks the
     /// `Heap([], fn(x, y): x < y)` deadlock: the annotation pins `T`, which then pins the closure
     /// params. Mirrors the existing closure-vs-fn-annotation checking-mode (`infer_arg`).
-    expected_hint: Option<Ty>,
+    expected_hint: Option<Hint>,
     /// TICKET-227 -- the node `expected_hint` was installed FOR (its slot's value). Only `infer` of
     /// that node may wrap it into the hint's carrier; every other reader treats the hint as a seed.
     hint_owner: Option<crate::ast::NodeId>,

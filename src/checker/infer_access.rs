@@ -3,6 +3,7 @@
 //! Split out of `src/checker/pattern.rs`. `super::*` is the parent module.
 
 use super::fn_value::fn_spelling;
+use super::infer::{ChildHint, child_hint};
 use super::pattern::OPT_RECV_PREFIX;
 use super::setup::{HeadBinding, TypeRead};
 use super::*;
@@ -118,7 +119,7 @@ impl Checker {
             }
             _ => {}
         }
-        let obj_ty = self.infer(obj);
+        let obj_ty = self.with_child_hint(child_hint(&e.kind), |c| c.infer(obj));
         match &obj_ty {
             // `t.0`, `t.1`, … — tuple element access. The field name is the element index as a
             // decimal string; out-of-range or non-numeric is an error.
@@ -687,7 +688,7 @@ impl Checker {
         span: Span,
     ) -> Ty {
         let m = self.tyvar_mark();
-        let t = self.infer_value(obj);
+        let t = self.with_child_hint(child_hint(&carrier.kind), |c| c.infer_value(obj));
         let t = self.close_operand(m, t);
         let key = crate::checker::carrier_key(
             self.graph_module_idx,
@@ -848,7 +849,7 @@ impl Checker {
     pub(super) fn infer_null_coalesce(&mut self, carrier: &Expr, lhs: &Expr, op_span: Span) -> Ty {
         // Same operand-scratch shape as `infer_opt_chain`, same reason.
         let m = self.tyvar_mark();
-        let t = self.infer_value(lhs);
+        let t = self.with_child_hint(child_hint(&carrier.kind), |c| c.infer_value(lhs));
         let t = self.close_operand(m, t);
         let key = crate::checker::carrier_key(
             self.graph_module_idx,
@@ -952,9 +953,10 @@ impl Checker {
         }
     }
 
-    pub(super) fn infer_try(&mut self, inner: &Expr, span: Span) -> Ty {
+    /// `rule` is the node's [`super::infer::child_hint`]: the operand's hint.
+    pub(super) fn infer_try(&mut self, inner: &Expr, span: Span, rule: ChildHint) -> Ty {
         let m = self.tyvar_mark();
-        let t = self.infer(inner);
+        let t = self.with_child_hint(rule, |c| c.infer(inner));
         let t = self.close_operand(m, t);
         // The innermost block around the `?` that stops it decides (`boundary::RULES`). A recover
         // block is its target (try-block style): its error type is `Error` and its result is a

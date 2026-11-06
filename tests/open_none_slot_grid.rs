@@ -4088,7 +4088,7 @@ const REC_ROWS: &[Row] = &[
 "#,
         [
             R(r#"cannot assign int! to variable of type int?!"#),
-            R(r#"cannot assign int?!! to variable of type int?!"#),
+            P(r#"8"#),
             P(r#"6"#),
         ],
     ),

@@ -64,6 +64,7 @@ write a second copy next to it (CLAUDE.md "Derive, don't mirror").
 | Type lattice | `Ty` (`checker/ty.rs`) | |
 | Type variables, solving | `solve` (`checker/tyvar.rs`) | |
 | Is a fn value fully pinned | `pin_generic_fn_value` (`checker/ty_util.rs`) | |
+| What expected type each child of an expression kind gets | `child_hint` (`checker/infer.rs`, exhaustive over `ExprKind`) | applied by `with_child_hint` at each child site (field / `?.` receiver, fragment, range bound, `?` / `??` / `else:` operand, `recover:` expression); `Same` and `Element` kinds forward in their own arm. A payload hint is read by `hint_shape` (`checker/targs.rs`). `checker::tests::hint_forwarding_grid` runs every cell |
 | Which type params an expected type fills (a protocol hint fills none) | `hint_bindings`, `hint_fixes` (`checker/ty_util.rs`) | read by `slot_seed` and `widen_targs_from_hint` (`checker/targs.rs`), `seed_from_hint` and `pin_generic_fn_value` (`checker/ty_util.rs`), `generic_fn_value_ty` (`checker/fn_value.rs`). `tests/generic_hint_grid.rs` runs every cell |
 | Is `a` assignable to `b` | `assignable` (`checker/assignable.rs`) | |
 | Does a type satisfy a protocol | `satisfies` (`checker/satisfies.rs`) | |

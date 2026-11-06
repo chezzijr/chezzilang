@@ -318,12 +318,12 @@ print(probe())
 
 /// W7-49 (2/3) — `CarrierTable`. An Option-mode `?.` inside `lib.chz`'s default-parameter
 /// expression and a Result-mode `?.` in `main.chz` land their NAME TOKENs at the same `line:col`
-/// (both `5:36`), so before `Span::file` they shared one `CarrierKey` and main's `Result` carrier
+/// (both `5:26`), so before `Span::file` they shared one `CarrierKey` and main's `Result` carrier
 /// got the `Option` lowering.
 ///
 /// Fails on `19f7696a` with `3` then `runtime error … no match arm for variant 'Ok'`, under a clean
 /// `chezzi check`,. CONTROL: widening main's `vvv…` binder by one character (so its
-/// `len` lands at col 37) makes `19f7696a` print `3` / `4` — the fault is the KEY, not the lowering.
+/// `len` lands at col 27) makes `19f7696a` print `3` / `4` — the fault is the KEY, not the lowering.
 #[test]
 fn a_spliced_default_carrier_does_not_alias_the_callers_carrier() {
     let dir = std::env::temp_dir().join(format!("chezzi_w749_carrier_{}", std::process::id()));
@@ -333,7 +333,7 @@ fn a_spliced_default_carrier_does_not_alias_the_callers_carrier() {
     std::fs::write(
         dir.join("lib.chz"),
         r#"# four pad lines put `fn f` on line 5, so its
-# `len` name token lands at exactly 5:36 — the
+# `len` name token lands at exactly 5:26 — the
 # same line:col as main's Result-mode carrier.
 # The default is SELF-CONTAINED (no lib global).
 fn f(x: int? = (?"abc")?.len()) -> int:
@@ -350,8 +350,8 @@ fn f(x: int? = (?"abc")?.len()) -> int:
 fn getr() -> str!str:
     return ?"wxyz"
 fn probe() -> int!str:
-    vvvvvvvvvvvvvvvvvvv := getr()?.len()
-    return ?vvvvvvvvvvvvvvvvvvv
+    vvvvvvvvv := getr()?.len()
+    return ?vvvvvvvvv
 print(f())
 match probe():
     ?n: print(n)
@@ -360,15 +360,13 @@ match probe():
     )
     .unwrap();
     let graph = crate::resolver::build_graph(&entry).expect("resolve");
-    // TICKET-228: the migrated default `(?"abc")?.len()` is rejected at check time: the slot's
-    // `int` reaches the `?` operand. The run below never happens; the reject is the assertion.
-    let errs = crate::checker::check_graph(&graph).expect_err("the migrated default is rejected");
+    // The two `len` name tokens share `5:26`; a shared CarrierKey gives main's Result carrier the
+    // Option lowering. (Before the per-kind hint table, the slot's `int` leaked into the `?x`
+    // operand and rejected this default, so the run never happened.)
+    let (vo, _ve, vr, _vc) = run_file(&entry);
     let _ = std::fs::remove_dir_all(&dir);
-    assert!(
-        errs.iter()
-            .any(|e| e.message.contains("'?' value: expected int, found str")),
-        "{errs:?}"
-    );
+    assert!(vr.is_ok(), "VM faulted (shared carrier key): {vr:?}");
+    assert_eq!(vo, "3\n4\n", "f() is Option-mode, probe() is Result-mode");
 }
 
 /// W7-49 (3/3) — `WitnessTable`. `lib.chz`'s default `empty[Counter]()` and `main.chz`'s

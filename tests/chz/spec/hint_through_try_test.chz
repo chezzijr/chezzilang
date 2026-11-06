@@ -1,0 +1,75 @@
+# tests/chz/spec/hint_through_try_test.chz: the expected type reaches a return-only generic call
+# through the wrapper that unwraps it (`child_hint` in `src/checker/infer.rs`): under `?`, `??` and
+# `else:` the call's `T` is the slot's type, as rustc infers `let n: i64 = parse("7")?`,
+# `opt("7").unwrap_or(0)`, `if c { parse("7")? } else { 0 }` and `vec![parse("7")?]`.
+# The checker grid is `src/checker/tests/hint_forwarding_grid.rs`.
+# Gated by `chz_suite_passes` (`tests/chz_suite.rs`).
+
+import TryFrom, TryInto from std.convert
+
+struct Frac:
+    n: int
+    d: int
+    fn try_into(self) -> int!:
+        if self.d != 1:
+            return !"{self.n}/{self.d} is not an int"
+        return self.n
+    fn try_into(self) -> str!:
+        return "{self.n}/{self.d}"
+
+fn frac_parts(f: Frac) -> int!:
+    n: int = f.try_into()?
+    s: str = f.try_into()?
+    return n + s.len()
+
+fn parse[T: TryFrom[str]](s: str) -> T!:
+    return T.try_from(s)
+
+fn opt[T: TryFrom[str]](s: str) -> T?:
+    v := T.try_from(s) else:
+        return None
+    return ?v
+
+fn tried(s: str, c: bool) -> int!:
+    n: int = parse(s)?
+    m: int = if c: parse(s)? else: 0
+    xs: List[int] = [parse(s)?]
+    return n + m + xs[0]
+
+fn tried_opt(s: str) -> int?:
+    n: int = opt(s)?
+    return n * 2
+
+fn guarded(s: str) -> int:
+    n: int = parse(s) else:
+        return -1
+    f: int = opt(s) else:
+        return -2
+    return n + f
+
+test fn a_question_mark_operand_takes_the_slot_type():
+    assert (tried("7", true) ?? 0) == 21
+    assert (tried("7", false) ?? 0) == 14
+    assert (tried("x", true) ?? 0) == 0, "the parse error propagates"
+    assert (tried_opt("7") ?? 0) == 14
+    assert (tried_opt("x") ?? -1) == -1
+
+test fn a_coalesce_lhs_takes_the_slot_type():
+    n: int = parse("7") ?? 0
+    m: float = opt("2.5") ?? 0.0
+    k: int = opt("x") ?? 3
+    assert n == 7
+    assert m == 2.5
+    assert k == 3
+
+test fn an_else_guard_value_takes_the_slot_type():
+    assert guarded("7") == 14
+    assert guarded("x") == -1
+
+test fn a_recover_value_keeps_its_payload_hint():
+    r: int! = (recover: parse("7")?)
+    assert (r ?? 0) == 7
+
+test fn a_question_mark_operand_picks_the_try_into_by_the_slot():
+    assert (frac_parts(Frac(6, 1)) ?? -1) == 9
+    assert (frac_parts(Frac(1, 2)) ?? -1) == -1, "the int try_into fails"

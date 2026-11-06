@@ -6,6 +6,72 @@ use super::*;
 use crate::ast::consteval;
 use crate::ast::{CarrierTag, RecoverForm};
 
+/// What the VALUE children of an expression receive as their expected type, from the node's own
+/// hint ([`child_hint`]). A child that is not a value child (a condition, a scrutinee, a callee, a
+/// subscript, a statement of a block) receives none. The node itself may still read its hint (a
+/// generic fn value, an overload pick, a constant's width).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) enum ChildHint {
+    /// No child sees the hint: a leaf, a field/`?.` receiver, an interpolation fragment, a range
+    /// bound, an index object.
+    None,
+    /// Each value child sees the node's hint unchanged, as a seed: an operator's operands, an
+    /// `if`/`match` arm (an arm owns the slot when the node owns it, `branch.rs`).
+    Same,
+    /// The node's own arm takes the hint and installs each child's part of it: a list/set/map
+    /// item, a tuple element, a comprehension element, a closure body, a call argument's
+    /// parameter, the payload of a prefix `?x`, the error of a prefix `!e`.
+    Element,
+    /// The child is the carrier the node unwraps (`x?`, `x ?? d`'s `x`, `x else: ...`): it gets a
+    /// payload hint (`Hint::payload`), "a `T!E` or `T?` whose `T` is the hint's payload".
+    /// A generic call binds its carrier result's payload against it (`Checker::hint_shape`). A
+    /// seed, never a wrap (TICKET-227). `d` of `x ?? d` is the node's value: it keeps the hint.
+    Unwrap,
+    /// The child is the payload the node wraps (`recover: x` builds `T!`): it gets the hint's `T`.
+    Payload,
+}
+
+/// THE table of [`ChildHint`]s: one rule per expression kind, read by every child site that does
+/// not forward through its own arm (`Checker::with_child_hint`). Exhaustive: a new kind decides
+/// what its children see.
+pub(super) fn child_hint(kind: &ExprKind) -> ChildHint {
+    match kind {
+        ExprKind::Int(_)
+        | ExprKind::Float(_)
+        | ExprKind::Str(_)
+        | ExprKind::Interp(_)
+        | ExprKind::Bytes(_)
+        | ExprKind::RawStr(_)
+        | ExprKind::Bool(_)
+        | ExprKind::NoneLit
+        | ExprKind::Pass
+        | ExprKind::Ident(_)
+        | ExprKind::Range { .. }
+        | ExprKind::Field { .. }
+        | ExprKind::Index { .. }
+        | ExprKind::OptChain { .. } => ChildHint::None,
+        ExprKind::Unary { op, .. } => match op {
+            UnaryOp::Neg | UnaryOp::Not => ChildHint::Same,
+            UnaryOp::ErrVal | UnaryOp::Wrap => ChildHint::Element,
+        },
+        ExprKind::Binary { .. }
+        | ExprKind::Compare { .. }
+        | ExprKind::Match { .. }
+        | ExprKind::IfElse { .. } => ChildHint::Same,
+        ExprKind::List(..)
+        | ExprKind::Tuple(_)
+        | ExprKind::Map(_)
+        | ExprKind::Set(_)
+        | ExprKind::Comprehension { .. }
+        | ExprKind::Closure { .. }
+        | ExprKind::Call { .. } => ChildHint::Element,
+        ExprKind::Try(_) | ExprKind::NullCoalesce { .. } | ExprKind::ElseGuard { .. } => {
+            ChildHint::Unwrap
+        }
+        ExprKind::Recover(..) => ChildHint::Payload,
+    }
+}
+
 impl Checker {
     /// Type-check an interpolated string literal's chunks ([`ExprKind::Interp`], built by the parser
     /// from the holes the lexer found). Every fragment `Expr` is run through the normal
@@ -131,7 +197,7 @@ impl Checker {
     /// `infer` of `e` may wrap `e` into the hint's carrier. Without, the hint is a seed (it guides
     /// inference and never wraps). A synthesized node never owns a hint.
     pub(super) fn install_hint(&mut self, e: &Expr, hint: Ty, slot: bool) {
-        self.expected_hint = Some(hint);
+        self.expected_hint = Some(Hint::plain(hint));
         self.hint_owner = (slot && e.id.0 != crate::ast::NodeId::SYNTH.0).then_some(e.id);
     }
 
@@ -154,13 +220,14 @@ impl Checker {
         if self.tyvars.borrow().any()
             && let Some(h) = &self.expected_hint
         {
-            self.expected_hint = Some(self.zonk(h));
+            let ty = self.zonk(&h.ty);
+            self.expected_hint = Some(Hint { ty, ..h.clone() });
         }
         // TICKET-227: the slot this node owns, if the hint was installed FOR it. Taken here, so
         // no child ever sees the owner.
         let owner = self.hint_owner.take();
         let slot = match owner {
-            Some(o) if o.0 == expr.id.0 => self.expected_hint.clone(),
+            Some(o) if o.0 == expr.id.0 => self.expected_hint.as_ref().map(|h| h.ty.clone()),
             _ => None,
         };
         self.hint_owned = slot.is_some();
@@ -296,6 +363,44 @@ impl Checker {
         }
     }
 
+    /// Run `f`, the inference of a child of a node whose kind has the rule `rule`
+    /// ([`child_hint`]), under the hint that rule gives the child; then put the node's own hint back
+    /// for the node itself and its other children. `Same` and `Element` leave the hint in place
+    /// (the node's own arm forwards or takes it).
+    pub(super) fn with_child_hint<R>(
+        &mut self,
+        rule: ChildHint,
+        f: impl FnOnce(&mut Self) -> R,
+    ) -> R {
+        match rule {
+            ChildHint::Same | ChildHint::Element => return f(self),
+            ChildHint::None | ChildHint::Unwrap | ChildHint::Payload => {}
+        }
+        let hint = self.expected_hint.take();
+        let owner = self.hint_owner.take();
+        if let Some(h) = &hint {
+            let payload = h.ty.slot_payload().clone();
+            self.expected_hint = match rule {
+                // A payload hint names a carrier's `T`, which is not itself a carrier the child
+                // unwraps: an `x?` under a payload hint gets none.
+                ChildHint::Unwrap if h.payload => None,
+                ChildHint::Unwrap => Some(Hint {
+                    ty: payload,
+                    payload: true,
+                }),
+                // `recover: x` builds the node's carrier: `x` is its payload (under a payload
+                // hint the node's value is that carrier, and `h.ty` is already its `T`).
+                ChildHint::Payload if h.payload => Some(Hint::plain(h.ty.clone())),
+                ChildHint::Payload => Some(Hint::plain(payload)),
+                ChildHint::None | ChildHint::Same | ChildHint::Element => None,
+            };
+        }
+        let r = f(self);
+        self.expected_hint = hint;
+        self.hint_owner = owner;
+        r
+    }
+
     /// TICKET-225 (R5, Go's untyped constants) — the one place a constant meets its slot. A literal
     /// or a constant expression (`1 << 8`, `3e38 + 3e38`) is checked against the C width of the
     /// expected type it is inferred under: `constant 256 does not fit int8 (-128..127)`. `slot` is
@@ -319,7 +424,7 @@ impl Checker {
             return;
         }
         let Some(w) = slot
-            .or(self.expected_hint.as_ref())
+            .or(self.expected_hint.as_ref().map(|h| &h.ty))
             .and_then(|h| h.width().or_else(|| h.slot_payload().width()))
             .cloned()
         else {
@@ -364,7 +469,9 @@ impl Checker {
             ExprKind::Float(_) => Ty::Float,
             ExprKind::Str(_) => Ty::Str,
             // Fragments are real children, normalized (named/default/variadic args) by `desugar`.
-            ExprKind::Interp(chunks) => self.check_interp_chunks(chunks, expr.span),
+            ExprKind::Interp(chunks) => self.with_child_hint(child_hint(&expr.kind), |c| {
+                c.check_interp_chunks(chunks, expr.span)
+            }),
             ExprKind::RawStr(_) => Ty::Str, // verbatim `str`, no interpolation to check
             ExprKind::Bytes(_) => Ty::Bytes,
             ExprKind::Bool(_) => Ty::Bool,
@@ -376,7 +483,10 @@ impl Checker {
                 // arg, a return position — or the synthesized variadic list). `take()` so the
                 // hint drives THIS literal's element type and never leaks into a nested element
                 // call. `None` keeps the ordinary bottom-up inference.
-                let hint = self.expected_hint.take().map(|t| t.slot_payload().clone());
+                let hint = self
+                    .expected_hint
+                    .take()
+                    .map(|h| h.ty.slot_payload().clone());
                 self.infer_list(items, hint.as_ref())
             }
             ExprKind::Tuple(items) => {
@@ -384,7 +494,7 @@ impl Checker {
                 // same `take()`-then-project contract as `List`/`Map` above, so a nested ctor
                 // literal inside the tuple sees its own element's hint instead of the bare
                 // bottom-up type.
-                let hint = self.expected_hint.take();
+                let hint = self.expected_hint.take().map(|h| h.ty);
                 let tys = match hint.map(|h| h.slot_payload().clone()) {
                     Some(Ty::Tuple(hs)) if hs.len() == items.len() => items
                         .iter()
@@ -405,11 +515,17 @@ impl Checker {
             // OUTER `Map[str, List[int]]` stayed in the slot and was consumed — wasted — by the first
             // entry's own inference.
             ExprKind::Map(entries) => {
-                let hint = self.expected_hint.take().map(|t| t.slot_payload().clone());
+                let hint = self
+                    .expected_hint
+                    .take()
+                    .map(|h| h.ty.slot_payload().clone());
                 self.infer_map(entries, hint.as_ref())
             }
             ExprKind::Set(elems) => {
-                let hint = self.expected_hint.take().map(|t| t.slot_payload().clone());
+                let hint = self
+                    .expected_hint
+                    .take()
+                    .map(|h| h.ty.slot_payload().clone());
                 self.infer_set(elems, hint.as_ref())
             }
             ExprKind::Comprehension {
@@ -423,9 +539,11 @@ impl Checker {
             ExprKind::Compare { operands, ops } => self.infer_compare_chain(operands, ops),
             // TICKET-253: a range is a VALUE of the prelude struct `Range`; its bounds are `int`s.
             ExprKind::Range { start, end, .. } => {
-                for bound in [start, end].into_iter().flatten() {
-                    self.expect_int(bound, "range bound");
-                }
+                self.with_child_hint(child_hint(&expr.kind), |c| {
+                    for bound in [start, end].into_iter().flatten() {
+                        c.expect_int(bound, "range bound");
+                    }
+                });
                 self.range_ty()
             }
             ExprKind::Call {
@@ -451,7 +569,7 @@ impl Checker {
             ExprKind::Index { obj, index, types } => {
                 self.infer_index(expr, obj, index.as_deref(), types)
             }
-            ExprKind::Try(inner) => self.infer_try(inner, expr.span),
+            ExprKind::Try(inner) => self.infer_try(inner, expr.span, child_hint(&expr.kind)),
             // W7-43 — optional-chaining `?.` / null-coalescing `??` are CARRIER nodes: the checker
             // types the operand, picks the lowering, then clone-lowers and infers the clone. The
             // choice needs the operand's TYPE, which is why desugar no longer lowers them; the
@@ -467,7 +585,7 @@ impl Checker {
                 // does, through one carrier layer; `meet_slot` wraps it. With no `fn` slot the
                 // free-closure inference (sources #2/#3) and the ambiguity check happen inside
                 // `infer_closure`.
-                let hint = self.expected_hint.take();
+                let hint = self.expected_hint.take().map(|h| h.ty);
                 let exp = hint
                     .as_ref()
                     .map(|h| h.slot_payload())
@@ -476,7 +594,9 @@ impl Checker {
             }
             ExprKind::Match { scrutinee, arms } => self.infer_match(scrutinee, arms, owned),
             ExprKind::IfElse { cond, then, els } => self.infer_if_else(cond, then, els, owned),
-            ExprKind::Recover(block, form) => self.infer_recover(block, *form),
+            ExprKind::Recover(block, form) => {
+                self.infer_recover(block, *form, child_hint(&expr.kind))
+            }
             ExprKind::ElseGuard { value, err, body } => {
                 self.infer_else_guard(expr, value, err, body)
             }
@@ -665,7 +785,7 @@ impl Checker {
         body: &Block,
     ) -> Ty {
         let m = self.tyvar_mark();
-        let ty = self.infer(value);
+        let ty = self.with_child_hint(child_hint(&e.kind), |c| c.infer(value));
         let ty = self.close_operand(m, ty);
         let (payload, err_ty) = match &ty {
             Ty::Option(t) => ((**t).clone(), None),
@@ -726,9 +846,12 @@ impl Checker {
             self.hover_record_at(*name_span, &bound, HoverKind::Local, None);
             self.declare(name, bound);
         }
-        for stmt in body {
-            self.check_stmt(stmt);
-        }
+        // The guard's block is a statement child: it sees no hint.
+        self.with_child_hint(ChildHint::None, |c| {
+            for stmt in body {
+                c.check_stmt(stmt);
+            }
+        });
         self.pop_scope();
         // Read after the body is checked: `call_diverges` knows a `panic` call only
         // once that call has been inferred.
@@ -744,14 +867,22 @@ impl Checker {
     /// `recover:` types as `Result[T]`. The inline form `recover: expr` carries the expression's type.
     /// The block form has no tail value (U8): every statement is an ordinary statement and the block
     /// is `!` (`Result[nil]`), the error or nothing.
-    pub(super) fn infer_recover(&mut self, block: &Block, form: RecoverForm) -> Ty {
+    /// `rule` is the node's [`child_hint`]: the inline expression's; a block's statements see none.
+    pub(super) fn infer_recover(
+        &mut self,
+        block: &Block,
+        form: RecoverForm,
+        rule: ChildHint,
+    ) -> Ty {
         // `boundary::RULES` says what may cross the block: it is the target of a `?` on a `T!E`.
         self.push_scope();
         let value_ty = self.in_block(boundary::Block::Recover, |c| match form {
             RecoverForm::Block => {
-                for stmt in block {
-                    c.check_stmt(stmt);
-                }
+                c.with_child_hint(ChildHint::None, |c| {
+                    for stmt in block {
+                        c.check_stmt(stmt);
+                    }
+                });
                 Ty::Nil
             }
             RecoverForm::Inline => {
@@ -761,7 +892,7 @@ impl Checker {
                 let StmtKind::Expr(e) = &stmt.kind else {
                     unreachable!("an inline recover holds one expression statement")
                 };
-                let ty = c.infer(e);
+                let ty = c.with_child_hint(rule, |c| c.infer(e));
                 // A body that provably diverges (`recover: panic(...)`) yields no normal value, so its
                 // `Ok` payload is bottom (`Unknown`), not `nil`. Reuses the sound, conservative
                 // `flow::stmt` summary (divergence read from the resolved callee).

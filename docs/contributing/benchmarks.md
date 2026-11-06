@@ -193,6 +193,15 @@ base, 8,560,578 branch (-0.59%); `check`: 6,015,034 base, 5,940,376 branch (-1.2
 protocols and the `into` gate alone were `run` +1.12%, `check` +1.22%; `seed_std_protocols` now
 seeds every std protocol's name and arity and harvests each once, instead of two full passes.
 
+Protocol slots in scope + per-kind hint table (2026-11-06): `print(1)`, release,
+`perf stat -e instructions:u`, median of 5, base `6668505a` in its own target dir. `run`: 8,530,799
+base, 8,570,945 branch (+0.47%); `check`: 5,922,610 base, 5,960,819 branch (+0.65%). The first cut
+of the scope-aware slot gate was `run` +17.7%: each type body rebuilt the visible-protocol set (in a
+std module every std protocol, with a linear `module_sigs` walk per miss) and deep-cloned each
+requirement's `FnSig`. Now a slot is `{name, protocol key, slot}` behind an `Arc`, and the std
+modules filter one per-process table (`std_slot_table`, a `OnceLock`). The remainder is that table's
+one-time derivation (~15k) and the prelude `int`/`float` slots.
+
 ### Peak memory vs Go
 
 Peak process RSS, `benches/maxrss.py`, median of 3, 2026-07-25 after the four memory levers

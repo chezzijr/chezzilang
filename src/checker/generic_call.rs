@@ -450,7 +450,8 @@ impl Checker {
         // conflicting argument is caught by the per-argument check below.
         let mut subst_map: HashMap<String, Ty> =
             self.seed_targs(name, &sig.type_params, targs, span);
-        let (owned, seed) = self.slot_seed(&subst_map, hint, &sig.ret);
+        let (hint, hint_ret) = self.hint_shape(hint, &sig.ret);
+        let (owned, seed) = self.slot_seed(&subst_map, hint, hint_ret);
         let (mut arg_tys, passes) =
             self.infer_generic_arg_tys(args, &sig.params, &owned, &seed, &sig.type_params);
         // Bare generic-fn args this pass could not pin YET — re-pinned once everything else has had
@@ -533,11 +534,11 @@ impl Checker {
         // left FREE by unifying the declared RETURN type (already `Ty::Param`-bearing) against the
         // hint — so `xs: List[int] = empty()` pins a return-only `T`, and the deadlock probe below
         // sees it bound. After arg-unification ⇒ turbofish/args win.
-        seed_from_hint(hint, &sig.ret, &mut subst_map);
+        seed_from_hint(hint, hint_ret, &mut subst_map);
         // W12-9 (TICKET-106): let the expected type widen a type arg the ARGUMENTS already bound.
         self.widen_targs_from_hint(
             hint,
-            &sig.ret,
+            hint_ret,
             &sig.type_params,
             &sig.params,
             &arg_tys,
@@ -860,11 +861,12 @@ impl Checker {
         // FREE). The free-fn path has done this all along; the method path had no hint plumbed to
         // it, which is why `v: int? = w.take(xs)` used to report a false conformance error PLUS
         // `cannot assign R to variable of type Option[int]`.
-        seed_from_hint(hint, ret, &mut mmap);
+        let (hint, hint_ret) = self.hint_shape(hint, ret);
+        seed_from_hint(hint, hint_ret, &mut mmap);
         // W12-9 (TICKET-106): let the expected type widen a type arg the ARGUMENTS already bound.
         self.widen_targs_from_hint(
             hint,
-            ret,
+            hint_ret,
             mtps,
             expected,
             &arg_tys,

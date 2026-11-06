@@ -223,7 +223,7 @@ impl Checker {
         // arm BODIES, the tail values). It is re-installed before each arm body below — every arm
         // is equally the value, and `infer_call` drains the single take()-once slot, so without
         // re-installing per arm only the first-inferred arm would get the hint (branch-order bug).
-        let hint = self.expected_hint.take();
+        let hint = self.expected_hint.take().map(|h| h.ty);
         // Set by `infer_null_coalesce` for the `match` it lowers `??` to: a mismatch names `??`.
         let coalesce = std::mem::take(&mut self.coalesce_join);
         let pats: Vec<&Pattern> = arms.iter().map(|a| &a.pattern).collect();
@@ -301,7 +301,7 @@ impl Checker {
         // re-installing it the second-inferred branch would lose the hint and a generic ctor there
         // would deadlock (acceptance would depend on branch order).
         // A seed (an unowned hint) wraps nothing, so it never hides the `None` sibling slot.
-        let hint = self.expected_hint.take();
+        let hint = self.expected_hint.take().map(|h| h.ty);
         let (hint, owned) = match hint {
             h if h.is_none() || !owned => {
                 let mut leaves = vec![then];
