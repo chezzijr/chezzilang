@@ -4,6 +4,7 @@
 
 use super::setup::{TypeHead, TypeHeadKind};
 use super::*;
+use std::sync::Arc;
 
 /// The slot of a protocol requirement that keys its overloads: the parameter that mentions the
 /// protocol's type param (`from(x: S)`, the source), or the return of a receiver-only method
@@ -25,13 +26,13 @@ impl OverloadSlot {
     }
 }
 
-/// A requirement of a parameterized protocol that keys overloads: its name, its protocol spelled
-/// (`From[S]`), its sig and the slot.
+/// A requirement of a parameterized protocol that keys overloads: its name, its protocol's key and
+/// the slot. Its sig and spelling are read off the protocol only where a declaration is checked
+/// ([`Checker::req_shape`]), so deciding a slot copies no signature.
 #[derive(Clone)]
 pub(super) struct OverloadReq {
     pub(super) name: String,
-    pub(super) spelled: String,
-    pub(super) req: FnSig,
+    pub(super) protocol: String,
     pub(super) slot: OverloadSlot,
 }
 
@@ -41,7 +42,7 @@ pub(super) struct OverloadReq {
 /// declaration order.
 #[derive(Clone, Default)]
 pub(super) struct Overloads {
-    pub(super) slots: HashMap<String, OverloadReq>,
+    pub(super) slots: HashMap<String, Arc<OverloadReq>>,
     sets: HashMap<String, Vec<FnSig>>,
 }
 
@@ -53,70 +54,77 @@ impl std::ops::Deref for Overloads {
 }
 
 impl Checker {
-    /// The keys of the parameterized protocols this module sees by a name it declares or imports
-    /// (`import From from std.convert`, `import p` for `p.Parse`); a std module sees every std
-    /// protocol. Sorted, so a message naming two reads the same every run.
-    fn visible_protocol_keys(&self) -> std::collections::BTreeSet<String> {
-        let mut keys = std::collections::BTreeSet::new();
+    /// Every requirement with an [`OverloadSlot`] named in `only` (`None`: any name), of the
+    /// parameterized protocols this module sees by a name it declares or imports (`import From
+    /// from std.convert`, `import p` for `p.Parse`); a std module sees every std protocol
+    /// ([`Self::std_slot_table`]). A protocol with no wanted method is skipped before any key or sig
+    /// is built (this runs per type body). Sorted by protocol key, so a message naming two reads
+    /// the same every run.
+    fn visible_slot_reqs(&self, only: Option<&[&str]>) -> Vec<Arc<OverloadReq>> {
         if self.current_module_is_stdlib {
-            for d in super::graph_pass::std_protocol_decls() {
-                keys.insert(d.name.clone());
-            }
+            let table = self.std_slot_table();
+            return table
+                .iter()
+                .filter(|r| only.is_none_or(|w| w.contains(&r.name.as_str())))
+                .cloned()
+                .collect();
         }
+        let wanted = &|n: &str| only.is_none_or(|w| w.contains(&n));
+        let keep = |p: &ProtocolInfo| {
+            !p.type_params.is_empty() && p.methods.iter().any(|(n, _)| wanted(n))
+        };
+        let mut found: Vec<(String, &ProtocolInfo)> = Vec::new();
+        // A declared or from-imported protocol is in `protocols` under its key (hoist, `bind_import`).
         for (bind, key) in &self.bare_types {
             let other_type = self.struct_names.contains(bind)
                 || self.enum_names.contains(bind)
                 || self.aliases.contains_key(bind);
-            if !other_type && self.protocol_by_key(key).is_some() {
-                keys.insert(key.clone());
+            if !other_type && let Some(p) = self.protocols.get(key).filter(|p| keep(p)) {
+                found.push((key.clone(), p));
             }
         }
         for mid in self.imported_modules.values() {
             if let Some(sig) = self.module_sigs.get(mid) {
-                for member in sig.protocol_defs.keys() {
-                    keys.insert(self.type_key(mid, member));
+                for (member, def) in &sig.protocol_defs {
+                    if keep(&def.info) {
+                        found.push((self.type_key(mid, member), &def.info));
+                    }
                 }
             }
         }
-        keys.retain(|k| {
-            self.protocol_by_key(k)
-                .is_some_and(|p| !p.type_params.is_empty())
-        });
-        keys
+        slot_reqs(found, wanted).into_iter().map(Arc::new).collect()
     }
 
-    /// A protocol's shape by its identity key: this checker's table, else the owning module's.
-    fn protocol_by_key(&self, key: &str) -> Option<&ProtocolInfo> {
-        self.protocols
-            .get(key)
-            .or_else(|| self.owning_protocol_def(key))
-    }
-
-    /// Every requirement of a [`Self::visible_protocol_keys`] protocol that has an
-    /// [`OverloadSlot`]; `only` limits it to one name.
-    fn visible_slot_reqs(&self, only: Option<&str>) -> Vec<OverloadReq> {
-        let mut out = Vec::new();
-        for key in self.visible_protocol_keys() {
-            let Some(pinfo) = self.protocol_by_key(&key) else {
-                continue;
-            };
-            let bare = crate::base::words::bare_display(&key);
-            let spelled = format!("{bare}[{}]", pinfo.type_params.join(", "));
-            for (n, req) in pinfo.methods.iter() {
-                if only.is_some_and(|o| o != n) {
-                    continue;
-                }
-                if let Some(slot) = overload_slot(req, &pinfo.type_params) {
-                    out.push(OverloadReq {
-                        name: n.clone(),
-                        spelled: spelled.clone(),
-                        req: req.clone(),
-                        slot,
-                    });
-                }
-            }
+    /// The slotted requirements of every parameterized std protocol, sorted by protocol key. The
+    /// std shapes are the same for every checker of a process (`seed_std_protocols`), so the table
+    /// is derived once and shared; a checker missing a std shape derives its own.
+    fn std_slot_table(&self) -> std::borrow::Cow<'static, [Arc<OverloadReq>]> {
+        static TABLE: std::sync::OnceLock<Vec<Arc<OverloadReq>>> = std::sync::OnceLock::new();
+        if let Some(t) = TABLE.get() {
+            return std::borrow::Cow::Borrowed(t);
         }
-        out
+        // Only a parameterized protocol keys a slot: its decl says so before any shape is read.
+        let decls: Vec<&str> = super::graph_pass::std_protocol_decls()
+            .iter()
+            .filter(|d| {
+                matches!(&d.stmt.kind, StmtKind::Protocol { type_params, .. } if !type_params.is_empty())
+            })
+            .map(|d| d.name.as_str())
+            .collect();
+        let found: Vec<(String, &ProtocolInfo)> = decls
+            .iter()
+            .filter_map(|k| Some((k.to_string(), self.protocols.get(*k)?)))
+            .collect();
+        let complete = found.len() == decls.len();
+        let table: Vec<Arc<OverloadReq>> = slot_reqs(found, &|_| true)
+            .into_iter()
+            .map(Arc::new)
+            .collect();
+        if complete {
+            std::borrow::Cow::Borrowed(TABLE.get_or_init(|| table))
+        } else {
+            std::borrow::Cow::Owned(table)
+        }
     }
 
     /// THE owner of "is this method a protocol slot", decided once per type body at hoist: for each
@@ -124,12 +132,20 @@ impl Checker {
     /// it, when every declaration of the name has that slot's receiver (a `Param` slot keys a
     /// static, a `Ret` slot an instance method). Any other method is plain. Two visible protocols
     /// that key one declared name differently are an error naming both.
-    pub(super) fn decl_slots(&mut self, methods: &[FnDecl]) -> HashMap<String, OverloadReq> {
-        let reqs = self.visible_slot_reqs(None);
+    pub(super) fn decl_slots(&mut self, methods: &[FnDecl]) -> HashMap<String, Arc<OverloadReq>> {
         let mut slots = HashMap::new();
-        let mut seen = HashSet::new();
-        for m in methods {
-            if !seen.insert(m.name.as_str()) {
+        if methods.is_empty() {
+            return slots;
+        }
+        let mut names: Vec<&str> = methods.iter().map(|m| m.name.as_str()).collect();
+        names.sort_unstable();
+        names.dedup();
+        let reqs = self.visible_slot_reqs(Some(&names));
+        if reqs.is_empty() {
+            return slots;
+        }
+        for (i, m) in methods.iter().enumerate() {
+            if methods[..i].iter().any(|x| x.name == m.name) {
                 continue;
             }
             let mut named = reqs.iter().filter(|r| r.name == m.name);
@@ -137,7 +153,9 @@ impl Checker {
                 continue;
             };
             if let Some(other) = named.find(|r| r.slot != first.slot) {
-                let (a, b, name) = (&first.spelled, &other.spelled, &m.name);
+                let spelled =
+                    |r: &OverloadReq| self.req_shape(r).map(|(s, _)| s).unwrap_or_default();
+                let (a, b, name) = (spelled(first), spelled(other), &m.name);
                 self.error(
                     m.name_span,
                     format!(
@@ -164,7 +182,7 @@ impl Checker {
     pub(super) fn report_dup_methods(
         &mut self,
         methods: &[FnDecl],
-    ) -> HashMap<String, OverloadReq> {
+    ) -> HashMap<String, Arc<OverloadReq>> {
         let slots = self.decl_slots(methods);
         self.report_dup_names(
             methods
@@ -232,7 +250,10 @@ impl Checker {
             let Some(r) = overloads.slots.get(name) else {
                 continue;
             };
-            let (spelled, req, slot) = (&r.spelled, &r.req, r.slot);
+            let Some((spelled, req)) = self.req_shape(r) else {
+                continue;
+            };
+            let (spelled, req, slot) = (&spelled, &req, r.slot);
             let protocol = spelled.split('[').next().unwrap_or(spelled).to_string();
             let mut valid: Vec<(&FnDecl, &FnSig, &Ty)> = Vec::new();
             for (decl, sig) in methods.iter().filter(|m| &m.name == name).zip(sigs) {
@@ -244,7 +265,7 @@ impl Checker {
                 let key = slot.key(sig);
                 let msg = if decl.ret.is_none() {
                     format!("an overloaded {name} declares its return type, as {spelled} declares")
-                } else if let Some(msg) = self.ret_misfit(r, &sig.ret, self_ty) {
+                } else if let Some(msg) = self.ret_misfit(r, req, &sig.ret, self_ty) {
                     msg
                 } else if sig.params.len() != req.params.len() && req.is_static {
                     let n = req.params.len();
@@ -307,15 +328,15 @@ impl Checker {
     /// (Rust `E0053`): `Self` (`self_ty`) for `from`, `Self!E` for `try_from`, a target `T` for
     /// `into`, `T!E` for `try_into`. A `!` return where a plain one is due names the fallible twin:
     /// the requirement that returns `r`'s return with `!` (`try_from`, `try_into`).
-    fn ret_misfit(&self, r: &OverloadReq, ret: &Ty, self_ty: &Ty) -> Option<String> {
+    fn ret_misfit(&self, r: &OverloadReq, req: &FnSig, ret: &Ty, self_ty: &Ty) -> Option<String> {
         let name = &r.name;
-        let shape = ret_ok(&r.req.ret).to_string();
+        let shape = ret_ok(&req.ret).to_string();
         let ok_fits = |ok: &Ty| match r.slot {
             OverloadSlot::Param(_) => *ok == *self_ty,
             OverloadSlot::Ret => true,
         };
         let is_result = matches!(ret, Ty::Result(..));
-        if matches!(r.req.ret, Ty::Result(..)) {
+        if matches!(req.ret, Ty::Result(..)) {
             return (!(is_result && ok_fits(ret_ok(ret))))
                 .then(|| format!("an overloaded {name} returns {shape}!E, found {ret}"));
         }
@@ -324,9 +345,11 @@ impl Checker {
         }
         let twin = (is_result && ok_fits(ret_ok(ret)))
             .then(|| {
-                self.visible_slot_reqs(None)
-                    .into_iter()
-                    .find(|t| matches!(&t.req.ret, Ty::Result(ok, _) if **ok == r.req.ret))
+                self.visible_slot_reqs(None).into_iter().find(|t| {
+                    self.req_shape(t).is_some_and(
+                        |(_, s)| matches!(&s.ret, Ty::Result(ok, _) if **ok == req.ret),
+                    )
+                })
             })
             .flatten();
         let hint = twin
@@ -335,6 +358,17 @@ impl Checker {
         Some(format!(
             "an overloaded {name} returns {shape}, found {ret}{hint}"
         ))
+    }
+
+    /// The protocol of `r` spelled with its type params (`From[S]`) and the requirement's sig.
+    fn req_shape(&self, r: &OverloadReq) -> Option<(String, FnSig)> {
+        let p = self
+            .protocols
+            .get(&r.protocol)
+            .or_else(|| self.owning_protocol_def(&r.protocol))?;
+        let (_, req) = p.methods.iter().find(|(n, _)| *n == r.name)?;
+        let bare = crate::base::words::bare_display(&r.protocol);
+        Some((format!("{bare}[{}]", p.type_params.join(", ")), req.clone()))
     }
 
     /// The sig of `methods[i]` at hoist: [`Self::fn_sig`], with the call-binding slots named for
@@ -409,7 +443,7 @@ impl Checker {
 
     /// The stored slot of the method `name` of the type `ty`, a lone method included.
     pub(super) fn slot_of(&self, ty: &Ty, name: &str) -> Option<&OverloadReq> {
-        self.nominal_overloads(ty)?.slots.get(name)
+        self.nominal_overloads(ty)?.slots.get(name).map(|r| &**r)
     }
 
     /// The protocol-slot methods of the struct or enum `ty`, or of a builtin's native struct.
@@ -591,7 +625,7 @@ impl Checker {
         name: &str,
         span: Span,
     ) -> Option<usize> {
-        let want = match self.expected_hint.clone() {
+        let want = match self.expected_hint.as_ref().map(|h| h.ty.clone()) {
             Some(Ty::Func { params, ret, .. }) if params.len() == 1 => match slot {
                 OverloadSlot::Param(_) => params.into_iter().next(),
                 OverloadSlot::Ret => Some(*ret),
@@ -863,6 +897,35 @@ fn overload_slot(req: &FnSig, tps: &[String]) -> Option<OverloadSlot> {
     (req.params.len() == 1 && is_tp).then_some(OverloadSlot::Ret)
 }
 
+/// The requirements with an [`OverloadSlot`] whose name `wanted` takes, of the parameterized
+/// protocols `found` (key, shape), sorted and deduplicated by key.
+fn slot_reqs(
+    mut found: Vec<(String, &ProtocolInfo)>,
+    wanted: &dyn Fn(&str) -> bool,
+) -> Vec<OverloadReq> {
+    found.sort_by(|a, b| a.0.cmp(&b.0));
+    found.dedup_by(|a, b| a.0 == b.0);
+    let mut out = Vec::new();
+    for (key, pinfo) in found {
+        if pinfo.type_params.is_empty() {
+            continue;
+        }
+        for (n, req) in pinfo.methods.iter() {
+            if !wanted(n) {
+                continue;
+            }
+            if let Some(slot) = overload_slot(req, &pinfo.type_params) {
+                out.push(OverloadReq {
+                    name: n.clone(),
+                    protocol: key.clone(),
+                    slot,
+                });
+            }
+        }
+    }
+    out
+}
+
 /// The ok type of a `T!E` return, else the return itself.
 fn ret_ok(ret: &Ty) -> &Ty {
     if let Ty::Result(ok, _) = ret { ok } else { ret }
@@ -913,7 +976,7 @@ pub(super) fn internal_name(base: &str, s: &Ty) -> String {
 /// One type body's [`Overloads`]: its `slots` ([`Checker::report_dup_methods`]), and each slotted
 /// name declared 2+ times with its sigs in declaration order.
 pub(super) fn overload_sets(
-    slots: HashMap<String, OverloadReq>,
+    slots: HashMap<String, Arc<OverloadReq>>,
     sigs: &[(String, FnSig)],
 ) -> Overloads {
     let mut sets: HashMap<String, Vec<FnSig>> = HashMap::new();
@@ -948,6 +1011,10 @@ pub(super) fn method_decl_sig(
 
 /// Does `ty` mention any of the type params `names`? A `subst` round-trip, as `mentions_self`.
 fn mentions_any(ty: &Ty, names: &[String]) -> bool {
+    // The common source `x: S` answers without the round-trip's copy.
+    if let Ty::Param(n) = ty {
+        return names.contains(n);
+    }
     let probe: HashMap<String, Ty> = names.iter().map(|n| (n.clone(), Ty::Unknown)).collect();
     subst(ty, &probe) != *ty
 }
