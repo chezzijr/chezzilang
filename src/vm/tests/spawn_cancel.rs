@@ -322,6 +322,7 @@ fn an_aborting_outcome_trips_the_fibers_cancel_at_finish() {
                 err: dl_err(),
                 out: Vec::new(),
                 stderr: Vec::new(),
+                frames: Vec::new(),
             },
             false,
         ),

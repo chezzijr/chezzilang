@@ -29,8 +29,8 @@ the claim has a slot left (`claim_joiner`), so the runner count stays `worker_co
 **One verdict, one halt (TICKET-223).** The first judge to see the verdict (main at its own
 wait, or an idle scheduler worker) latches it, and every party ends through the run-halt funnel
 that `os.exit` and a job fault use, so no party runs past it. Main blocked at a wait reports that
-wait's site: main locking a `Shared` guard that a stuck job holds reports
-`update guard wait: deadlock — …` at its own `update`, as Go reports
+wait's site: main locking a `Shared` guard that a stuck job holds is listed as
+`waiting for the Shared guard` at its own `update`, as Go reports
 `goroutine 1 [sync.Mutex.Lock]`. Main at a join (`shutdown()`, the end of a `parallel:` block)
 reports the victims' sites. A cleanup that meets the verdict is fatal too: no further `defer`
 runs, no `recover:` catches the unwind it ran in (a `?` inside `recover:` included), and the cause
@@ -46,8 +46,8 @@ five sites faulted the tasks with no latch. A faulted task unwound and freed the
 it held, main took the guard and ran on: `print("AFTER")` ran past the deadlock in 27 to 67 of
 600 runs (`tests/deadlock_verdict_stress.rs`). The latched report is the first blocked party's
 own site, whichever judge decides first (TICKET-256, owner decision 2026-10-14): a `parallel:`
-body that waits at `s.update` reports `update guard wait: deadlock …` at that line, and the
-`parallel:` line reports only when the body waits at the join. The scheduler writes the same
+body that waits at `s.update` is listed as `waiting for the Shared guard` at that line. Since
+2026-11-06 the report lists every blocked task (`docs/reference/concurrency/05-cancel.md`). The scheduler writes the same
 report into the tasks it faults, so main ends with one text whichever it reads first. Go
 agrees: its trace lists main at its `Lock` first, and nothing after the lock runs. A wait registers as a blocked party
 before it marks its body blocked, so a judge never sees a blocked body with no party.

@@ -167,7 +167,8 @@ fn a_job_nursery_deadlock_with_no_shutdown_still_faults() {
             out.status
         );
         assert!(
-            stderr.contains("deadlock: every task in this parallel: block is blocked"),
+            stderr.contains("deadlock: 1 task is blocked and cannot proceed")
+                && stderr.contains("task 1: recv() on an empty channel at "),
             "expected a deadlock fault, got stdout: {stdout:?} stderr: {stderr:?}"
         );
     });

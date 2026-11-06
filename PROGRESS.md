@@ -379,6 +379,13 @@ Each group below is one fact decided in two or more places (grouped 2026-10-16).
     is deleted. A protocol value's messages print its type, not its key (`Vecish`, not `v::Vecish`). A failed call under
     `?.` reports what the plain `.` call reports: `r?.nope2(nope())` is 2 errors, not 3. The carrier
     binders' names have one owner, `ast::CarrierTemp`.
+38. **The deadlock report lists every blocked task (Go's model, done 2026-11-06).** One header
+    (`deadlock: N tasks are blocked and none can proceed`), then `task k: <wait> at <site>` and its
+    frames for every blocked task of the run, in spawn-tree order, the same every run;
+    `chezzi test --errors=json` adds a `tasks` array. `vm/deadlock.rs` owns each wait's phrase, the
+    header, the fold and the rendering; the five old texts are gone. A deadlock fault no longer
+    cancels a blocked sibling, and a cut guard waiter no longer takes the guard its cut holder
+    frees. `docs/reference/concurrency/05-cancel.md`. History: `docs/history/progress/2026-11.md`.
 
 ### Open questions for the owner
 
@@ -386,15 +393,6 @@ Each group below is one fact decided in two or more places (grouped 2026-10-16).
   item 19.
 
 ### Owner decisions not yet implemented
-
-- **A deadlock verdict lists every blocked task** (owner decision 2026-11-06, Go's model: `fatal
-  error: all goroutines are asleep - deadlock!` then each goroutine's wait and stack). Today the
-  verdict is deterministic (one report, the lowest task by spawn order, plan
-  `2026-11-06-slot-optchain-hints` task 7) but it names one task, and the wait texts differ by site
-  (`deadlock: every task …`, `recv on an empty channel: deadlock …`, `update guard wait:
-  deadlock …`). Needs: each cut site to carry its own wait text and span (a demoted `recv` reports
-  the nursery's text today), a parked fiber's frames in its `Deadlocked` slot, one composer in the
-  reduce, and the listing's shape in `--errors=json`.
 
 - **U16: `Sized` and `Extend` protocols not declared yet** (owner decision 2026-10-16).
   A protocol only where generic code needs one; a new protocol goes in a std module, not the global

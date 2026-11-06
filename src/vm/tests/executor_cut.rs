@@ -631,9 +631,9 @@ fn spawn_call_operands_are_evaluated_in_the_parent() {
     let e = run_capture("fn main():\n    a := Channel[int](1)\n    parallel:\n        spawn print(a.recv())\n        a.send(1)\nmain()\n")
         .expect_err("the parent's recv has no sender yet");
     assert!(
-        e.message.contains("recv on an empty channel: deadlock"),
+        err_text(&e).contains("recv() on an empty channel"),
         "{}",
-        e.message
+        err_text(&e)
     );
 }
 

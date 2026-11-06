@@ -1354,6 +1354,7 @@ pub(super) fn halt_over_backlog(
         is_timed_out: false,
         is_deadlock: false,
         is_panic: false,
+        blocked: None,
     };
     match outcome {
         T::Done(r) => (

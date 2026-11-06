@@ -43,13 +43,16 @@ impl MnSched {
     ) -> (bool, bool) {
         let mut c = self.lock();
         debug_assert!(Arc::ptr_eq(&c.left, &self.quiesce.epoch()));
-        // A party the sched-wide verdict cut ends with the verdict's fault. That verdict cut EVERY
-        // blocked party of this sched at once, so this end cancels no sibling: a trip here turned the
-        // sibling that read its cut later into a cancelled task, and which task's deadlock was
-        // reported depended on which woke first. Every cut party reports, and the reduce
-        // picks one by task order.
+        let job_fault = self.publish_job_fault(&c, scope_id, &outcome);
+        c.leave_running();
+        // A task that ends with a deadlock verdict's fault cancels no sibling when every other
+        // party of this sched is stuck too: the sched-wide verdict cut them all at once, or (a
+        // verdict on one leaf family, ended through its owner) nothing else here can move. A trip
+        // turned such a sibling into a cancelled task, so the report missed it, and which task was
+        // reported depended on which woke first. Each stuck sibling is then judged by the next
+        // verdict, and the join lists every one in task order.
         let cut_end = matches!(&outcome, TaskOutcome::Fault { err, .. } if err.is_deadlock)
-            && c.cut_in_place();
+            && (c.cut_in_place() || self.is_deadlocked(&c));
         // The outcome the worker handed in, before the W7-26r conversion below: that conversion
         // trips the scope's own flag, for a backlog only.
         if let Some(flag) = trip
@@ -58,8 +61,6 @@ impl MnSched {
         {
             crate::vm::trip_cancel_flag(flag);
         }
-        let job_fault = self.publish_job_fault(&c, scope_id, &outcome);
-        c.leave_running();
         // W7-26r — this thread is the only party that can observe the cap for a nursery whose parent
         // is blocked in the join (see `core::halt_over_backlog`). These slots live outside every
         // `Heap`, so `live_bytes` never counted them either: this is the accounting AND the
@@ -898,6 +899,7 @@ impl MnSched {
                     is_timed_out: false,
                     is_deadlock: false,
                     is_panic: false,
+                    blocked: None,
                 }),
                 Err(p) => Err(panic_to_fault(p, span)),
             };

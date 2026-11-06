@@ -47,13 +47,14 @@ fn core_key(core: &Arc<ChannelCore>) -> usize {
 
 fn dl_err() -> RuntimeError {
     RuntimeError {
-        message: DEADLOCK_MSG.to_string(),
+        message: super::deadlock::Wait::Nursery.phrase().to_string(),
         span: Span::RUNTIME,
         is_assert: false,
         is_over_memory: false,
         is_timed_out: false,
         is_deadlock: false,
         is_panic: false,
+        blocked: None,
     }
 }
 
@@ -183,8 +184,20 @@ fn run(src: &str) -> String {
 fn run_err(src: &str) -> String {
     match run_capture(src) {
         Ok(out) => panic!("expected a runtime error, got output: {out:?}"),
-        Err(e) => e.message,
+        Err(e) => err_text(&e),
     }
+}
+
+/// A fault as a driver prints it, minus paths and frames: the message, then for a deadlock each
+/// blocked task's `task k: <wait> at <site>` line.
+fn err_text(e: &RuntimeError) -> String {
+    let tasks = crate::vm::deadlock::listing(e, &[]);
+    let mut s = e.message.clone();
+    for line in crate::vm::deadlock::render(&tasks, &[]) {
+        s.push('\n');
+        s.push_str(&line);
+    }
+    s
 }
 
 /// Run a program and return its stdout, for the caller to assert against a literal expected.

@@ -224,7 +224,7 @@ fn main():
     print("AFTER")
 main()
 "#,
-        site: "9:11",
+        site: "6:5",
         after_ok: false,
         test_mode: false,
     },
@@ -301,7 +301,7 @@ fn main():
     print("AFTER")
 main()
 "#,
-        site: "4:5",
+        site: "5:22",
         after_ok: false,
         test_mode: false,
     },
@@ -322,7 +322,7 @@ fn main():
     print("AFTER")
 main()
 "#,
-        site: "5:5",
+        site: "7:22",
         after_ok: false,
         test_mode: false,
     },
@@ -573,8 +573,9 @@ fn run_cell(
 /// verdict (since TICKET-246 a `RwShared.read` waits for a writer too: ex_rw, sp_rw); plus
 /// `CLEANUP_ROWS`, where nothing prints after the verdict and the cause keeps the report.
 /// Since TICKET-256 a `parallel:` body that waits at its own blocking op is the first party, so its
-/// op is the report (`sp_guard`, `sp_rw`, `sp_full_send`); the `parallel:` line reports only when
-/// the body waits at the join (`sp_chan`, `sp_cycle`).
+/// op is the report (`sp_guard`, `sp_rw`, `sp_full_send`). Since the deadlock listing the report's
+/// position is the first blocked task's own wait: a body at the join is not listed, so `sp_chan`
+/// and `sp_cycle` report their first task's `recv`, and `ex_nested` its job's inner `shutdown()`.
 #[test]
 fn deadlock_verdict_grid_ends_at_the_first_party_site() {
     let dir = std::env::temp_dir().join(format!("chz-ticket223-grid-{}", std::process::id()));

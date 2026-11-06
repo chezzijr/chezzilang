@@ -6,6 +6,7 @@
 mod blocking_pool;
 pub mod chzstr;
 pub mod core;
+pub mod deadlock;
 mod fxhash;
 mod gc_coord;
 mod gc_door;
@@ -88,6 +89,9 @@ pub struct RuntimeError {
     pub is_timed_out: bool,
     pub is_deadlock: bool,
     pub is_panic: bool,
+    /// A folded deadlock report: every blocked task of the joins it crossed, in task order
+    /// ([`deadlock::fold`]). `None` for every other fault, and for one task's own cut.
+    pub blocked: Option<Box<deadlock::Blocked>>,
 }
 
 impl RuntimeError {
@@ -118,10 +122,7 @@ impl RuntimeError {
     /// This verdict, reported as the blocking op of one waiter: its own text and span, every
     /// marker kept. The one way a sched's deadlock fault is re-sited.
     pub(crate) fn at_site(&self, msg: &str, span: Span) -> Self {
-        let mut e = self.clone();
-        e.message = msg.to_string();
-        e.span = span;
-        e
+        deadlock::cut(self, msg, span)
     }
 
     /// Mark this fault as raised by `panic(...)` (see [`RuntimeError::is_panic`]).
@@ -198,6 +199,9 @@ pub struct RunError {
     /// `Program` existed (a resolve/compile-time error) — `render_span` falls back to the historical
     /// `line N, col M` form in either case, never a wrong or partial path.
     pub files: Vec<(u32, std::path::PathBuf)>,
+    /// A deadlock verdict's blocked tasks ([`deadlock::listing`]); empty for every other fault.
+    /// [`format_trace`] prints them in place of `trace`.
+    pub blocked: Vec<deadlock::BlockedTask>,
 }
 
 impl RunError {
@@ -206,11 +210,17 @@ impl RunError {
         trace: Vec<TraceFrame>,
         files: Vec<(u32, std::path::PathBuf)>,
     ) -> Self {
+        let blocked = deadlock::listing(&e, &trace);
         RunError {
-            message: e.message,
+            message: if blocked.is_empty() {
+                e.message
+            } else {
+                deadlock::header(blocked.len())
+            },
             span: e.span,
             trace,
             files,
+            blocked,
         }
     }
     fn plain(e: RuntimeError) -> Self {
@@ -219,6 +229,7 @@ impl RunError {
             span: e.span,
             trace: Vec::new(),
             files: Vec::new(),
+            blocked: Vec::new(),
         }
     }
 }
@@ -256,7 +267,12 @@ pub fn format_trace(e: &RunError) -> String {
         render_span(e.span, path_for(e.span.file)),
         e.message
     );
-    for entry in format_frames(&e.trace, &e.files) {
+    let entries = if e.blocked.is_empty() {
+        format_frames(&e.trace, &e.files)
+    } else {
+        deadlock::render(&e.blocked, &e.files)
+    };
+    for entry in entries {
         s.push('\n');
         s.push_str(&entry);
     }
@@ -1101,6 +1117,11 @@ pub struct Vm {
     /// path raises for the same op, and the op's span. Set beside `suspend` / `send_suspend` /
     /// `wait_suspend`, moved to [`Fiber::park_site`] by `run_one_fiber`.
     park_site: Option<(&'static str, Span)>,
+    /// The wait this thread is in right now, as the deadlock listing names it (its phrase and
+    /// span): set by [`Vm::wait_begin`] / [`Vm::wait_demote`] from the wait's [`block::Blocked`],
+    /// cleared by [`Vm::wait_end`]. A party the run's latched verdict ends reports this wait, not
+    /// the first party's ([`Vm::run_exit_err`]).
+    wait_site: Option<(&'static str, Span)>,
     /// TICKET-185 — the blocked party this `Vm` is running (a parked `send`'s offer, a parked
     /// `recv`'s slot, a `wait:`'s offers and slots), carried across a park by [`Fiber::pending`].
     /// The re-run op settles it first ([`crate::vm::core::PendingOp::settle`]).

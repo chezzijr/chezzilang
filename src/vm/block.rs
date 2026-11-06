@@ -284,6 +284,9 @@ pub(super) fn wait_steps(spec: Option<WaitSpec>, ctx: BlockCtx) -> WaitSteps {
 pub(super) struct Blocked {
     wait: Arc<PartyWait>,
     site: Option<(&'static str, Span)>,
+    /// The wait as the deadlock listing names it ([`Vm::wait_site`]): `site`, or for a wait that
+    /// is no party report (a demoted wait, an Executor join) the name [`Blocked::named`] gives.
+    listed: Option<(&'static str, Span)>,
 }
 
 impl Blocked {
@@ -291,6 +294,7 @@ impl Blocked {
         Blocked {
             wait: Arc::new(wait),
             site: None,
+            listed: None,
         }
     }
 
@@ -298,7 +302,14 @@ impl Blocked {
         Blocked {
             wait: Arc::new(wait),
             site: Some((msg, span)),
+            listed: Some((msg, span)),
         }
+    }
+
+    /// Name a wait that gives no party report, for the deadlock listing only.
+    pub(super) fn named(mut self, wait: super::deadlock::Wait, span: Span) -> Self {
+        self.listed = Some((wait.phrase(), span));
+        self
     }
 }
 
@@ -663,6 +674,16 @@ impl Vm {
     /// cuts a wait of its own as the stuck cleanup of a cancelled scope, so the party unwinds as
     /// cancelled ([`Cut::Cancelled`]): its `deadlock` stays swallowed, as a cancelled task's stuck
     /// cleanup's does, and the scope's cause is the report (DEC-147).
+    /// The fault of this thread's wait when the verdict cut it ([`Vm::in_place_cut`]): `sched`'s
+    /// deadlock fault, sited at the wait this thread is in ([`Vm::wait_site`], named by its
+    /// [`Blocked`]).
+    pub(super) fn cut_fault(&self, sched: &MnSched, span: Span) -> RuntimeError {
+        let (wait, at) = self
+            .wait_site
+            .unwrap_or((super::deadlock::Wait::Nursery.phrase(), span));
+        sched.deadlock_err.at_site(wait, at)
+    }
+
     pub(super) fn in_place_cut(&mut self, c: &SchedCore, tok: Option<u64>) -> bool {
         if c.cut_in_place() {
             return true;
@@ -874,6 +895,7 @@ impl Vm {
         span: Span,
     ) -> Result<(Counts, Option<DemoteReg>), RuntimeError> {
         let counts = self.counts(steps, on.as_ref(), None);
+        self.wait_site = on.as_ref().and_then(|b| b.listed);
         let demote = match steps.hand {
             Handover::Demote(account) => {
                 Some(self.block_enter(account, on.as_ref().map(|b| &b.wait), what, span)?)
@@ -1048,6 +1070,7 @@ impl Vm {
             ticked: _,
         } = reg;
         drop(counts);
+        self.wait_site = None;
         self.permit_back(released, watched, pins);
         if let Some(reg) = demote {
             self.block_exit(reg);
@@ -1352,6 +1375,7 @@ mod tests {
             is_timed_out: false,
             is_deadlock: false,
             is_panic: false,
+            blocked: None,
         }
     }
 

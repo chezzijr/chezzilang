@@ -58,7 +58,7 @@ FLAGS:
     --show-output    Surface a FAILING test's captured stdout byte-exactly, indented under its line
                      (default: discard). Its captured stderr goes to fd 2 instead, as one block per
                      test.
-    --errors=json    Emit ONLY a JSON document ({tests:[{name,file,line?,status,message?,duration_ms}],totals})
+    --errors=json    Emit ONLY a JSON document ({tests:[{name,file,line?,status,message?,tasks?,duration_ms}],totals})
                      for CI/editors — suppresses the human PASS/FAIL lines (mirrors `check --errors=json`).
     -q, --quiet      Dots (`.`/`F`/`E`/`M`/`T`) per test + the summary only (no per-test lines).
     -v, --verbose    Per-test lines + per-test timing (`(Nms)`) + a total (`-q`/`-v` are exclusive).

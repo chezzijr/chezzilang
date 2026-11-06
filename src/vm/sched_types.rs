@@ -350,6 +350,9 @@ pub(super) enum TaskOutcome {
         err: RuntimeError,
         out: Vec<u8>,
         stderr: Vec<u8>,
+        /// The parked fiber's frames (innermost first, module toplevels dropped), named by the
+        /// reducing VM ([`Vm::trace_of`]) for the deadlock listing.
+        frames: Vec<(ProtoId, Span)>,
     },
 }
 
@@ -387,11 +390,6 @@ impl TaskOutcome {
 // for is unchanged and now lives inline in `Vm::spawn_into`: a Rust panic in a job's worker VM
 // becomes a `Fault` slot instead of leaving `the Executor's sched::outstanding` short and hanging `shutdown`
 // forever. Covered by `executor_faulting_job_does_not_hang_shutdown`.
-
-/// The `deadlock` fault message raised by the M:N detector ([`MnSched::take_runnable`]).
-pub(super) const DEADLOCK_MSG: &str = "deadlock: every task in this parallel: block is blocked on a channel it \
-     cannot proceed on (an empty recv() or a full send()) and no sibling can unblock it — the nursery \
-     cannot progress";
 
 /// TICKET-208 — `Executor.submit` could start no runner thread for its job.
 pub(super) const EXEC_NO_RUNNER_MSG: &str =

@@ -115,18 +115,28 @@ impl SchedCore {
         // DEC-048.
         // TICKET-208 — else, on an `Executor`'s sched, the fiber's own blocking op: the text and
         // span the in-place path raises there. Else the sched-wide `err`.
-        let scope_err = match (&self.scopes[sid].deadlock_err, f.park_site) {
-            (Some(e), _) => e.clone(),
-            (None, Some((msg, span))) if self.leaf_site => err.at_site(msg, span),
-            _ => err.clone(),
+        // The listing names each task's own wait: its park site, else its scope's own fault
+        // (an owner parked at a join names no site), else the sched-wide `err`.
+        let scope_err = match (f.park_site, &self.scopes[sid].deadlock_err) {
+            (Some((msg, span)), _) => err.at_site(msg, span),
+            (None, Some(e)) => e.clone(),
+            (None, None) => err.clone(),
         };
         // M1.4 — take the context out of the registry before any field moves: this thread may not
         // be attached to the GC (see `RootRegistry::roots`).
         let ctx = f.ctx.into_inner();
+        let frames = ctx
+            .frames
+            .iter()
+            .rev()
+            .filter(|f| !f.is_toplevel)
+            .map(|f| (f.proto, f.call_span))
+            .collect();
         self.slots[ti] = Some(TaskOutcome::Deadlocked {
             err: scope_err,
             out: ctx.out,
             stderr: ctx.stderr,
+            frames,
         });
         self.task_done(sid);
         self.job_event(
@@ -519,6 +529,7 @@ pub(super) fn panic_to_fault(payload: Box<dyn std::any::Any + Send>, span: Span)
         is_timed_out: false,
         is_deadlock: false,
         is_panic: false,
+        blocked: None,
     }
 }
 

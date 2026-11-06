@@ -385,19 +385,43 @@ picks the report:
 3. the run's own cause (`--timeout`, `--max-heap`, an own fault, a deadlock).
 
 Go's first panic ends the process, so the earlier job fault is reported with the job's frames; an own
-fault that happened first stays the report.
-
-**One deadlock verdict, the same every run.** A deadlock verdict cuts every blocked task of the
-scheduler at once. Each cut task ends with the verdict's fault, and none of them cancels a sibling,
-so the task that wakes first does not decide the report: the lowest task by spawn order is. A
-`Shared.update` holder blocked on a `recv` nothing feeds, beside a sibling waiting for its guard,
-reports the holder's `deadlock: every task in this parallel: block is blocked …` with the holder's
-frames on every run, never the sibling's `update guard wait: deadlock`. A job fault replacing a deadlock stays fatal, so
+fault that happened first stays the report. A job fault replacing a deadlock stays fatal, so
 `recover:` cannot catch it. This applies only to an executor no `shutdown()` has started on: a
 deadlock inside that executor's own join keeps its `deadlock` verdict. A job cut by the run's own
 `--timeout` is that cause, not an earlier fault. A child's or a job's fault prints the faulting
 party's frames, never the frames of the owner that received it. A run that ends in a deadlock verdict
 still drains its executors, so a finished job's buffered output is not lost.
+
+**The deadlock report lists every blocked task (Go's `all goroutines are asleep`).** A verdict cuts
+every blocked task at once; each ends with its own wait at its own site, and none of them cancels a
+sibling, so the report does not depend on which task woke first. A join folds the blocked tasks of
+its slots in task order, and an enclosing join folds again, so the report lists every blocked task
+of the run in spawn-tree order (a nursery's tasks in place of the task that opened it). An executor's
+blocked jobs, drained at the end of the run, follow the run's own tasks. The report is one header,
+then one entry per task with its frames:
+
+```
+deadlock: 2 tasks are blocked and none can proceed
+  task 1: recv() on an empty channel at g.chz:5:10
+    at take (called at g.chz:14:45)
+    at <closure> (called at g.chz:14:13)
+    at <spawned task> (called at g.chz:13:9)
+  task 2: waiting for the Shared guard at g.chz:17:13
+    at <spawned task> (called at g.chz:15:9)
+```
+
+The waits are `recv() on an empty channel`, `send() on a full channel`, `send() on a rendezvous
+channel`, `wait: on channels that are all empty`, `wait: on channels none of which can proceed`,
+`waiting for the Shared guard`, `waiting for the RwShared guard`, `waiting for an Executor join`,
+`waiting on a socket`, and `blocked in a parallel: block` for a task whose own wait no site names
+(owner `vm/deadlock.rs`, `Wait::phrase`). One task reads `deadlock: 1 task is blocked and cannot
+proceed`. The error's position is the first task's site. `chezzi test --errors=json` gives the
+header as the test's `message` and the entries as `tasks`: `[{"wait", "file", "line", "col",
+"frames": [{"function", "file", "line", "col"}]}]`. A guard that a cut holder frees as it unwinds is
+not progress: a waiter the verdict cut reports its wait and does not take the guard. A wait that
+cannot block where it is (a native callback with no thread of its own) faults at once with
+`deadlock: <wait>: <why>`, e.g. `deadlock: recv() on an empty channel: no runnable task can send.`
+That fault is an ordinary fault, not a verdict, and lists no tasks.
 
 **Cross-task output order is NOT part of the contract.** One `print` = one locked write = line-atomic;
 the *order* of prints from different tasks is nondeterministic (a cancelled task's already-printed

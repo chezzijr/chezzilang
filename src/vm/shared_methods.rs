@@ -747,9 +747,20 @@ impl Vm {
             Ok(()) => self.drain_live_executors(),
             Err(e) if (e.is_deadlock || job) && self.pending_exit.is_none() => {
                 let trace = (self.fault_trace.take(), self.fault_trace_depth);
-                let _ = self.drain_live_executors();
+                let drained = self.drain_live_executors();
                 (self.fault_trace, self.fault_trace_depth) = trace;
-                Err(e)
+                // The whole run's listing: an executor's blocked jobs follow the run's own tasks.
+                match drained {
+                    Err(d) if e.blocked.is_some() && d.blocked.is_some() => {
+                        let mut tasks = super::deadlock::listing(
+                            &e,
+                            self.fault_trace.as_deref().unwrap_or_default(),
+                        );
+                        tasks.extend(super::deadlock::listing(&d, &[]));
+                        Err(super::deadlock::fold(e, tasks))
+                    }
+                    Ok(()) | Err(_) => Err(e),
+                }
             }
             Err(e) => {
                 // TICKET-270 — an exit joins nothing, but what a finished job printed still

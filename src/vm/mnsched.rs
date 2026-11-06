@@ -1234,6 +1234,7 @@ pub(super) fn arm_timer_sleep(sched: Arc<MnSched>, mut fiber: Fiber, t: TimerSle
             is_timed_out: false,
             is_deadlock: false,
             is_panic: false,
+            blocked: None,
         })
     } else {
         None

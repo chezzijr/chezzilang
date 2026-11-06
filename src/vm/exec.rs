@@ -14,6 +14,7 @@ pub(super) fn plain_err(message: String, span: Span) -> RuntimeError {
         is_timed_out: false,
         is_deadlock: false,
         is_panic: false,
+        blocked: None,
     }
 }
 
@@ -101,6 +102,7 @@ impl Vm {
             is_timed_out: false,
             is_deadlock: false,
             is_panic: false,
+            blocked: None,
         })
     }
 
@@ -183,6 +185,7 @@ impl Vm {
             wait_suspend: None,
             send_suspend: None,
             park_site: None,
+            wait_site: None,
             pending: None,
             fault_park: None,
             offload: None,
@@ -1082,7 +1085,9 @@ impl Vm {
             });
         }
         match (r, dl) {
-            (Ok(()), Some((msg, site))) => Err(self.err(msg, site).deadlock()),
+            (Ok(()), Some((msg, site))) => {
+                Err(self.err(String::new(), site).deadlock().at_site(&msg, site))
+            }
             (r, _) => r,
         }
     }

@@ -196,18 +196,28 @@ impl Vm {
     /// Build a stack trace from the live frames (innermost first), skipping module-toplevel frames.
     /// Valid only while the frames are intact — i.e. on the uncaught-error path, before unwinding.
     pub(super) fn capture_trace(&self) -> Vec<TraceFrame> {
-        self.frames
+        let raw: Vec<(ProtoId, Span)> = self
+            .frames
             .iter()
             .rev()
             .filter(|f| !f.is_toplevel)
-            .map(|f| TraceFrame {
+            .map(|f| (f.proto, f.call_span))
+            .collect();
+        self.trace_of(&raw)
+    }
+
+    /// Name the frames `raw` (a proto and the call site that entered it, innermost first): a live
+    /// trace, or a parked fiber's frames ([`TaskOutcome::Deadlocked`]).
+    pub(super) fn trace_of(&self, raw: &[(ProtoId, Span)]) -> Vec<TraceFrame> {
+        raw.iter()
+            .map(|&(proto, span)| TraceFrame {
                 // Rendered, not raw: a W7-51 default-argument provider's internal name is
                 // deliberately unspellable (`$def$2$f.x$`) and would be unreadable in a trace.
                 function: crate::base::provider_name::display_fn_name(
-                    &self.program.protos[f.proto].name,
+                    &self.program.protos[proto].name,
                 )
                 .into_owned(),
-                span: f.call_span,
+                span,
             })
             .collect()
     }

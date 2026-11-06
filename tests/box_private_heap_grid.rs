@@ -136,7 +136,8 @@ fn a_child_task_reading_the_box_inside_its_own_closure_is_a_deadlock_fault_not_a
             let r = chezzi(&["run", path.to_str().unwrap()], threads, 30);
             assert_eq!(r.code, Some(1), "{kind} at {threads:?}: {}", r.stderr);
             assert!(
-                r.stderr.contains("update guard wait: deadlock")
+                r.stderr
+                    .contains(&format!("task 1: waiting for the {kind} guard at "))
                     && r.stderr.contains("main.chz:4:")
                     && r.stdout.is_empty(),
                 "{kind} at {threads:?}: stdout {:?} stderr {}",

@@ -1,6 +1,7 @@
 //! VM: demoting a blocked fiber in place: recv, send, `wait`, timers and sockets.
 //! Split out of `src/vm/sched.rs`. `super::*` is the parent module.
 
+use super::deadlock::Wait;
 use super::*;
 
 impl Vm {
@@ -68,10 +69,13 @@ impl Vm {
         //    deadlock (the #1 false-positive against an innocent parked sibling).
         let mut reg = match self.wait_begin(
             WaitSpec::Recv,
-            Some(Blocked::on(quiesce::PartyWait::Recv(
-                Arc::clone(&core),
-                Some(Arc::clone(&p)),
-            ))),
+            Some(
+                Blocked::on(quiesce::PartyWait::Recv(
+                    Arc::clone(&core),
+                    Some(Arc::clone(&p)),
+                ))
+                .named(Wait::Recv, span),
+            ),
             "recv",
             span,
         ) {
@@ -140,7 +144,7 @@ impl Vm {
                     } else if self.in_place_cut(&c, reg.tok()) {
                         // Terminate without a delivered value (genuine deadlock / nursery torn down).
                         reg.release(&sched, &mut c);
-                        Err(sched.deadlock_err.clone())
+                        Err(self.cut_fault(&sched, span))
                     } else {
                         // Path C self-sufficient deadlock detection: evaluate the predicate HERE rather
                         // than depending on a separate idle puller being alive to fire it. A verdict
@@ -210,7 +214,10 @@ impl Vm {
         let _gated = self.gated_register(&[core]);
         let mut reg = self.wait_begin(
             WaitSpec::Send,
-            Some(Blocked::on(quiesce::PartyWait::Send(Arc::clone(p)))),
+            Some(
+                Blocked::on(quiesce::PartyWait::Send(Arc::clone(p)))
+                    .named(Wait::send(core.cap), span),
+            ),
             "send",
             span,
         )?;
@@ -235,7 +242,7 @@ impl Vm {
                 }
                 if self.in_place_cut(&c, reg.tok()) {
                     reg.release(&sched, &mut c);
-                    break Err(sched.deadlock_err.clone());
+                    break Err(self.cut_fault(&sched, span));
                 }
                 if sched.is_deadlocked(&c) {
                     // A verdict ends the wait on a later pass through `run_exit_err` or
@@ -299,11 +306,13 @@ impl Vm {
         };
         // A timed `wait:` returns at its deadline whatever anyone does: the table accounts it
         // `inflight`, an untimed one a waiter on its arms (`block::wait_steps`).
+        let has_send = arms.iter().any(|(_, is_send)| *is_send);
         let spec = WaitSpec::Wait {
             deadline: timer.is_some(),
-            has_send: arms.iter().any(|(_, is_send)| *is_send),
+            has_send,
         };
-        let on = Blocked::on(quiesce::PartyWait::Wait(arms.clone(), Some(Arc::clone(p))));
+        let on = Blocked::on(quiesce::PartyWait::Wait(arms.clone(), Some(Arc::clone(p))))
+            .named(Wait::select(has_send), span);
         let mut reg = self.wait_begin(spec, Some(on), "wait", span)?;
         let recv_ready = |core: &Arc<ChannelCore>, g: &crate::vm::core::ChanState| {
             g.closed || g.recv_ready_for(Some(p)) || core.done_latch.load(Ordering::Relaxed)
@@ -337,7 +346,7 @@ impl Vm {
                 if self.in_place_cut(&c, reg.tok()) {
                     reg.release(&sched, &mut c);
                     drop(c);
-                    break Err(sched.deadlock_err.clone());
+                    break Err(self.cut_fault(&sched, span));
                 }
                 // A pending timer guarantees future progress (its deadline send), so it vetoes the
                 // self-detected deadlock just like an `inflight` job does on the snapshot-park path.
@@ -548,7 +557,7 @@ impl Vm {
             if let Some(s) = &sched
                 && self.in_place_cut(&s.lock(), reg.tok())
             {
-                break Err(s.deadlock_err.clone());
+                break Err(s.deadlock_err.at_site(Wait::Socket.phrase(), span));
             }
             match attempt(self) {
                 SockPoll::Ready(r) => break r,

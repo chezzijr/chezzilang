@@ -53,6 +53,7 @@ pub(super) fn test_program(src: &str) -> Result<Program, RuntimeError> {
         is_timed_out: false,
         is_deadlock: false,
         is_panic: false,
+        blocked: None,
     })
 }
 
@@ -379,6 +380,7 @@ pub fn run_built(
                     is_timed_out: false,
                     is_deadlock: false,
                     is_panic: false,
+                    blocked: None,
                 })),
                 None,
             );

@@ -1188,8 +1188,9 @@ fn a_provider_frame_in_a_trace_is_readable() {
 
 /// TICKET-048 (W8-14 residual) — a nursery-deadlock fault's headline must name a real file and
 /// position, not the placeholder `Span::RUNTIME` used at `run_mn_nursery_outermost`'s
-/// `DEADLOCK_MSG` sites (`sched.rs:503`, `:800`). It currently renders `line 1, col 1` with no file,
-/// unlike an ordinary in-task fault one line away, which renders the true `path:line:col`.
+/// nursery deadlock sites. It rendered `line 1, col 1` with no file, unlike an ordinary in-task
+/// fault one line away. Since the deadlock listing, the headline is the first blocked task's own
+/// wait (this test and the two below).
 #[test]
 fn nursery_deadlock_headline_has_a_real_position() {
     let dir = std::env::temp_dir().join(format!("chezzi_t048_deadlock_{}", std::process::id()));
@@ -1209,8 +1210,8 @@ fn nursery_deadlock_headline_has_a_real_position() {
         "expected a real file/position on the deadlock headline, got:\n{trace}"
     );
     assert!(
-        trace.contains("main.chz:3:5"),
-        "expected the headline to name the parallel: keyword's position, got:\n{trace}"
+        trace.contains("main.chz:5:28): deadlock: 1 task is blocked"),
+        "expected the headline to name the first blocked task's own wait, got:\n{trace}"
     );
 }
 
@@ -1235,8 +1236,8 @@ fn implicit_fn_nursery_deadlock_headline_names_the_body_start() {
         "expected a real file/position on the deadlock headline, got:\n{trace}"
     );
     assert!(
-        trace.contains("main.chz:2:5"),
-        "expected the headline to name the body's first statement, got:\n{trace}"
+        trace.contains("main.chz:3:12): deadlock: 2 tasks are blocked"),
+        "expected the headline to name the first blocked task's own wait, got:\n{trace}"
     );
 }
 
@@ -1261,8 +1262,8 @@ fn implicit_module_nursery_deadlock_headline_names_the_first_statement() {
         "expected a real file/position on the deadlock headline, got:\n{trace}"
     );
     assert!(
-        trace.contains("main.chz:3:1"),
-        "expected the headline to name the module's first statement, got:\n{trace}"
+        trace.contains("main.chz:4:8): deadlock: 2 tasks are blocked"),
+        "expected the headline to name the first blocked task's own wait, got:\n{trace}"
     );
 }
 

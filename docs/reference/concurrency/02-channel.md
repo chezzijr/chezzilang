@@ -54,8 +54,8 @@ c := bch.cap()             # capacity: 2 here; 0 for a rendezvous Channel[T](0);
   deliberate. A Go programmer porting `make(chan T)` should write `Channel[T](0)`, not
   `Channel[T]()`. Reach for `Channel[T](cap)` or `Channel[T](0)` by default: an unbounded channel lets
   a producer outrun a consumer with no backpressure at all.
-- **`recv` on an empty channel BLOCKS** until a sibling sends. It faults `recv on an empty channel:
-  deadlock` only when the run is provably stuck — every counted party blocked with no satisfiable
+- **`recv` on an empty channel BLOCKS** until a sibling sends. It faults `deadlock` (the task listed as
+  `recv() on an empty channel`, see `05-cancel.md`) only when the run is provably stuck — every counted party blocked with no satisfiable
   wait — which is Go's own detector (`fatal error: all goroutines are asleep - deadlock!`). A
   `spawn`ed producer is already running when the body reaches its `recv`, so Go's plainest channel
   idiom works verbatim. This holds for a nested `parallel:` whose outer body is itself parked on a
@@ -98,11 +98,11 @@ c := bch.cap()             # capacity: 2 here; 0 for a rendezvous Channel[T](0);
   "a genuine deadlock does not run `defer`s").
 
   **What the deadlock report names.** One verdict ends the run, and no party runs past it. The
-  report is the first blocked party's own site. Main locking a `Shared` guard that a stuck job holds
-  reports `update guard wait: deadlock — …` at its own `update`, as Go reports
-  `goroutine 1 [sync.Mutex.Lock]`. A `parallel:` body that waits at `s.update` reports at that line;
-  the `parallel:` line is reported only when the body waits at the join. Main at a join
-  (`shutdown()`, the end of a `parallel:` block) reports the victims' sites. A cleanup that meets the
+  report lists every blocked task with its own wait and frames (`05-cancel.md`, the deadlock
+  report). Main locking a `Shared` guard that a stuck job holds is listed as `waiting for the Shared
+  guard` at its own `update`, as Go lists `goroutine 1 [sync.Mutex.Lock]`. A `parallel:` body that
+  waits at `s.update` is listed at that line. Main at a join (`shutdown()`, the end of a
+  `parallel:` block) is not listed: the tasks it waits for are. A cleanup that meets the
   verdict is fatal too: no further `defer` runs, no `recover:` catches the unwind it ran in (a `?`
   inside `recover:` included), and the cause it was cleaning up after keeps the report. How the
   verdict is judged without false faults:

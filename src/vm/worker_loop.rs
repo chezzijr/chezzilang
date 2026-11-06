@@ -2,7 +2,6 @@
 //! outcome classification, wakes, the sched registry.
 //! Split out of `src/vm/sched.rs`. `super::*` is the parent module.
 
-use super::netio::GUARD_DEADLOCK;
 use super::sched::GatedReg;
 use super::sched::JoinCover;
 #[cfg(test)]
@@ -214,12 +213,13 @@ impl Vm {
         what: &str,
         span: Span,
     ) -> Result<(), RuntimeError> {
+        let wait = super::deadlock::Wait::guard(key.lock.kind).phrase();
         self.wait_demote(
             reg,
             WaitSpec::Guard,
             Some(Blocked::at(
                 quiesce::PartyWait::Guard(key, self.guard_token),
-                GUARD_DEADLOCK,
+                wait,
                 span,
             )),
             what,
@@ -976,6 +976,9 @@ impl Vm {
         let mut first_cancel_fault: Option<(RuntimeError, Vec<TraceFrame>)> = None;
         // TICKET-284 — how much exit output this reduce took; its take counted each one.
         let mut exits = 0;
+        // Every deadlock slot's blocked tasks, in task order: the report folds them into one
+        // listing ([`super::deadlock::fold`]).
+        let mut blocked: Vec<super::deadlock::BlockedTask> = Vec::new();
         for slot in slots {
             // W7-60 — a `None` here means the slot was already drained by `MnSched::take_finished_streams`
             // on a `join_executor` bail-out (its output is flushed, its outcome consumed), which is
@@ -1025,6 +1028,7 @@ impl Vm {
                     // fault output ordering is a separate, pre-existing nondeterminism (see the
                     // single-producer case covered by the test
                     // `parallel_faulting_task_flushes_partial_output_3engine`).
+                    blocked.extend(super::deadlock::listing(&err, &trace));
                     if first_hard_fault.is_none() && (executor_hard_halt(&err) || err.is_deadlock) {
                         first_hard_fault = Some((err.clone(), trace.clone()));
                     }
@@ -1034,7 +1038,13 @@ impl Vm {
                         first_fault = Some((err, trace));
                     }
                 }
-                TaskOutcome::Deadlocked { err, out, stderr } => {
+                TaskOutcome::Deadlocked {
+                    err,
+                    out,
+                    stderr,
+                    frames,
+                } => {
+                    blocked.extend(super::deadlock::listing(&err, &self.trace_of(&frames)));
                     // The M:N deadlock detector recorded EVERY still-parked fiber with this synthetic
                     // outcome (`flag_deadlock`). Unlike a real `Fault`, ALL parked buffers flush at
                     // their task-order slot (no `is_none()` gate) — so with two-or-more parked fibers
@@ -1087,6 +1097,14 @@ impl Vm {
             return (Err(e), None);
         }
         let fault = first_hard_fault.or(first_fault).or(first_cancel_fault);
+        // A deadlock report lists every blocked task of this join, whichever slot ranks first.
+        let fold = |e: RuntimeError| {
+            if e.blocked.is_some() {
+                super::deadlock::fold(e, blocked)
+            } else {
+                e
+            }
+        };
         match (first_exit, fault, deadlock_err) {
             // A child `os.exit` hard-halts the parent: set `pending_exit` and return the exit
             // sentinel. The op→`step`→`run_until` chain sees `pending_exit` and unwinds past every
@@ -1102,9 +1120,9 @@ impl Vm {
             // A real fault propagates normally so an outer `recover:` can still catch it (unless it
             // carries a hard-halt marker, in which case `first_hard_fault` already selected it above
             // and `exec.rs`'s cancel-bypass check keeps `recover:` from swallowing it anyway).
-            (None, Some((e, trace)), _) => (Err(e), Some(trace)),
+            (None, Some((e, trace)), _) => (Err(fold(e)), Some(trace)),
             // Deadlock abort: all parked buffers already flushed above; propagate ONE deadlock error.
-            (None, None, Some(e)) => (Err(e), None),
+            (None, None, Some(e)) => (Err(fold(e)), None),
             (None, None, None) => (Ok(()), None),
         }
     }

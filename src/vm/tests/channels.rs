@@ -97,8 +97,8 @@ fn bounded_channel_try_send_full_returns_false_both_engines() {
 fn bounded_channel_full_send_top_level_deadlocks_both_engines() {
     let src = "c := Channel[int](1)\nc.send(1)\nc.send(2)\nprint(\"unreached\")\n";
     let e = run_err(src);
-    assert!(e.contains("send on a full channel"), "serial: {e}");
-    let ep = run_capture(src).expect_err("M:N should fault").message;
+    assert!(e.contains("send() on a full channel"), "serial: {e}");
+    let ep = err_text(&run_capture(src).expect_err("M:N should fault"));
     assert_eq!(e, ep, "serial and M:N deadlock text must match");
 }
 
@@ -118,10 +118,10 @@ fn bounded_channel_nursery_send_deadlock_names_full_send_both_engines() {
                main()\n";
     let e = run_err(src);
     assert!(
-        e.contains("full send()"),
+        e.contains("task 1: send() on a full channel"),
         "serial diagnostic must name the send stall: {e}"
     );
-    let ep = run_capture(src).expect_err("M:N should fault").message;
+    let ep = err_text(&run_capture(src).expect_err("M:N should fault"));
     assert_eq!(e, ep, "serial and M:N deadlock text must match");
 }
 
@@ -340,9 +340,9 @@ fn bounded_channel_inline_builder_full_send_faults_not_hang() {
         Ok(r) => {
             let e = r.expect_err("full inline-builder send must fault, not silently complete");
             assert!(
-                e.message.contains("send on a full channel"),
+                err_text(&e).contains("send() on a full channel"),
                 "unexpected fault: {}",
-                e.message
+                err_text(&e)
             );
         }
         Err(_) => panic!("hung — inline-builder full send parked and leaked send_suspend (bug 2)"),

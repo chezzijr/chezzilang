@@ -2536,6 +2536,8 @@ fn verdict_msg_covers_all_variants() {
         pos: "f.chz:1:1".into(),
         line: 1,
         frames: Vec::new(),
+        tasks: Vec::new(),
+        tasks_json: String::new(),
     };
     assert_eq!(
         verdict_msg(&Verdict::Fail {

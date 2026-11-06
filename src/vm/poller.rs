@@ -564,6 +564,7 @@ mod tests {
             is_timed_out: false,
             is_deadlock: false,
             is_panic: false,
+            blocked: None,
         }
     }
 

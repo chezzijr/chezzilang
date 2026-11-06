@@ -70,17 +70,18 @@ the box waits.
 - A slow closure blocks every user of the box and holds its worker (the Elixir `Agent` warning
   applies: keep it short). A child of a `parallel:` inside the closure that reads or writes the
   **same** box can never be served (the closure holds the box until the nursery joins), so the run
-  stops with the `update guard wait: deadlock` fault at the child's own `get`; it does not hang. Pass
+  stops with a `deadlock` that lists the child as `waiting for the Shared guard` at its own `get`; it
+  does not hang. Pass
   the child the value it needs instead of the box.
 - A task's open nurseries stay its own inside a box closure: when a child of an enclosing `parallel:`
   faults, an owner that waits inside the closure is cut there, and a `recover:` inside the closure
   does not catch the child's fault. A `parallel:` opened inside the closure joins the scheduler of the
   task's enclosing `parallel:`, so a nursery deadlock there is reported the same way
-  (`deadlock: every task in this parallel: block is blocked …`, exit 1).
+  (`deadlock: N tasks are blocked and none can proceed`, then each task, exit 1).
 - One shape declines the verdict and hangs: under an enclosing `parallel:` whose sibling is blocked,
   a closure that itself waits on a channel nobody can feed.
-- A reader of a `RwShared` whose writer is blocked for good gets the `update guard wait: deadlock`
-  fault at its own `read` / `get`, as a `Shared` user does.
+- A reader of a `RwShared` whose writer is blocked for good is listed as `waiting for the RwShared
+  guard` at its own `read` / `get`, as a `Shared` user is.
 
 `Shared.read(f)` runs `f` on the live value, so a mutation `f` makes persists. `RwShared` (§6f) is the
 same one-value box behind a read-write guard.

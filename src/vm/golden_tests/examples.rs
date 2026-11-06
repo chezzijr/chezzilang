@@ -1114,6 +1114,7 @@ fn recursion_trace_parity_vm_vs_interp() {
 #[cfg(test)]
 fn synthetic_run_error(message: &str, span: Span, trace: Vec<TraceFrame>) -> RunError {
     RunError {
+        blocked: Vec::new(),
         message: message.to_string(),
         span,
         trace,

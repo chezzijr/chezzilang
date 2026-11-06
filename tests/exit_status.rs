@@ -1425,39 +1425,164 @@ fn timeout_reaches_a_guard_waiter_parked_behind_a_recv() {
     );
 }
 
-// ===== Task 7: one deadlock verdict, the same every run =====
+// ===== One deadlock verdict that lists every blocked task, the same every run =====
 //
-// Both tasks of `GUARD_WAITER` are cut by the same verdict. The first one to see the cut used to
-// fault, trip the nursery's cancel, and so turn its sibling into a cancelled task: which task's text
-// was reported (the nursery's `deadlock:` line or the guard waiter's own) depended on which woke
-// first. Many concurrent runs per worker count (the load is what moves the wake order) must print
-// byte-identical output. The seeded scheduler does not reorder these wakes (both waits are in place,
-// on their own threads), so the runs are concurrent processes rather than seeds.
-#[test]
-fn a_guard_waiter_deadlock_prints_the_same_verdict_every_run() {
-    let t = TmpDir::new();
-    let entry = t.write("guard_waiter_test.chz", GUARD_WAITER);
-    for threads in ["1", "2", "4"] {
-        let outs: Vec<String> = std::thread::scope(|s| {
-            let runs: Vec<_> = (0..48)
-                .map(|_| {
-                    s.spawn(|| {
-                        let out = Command::new(env!("CARGO_BIN_EXE_chezzi"))
-                            .args(["test", "--timeout=500"])
-                            .arg(&entry)
-                            .env("CHEZZI_THREADS", threads)
-                            .output()
-                            .expect("spawn chezzi");
-                        String::from_utf8_lossy(&out.stdout).into_owned()
-                    })
+// Go's report: one header, then every blocked task with its own wait and its frames, in task order.
+// Before, the first cut task to wake faulted, cancelled its sibling, and alone was reported, with
+// the nursery's text (`deadlock: every task in this parallel: block …`) or the guard waiter's own
+// (`update guard wait: deadlock …`) depending on which woke first. `held` makes the holder take the
+// guard before its sibling asks for it, so the program has one schedule: without it the sibling
+// may `set` before the holder's `update` and finish, which is a different, correct run (Go's
+// listing changes with it too). Many concurrent runs per worker count (the load moves the wake
+// order) must print byte-identical output. The seeded scheduler does not reorder these wakes (both
+// waits are in place, on their own threads), so the runs are concurrent processes, not seeds.
+const GUARD_WAITER_HELD: &str = r#"import Shared from std.concurrency
+
+fn take(ch: Channel[int], held: Channel[int]) -> int:
+    held.send(1)
+    v := ch.recv() else: panic("ch closed")
+    return v
+
+test fn guard_waiter_hangs():
+    s := Shared(0)
+    ch := Channel[int]()
+    held := Channel[int](1)
+    parallel:
+        spawn:
+            s.update(fn(x: int) -> int: x + take(ch, held))
+        spawn:
+            _ := held.recv() else: panic("held closed")
+            s.set(5)
+"#;
+
+/// `chezzi test` on `entry` at `threads` workers, `n` concurrent runs: each run's stdout, with the
+/// temp dir spelled `<dir>`.
+fn concurrent_test_runs(
+    entry: &std::path::Path,
+    args: &[&str],
+    threads: &str,
+    n: usize,
+) -> Vec<String> {
+    let dir = entry.parent().unwrap().display().to_string();
+    std::thread::scope(|s| {
+        let runs: Vec<_> = (0..n)
+            .map(|_| {
+                s.spawn(|| {
+                    let out = Command::new(env!("CARGO_BIN_EXE_chezzi"))
+                        .arg("test")
+                        .args(args)
+                        .arg(entry)
+                        .env("CHEZZI_THREADS", threads)
+                        .output()
+                        .expect("spawn chezzi");
+                    String::from_utf8_lossy(&out.stdout).replace(&dir, "<dir>")
                 })
-                .collect();
-            runs.into_iter().map(|h| h.join().unwrap()).collect()
-        });
-        let first = &outs[0];
-        assert!(first.contains("deadlock:"), "threads={threads}: {first:?}");
-        for (i, out) in outs.iter().enumerate() {
-            assert_eq!(out, first, "threads={threads}: run {i} differs from run 0");
+            })
+            .collect();
+        runs.into_iter().map(|h| h.join().unwrap()).collect()
+    })
+}
+
+#[test]
+fn a_guard_waiter_deadlock_lists_both_tasks_the_same_every_run() {
+    let t = TmpDir::new();
+    let entry = t.write("guard_waiter_test.chz", GUARD_WAITER_HELD);
+    let want = "ERROR guard_waiter_hangs (<dir>/guard_waiter_test.chz:5:10) deadlock: 2 tasks are \
+                blocked and none can proceed\n  \
+                task 1: recv() on an empty channel at <dir>/guard_waiter_test.chz:5:10\n    \
+                at take (called at <dir>/guard_waiter_test.chz:14:45)\n    \
+                at <closure> (called at <dir>/guard_waiter_test.chz:14:13)\n    \
+                at <spawned task> (called at <dir>/guard_waiter_test.chz:13:9)\n  \
+                task 2: waiting for the Shared guard at <dir>/guard_waiter_test.chz:17:13\n    \
+                at <spawned task> (called at <dir>/guard_waiter_test.chz:15:9)\n\n\
+                1 test(s): 0 passed, 0 failed, 1 errored\n";
+    for threads in ["1", "2", "4"] {
+        for (i, out) in concurrent_test_runs(&entry, &["--timeout=500"], threads, 48)
+            .iter()
+            .enumerate()
+        {
+            assert_eq!(out, want, "threads={threads}: run {i}");
         }
     }
+}
+
+// A deadlock across two nurseries: an outer task waits on `a`, and the inner nursery of its
+// sibling holds a sender on a full channel and a second receiver on `a`. Every blocked task of
+// both nurseries is listed, in spawn-tree order (the outer task, then the inner nursery's tasks).
+#[test]
+fn a_deadlock_across_two_nurseries_lists_the_tasks_of_both() {
+    let t = TmpDir::new();
+    let entry = t.write(
+        "cross_test.chz",
+        r#"test fn cross_nursery():
+    a := Channel[int]()
+    b := Channel[int](1)
+    parallel:
+        spawn:
+            _ := a.recv() else: panic("a closed")
+        spawn:
+            parallel:
+                spawn:
+                    b.send(1)
+                    b.send(2)
+                spawn:
+                    _ := a.recv() else: panic("a closed")
+"#,
+    );
+    let want = "ERROR cross_nursery (<dir>/cross_test.chz:6:18) deadlock: 3 tasks are blocked and \
+                none can proceed\n  \
+                task 1: recv() on an empty channel at <dir>/cross_test.chz:6:18\n    \
+                at <spawned task> (called at <dir>/cross_test.chz:5:9)\n  \
+                task 2: send() on a full channel at <dir>/cross_test.chz:11:21\n    \
+                at <spawned task> (called at <dir>/cross_test.chz:9:17)\n  \
+                task 3: recv() on an empty channel at <dir>/cross_test.chz:13:26\n    \
+                at <spawned task> (called at <dir>/cross_test.chz:12:17)\n\n\
+                1 test(s): 0 passed, 0 failed, 1 errored\n";
+    for threads in ["1", "2", "4"] {
+        for (i, out) in concurrent_test_runs(&entry, &["--timeout=2000"], threads, 16)
+            .iter()
+            .enumerate()
+        {
+            assert_eq!(out, want, "threads={threads}: run {i}");
+        }
+    }
+}
+
+// The JSON shape of the listing: the test's `message` is the header, and `tasks` lists each blocked
+// task's `wait`, its site and its `frames`.
+#[test]
+fn a_deadlock_listing_is_a_tasks_array_in_errors_json() {
+    let t = TmpDir::new();
+    let entry = t.write("guard_waiter_test.chz", GUARD_WAITER_HELD);
+    let out = &concurrent_test_runs(&entry, &["--errors=json", "--timeout=500"], "2", 1)[0];
+    let out = mask_durations(out);
+    let f = "\"file\":\"<dir>/guard_waiter_test.chz\"";
+    let want = format!(
+        "{{\"tests\":[{{\"name\":\"guard_waiter_hangs\",{f},\"line\":5,\"status\":\"error\",\
+         \"message\":\"deadlock: 2 tasks are blocked and none can proceed\",\"tasks\":[\
+         {{\"wait\":\"recv() on an empty channel\",{f},\"line\":5,\"col\":10,\"frames\":[\
+         {{\"function\":\"take\",{f},\"line\":14,\"col\":45}},\
+         {{\"function\":\"<closure>\",{f},\"line\":14,\"col\":13}},\
+         {{\"function\":\"<spawned task>\",{f},\"line\":13,\"col\":9}}]}},\
+         {{\"wait\":\"waiting for the Shared guard\",{f},\"line\":17,\"col\":13,\"frames\":[\
+         {{\"function\":\"<spawned task>\",{f},\"line\":15,\"col\":9}}]}}],\
+         \"duration_ms\":N}}],\"file_errors\":[],\"totals\":{{\"total\":1,\"passed\":0,\
+         \"failed\":0,\"errored\":1,\"over_memory\":0,\"timed_out\":0,\"filtered_out\":0,\
+         \"file_errors\":0}}}}\n"
+    );
+    assert_eq!(out, want);
+}
+
+/// `out` with every `"duration_ms":<digits>` spelled `"duration_ms":N`.
+fn mask_durations(out: &str) -> String {
+    let key = "\"duration_ms\":";
+    let mut s = String::new();
+    let mut rest = out;
+    while let Some(i) = rest.find(key) {
+        s.push_str(&rest[..i + key.len()]);
+        s.push('N');
+        rest = rest[i + key.len()..].trim_start_matches(|c: char| c.is_ascii_digit());
+    }
+    s.push_str(rest);
+    s
 }
