@@ -752,11 +752,8 @@ impl Vm {
                 // The whole run's listing: an executor's blocked jobs follow the run's own tasks.
                 match drained {
                     Err(d) if e.blocked.is_some() && d.blocked.is_some() => {
-                        let mut tasks = super::deadlock::listing(
-                            &e,
-                            self.fault_trace.as_deref().unwrap_or_default(),
-                        );
-                        tasks.extend(super::deadlock::listing(&d, &[]));
+                        let trace = self.fault_trace.as_deref().unwrap_or_default();
+                        let tasks = super::deadlock::listings(&[(&e, trace), (&d, &[])]);
                         Err(super::deadlock::fold(e, tasks))
                     }
                     Ok(()) | Err(_) => Err(e),
@@ -819,8 +816,7 @@ impl Vm {
                     deadlock = Some(match deadlock {
                         None => e,
                         Some(first) => {
-                            let mut tasks = super::deadlock::listing(&first, &[]);
-                            tasks.extend(super::deadlock::listing(&e, &[]));
+                            let tasks = super::deadlock::listings(&[(&first, &[]), (&e, &[])]);
                             super::deadlock::fold(first, tasks)
                         }
                     });

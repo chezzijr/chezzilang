@@ -166,6 +166,15 @@ pub fn listing(err: &RuntimeError, trace: &[TraceFrame]) -> Vec<BlockedTask> {
     }
 }
 
+/// The blocked tasks of several deadlock faults, in the order given: each part is a fault and the
+/// frames of the task it ends ([`listing`]). The one way two listings are joined before a [`fold`].
+pub(super) fn listings(parts: &[(&RuntimeError, &[TraceFrame])]) -> Vec<BlockedTask> {
+    parts
+        .iter()
+        .flat_map(|(e, trace)| listing(e, trace))
+        .collect()
+}
+
 /// Fold the blocked tasks of a join's deadlock slots, in task order, into one fault. `first` is the
 /// lowest-index deadlock fault, whose markers the folded fault keeps.
 pub(super) fn fold(first: RuntimeError, tasks: Vec<BlockedTask>) -> RuntimeError {

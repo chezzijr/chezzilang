@@ -1091,8 +1091,11 @@ impl Vm {
         // TICKET-208 — the run-wide halt, read through its one funnel after a slot's own exit and
         // before any slot fault: a `recover:` around this nursery must not catch a sibling fault
         // and outlive a job fault that ends the run. Every slot's output is already flushed.
+        // The latched deadlock verdict is the one the slots' blocked tasks report: they are this
+        // join's listing, and a deadlock fault is fatal, so no `recover:` catches it either.
         if first_exit.is_none()
             && let Some(e) = self.run_exit_err(Span::RUNTIME)
+            && !(e.is_deadlock && !blocked.is_empty())
         {
             return (Err(e), None);
         }

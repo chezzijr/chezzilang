@@ -1506,6 +1506,80 @@ fn a_guard_waiter_deadlock_lists_both_tasks_the_same_every_run() {
     }
 }
 
+// A `parallel:` body waits for the guard that its spawned task holds while that task blocks in
+// `recv()` inside `update`. The body's cut unwinds past the nursery it opened, and that abort's
+// blocked task joins the listing ahead of the body's own wait (a nursery's tasks in place of the
+// task that opened it). Before, the body alone was listed (`1 task is blocked`): the abort's
+// reduce took the latched verdict in place of its slot, the fatal unwind dropped what the abort
+// returned, and a holder that read the abort's cancel before its own cut ended cancelled.
+// `held` orders the two waits, so the program has one schedule. The body runs at top level
+// (`chezzi run`) and in a `test fn`, concurrently at 1, 2 and 4 workers.
+const GUARD_HOLDER_BODY: &str = r#"s := Shared(0)
+ch := Channel[int]()
+held := Channel[int](1)
+parallel:
+    spawn:
+        s.update(fn(x: int) -> int: x + take(ch, held))
+    _ := held.recv() else: panic("held closed")
+    s.set(5)
+"#;
+
+#[test]
+fn a_body_waiting_for_a_blocked_guard_holder_lists_the_holder_too() {
+    let head = GUARD_WAITER_HELD.split("test fn").next().unwrap();
+    let t = TmpDir::new();
+    let dir = t.0.display().to_string();
+    let entry = t.write("holder.chz", &format!("{head}{GUARD_HOLDER_BODY}"));
+    let want = "runtime error (<dir>/holder.chz:5:10): deadlock: 2 tasks are blocked and none can \
+                proceed\n  \
+                task 1: recv() on an empty channel at <dir>/holder.chz:5:10\n    \
+                at take (called at <dir>/holder.chz:13:41)\n    \
+                at <closure> (called at <dir>/holder.chz:13:9)\n    \
+                at <spawned task> (called at <dir>/holder.chz:12:5)\n  \
+                task 2: waiting for the Shared guard at <dir>/holder.chz:15:5\n";
+    for threads in ["1", "2", "4"] {
+        let runs: Vec<_> = std::thread::scope(|s| {
+            let hs: Vec<_> = (0..24)
+                .map(|_| s.spawn(|| hang_deadline::run_with_hang_deadline(&entry, Some(threads))))
+                .collect();
+            hs.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+        for (i, run) in runs.into_iter().enumerate() {
+            let out = run.unwrap_or_else(|| panic!("threads={threads}: run {i} hung"));
+            let err = String::from_utf8_lossy(&out.stderr).replace(&dir, "<dir>");
+            assert_eq!(
+                (out.status.code(), err.as_str()),
+                (Some(1), want),
+                "run threads={threads}: run {i}"
+            );
+        }
+    }
+    let body: String = GUARD_HOLDER_BODY
+        .lines()
+        .map(|l| format!("    {l}\n"))
+        .collect();
+    let entry = t.write(
+        "holder_test.chz",
+        &format!("{head}test fn holder():\n{body}"),
+    );
+    let want = "ERROR holder (<dir>/holder_test.chz:5:10) deadlock: 2 tasks are blocked and none \
+                can proceed\n  \
+                task 1: recv() on an empty channel at <dir>/holder_test.chz:5:10\n    \
+                at take (called at <dir>/holder_test.chz:14:45)\n    \
+                at <closure> (called at <dir>/holder_test.chz:14:13)\n    \
+                at <spawned task> (called at <dir>/holder_test.chz:13:9)\n  \
+                task 2: waiting for the Shared guard at <dir>/holder_test.chz:16:9\n\n\
+                1 test(s): 0 passed, 0 failed, 1 errored\n";
+    for threads in ["1", "2", "4"] {
+        for (i, out) in concurrent_test_runs(&entry, &["--timeout=2000"], threads, 24)
+            .iter()
+            .enumerate()
+        {
+            assert_eq!(out, want, "test threads={threads}: run {i}");
+        }
+    }
+}
+
 // A deadlock across two nurseries: an outer task waits on `a`, and the inner nursery of its
 // sibling holds a sender on a full channel and a second receiver on `a`. Every blocked task of
 // both nurseries is listed, in spawn-tree order (the outer task, then the inner nursery's tasks).

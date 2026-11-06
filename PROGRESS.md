@@ -388,7 +388,8 @@ Each group below is one fact decided in two or more places (grouped 2026-10-16).
     header, the fold and the rendering; the five old texts are gone. A deadlock fault no longer
     cancels a blocked sibling, and a cut guard waiter no longer takes the guard its cut holder
     frees. Every executor's blocked jobs are listed, in creation order, and a deadlock whose cut
-    joiner leaves its Executor finished and unjoined no longer hangs the exit drain.
+    joiner leaves its Executor finished and unjoined no longer hangs the exit drain. A
+    `parallel:` body blocked in its own wait lists its nursery's blocked tasks ahead of its own.
     `docs/reference/concurrency/05-cancel.md`. History: `docs/history/progress/2026-11.md`.
 39. **`CHEZZI_SCHED_STATS=1` prints the worker count (done 2026-11-06).** `run` and `test` print
     `[sched-stats] workers=<n>` on stderr: `vm::worker_count()`, which sizes the pool and every

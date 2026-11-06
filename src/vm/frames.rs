@@ -678,9 +678,17 @@ impl Vm {
         // none, DEC-092). Per-call, never a VM latch: `chezzi test` keeps running.
         // TICKET-287 — at a fiber's outermost loop the unwind parks at a fiber-owned nursery that
         // is not done, instead of running other fibers on this stack while it waits.
+        // The verdict cut the aborted nurseries' blocked tasks too: they join the listing ahead
+        // of this task's own wait (a nursery's tasks in place of the task that opened it).
         let rte = if fatal {
-            self.unwind_no_defer(target);
-            rte
+            match self.unwind_no_defer(target) {
+                Some(child) if rte.blocked.is_some() && child.blocked.is_some() => {
+                    let trace = self.fault_trace.as_deref().unwrap_or_default();
+                    let tasks = deadlock::listings(&[(&child, &[]), (&rte, trace)]);
+                    deadlock::fold(rte, tasks)
+                }
+                Some(_) | None => rte,
+            }
         } else {
             let (d, _) = self.unwind_deferred_escaped(target, true, true, base_level == 0);
             if self.join_suspend.is_some() {
@@ -1074,6 +1082,15 @@ impl Vm {
     }
 
     pub(super) fn read_halts(&mut self, read: Option<Halt>, span: Span) -> Option<RuntimeError> {
+        // The latched deadlock verdict cut this wait before any cancel it now reads: a cut owner's
+        // abort tripped that cancel, and a task the verdict cut cancels no sibling. The wait ends
+        // with its own cut, as it would had it woken first.
+        if matches!(read, Some(Halt::Cancelled))
+            && self.quiesce.run_halt() == RunHalt::Deadlock
+            && let Some(e) = self.run_exit_err(span)
+        {
+            return Some(e);
+        }
         if let Some(h) = read {
             return Some(self.deliver_halt(h, span));
         }
@@ -1141,7 +1158,7 @@ impl Vm {
         match self.cleanup_halt(rte) {
             Ok(rte) => Ok(rte),
             Err(e) if e.is_deadlock => {
-                self.unwind_no_defer(base_level);
+                let _ = self.unwind_no_defer(base_level);
                 Err(e)
             }
             Err(e) if executor_hard_halt(&e) => Err(self.unwind_keeping_halt(base_level, false, e)),
