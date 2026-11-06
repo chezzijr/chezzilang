@@ -113,7 +113,8 @@ struct Meters:
 - **Turbofish at the declaration site.** Explicit type args go where the generic is DECLARED: on the
   type (`Box[int].Has(5)`, `Box[int].empty()`) or on the member (`s.first[int, str](1, "x")`,
   `Box[int].make[str](x)`). `recv.name[X](args)` parses as a method turbofish on any receiver; a head
-  that denotes data indexes then calls (`h.fs[k](10)`). See `syntax.md §7a/§7b`.
+  that denotes data indexes then calls (`h.fs[k](10)`). `?.` takes the same turbofish
+  (`r?.into[str]()`, `h?.fs[k](10)`). See `syntax.md §7a/§7b`.
 - **Expected-type inference.** A surrounding annotation (a binding's declared type, a declared return
   type, a parameter type) pins the type parameters of a generic constructor or call that the arguments
   left free (precedence: **turbofish > arguments > annotation**), so `h: Heap[int] = Heap([], fn(x, y):

@@ -1511,6 +1511,9 @@ pub struct OptCall {
     pub args: Vec<Expr>,
     pub named: Vec<(String, Expr)>,
     pub type_args: Vec<Type>,
+    /// The one-arg bracket's expression reading, as [`ExprKind::Call`]'s `bracket`
+    /// (`r?.fs[k](10)` indexes then calls when `fs` is data, TICKET-210).
+    pub bracket: Option<Box<Expr>>,
 }
 
 /// One arm of an expression-position `match`: `pattern [if guard]: value-expr`.
@@ -1715,6 +1718,7 @@ pub fn expr_recover_blocks<'a>(e: &'a Expr, out: &mut Vec<&'a Block>) {
             go(obj);
             if let Some(c) = call {
                 c.args.iter().for_each(&mut go);
+                c.bracket.iter().for_each(|b| go(b));
                 c.named
                     .iter()
                     .for_each(|(_, v)| expr_recover_blocks(v, out));
@@ -2199,6 +2203,9 @@ fn ids_in_expr(e: &mut Expr, f: &mut dyn FnMut(&mut NodeId, Span, u32)) {
             if let Some(c) = call {
                 for a in &mut c.args {
                     go(a, f);
+                }
+                if let Some(b) = &mut c.bracket {
+                    go(b, f);
                 }
                 for (_, a) in &mut c.named {
                     go(a, f);

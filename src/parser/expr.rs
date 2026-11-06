@@ -486,13 +486,22 @@ impl Parser {
                     } else {
                         (self.expect_member_name()?, true)
                     };
+                    // `obj?.m[T](args)` takes type arguments by the `.` arm's speculative parse; a
+                    // bracket that is not `[types](` stays a postfix index on the chain.
+                    let typed = if is_ident && self.check(&Token::LBracket) {
+                        self.try_parse_type_args(true)
+                    } else {
+                        None
+                    };
                     let call = if is_ident && self.check(&Token::LParen) {
                         self.advance();
                         let (args, named) = self.parse_call_args()?;
+                        let (type_args, bracket) = typed.unwrap_or_default();
                         Some(OptCall {
                             args,
                             named,
-                            type_args: Vec::new(),
+                            type_args,
+                            bracket,
                         })
                     } else {
                         None
@@ -763,38 +772,10 @@ impl Parser {
     /// (`arr[i]`, `fns[0](x)`). Once `]` `(` is confirmed it commits, so a genuine error inside the
     /// argument list propagates instead of silently re-parsing as an index.
     fn try_parse_type_arg_call(&mut self, callee: &Expr, span: Span) -> PResult<Option<Expr>> {
-        let save = self.pos;
-        // `parse_type` bumps `self.depth` and only unwinds it on success; on a swallowed (backtrack)
-        // failure we must restore depth too, else every plain `name[idx]` leaks a level and many
-        // such indexes spuriously trip MAX_DEPTH. `fold_depth` rides along for the same reason.
-        let save_depth = self.depth;
-        let save_fold = self.fold_depth;
-        self.advance(); // '['
-        let mut type_args = Vec::new();
-        loop {
-            match self.parse_type() {
-                Ok(t) => type_args.push(t),
-                Err(_) => {
-                    self.pos = save;
-                    self.depth = save_depth;
-                    self.fold_depth = save_fold;
-                    return Ok(None);
-                }
-            }
-            if !self.eat(&Token::Comma) {
-                break;
-            }
-        }
-        if !self.eat(&Token::RBracket) || !self.check(&Token::LParen) {
-            self.pos = save;
-            self.depth = save_depth;
-            self.fold_depth = save_fold;
+        let Some((type_args, bracket)) = self.try_parse_type_args(callee.kind.is_named_head())
+        else {
             return Ok(None);
-        }
-        // A one-arg bracket on a bare-name or member head keeps its expression reading too: the
-        // checker, which knows the scope, chooses index-then-call when the head denotes data
-        // (`fs[k](10)`). The parser reads no scope (DEC-204).
-        let bracket = self.bracket_expression(callee, &type_args, save, save_depth, save_fold);
+        };
         self.advance(); // '(' — committed to a type-argument call now.
         let (args, named) = self.parse_call_args()?;
         Ok(Some(Expr {
@@ -810,19 +791,60 @@ impl Parser {
         }))
     }
 
+    /// The speculative `[Type, …]` that a `(` follows, shared by the `.` call (`recv.m[T](x)`,
+    /// `f[T](x)`) and the `?.` call (`r?.m[T](x)`). Assumes the `[` has NOT been consumed. `None`
+    /// (position, `depth` and `fold_depth` restored) when the shape isn't there. On `Some` the
+    /// position is at the `(`, and the second part is the one-arg bracket's expression reading
+    /// (`bracket_expression`), kept only when `headed` (the head is a bare name or a named member).
+    fn try_parse_type_args(&mut self, headed: bool) -> Option<(Vec<Type>, Option<Box<Expr>>)> {
+        let save = self.pos;
+        // `parse_type` bumps `self.depth` and only unwinds it on success; on a swallowed (backtrack)
+        // failure we must restore depth too, else every plain `name[idx]` leaks a level and many
+        // such indexes spuriously trip MAX_DEPTH. `fold_depth` rides along for the same reason.
+        let save_depth = self.depth;
+        let save_fold = self.fold_depth;
+        self.advance(); // '['
+        let mut type_args = Vec::new();
+        loop {
+            match self.parse_type() {
+                Ok(t) => type_args.push(t),
+                Err(_) => {
+                    self.pos = save;
+                    self.depth = save_depth;
+                    self.fold_depth = save_fold;
+                    return None;
+                }
+            }
+            if !self.eat(&Token::Comma) {
+                break;
+            }
+        }
+        if !self.eat(&Token::RBracket) || !self.check(&Token::LParen) {
+            self.pos = save;
+            self.depth = save_depth;
+            self.fold_depth = save_fold;
+            return None;
+        }
+        // A one-arg bracket on a bare-name or member head keeps its expression reading too: the
+        // checker, which knows the scope, chooses index-then-call when the head denotes data
+        // (`fs[k](10)`). The parser reads no scope (DEC-204).
+        let bracket = self.bracket_expression(headed, &type_args, save, save_depth, save_fold);
+        Some((type_args, bracket))
+    }
+
     /// The expression reading of the bracket `[X]` that `try_parse_type_arg_call` just read as one
-    /// type, from `save` (the `[`) to the `(` at the current position. `Some` only for an `Ident`
-    /// head or a non-tuple-index `Field` head, and only when `X` parses as an expression that ends
-    /// at the `]`. Leaves the position at the `(`, with `depth` and `fold_depth` restored.
+    /// type, from `save` (the `[`) to the `(` at the current position. `Some` only for a `headed`
+    /// head (an `Ident`, a non-tuple-index `Field`, or a `?.` member name), and only when `X`
+    /// parses as an expression that ends at the `]`. Leaves the position at the `(`, with `depth`
+    /// and `fold_depth` restored.
     fn bracket_expression(
         &mut self,
-        callee: &Expr,
+        headed: bool,
         type_args: &[Type],
         save: usize,
         save_depth: usize,
         save_fold: usize,
     ) -> Option<Box<Expr>> {
-        let headed = callee.kind.is_named_head();
         if !headed || type_args.len() != 1 {
             return None;
         }

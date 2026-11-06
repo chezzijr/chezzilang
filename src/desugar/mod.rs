@@ -821,6 +821,9 @@ fn walk_idents_and_types(e: &Expr, f: &mut impl FnMut(&str), tf: &mut impl FnMut
             walk_idents_and_types(obj, f, tf);
             if let Some(c) = call {
                 c.args.iter().for_each(|a| walk_idents_and_types(a, f, tf));
+                c.bracket
+                    .iter()
+                    .for_each(|b| walk_idents_and_types(b, f, tf));
                 c.named
                     .iter()
                     .for_each(|(_, a)| walk_idents_and_types(a, f, tf));
@@ -1428,6 +1431,9 @@ impl Walker<'_> {
                     for a in c.args.iter_mut() {
                         self.walk_expr(a)?;
                     }
+                    if let Some(b) = c.bracket.as_mut() {
+                        self.walk_expr(b)?;
+                    }
                     for (_, v) in c.named.iter_mut() {
                         self.walk_expr(v)?;
                     }
@@ -1585,6 +1591,7 @@ fn lower_carrier_option_as(expr: &mut Expr, tmp: usize, void: bool) {
                     args,
                     named,
                     type_args,
+                    bracket,
                 }) => Expr {
                     id: nid(),
                     kind: ExprKind::Call {
@@ -1592,7 +1599,7 @@ fn lower_carrier_option_as(expr: &mut Expr, tmp: usize, void: bool) {
                         args,
                         named,
                         type_args,
-                        bracket: None,
+                        bracket,
                     },
                     span,
                 },
@@ -1778,12 +1785,13 @@ pub fn lower_carrier_try(expr: &mut Expr) {
             args,
             named,
             type_args,
+            bracket,
         }) => ExprKind::Call {
             callee: Box::new(field),
             args,
             named,
             type_args,
-            bracket: None,
+            bracket,
         },
     };
 }

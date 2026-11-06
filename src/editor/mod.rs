@@ -1059,6 +1059,7 @@ fn overlay_expr(expr: &crate::ast::Expr, map: &mut std::collections::HashMap<(us
             }
         }
         ExprKind::Try(e) => overlay_expr(e, map),
+        // `bracket` spans the same text as `type_args`, which color it (as `Call`).
         ExprKind::OptChain { obj, call, .. } => {
             overlay_expr(obj, map);
             if let Some(c) = call {
@@ -1067,6 +1068,9 @@ fn overlay_expr(expr: &crate::ast::Expr, map: &mut std::collections::HashMap<(us
                 }
                 for (_, v) in &c.named {
                     overlay_expr(v, map);
+                }
+                for t in &c.type_args {
+                    overlay_type(t, map);
                 }
             }
         }

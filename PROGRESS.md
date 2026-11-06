@@ -353,6 +353,12 @@ Each group below is one fact decided in two or more places (grouped 2026-10-16).
     (`write .into[T]()`), so `?.`'s internal name never shows. A plain method keeps `takes no type
     argument(s)`. One pick: `from_overload::pick_slot`. Grids:
     `checker::tests::from_overloads::slot_pick_grid`, the three conversion spec files.
+35. **`?.` takes type arguments (done 2026-11-06).** `r?.into[str]()` and `r?.m[int](1)` parse as
+    the `.` method turbofish does, by the same speculative `[types](` parse
+    (`Parser::try_parse_type_args`), on a `T?` and a `T!E`. A one-arg bracket keeps its expression
+    reading (`OptCall::bracket`), so `h?.fs[k](10)` indexes then calls when `fs` is data
+    (TICKET-210). Grids: `parser::tests::exprs_stmts::optchain_type_args`,
+    `tests/corpus/accept/optchain_type_args.chz`, `tests/chz/spec/opt_carrier_test.chz` §16.
 
 ### Open questions for the owner
 

@@ -127,6 +127,9 @@ n    := fetch()?.len()                  # T!E: propagate the error (`?`), then `
   `f()?.len()` is Rust's idiom.
 - The `T!E` form does not chain tries through a nested carrier: with `a: X?` and `a.b: Y!E`,
   `a?.b?.c` is an `(Y!E)?` followed by a field access on a `T!E`, an error.
+- A `?.` method call takes type arguments as a `.` call does, on either carrier: `r?.into[str]()`,
+  `r?.m[int](1)`. A one-arg bracket on a data member indexes then calls, as after `.`:
+  `h?.fs[k](10)` is `h?.fs` indexed by `k`, then called with `10`.
 
 **Null-coalescing `??` takes a `T?` or a `T!E`.** `a ?? b` yields `a`'s inner value if present, else
 `b`. It is right-associative (`a ?? b ?? c` = `a ?? (b ?? c)`). On a `T!E` the error is discarded

@@ -363,6 +363,7 @@ impl Scan {
                 self.expr(obj);
                 if let Some(c) = call {
                     c.args.iter().for_each(|a| self.expr(a));
+                    c.bracket.iter().for_each(|b| self.expr(b));
                     c.named.iter().for_each(|(_, v)| self.expr(v));
                 }
             }

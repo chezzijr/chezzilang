@@ -1,0 +1,7 @@
+# `?.` method turbofish: type arguments after an optional-chained member name, and a one-arg
+# bracket that the checker may read as an index (`r?.fs[k](1)`).
+fn use(r: Box?, k: int):
+    a := r?.m[int]()
+    b := r?.m[int](1)
+    c := r?.m[int, str](1, "x")
+    d := r?.fs[k](1)

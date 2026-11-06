@@ -413,6 +413,39 @@ fn parses_opt_chain_method() {
     }
 }
 
+/// `?.` shares the `.` arm's `[types](` parse: `r?.m[int]()` is an optional-chained call with a
+/// type argument, and a one-arg bracket keeps its expression reading (`bracket`), so the checker
+/// can index then call when the member is data (`r?.fs[k](1)`, TICKET-210).
+#[test]
+fn optchain_type_args() {
+    let opt_call = |src: &str| match let_value(src).kind {
+        ExprKind::OptChain {
+            name,
+            call: Some(c),
+            ..
+        } => (name, c),
+        other => panic!("{src}: {other:?}"),
+    };
+    let (name, c) = opt_call("x := r?.m[int]()\n");
+    assert_eq!(name, "m");
+    assert!(matches!(c.type_args.as_slice(), [Type::Named { name, .. }] if name == "int"));
+    assert!(c.args.is_empty());
+    let (_, c) = opt_call("x := r?.m[int, str](1)\n");
+    assert_eq!((c.type_args.len(), c.args.len()), (2, 1));
+    assert!(
+        c.bracket.is_none(),
+        "two type args have no expression reading"
+    );
+    let (name, c) = opt_call("x := r?.fs[k](1)\n");
+    assert_eq!(name, "fs");
+    assert!(matches!(c.bracket.map(|b| b.kind), Some(ExprKind::Ident(k)) if k == "k"));
+    // A bracket that is no type list stays an index on the chain.
+    assert!(matches!(
+        let_value("x := r?.fs[0](1)\n").kind,
+        ExprKind::Call { .. }
+    ));
+}
+
 #[test]
 fn opt_chain_chains_left_assoc() {
     // `y?.a?.b` = `(y?.a)?.b`.

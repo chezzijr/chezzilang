@@ -1538,6 +1538,7 @@ fn expr_has_bare_spawn(e: &Expr) -> bool {
             expr_has_bare_spawn(obj)
                 || call.as_ref().is_some_and(|c| {
                     c.args.iter().any(expr_has_bare_spawn)
+                        || c.bracket.as_deref().is_some_and(expr_has_bare_spawn)
                         || c.named.iter().any(|(_, v)| expr_has_bare_spawn(v))
                 })
         }

@@ -739,6 +739,11 @@
             | <postfix> "QUESTIONDOT" "INT"
             | <postfix> "QUESTIONDOT" <memberName> "LPAREN" "RPAREN"
             | <postfix> "QUESTIONDOT" <memberName> "LPAREN" <argList> "RPAREN"
+            # `?.` takes the `.` method turbofish by the same speculative `[ <typeList> ] (` parse
+            # (`r?.into[str]()`); a one-arg bracket keeps its expression reading, so the checker
+            # indexes then calls when the member is data (`h?.fs[k](10)`, TICKET-210).
+            | <postfix> "QUESTIONDOT" <memberName> "LBRACKET" <typeList> "RBRACKET" "LPAREN" "RPAREN"
+            | <postfix> "QUESTIONDOT" <memberName> "LBRACKET" <typeList> "RBRACKET" "LPAREN" <argList> "RPAREN"
 
 # The inside of a subscript `[ … ]`: one expression. A `Range` value in it (`xs[a..b]`, `xs[2..]`,
 # `xs[..]`, `xs[Range(0, 10, 2)]`) is a slice; any other value is an index or a map key. The colon
