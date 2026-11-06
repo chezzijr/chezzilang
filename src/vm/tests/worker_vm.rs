@@ -255,8 +255,10 @@ fn globals_compile_to_stable_slots() {
         lexer::tokenize("a := 1\nb := 2\nfn read_b() -> int:\n    return b\n").expect("tok");
     let module = parser::parse(tokens).expect("parse");
     let program = crate::compiler::compile_module_standalone(&module).expect("compile");
+    // The entry is the last module, after the prelude.
+    let entry = program.modules.last().expect("the entry module");
     assert_eq!(
-        program.modules[0].global_slots,
+        entry.global_slots,
         vec!["read_b".to_string(), "a".to_string(), "b".to_string()]
     );
     let read_b = program
@@ -272,7 +274,7 @@ fn globals_compile_to_stable_slots() {
         "read_b should load global slot 2 (`b`): {:?}",
         read_b.code
     );
-    let top = &program.protos[program.modules[0].toplevel];
+    let top = &program.protos[entry.toplevel];
     let defines: Vec<u32> = top
         .code
         .iter()

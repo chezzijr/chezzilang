@@ -81,10 +81,6 @@ impl Checker {
     /// signatures into `self.extern_sigs`.
     pub(super) fn run_graph_pass(&mut self, graph: &ModuleGraph, harvest_externs: bool) {
         let c = self;
-        #[cfg(any(test, feature = "test-api"))]
-        if !graph.modules.iter().any(|m| m.dotted == ["std", "prelude"]) {
-            c.seed_native_prelude_sigs();
-        }
         // Every file's index is known before any body is checked.
         for (idx, lm) in graph.modules.iter().enumerate() {
             c.module_idx_of_file.insert(lm.file, idx);

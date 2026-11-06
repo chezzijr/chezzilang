@@ -177,7 +177,8 @@ impl Checker {
     }
 
     /// Check one module's statements with its imports bound first; returns its public signature.
-    /// `id` is `Some` for a graph module (enables import binding), `None` for a lone `check`.
+    /// `id` is `Some` for a graph module (enables import binding), `None` for a test that checks
+    /// statements outside a graph.
     pub(super) fn check_module(
         &mut self,
         stmts: &[Stmt],

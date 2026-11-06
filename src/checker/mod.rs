@@ -1000,8 +1000,9 @@ struct Checker {
     /// type" text of `check_return`. Saved/restored beside `ret_declared`.
     ret_owner: Option<String>,
     /// The untyped-call probe of `infer_inline_fn_ret`: `Some(None)` while an inline body is
-    /// walked, `Some(Some(span))` once a call in it typed to `Unknown`. `Checker::infer` is the
-    /// one writer; no call site knows about it.
+    /// walked, `Some(Some(span))` once a call in it typed to `Unknown`, `span` being the last such
+    /// call to finish (an outer call after the calls in its arguments). `Checker::infer` is the one
+    /// writer; no call site knows about it.
     untyped_call: Option<Option<Span>>,
     /// Public surfaces of already-checked modules (multi-file programs), keyed by module id.
     module_sigs: HashMap<ModuleId, ModuleSig>,
@@ -1278,7 +1279,7 @@ struct Checker {
     /// `["Listener"]`) by [`seed_stdlib_structs`] so `socket.read(...)` / `listener.accept(...)` resolve
     /// via the normal method path in every module. Bare-name annotation stays import-gated by
     /// `builtin_binds` + `resolve_type`'s builtin arm — the seed adds NO bare licensing. `None` until
-    /// std.net is harvested (and on the single-module `check` path, which has no graph).
+    /// std.net is harvested (a program that imports no `std.net`).
     net_socket_seed: Option<StructInfo>,
     net_listener_seed: Option<StructInfo>,
     /// R2 — the harvested `StructInfo` (method table) for std.io's reserved `Writer` handle, captured
@@ -1330,9 +1331,7 @@ struct Checker {
     /// the `.chz` decls are now the single source of truth for these signatures. `builtin_sig` reads
     /// this registry (falling back to the still-hard-coded `print`/container arms). Populated once when
     /// the prelude module is hoisted (it's always linked before the entry, so this is filled before any
-    /// user module's inference reads it). Empty on the lone single-module `check` path (no graph → no
-    /// prelude), where `builtin_sig` returns `None` for these names — the same as before this table for
-    /// hover-only queries; every real program goes through `check_graph` with the prelude linked.
+    /// user module's inference reads it).
     native_prelude_sigs: HashMap<String, FnSig>,
     /// TICKET-255 — set per module by `run_graph_pass` from [`ModuleGraph::skipped_prelude_structs`]:
     /// the prelude structs whose method bodies are not checked, because the graph builds no value

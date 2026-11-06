@@ -873,99 +873,13 @@ impl Checker {
     }
 
     /// Register one `native fn`/`native ctor` decl's signature into [`Checker::native_prelude_sigs`]
-    /// (the single source of truth for the eight migrated universe builtins). Shared by the `hoist`
-    /// pass (graph path) and [`seed_native_prelude_sigs`] (single-module `check` path). Applies the
+    /// (the single source of truth for the eight migrated universe builtins), from the `hoist` pass
+    /// of the prelude module. Applies the
     /// native-decl dynamic convention: an UNANNOTATED param → `Ty::Unknown`; no `-> ret` → `Ty::Unknown`
     /// return (native/never, how `panic` is spelled).
     pub(super) fn register_native_decl(&mut self, decl: &NativeDecl) {
         let sig = self.harvest_native_fn_sig(decl, false);
         self.native_prelude_sigs.insert(decl.name.clone(), sig);
-    }
-
-    /// The parsed `std/prelude.chz`, for the test-only paths that check a program with no prelude
-    /// module in a graph; `seed_native_prelude_sigs` is their one seed.
-    /// Same source chain as the resolver ($CHEZZI_STD → embedded) — no reader bypasses it.
-    /// Parsed once per process, so every checker of one process reads the same node ids (a call
-    /// plan's `Inline` fill of a prelude default, such as `print`'s `sep`, names one node).
-    #[cfg(any(test, feature = "test-api"))]
-    fn parse_prelude_source() -> Option<crate::ast::Module> {
-        static PRELUDE: std::sync::OnceLock<Option<crate::ast::Module>> =
-            std::sync::OnceLock::new();
-        PRELUDE
-            .get_or_init(|| {
-                let src = crate::resolver::std_source(&["std".to_string(), "prelude".to_string()])
-                    .ok()?;
-                let toks = crate::lexer::tokenize(&src).ok()?;
-                let mut module = crate::parser::parse(toks).ok()?;
-                // A std file never probes the project root (as `Resolver::parse` classifies it).
-                crate::ast::classify_variant_imports(&mut module, &|_| false);
-                Some(module)
-            })
-            .clone()
-    }
-
-    /// Populate [`Checker::native_prelude_sigs`] from the always-linked `std/prelude.chz` on the
-    /// SINGLE-MODULE `check` path (test-only — the graph path hoists the prelude module directly, which
-    /// registers these during `hoist`). Without this, a single-module `check` (`ok()`/`check_src`) has
-    /// no prelude in scope, so `ord`/`panic` value-position typing + hover would silently regress.
-    /// Reads, parses, and registers only the file's `native` decls; the prelude imports nothing and its
-    /// param/return types are reserved primitives (`str`/`int`/`bytes`/…), so no module scope is needed.
-    #[cfg(any(test, feature = "test-api"))]
-    pub(super) fn seed_native_prelude_sigs(&mut self) {
-        if !self.native_prelude_sigs.is_empty() {
-            return;
-        }
-        let Some(module) = Self::parse_prelude_source() else {
-            return;
-        };
-        // The carriers come first: the native sigs and container tables below name `Option[T]` /
-        // `Result[T, E]`, and those resolve through the enum tables. This reads the prelude, a std
-        // module, so the carriers' names are in scope for it.
-        let outer_std = std::mem::replace(&mut self.current_module_is_stdlib, true);
-        self.carrier_seeds = self.harvest_native_enums(&module);
-        self.seed_carrier_enums();
-        self.seed_prelude_structs(&module);
-        self.seed_std_protocols();
-        for s in &module.stmts {
-            if let StmtKind::Native(decl) = &s.kind {
-                self.register_native_decl(decl);
-            }
-        }
-        // The single-module `check` path never builds a graph, so the graph capture of the prelude's
-        // native struct method tables (into `container_seeds`, re-seeded by `seed_stdlib_structs`)
-        // never runs here. Harvest them straight into `self.structs` too, so method calls resolve on
-        // the graph-less path as on the graph path. `begin_module` re-seeds from `container_seeds`,
-        // so the test-only graph with no prelude module (`standalone_graph`) keeps these tables too.
-        for (tn, info) in self.harvest_native_struct_tables(&module) {
-            self.container_seeds.insert(tn.clone(), info.clone());
-            self.structs.insert(tn, info);
-        }
-        self.current_module_is_stdlib = outer_std;
-        // Re-seed under the caller's module, which may be a user module.
-        self.seed_carrier_enums();
-    }
-
-    /// TICKET-253 — the [`crate::resolver::PRELUDE_STRUCTS`] (`Range`, `RecvError`) are structs of
-    /// the prelude that every module sees with no `import` (the resolver adds
-    /// `import Range, RecvError from std.prelude` on the graph path). The graph-less path hoists
-    /// their declarations straight into this checker so `Range(0, 3)` resolves here too.
-    #[cfg(any(test, feature = "test-api"))]
-    pub(super) fn seed_prelude_structs(&mut self, module: &crate::ast::Module) {
-        let names = crate::resolver::PRELUDE_STRUCTS.map(|p| p.name);
-        let decls: Vec<Stmt> = module
-            .stmts
-            .iter()
-            .filter(|s| matches!(&s.kind, StmtKind::Struct { name, .. } if names.contains(&name.as_str())))
-            .cloned()
-            .collect();
-        let outer = std::mem::replace(&mut self.current_module_is_stdlib, true);
-        self.hoist(&decls);
-        self.current_module_is_stdlib = outer;
-        for name in names {
-            if let Some(info) = self.structs.get(name).cloned() {
-                self.bind_imported_struct_name(name, name, &info, true);
-            }
-        }
     }
 
     /// Is this surface extern `Type` a RETURN-ONLY marshalling form (`owned_str`, `str?`, or

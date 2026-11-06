@@ -1860,6 +1860,40 @@ pub fn private_name(name: &str) -> String {
     format!("${name}")
 }
 
+/// THE one owner of the binders the compiler writes for a carrier (`?.`, `??`): their names and
+/// the test "is this name one of them". A maker calls [`CarrierTemp::name`], a reader
+/// [`CarrierTemp::of`]; neither spells a prefix.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CarrierTemp {
+    /// The payload binder of a desugared carrier `match` (`__opt{n}`).
+    Payload,
+    /// The checker's pre-typed stand-in for a carrier's operand (`__optrecv{n}`).
+    Operand,
+}
+
+impl CarrierTemp {
+    /// Longest prefix first: `__optrecv` also starts with `__opt`.
+    const ALL: [CarrierTemp; 2] = [CarrierTemp::Operand, CarrierTemp::Payload];
+
+    /// The spelling every binder of this kind starts with (a test asks a message for it).
+    pub fn prefix(self) -> &'static str {
+        match self {
+            CarrierTemp::Payload => "__opt",
+            CarrierTemp::Operand => "__optrecv",
+        }
+    }
+
+    /// The `n`th binder of this kind.
+    pub fn name(self, n: usize) -> String {
+        format!("{}{n}", self.prefix())
+    }
+
+    /// The kind of carrier binder `name` is, or `None` for any other name.
+    pub fn of(name: &str) -> Option<CarrierTemp> {
+        Self::ALL.into_iter().find(|k| name.starts_with(k.prefix()))
+    }
+}
+
 /// The name a private spelling stands for (`$Option` → `Option`); any other name unchanged.
 pub fn unprivate(name: &str) -> &str {
     name.strip_prefix('$').unwrap_or(name)

@@ -240,10 +240,10 @@ impl Checker {
     /// (`Ty::has_hole`). On a hole it reports once per statement and returns the error sentinel;
     /// the `bool` means "poisoned" (the caller marks the binding in `hole_rejected`). It closes
     /// no frame: a lambda param is declared while its statement still solves. A desugar temp
-    /// (`OPT_RECV_PREFIX`) holds a consumed operand and is not judged.
+    /// (`CarrierTemp::Operand`) holds a consumed operand and is not judged.
     pub(super) fn closed_binding_ty(&mut self, name: &str, ty: Ty, site: BindSite) -> (Ty, bool) {
         let t = self.pinning_value_ty(&ty);
-        if name.starts_with(super::pattern::OPT_RECV_PREFIX) {
+        if crate::ast::CarrierTemp::of(name) == Some(crate::ast::CarrierTemp::Operand) {
             return (t, false);
         }
         if t.has_hole() {

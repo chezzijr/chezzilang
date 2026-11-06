@@ -4,7 +4,6 @@
 
 use super::fn_value::fn_spelling;
 use super::infer::{ChildHint, child_hint};
-use super::pattern::OPT_RECV_PREFIX;
 use super::setup::{HeadBinding, TypeRead};
 use super::*;
 
@@ -144,7 +143,7 @@ impl Checker {
                     // through its TYPE (`Bx[int].get`, receiver first) is the value form.
                     if info.methods.contains_key(name) {
                         let recv = match obj.kind.as_ident() {
-                            Some(n) if !crate::desugar::is_carrier_temp(n) => n.as_str(),
+                            Some(n) if crate::ast::CarrierTemp::of(n).is_none() => n.as_str(),
                             Some(_) | None => "x",
                         };
                         self.error(
@@ -609,7 +608,7 @@ impl Checker {
     fn scratch_operand(&mut self, t: Ty) -> Expr {
         let n = self.next_opt_tmp;
         self.next_opt_tmp += 1;
-        let name = format!("{OPT_RECV_PREFIX}{n}");
+        let name = crate::ast::CarrierTemp::Operand.name(n);
         self.push_scope();
         self.declare(&name, t);
         Expr {

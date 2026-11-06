@@ -662,10 +662,12 @@ fn head_resolution(src: &str, line: u32, col: u32) -> Resolution {
     let mut m = parser::parse(lexer::tokenize(src).expect("lex")).expect("parse");
     crate::desugar::run_standalone(&mut m).expect("desugar");
     let table = resolve_call_tables_standalone(&m.stmts).6;
+    // The entry is the standalone graph's last module, after the prelude.
+    let entry = crate::resolver::standalone_graph(&[]).modules.len() - 1;
     let hits: Vec<Resolution> = crate::ast::node_ids(&m)
         .into_iter()
         .filter(|(_, sp)| sp.line == line && sp.col == col)
-        .filter_map(|(id, _)| table.get(&(0, id)).cloned())
+        .filter_map(|(id, _)| table.get(&(entry, id)).cloned())
         .collect();
     assert_eq!(hits.len(), 1, "entries at {line}:{col}: {hits:?}");
     hits[0].clone()
@@ -817,9 +819,11 @@ fn resolution_records_every_pattern_head() {
     let mut m = parser::parse(lexer::tokenize(src).expect("lex")).expect("parse");
     crate::desugar::run_standalone(&mut m).expect("desugar");
     let table = resolve_call_tables_standalone(&m.stmts).6;
+    // The entry is the standalone graph's last module, after the prelude.
+    let entry = crate::resolver::standalone_graph(&[]).modules.len() - 1;
     let mut got: Vec<String> = crate::ast::node_ids(&m)
         .into_iter()
-        .filter_map(|(id, _)| table.get(&(0, id)))
+        .filter_map(|(id, _)| table.get(&(entry, id)))
         .filter(|r| {
             matches!(
                 r,

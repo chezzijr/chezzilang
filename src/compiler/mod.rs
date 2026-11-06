@@ -44,14 +44,6 @@ pub(crate) mod run_for_tests;
 #[cfg(test)]
 mod tests;
 
-/// The name a builtin resolves to.
-/// ROOT REDESIGN — the module key used to qualify user-type identity keys in the single-source
-/// (standalone / `<main>`) compile + run paths, where there is no module graph to derive a real
-/// label from. The checker, compiler, and VM must all agree on it, so it lives here as one constant. Only
-/// the test-only standalone paths use it (the CLI always runs the module-graph path).
-#[cfg(any(test, feature = "test-api"))]
-pub const STANDALONE_MODULE_KEY: &str = "<main>";
-
 /// M24 — the UNSPELLABLE local name holding the runtime type witness for the slot tagged `t`
 /// (`crate::checker::witness_tag`). `$` is not
 /// an identifier character, so no source binding can shadow or read it.
@@ -200,102 +192,14 @@ pub fn compile_source(src: &str) -> Result<Program, CompileError> {
 
 #[cfg(any(test, feature = "test-api"))]
 pub fn compile_module_standalone(module: &Module) -> Result<Program, CompileError> {
-    // Mirror the file-backed path: normalize named/default call arguments before compiling.
+    // Mirror the file-backed path: normalize named/default call arguments, then compile the
+    // one-module graph (the prelude, then `module`) as `compile_graph` compiles any graph.
     let mut module = module.clone();
-    // TICKET-253: every module sees the prelude's structs (`resolver::PRELUDE_STRUCTS`); a standalone
-    // module has no graph, so it carries each declaration itself (unless it declares one).
-    let struct_name = |s: &Stmt| {
-        if let StmtKind::Struct { name, .. } = &s.kind {
-            Some(name.clone())
-        } else {
-            None
-        }
-    };
-    let prelude = crate::resolver::std_source(&["std".to_string(), "prelude".to_string()])
-        .ok()
-        .and_then(|src| crate::lexer::tokenize(&src).ok())
-        .and_then(|toks| crate::parser::parse(toks).ok())
-        .map(|m| m.stmts)
-        .unwrap_or_default();
-    let print_defaults = call::prelude_print_defaults(&prelude)?;
-    let declared: Vec<String> = module.stmts.iter().filter_map(struct_name).collect();
-    module.stmts.extend(prelude.into_iter().filter(|s| {
-        struct_name(s).is_some_and(|n| {
-            crate::resolver::PRELUDE_STRUCTS.iter().any(|p| p.name == n) && !declared.contains(&n)
-        })
-    }));
     crate::desugar::run_standalone(&mut module).map_err(|e| CompileError {
         message: e.message,
         span: e.span,
     })?;
-    let module = &module;
-    let mut c = Compiler::new();
-    // Single-module: every type is locally declared, keyed `<main>::Name` (the standalone module
-    // key). Record the declared type names (for the engines' from-import skip) and the per-module set.
-    c.module_types = vec![std::collections::HashSet::new()];
-    for s in &module.stmts {
-        if let StmtKind::Struct { name, .. }
-        | StmtKind::Enum { name, .. }
-        | StmtKind::TypeAlias { name, .. } = &s.kind
-        {
-            c.module_types[0].insert(name.clone());
-            c.type_keys.insert(
-                (0, name.clone()),
-                format!("{STANDALONE_MODULE_KEY}::{name}"),
-            );
-        }
-    }
-    c.hoist_types(0, &module.stmts)?;
-    // SINGLE-RESOLVER: extern C types come from the checker's standalone pass — the SAME resolver the
-    // multi-file CLI uses (no second backend resolver exists). The backend reads this table verbatim.
-    c.extern_sigs = crate::checker::resolve_extern_signatures_standalone(&module.stmts);
-    let (kw, wt, ct, ns, rc, conflicts, rs, nf, wr, ht, hc, fw) =
-        crate::checker::resolve_call_tables_standalone(&module.stmts);
-    reject_table_conflicts(conflicts)?;
-    c.hook_table = ht;
-    c.hook_calls = hc;
-    c.field_widths = fw;
-    c.fall_off = nf;
-    c.call_plans = kw;
-    c.witnesses = wt;
-    c.carriers = ct;
-    c.sum_seeds = ns;
-    c.resolutions = rs;
-    c.ret_coerce = rc;
-    c.wraps = wr;
-    let binds = crate::resolver::module_global_binds(&[], &module.stmts, None, &|_, _| {
-        unreachable!("a standalone module has no import")
-    });
-    let toplevel = c.compile_module(0, module, &[], true, &binds)?;
-    let global_slots = std::mem::take(&mut c.global_slots);
-    let let_lines = std::mem::take(&mut c.global_let_lines);
-    debug_assert_eq!(let_lines.len(), global_slots.len());
-    // A synthetic module id so the run driver has something to key the namespace cache on.
-    let id = crate::base::module_id::ModuleId(std::path::PathBuf::from("<main>"));
-    c.program.modules.push(ModuleProto {
-        id,
-        label: "<main>".to_string(),
-        toplevel,
-        imports: Vec::new(),
-        native: None,
-        std: false,
-        global_slots,
-        let_lines,
-        file: 0,
-    });
-    c.program.field_ic_sites = c.field_ic_next;
-    c.program.task_entry = c.spawn_entry_proto("<task entry>", None, 0, Span::RUNTIME);
-    c.program.method_ic_sites = c.method_ic_next;
-    let graph = crate::checker::standalone_graph(&module.stmts);
-    c.program.range_key =
-        crate::resolver::prelude_struct_key(&graph, crate::resolver::RANGE_STRUCT);
-    c.program.recv_error_key =
-        crate::resolver::prelude_struct_key(&graph, crate::resolver::RECV_ERROR_STRUCT);
-    c.program.print_defaults = print_defaults;
-    c.program.rebuild_struct_names(&c.field_widths);
-    c.build_provider_table()?;
-    c.build_hooks();
-    Ok(c.program)
+    compile_graph(&crate::resolver::standalone_graph(&module.stmts))
 }
 
 /// A compiler-synthesized fn value, keyed by (item, the type args its body depends on)
@@ -404,8 +308,7 @@ struct Compiler {
     /// FFI ROOT FIX (fix4): the checker-resolved C signature of every `extern` fn, keyed by `(graph
     /// module index, fn name)`. The extern lowering consumes THIS instead of re-resolving alias names
     /// itself — so every qualified/imported/aliased width resolves in its DEFINING module's scope
-    /// (collision-proof). Filled once in `compile_graph` (multi-file) or by
-    /// `resolve_extern_signatures_standalone` (single-file) — the ONE extern-type resolver.
+    /// (collision-proof). Filled once in `compile_graph` — the ONE extern-type resolver.
     extern_sigs: crate::checker::ExternTable,
     /// The checker's argument slot plan per bound call, keyed `(graph module index, call NodeId)`
     /// (see [`crate::checker::CallPlanTable`]). Filled in `compile_graph`/`compile_module_standalone`
@@ -1139,8 +1042,7 @@ impl Compiler {
             // extern C fns: register a CffiDef and bind the name to a `Cffi` value at module init,
             // exactly like a top-level `fn`. SINGLE-RESOLVER (fix5): each param/return CType comes
             // VERBATIM from the CHECKER-RESOLVED `extern_sigs` table — the ONLY extern-type resolver
-            // (the multi-file CLI fills it via `resolve_extern_signatures`, the standalone path via
-            // `resolve_extern_signatures_standalone`). The backend does ZERO alias/qualified/struct
+            // (`compile_graph` fills it via `resolve_compile_tables`). The backend does ZERO alias/qualified/struct
             // resolution of its own, so a second resolver cannot exist or drift.
             if let StmtKind::Extern { lib, fns } = &stmt.kind {
                 for ef in fns {

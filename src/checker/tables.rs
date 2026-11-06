@@ -74,40 +74,18 @@ pub type TableConflicts = Vec<(Span, String)>;
 
 /// Resolve value-keyword calls for a SINGLE-FILE (standalone, source-string) program, through the
 /// EXACT SAME [`resolve_call_tables`] pass as the multi-file CLI (one resolver, one consumer,
-/// module index `0`). Wraps `stmts` in a synthetic one-module graph, mirroring
-/// [`resolve_extern_signatures_standalone`]. Test-only (the standalone compile/run paths are
+/// over [`crate::resolver::standalone_graph`]). Test-only (the standalone compile/run paths are
 /// `#[cfg(test)]`; production always goes through `build_graph`).
 #[cfg(any(test, feature = "test-api"))]
 pub fn resolve_call_tables_standalone(stmts: &[Stmt]) -> CallTables {
-    resolve_call_tables_with(&standalone_graph(stmts), true)
+    resolve_call_tables_with(&crate::resolver::standalone_graph(stmts), true)
 }
 
 /// [`resolve_call_tables_standalone`] with the nested-fn return memo off — the twin
 /// `the_nested_fn_ret_memo_is_invisible_to_diagnostics_and_tables` compares against.
 #[cfg(any(test, feature = "test-api"))]
 pub fn resolve_call_tables_standalone_no_memo(stmts: &[Stmt]) -> CallTables {
-    resolve_call_tables_with(&standalone_graph(stmts), false)
-}
-
-/// The synthetic one-module graph both standalone entry points wrap `stmts` in.
-#[cfg(any(test, feature = "test-api"))]
-pub fn standalone_graph(stmts: &[Stmt]) -> ModuleGraph {
-    let id = crate::base::module_id::ModuleId(std::path::PathBuf::from("<main>"));
-    ModuleGraph {
-        entry: id.clone(),
-        prelude_used: crate::resolver::PreludeUse::ALL,
-        skipped_fns: std::collections::HashMap::new(),
-        modules: vec![crate::resolver::LoadedModule {
-            id,
-            dotted: Vec::new(),
-            ast: crate::ast::Module {
-                stmts: stmts.to_vec(),
-            },
-            file: 0,
-            imports: Vec::new(),
-            native: None,
-        }],
-    }
+    resolve_call_tables_with(&crate::resolver::standalone_graph(stmts), false)
 }
 
 /// W7-49 — record ONE entry into a checker→compiler side table, refusing to overwrite a key that is

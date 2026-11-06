@@ -235,9 +235,9 @@ impl Checker {
                             span,
                             format!(
                                 "method '{method}' is not callable through the protocol value \
-                                 {pname} — its signature takes `Self`, and a protocol value erases \
+                                 {obj_ty} — its signature takes `Self`, and a protocol value erases \
                                  which type it holds. Bind the receiver with a generic parameter \
-                                 instead: `[T: {pname}]`"
+                                 instead: `[T: {obj_ty}]`"
                             ),
                         );
                         return Ty::Unknown;
@@ -282,7 +282,7 @@ impl Checker {
                 }
                 self.error_help(
                     name_span,
-                    format!("type {pname} has no method '{method}'"),
+                    format!("type {obj_ty} has no method '{method}'"),
                     suggest::did_you_mean(method, &names),
                 );
                 Ty::Unknown

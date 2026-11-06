@@ -3,8 +3,8 @@
 
 use super::*;
 
-/// Type-check a single parsed module (no imports). Retained as the unit-test entry point; the CLI
-/// drives [`check_graph`] so single- and multi-file programs share one path.
+/// Type-check a single parsed module (no imports). Retained as the unit-test entry point: it runs the
+/// graph pass over [`crate::resolver::standalone_graph`], so the module is set up as any graph module is.
 ///
 /// Runs on [`crate::on_frontend_stack_scoped`]'s dedicated stack — see that fn's doc comment. This is
 /// the sole reason `check_src`/`ok`/`rejects` and the ~4000 other Rust test-harness callers that go
@@ -75,6 +75,15 @@ pub fn check_diags_no_memo(
     (res, warnings)
 }
 
+/// A checker that has run the graph pass over an empty standalone module: the prelude is checked,
+/// so its builtin signatures and types are in place (for tests that read a checker's tables).
+#[cfg(any(test, feature = "test-api"))]
+pub(super) fn prelude_checker() -> Checker {
+    let mut c = Checker::new();
+    c.run_graph_pass(&crate::resolver::standalone_graph(&[]), false);
+    c
+}
+
 impl Checker {
     /// THE end of a check: hand out the errors and warnings, each reported once. A position can be
     /// checked twice by design — a field default is typed at its declaration and again where a
@@ -116,12 +125,8 @@ pub fn check_diags_with(
     crate::on_frontend_stack_scoped(move || {
         let mut c = Checker::new();
         c.memo_enabled = memo_enabled;
-        // Single-module path (no graph): the always-linked std/prelude.chz was never hoisted, so seed
-        // the eight migrated universe-builtin signatures from it directly (graph path hoists them
-        // normally).
-        c.seed_native_prelude_sigs();
-        c.check_module(&module.stmts, None, &[], &[]);
-        c.check_provider_cycles();
+        // The graph pass over the one-module graph: a lone module is set up as any graph module is.
+        c.run_graph_pass(&crate::resolver::standalone_graph(&module.stmts), false);
         let (res, warnings) = c.finish_diags();
         (
             res,
@@ -255,38 +260,6 @@ pub fn resolve_extern_signatures(graph: &ModuleGraph) -> ExternTable {
         c.run_graph_pass(graph, true);
         std::mem::take(&mut c.extern_sigs)
     })
-}
-
-/// Resolve extern C signatures for a SINGLE-FILE (standalone, source-string) program, going through
-/// the EXACT SAME [`resolve_extern_signatures`] pass as the multi-file CLI — so there is exactly ONE
-/// extern-type resolver in the whole codebase and the backends never re-resolve. Wraps `stmts` in a
-/// synthetic one-module [`ModuleGraph`]: id `<main>` (so `module_keys` yields `<main>`, matching the
-/// backends' `STANDALONE_MODULE_KEY` struct-identity key), no imports, no native. Width names
-/// (`int32`) resolve as reserved leaves; local aliases/structs resolve from the parsed stmts; no
-/// qualified / named-import forms exist in single-file source, so nothing else is needed.
-///
-/// Test-only: the single-file standalone compile/run path (`compile_module_standalone`)
-/// is `#[cfg(test)]`. The production CLI — single- AND multi-file — always goes
-/// through `build_graph` → `resolve_extern_signatures`.
-#[cfg(any(test, feature = "test-api"))]
-pub fn resolve_extern_signatures_standalone(stmts: &[Stmt]) -> ExternTable {
-    let id = crate::base::module_id::ModuleId(std::path::PathBuf::from("<main>"));
-    let graph = ModuleGraph {
-        entry: id.clone(),
-        prelude_used: crate::resolver::PreludeUse::ALL,
-        skipped_fns: std::collections::HashMap::new(),
-        modules: vec![crate::resolver::LoadedModule {
-            id,
-            dotted: Vec::new(),
-            ast: crate::ast::Module {
-                stmts: stmts.to_vec(),
-            },
-            file: 0,
-            imports: Vec::new(),
-            native: None,
-        }],
-    };
-    resolve_extern_signatures(&graph)
 }
 
 /// Swift-style keyword arguments through a function VALUE: resolve every value call that carries

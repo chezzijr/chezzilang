@@ -943,7 +943,7 @@ fn probe_expr_depth(e: &crate::ast::Expr) -> usize {
 /// **`check` has no separable inner fn.** `checker::check` and `check_graph_with_entry` wrap their
 /// own bodies in `crate::on_frontend_stack_scoped`, so calling either from the probe thread would
 /// measure the 1 GiB stack and report a meaningless number. The `check` arm below therefore inlines
-/// the exact body of `checker::check` (`Checker::new` → `seed_native_prelude_sigs` → `check_module`),
+/// the exact body of `checker::check` (`Checker::new` → `run_graph_pass` over `standalone_graph`),
 /// which `checker::tests` can reach as a child module. If that body ever changes, change it here too.
 ///
 /// **`overlay` is NOT probeable from here and is deliberately absent.** `editor::semantic_overlay`
@@ -1028,9 +1028,10 @@ fn stack_probe_frontend_walker_depth() {
             "check" => {
                 let module = prepared.expect("prepared");
                 let mut c = Checker::new();
-                c.seed_native_prelude_sigs();
-                c.check_module(&module.stmts, None, &[], &[]);
+                let graph = crate::resolver::standalone_graph(&module.stmts);
+                c.run_graph_pass(&graph, false);
                 let errs = c.errors.len();
+                std::mem::forget(graph);
                 std::mem::forget(module);
                 std::mem::forget(c);
                 format!("errs={errs}")

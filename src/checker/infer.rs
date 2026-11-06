@@ -243,7 +243,9 @@ impl Checker {
         } else {
             ty
         };
-        if matches!(self.untyped_call, Some(None))
+        // The LAST call to type `Unknown` wins: calls finish inner to outer, so the `?.` void
+        // attempt asks about its own call, not about a failed call in its argument.
+        if self.untyped_call.is_some()
             && !self.generic_arg_prepass
             && matches!(expr.kind, ExprKind::Call { .. })
             && ty.is_unknown()

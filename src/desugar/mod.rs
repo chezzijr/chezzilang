@@ -1504,21 +1504,6 @@ fn variant_pat(id: crate::ast::NodeId, name: &str, bindings: Vec<Pattern>) -> Pa
     }
 }
 
-/// The name prefix of the payload binder the carrier lowerings bind (`__opt{tmp}`); the
-/// checker's operand scratch (`__optrecv{n}`) shares it. No user source spells it.
-const CARRIER_TEMP: &str = "__opt";
-
-/// The payload binder of the carrier lowering numbered `tmp`.
-fn carrier_temp(tmp: usize) -> String {
-    format!("{CARRIER_TEMP}{tmp}")
-}
-
-/// Is `name` a binder a carrier lowering synthesized? A message that would print it prints no
-/// receiver instead (`?.` desugars its receiver to one).
-pub fn is_carrier_temp(name: &str) -> bool {
-    name.starts_with(CARRIER_TEMP)
-}
-
 /// Lower an `OptChain` / `NullCoalesce` carrier (in place) to an expression-position `match` —
 /// the **Option** lowering:
 ///   `a ?? b`     → `match a: Some(__optN): __optN; None: b`
@@ -1553,7 +1538,7 @@ fn lower_carrier_option_as(expr: &mut Expr, tmp: usize, void: bool) {
         k.set(k.get() + 1);
         base.carrier_child(k.get())
     };
-    let c = carrier_temp(tmp);
+    let c = crate::ast::CarrierTemp::Payload.name(tmp);
     let kind = std::mem::replace(&mut expr.kind, ExprKind::Bool(false));
     expr.kind = match kind {
         ExprKind::NullCoalesce { lhs, rhs, .. } => {
@@ -1710,7 +1695,7 @@ pub fn lower_carrier_result_coalesce(expr: &mut Expr, tmp: usize) {
         k.set(k.get() + 1);
         base.carrier_child(k.get())
     };
-    let c = carrier_temp(tmp);
+    let c = crate::ast::CarrierTemp::Payload.name(tmp);
     let kind = std::mem::replace(&mut expr.kind, ExprKind::Bool(false));
     let ExprKind::NullCoalesce { lhs, rhs, .. } = kind else {
         unreachable!("lower_carrier_result_coalesce applies to '??' only");
@@ -2292,7 +2277,9 @@ mod tests {
         };
         assert_eq!(*name, crate::ast::private_name("Ok"));
         assert_eq!(bindings.len(), 1);
-        assert!(matches!(&bindings[0], Pattern::Ident(n, _, _) if n == "__opt0"));
+        assert!(
+            matches!(&bindings[0], Pattern::Ident(n, _, _) if *n == crate::ast::CarrierTemp::Payload.name(0))
+        );
         let Pattern::Variant { name, bindings, .. } = &arms[1].pattern else {
             panic!("expected a variant pattern, got {:?}", arms[1].pattern)
         };

@@ -372,6 +372,13 @@ Each group below is one fact decided in two or more places (grouped 2026-10-16).
     interpolation fragment and a range bound get none, so `s: str = "{pick()}"` is `cannot infer
     type parameter T` (rustc E0282). Grids: `checker::tests::hint_forwarding_grid`,
     `tests/chz/spec/hint_through_try_test.chz`.
+37. **One checker entry, one `?.` error, one temp-name owner (done 2026-11-06).** The unit-test
+    `checker::check` and `compile_module_standalone` run the graph path over
+    `resolver::standalone_graph` (the real prelude, then the module), so a lone module is set up as
+    a graph module (a module's own protocol keys an overload set there too); the no-prelude seeding
+    is deleted. A protocol value's messages print its type, not its key (`Vecish`, not `v::Vecish`). A failed call under
+    `?.` reports what the plain `.` call reports: `r?.nope2(nope())` is 2 errors, not 3. The carrier
+    binders' names have one owner, `ast::CarrierTemp`.
 
 ### Open questions for the owner
 

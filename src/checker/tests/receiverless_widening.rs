@@ -2505,8 +2505,7 @@ fn constant_int_overflow_scan_is_linear() {
         let module = parser::parse(tokens).expect("parse should succeed");
         crate::on_frontend_stack_scoped(move || {
             let mut c = Checker::new();
-            c.seed_native_prelude_sigs();
-            c.check_module(&module.stmts, None, &[], &[]);
+            c.run_graph_pass(&crate::resolver::standalone_graph(&module.stmts), false);
             c.const_scan_visits
         })
     }

@@ -621,6 +621,16 @@ fn protocol_slot_gate_grid() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
+/// The single-module entry (`checker::check`) sets a module up as the graph pass does: a protocol
+/// the module declares keys an overload set there too, as through `chezzi check`.
+#[test]
+fn a_user_protocol_keys_an_overload_through_the_single_module_check() {
+    let src = "protocol Parse[S]:\n    fn parse(x: S) -> Self\nstruct W:\n    n: int\n    fn parse(x: int) -> W:\n        return W(x)\n    fn parse(x: str) -> W:\n        return W(x.len())\nfn main():\n    print(W.parse(3).n + W.parse(\"ab\").n)\nmain()\n";
+    let tokens = crate::lexer::tokenize(src).expect("lex should succeed");
+    let module = crate::parser::parse(tokens).expect("parse should succeed");
+    assert_eq!(check(&module), Ok(()));
+}
+
 /// One pick rule for every protocol slot, static or instance, one decl or several: `m[X]` names
 /// the type at the stored slot (the source of a `Param` slot, the target of a `Ret` slot), and
 /// with no `[X]` an argument picks a `Param` slot and the annotation a `Ret` slot (a carrier
@@ -790,7 +800,10 @@ fn slot_pick_grid() {
         let errs = check_entry(src);
         if !errs.iter().any(|e| e.message.contains(needle)) {
             failures.push(format!("reject `{cell}`: wanted {needle:?}, got {errs:?}"));
-        } else if errs.iter().any(|e| e.message.contains("__opt")) {
+        } else if errs.iter().any(|e| {
+            e.message
+                .contains(crate::ast::CarrierTemp::Payload.prefix())
+        }) {
             failures.push(format!("reject `{cell}`: an internal name leaks: {errs:?}"));
         }
     }

@@ -13,10 +13,11 @@ fn compile(src: &str) -> crate::base::op::Program {
     compile_module_standalone(&module).expect("compile")
 }
 
+/// The entry's toplevel: the last one, after the prelude's.
 fn toplevel(p: &crate::base::op::Program) -> &crate::base::op::Proto {
     p.protos
         .iter()
-        .find(|q| q.name == "<toplevel>")
+        .rfind(|q| q.name == "<toplevel>")
         .expect("toplevel proto")
 }
 

@@ -359,7 +359,6 @@ match probe():
 "#,
     )
     .unwrap();
-    let graph = crate::resolver::build_graph(&entry).expect("resolve");
     // The two `len` name tokens share `5:26`; a shared CarrierKey gives main's Result carrier the
     // Option lowering. (Before the per-kind hint table, the slot's `int` leaked into the `?x`
     // operand and rejected this default, so the run never happened.)

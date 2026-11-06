@@ -900,9 +900,8 @@ impl Checker {
 /// protocol grid (`tests/protocol_method_grid.rs`) exempts these from its hook-owner rule.
 #[cfg(any(test, feature = "test-api"))]
 pub fn std_target_keyed_protocols() -> Vec<String> {
-    let mut c = Checker::new();
-    // The prelude types a shape names (`T!` is `$Result`), as the single-module check seeds them.
-    c.seed_native_prelude_sigs();
+    // The prelude types a shape names (`T!` is `$Result`), as a checked prelude leaves them.
+    let mut c = super::entry::prelude_checker();
     c.seed_std_protocols();
     super::graph_pass::std_protocol_decls()
         .iter()

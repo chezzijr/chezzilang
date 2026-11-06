@@ -1324,7 +1324,9 @@ fn opt_chain_on_non_option_does_not_leak_temp_name() {
     let errs = check_desugared("x := 5\ny := x?.f\n");
     assert!(!errs.is_empty(), "non-option opt-chain should error");
     assert!(
-        !errs.iter().any(|e| e.message.contains("__opt")),
+        !errs.iter().any(|e| e
+            .message
+            .contains(crate::ast::CarrierTemp::Payload.prefix())),
         "internal temp name leaked into a diagnostic: {errs:?}"
     );
 }
@@ -1353,12 +1355,43 @@ fn a_failed_optchain_call_reports_once_and_names_no_temp() {
     for (body, needle) in cells {
         let src = format!("{k}fn main():\n{body}main()\n");
         let errs = check_desugared(&src);
-        if errs.len() != 1 || !errs[0].message.contains(needle) || errs[0].message.contains("__opt")
+        if errs.len() != 1
+            || !errs[0].message.contains(needle)
+            || errs[0]
+                .message
+                .contains(crate::ast::CarrierTemp::Payload.prefix())
         {
             failed.push(format!("{body}=> wanted one {needle:?}, got {errs:?}"));
         }
     }
     assert!(failed.is_empty(), "{}", failed.join("\n"));
+}
+
+/// A double fault under `?.` (an unknown method AND an unknown name in its argument) reports the
+/// errors the plain `.` call reports, no more: the receiver type reads `K` in both.
+#[test]
+fn a_double_fault_under_optchain_reports_what_the_plain_call_reports() {
+    let k = "struct K:\n    n: int\n";
+    let run = |call: &str| {
+        let src =
+            format!("{k}fn main():\n    r: K? = K(1)\n    x := {call}\n    print(x)\nmain()\n");
+        let mut msgs: Vec<String> = check_desugared(&src)
+            .into_iter()
+            .map(|e| e.message)
+            .collect();
+        msgs.sort();
+        msgs
+    };
+    let plain = run("r.nope2(nope())");
+    let opt = run("r?.nope2(nope())");
+    assert_eq!(plain.len(), 2, "{plain:?}");
+    assert_eq!(
+        opt,
+        plain
+            .iter()
+            .map(|m| m.replace("K?", "K"))
+            .collect::<Vec<_>>()
+    );
 }
 
 #[test]
@@ -1379,7 +1412,9 @@ fn carrier_operand_scratch_name_never_leaks_into_a_diagnostic() {
         let errs = check_desugared(src);
         assert!(!errs.is_empty(), "expected a diagnostic for: {src}");
         assert!(
-            !errs.iter().any(|e| e.message.contains("__optrecv")),
+            !errs.iter().any(|e| e
+                .message
+                .contains(crate::ast::CarrierTemp::Operand.prefix())),
             "operand-scratch name leaked into a diagnostic: {errs:?}"
         );
     }

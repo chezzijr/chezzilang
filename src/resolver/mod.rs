@@ -119,7 +119,7 @@ pub struct PreludeStruct {
 }
 
 /// The structs of `std.prelude` that every module sees with no `import` line: the one list the
-/// resolver's implicit import, the graph-less checker seed, the standalone compile and the
+/// resolver's implicit import ([`prelude_struct_import`]) and the
 /// TICKET-255 method gate ([`PreludeUse`]) read. `RecvError` is built by `Channel.recv`, so a
 /// `recv` in the source (a call or a `wait:` recv arm) uses it.
 pub const PRELUDE_STRUCTS: [PreludeStruct; 2] = [
@@ -141,7 +141,7 @@ pub const PRELUDE_STRUCTS: [PreludeStruct; 2] = [
 pub struct PreludeUse([bool; PRELUDE_STRUCTS.len()], bool);
 
 impl PreludeUse {
-    /// Every prelude struct used: the graph-less and test graphs, and a run of the prelude itself.
+    /// Every prelude struct used: the test graph ([`standalone_graph`]) and a run of the prelude itself.
     pub const ALL: Self = Self([true; PRELUDE_STRUCTS.len()], true);
 
     /// The prelude structs whose [`PreludeStruct::words`] `source` holds, and whether its tokens
@@ -505,6 +505,58 @@ pub fn graph_global_binds(graph: &ModuleGraph) -> Vec<Vec<(String, GlobalSource)
         out.push(binds);
     }
     out
+}
+
+/// TICKET-253 — the import no one wrote that gives every module but the prelude the
+/// [`PRELUDE_STRUCTS`]: `import Range, RecvError from std.prelude`, with `prelude` the prelude's id.
+pub fn prelude_struct_import(prelude: ModuleId) -> ResolvedImport {
+    ResolvedImport {
+        target: prelude,
+        import: Import::From {
+            path: vec!["std".to_string(), "prelude".to_string()],
+            names: PRELUDE_STRUCTS.map(|p| (p.name.to_string(), None)).to_vec(),
+            name_spans: vec![Span::NOWHERE; PRELUDE_STRUCTS.len()],
+        },
+        span: Span::NOWHERE,
+    }
+}
+
+/// The one-module graph of the test entry points that take a parsed module (`checker::check`,
+/// `compiler::compile_module_standalone`): `stmts` as the entry `<main>` (file 0), after the
+/// always-linked prelude as [`build_graph`] loads it (read once per process). The entry imports
+/// what a real entry imports implicitly ([`prelude_struct_import`]). With no source text to read
+/// names from, every prelude body is kept ([`PreludeUse::ALL`], no skipped fn).
+#[cfg(any(test, feature = "test-api"))]
+pub fn standalone_graph(stmts: &[crate::ast::Stmt]) -> ModuleGraph {
+    static PRELUDE: std::sync::OnceLock<LoadedModule> = std::sync::OnceLock::new();
+    let prelude = PRELUDE.get_or_init(|| {
+        let graph = build_graph_with_entry_source(Path::new("<main>.chz"), Some(String::new()))
+            .expect("the always-linked prelude resolves");
+        graph
+            .modules
+            .into_iter()
+            .find(|m| m.dotted == ["std", "prelude"])
+            .expect("a graph links the prelude")
+    });
+    let id = ModuleId(PathBuf::from("<main>"));
+    ModuleGraph {
+        entry: id.clone(),
+        prelude_used: PreludeUse::ALL,
+        skipped_fns: HashMap::new(),
+        modules: vec![
+            prelude.clone(),
+            LoadedModule {
+                id,
+                dotted: Vec::new(),
+                ast: Module {
+                    stmts: stmts.to_vec(),
+                },
+                file: 0,
+                imports: vec![prelude_struct_import(prelude.id.clone())],
+                native: None,
+            },
+        ],
+    }
 }
 
 /// One user type's identity key (see [`user_type_keys`]).
@@ -1143,17 +1195,9 @@ impl Builder {
         // compiler and VM carry the types through the ordinary from-import path. `Span::NOWHERE` marks
         // it as written by no one.
         if dotted != ["std".to_string(), "prelude".to_string()] {
-            let prelude_path = vec!["std".to_string(), "prelude".to_string()];
+            let prelude_path = ["std".to_string(), "prelude".to_string()];
             let file = module_file(&prelude_path, &self.project_root, &self.std_root);
-            resolved.push(ResolvedImport {
-                target: ModuleId(canonical_or_abs(&file)),
-                import: Import::From {
-                    path: prelude_path,
-                    names: PRELUDE_STRUCTS.map(|p| (p.name.to_string(), None)).to_vec(),
-                    name_spans: vec![Span::NOWHERE; PRELUDE_STRUCTS.len()],
-                },
-                span: Span::NOWHERE,
-            });
+            resolved.push(prelude_struct_import(ModuleId(canonical_or_abs(&file))));
         }
         self.on_stack.pop();
         Ok(resolved)

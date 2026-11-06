@@ -1528,8 +1528,8 @@ mod diags_json_tests {
     /// resolver's one lex seam (`resolver::Builder::parse`'s doc comment) — a `chezzi check
     /// --errors=json` integration test cannot construct a file-less diagnostic, so this pins the
     /// renderer directly with a synthesized `Span`, the same way `resolver`'s own unit tests construct
-    /// a synthetic single-module `ModuleGraph` with `file: 0` for the identical reason (see
-    /// `checker::resolve_extern_signatures_standalone`).
+    /// a synthetic module with `file: 0` for the identical reason (see
+    /// `resolver::standalone_graph`).
     #[test]
     fn omits_file_key_when_span_file_is_zero() {
         let span = lexer::Span {
