@@ -715,7 +715,11 @@ impl Vm {
             return Err(self.err(super::EXEC_NO_RUNNER_MSG.to_string(), span));
         };
         self.spawn_into(
-            crate::vm::sched::SpawnTarget::Scope { sched, settle },
+            crate::vm::sched::SpawnTarget::Scope {
+                sched,
+                settle,
+                executor: core.key.clone(),
+            },
             crate::vm::sched::SpawnHead::Callee(Some(self.program.task_entry)),
             f,
             Vec::new(),
@@ -738,26 +742,19 @@ impl Vm {
     /// deadlock verdict drains them too, so a finished job's buffered output still reaches the sink
     /// (`run_file`'s in-process sink holds it only in the job's slot); the drain's own result is
     /// discarded, and the verdict and its trace stand. Any other fault, and a pending exit, skip the
-    /// drain as before.
+    /// drain as before. A verdict's fault then reports the run's listing ([`Vm::list_blocked`]).
     pub(crate) fn finish_run(&mut self, r: Result<(), RuntimeError>) -> Result<(), RuntimeError> {
         // TICKET-208 — a run ended by a job fault drains too: every scope is already cancelled,
         // and a finished job's buffered output must still reach the sink.
         let job = self.quiesce.has_job_fault();
-        match self.rank_end(r) {
+        let r = match self.rank_end(r) {
             Ok(()) => self.drain_live_executors(),
             Err(e) if (e.is_deadlock || job) && self.pending_exit.is_none() => {
                 let trace = (self.fault_trace.take(), self.fault_trace_depth);
-                let drained = self.drain_live_executors();
+                // The drain's blocked jobs join the run's listing; the verdict stands.
+                let _ = self.drain_live_executors();
                 (self.fault_trace, self.fault_trace_depth) = trace;
-                // The whole run's listing: an executor's blocked jobs follow the run's own tasks.
-                match drained {
-                    Err(d) if e.blocked.is_some() && d.blocked.is_some() => {
-                        let trace = self.fault_trace.as_deref().unwrap_or_default();
-                        let tasks = super::deadlock::listings(&[(&e, trace), (&d, &[])]);
-                        Err(super::deadlock::fold(e, tasks))
-                    }
-                    Ok(()) | Err(_) => Err(e),
-                }
+                Err(e)
             }
             Err(e) => {
                 // TICKET-270 — an exit joins nothing, but what a finished job printed still
@@ -767,7 +764,8 @@ impl Vm {
                 }
                 Err(e)
             }
-        }
+        };
+        self.list_blocked(r)
     }
 
     /// Like [`Vm::drain_live_executors`], but skips the first `from` registry entries. `from` is a
@@ -796,7 +794,7 @@ impl Vm {
         // has `slack == 0` (`main` is never a fiber of the Executor's sched), so it ends with the
         // scope taken, or with an `Err` that leaves the loop. A deadlock is the one `Err` that
         // continues: its join took the scope, and every later Executor's blocked jobs belong in
-        // the same listing (Go lists every blocked goroutine), folded in creation order.
+        // the same listing (Go lists every blocked goroutine). The first deadlock is the report.
         let mut deadlock: Option<RuntimeError> = None;
         loop {
             let next = self
@@ -813,13 +811,7 @@ impl Vm {
             // this Executor was created.
             if let Err(e) = self.join_executor(&core, core.created_at) {
                 if e.blocked.is_some() && core.sched().is_none() {
-                    deadlock = Some(match deadlock {
-                        None => e,
-                        Some(first) => {
-                            let tasks = super::deadlock::listings(&[(&first, &[]), (&e, &[])]);
-                            super::deadlock::fold(first, tasks)
-                        }
-                    });
+                    deadlock = deadlock.or(Some(e));
                     continue;
                 }
                 if self.join_leave_flushes(&e) {

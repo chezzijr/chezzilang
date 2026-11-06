@@ -329,12 +329,28 @@ impl MnSched {
     ) {
         let buckets: Vec<(usize, Vec<ParkedEntry>)> = c.parked.drain().collect();
         let mut drained = 0usize;
+        // A fiber requeued while the run's deadlock verdict is latched (a cut owner's abort
+        // cancelled its scope) is one of the verdict's blocked tasks: it is parked at a wait that
+        // nothing can satisfy, so it joins the run's listing here, as the verdict found it.
+        let listing = (self.quiesce.run_halt() == crate::vm::quiesce::RunHalt::Deadlock)
+            .then(|| Arc::clone(&c.listing));
+        let list = |f: &Fiber| {
+            if let (Some(l), Some((wait, span))) = (&listing, f.park_site) {
+                l.add(
+                    &f.ctx.task,
+                    wait,
+                    span,
+                    super::frames::raw_frames(&f.ctx.frames),
+                );
+            }
+        };
         for (key, v) in buckets {
             let mut keep: Vec<ParkedEntry> = Vec::new();
             for entry in v {
                 match entry {
                     ParkedEntry::Recv(mut f) => {
                         if wake(&f) {
+                            list(&f);
                             drained += 1;
                             f.state = FiberState::Ready;
                             c.global.push_back(f);
@@ -344,6 +360,7 @@ impl MnSched {
                     }
                     ParkedEntry::Send(mut f) => {
                         if wake(&f) {
+                            list(&f);
                             drained += 1;
                             f.state = FiberState::Ready;
                             c.global.push_back(f);
@@ -384,6 +401,7 @@ impl MnSched {
                             .unwrap_or_else(|e| e.into_inner())
                             .take()
                             .expect("WaitPark fiber claimed twice");
+                        list(&f);
                         drained += 1;
                         f.state = FiberState::Ready;
                         c.global.push_back(f);

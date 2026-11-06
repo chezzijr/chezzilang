@@ -394,13 +394,16 @@ still drains its executors, so a finished job's buffered output is not lost.
 
 **The deadlock report lists every blocked task (Go's `all goroutines are asleep`).** A verdict cuts
 every blocked task at once; each ends with its own wait at its own site, and none of them cancels a
-sibling, so the report does not depend on which task woke first. A join folds the blocked tasks of
-its slots in task order, and an enclosing join folds again, so the report lists every blocked task
-of the run in spawn-tree order (a nursery's tasks in place of the task that opened it, then that
-task's own wait when its body is blocked too, inside a callback such as `update` as well). The blocked jobs
-of every executor, drained at the end of the run, follow the run's own tasks, in executor creation
-order. The report is one header,
-then one entry per task with its frames:
+sibling, so the report does not depend on which task woke first. The report is a snapshot taken at
+the verdict: each task the verdict cut adds its own entry at its cut (its wait, its site, its
+frames), once, and the run reports them after every join and the executor drain, so no join or
+unwind can drop or repeat a task. The entries are in spawn-tree order: a task's place is its
+parent's place and the order in which its parent spawned it. A task blocked only in its
+`parallel:` join has no entry (its nursery's blocked tasks stand in its place); a task whose body
+is blocked in its own wait too (inside a callback such as `update` as well) comes after its
+nursery's tasks. The blocked jobs of every executor follow the run's own tasks, by the executor's
+place (where its creator made it), then in submission order. The report is one header, then one
+entry per task with its frames:
 
 ```
 deadlock: 2 tasks are blocked and none can proceed
@@ -415,8 +418,9 @@ deadlock: 2 tasks are blocked and none can proceed
 The waits are `recv() on an empty channel`, `send() on a full channel`, `send() on a rendezvous
 channel`, `wait: on channels that are all empty`, `wait: on channels none of which can proceed`,
 `waiting for the Shared guard`, `waiting for the RwShared guard`, `waiting for an Executor join`,
-`waiting on a socket`, and `blocked in a parallel: block` for a task whose own wait no site names
-(owner `vm/deadlock.rs`, `Wait::phrase`). One task reads `deadlock: 1 task is blocked and cannot
+`waiting on a socket`, and `blocked in a parallel: block` for a report whose cut task named no wait
+and whose run listed none (owner `vm/deadlock.rs`, `Wait::phrase`; the listing is
+`deadlock::Listing`). One task reads `deadlock: 1 task is blocked and cannot
 proceed`. The error's position is the first task's site. `chezzi test --errors=json` gives the
 header as the test's `message` and the entries as `tasks`: `[{"wait", "file", "line", "col",
 "frames": [{"function", "file", "line", "col"}]}]`. A guard that a cut holder frees as it unwinds is

@@ -196,14 +196,12 @@ impl Vm {
     /// Build a stack trace from the live frames (innermost first), skipping module-toplevel frames.
     /// Valid only while the frames are intact — i.e. on the uncaught-error path, before unwinding.
     pub(super) fn capture_trace(&self) -> Vec<TraceFrame> {
-        let raw: Vec<(ProtoId, Span)> = self
-            .frames
-            .iter()
-            .rev()
-            .filter(|f| !f.is_toplevel)
-            .map(|f| (f.proto, f.call_span))
-            .collect();
-        self.trace_of(&raw)
+        self.trace_of(&self.raw_frames())
+    }
+
+    /// The live frames as [`raw_frames`] lists them: what [`Vm::capture_trace`] names.
+    pub(super) fn raw_frames(&self) -> Vec<(ProtoId, Span)> {
+        raw_frames(&self.frames)
     }
 
     /// Name the frames `raw` (a proto and the call site that entered it, innermost first): a live
@@ -678,17 +676,10 @@ impl Vm {
         // none, DEC-092). Per-call, never a VM latch: `chezzi test` keeps running.
         // TICKET-287 — at a fiber's outermost loop the unwind parks at a fiber-owned nursery that
         // is not done, instead of running other fibers on this stack while it waits.
-        // The verdict cut the aborted nurseries' blocked tasks too: they join the listing ahead
-        // of this task's own wait (a nursery's tasks in place of the task that opened it).
         let rte = if fatal {
-            match self.unwind_no_defer(target) {
-                Some(child) if rte.blocked.is_some() && child.blocked.is_some() => {
-                    let trace = self.fault_trace.as_deref().unwrap_or_default();
-                    let tasks = deadlock::listings(&[(&child, &[]), (&rte, trace)]);
-                    deadlock::fold(rte, tasks)
-                }
-                Some(_) | None => rte,
-            }
+            // The aborted nurseries' cut tasks are in the run's listing already.
+            self.unwind_no_defer(target);
+            rte
         } else {
             let (d, _) = self.unwind_deferred_escaped(target, true, true, base_level == 0);
             if self.join_suspend.is_some() {
@@ -1158,7 +1149,7 @@ impl Vm {
         match self.cleanup_halt(rte) {
             Ok(rte) => Ok(rte),
             Err(e) if e.is_deadlock => {
-                let _ = self.unwind_no_defer(base_level);
+                self.unwind_no_defer(base_level);
                 Err(e)
             }
             Err(e) if executor_hard_halt(&e) => Err(self.unwind_keeping_halt(base_level, false, e)),
@@ -1325,4 +1316,16 @@ impl Vm {
     pub(super) fn pop(&mut self) -> Value {
         self.stack.pop().expect("operand stack underflow")
     }
+}
+
+/// `frames` as a proto and the call site that entered it, innermost first, skipping
+/// module-toplevel frames: a live trace ([`Vm::raw_frames`]) or a parked fiber's
+/// ([`SchedCore::record_deadlocked`]).
+pub(super) fn raw_frames(frames: &[CallFrame]) -> Vec<(ProtoId, Span)> {
+    frames
+        .iter()
+        .rev()
+        .filter(|f| !f.is_toplevel)
+        .map(|f| (f.proto, f.call_span))
+        .collect()
 }

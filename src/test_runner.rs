@@ -257,26 +257,44 @@ fn fault_site(
     files: &[(u32, PathBuf)],
     fallback: &Path,
 ) -> FaultSite {
-    let path = files
-        .iter()
-        .find(|(f, _)| *f == e.span.file)
-        .map(|(_, p)| p.as_path())
-        .unwrap_or(fallback);
-    let trace: Vec<crate::vm::TraceFrame> = vm
-        .take_fault_trace()
-        .into_iter()
-        .filter(|f| f.span.file != 0)
-        .collect();
-    let tasks: Vec<crate::vm::deadlock::BlockedTask> = crate::vm::deadlock::listing(e, &trace)
+    let trace = vm.take_fault_trace();
+    traced_fault_site(vm, e, trace, files, fallback)
+}
+
+/// [`fault_site`] with the trace taken already. A deadlock verdict's fault reports the run's
+/// listing ([`Vm::take_listing`]), sited at its first task; the listing is taken either way, so
+/// the next test starts with none.
+fn traced_fault_site(
+    vm: &Vm,
+    e: &crate::vm::RuntimeError,
+    trace: Vec<crate::vm::TraceFrame>,
+    files: &[(u32, PathBuf)],
+    fallback: &Path,
+) -> FaultSite {
+    let trace: Vec<crate::vm::TraceFrame> =
+        trace.into_iter().filter(|f| f.span.file != 0).collect();
+    let listed = vm.take_listing();
+    let tasks = if e.blocked.is_some() && !listed.is_empty() {
+        listed
+    } else {
+        crate::vm::deadlock::listing(e, &trace)
+    };
+    let tasks: Vec<crate::vm::deadlock::BlockedTask> = tasks
         .into_iter()
         .map(|mut t| {
             t.frames.retain(|f| f.span.file != 0);
             t
         })
         .collect();
+    let span = tasks.first().map_or(e.span, |t| t.span);
+    let path = files
+        .iter()
+        .find(|(f, _)| *f == span.file)
+        .map(|(_, p)| p.as_path())
+        .unwrap_or(fallback);
     FaultSite {
-        pos: crate::lexer::render_span(e.span, Some(path)),
-        line: e.span.line as usize,
+        pos: crate::lexer::render_span(span, Some(path)),
+        line: span.line as usize,
         frames: if tasks.is_empty() {
             crate::vm::format_frames(&trace, files)
         } else {
@@ -288,26 +306,6 @@ fn fault_site(
             tasks_json(&tasks, files)
         },
         tasks,
-    }
-}
-
-/// A deadlock verdict's listing, extended with the blocked tasks of `reaped` (the deadlock the
-/// per-test reap of the test's executors reported): the run's own tasks first, then its jobs'.
-/// Any other verdict or fault is left alone.
-fn extend_listing(
-    verdict: &mut Verdict,
-    reaped: &crate::vm::RuntimeError,
-    files: &[(u32, PathBuf)],
-) {
-    let more = crate::vm::deadlock::listing(reaped, &[]);
-    if let Verdict::Error { site, msg } = verdict
-        && !site.tasks.is_empty()
-        && !more.is_empty()
-    {
-        site.tasks.extend(more);
-        site.frames = crate::vm::deadlock::render(&site.tasks, files);
-        site.tasks_json = tasks_json(&site.tasks, files);
-        *msg = crate::vm::deadlock::header(site.tasks.len());
     }
 }
 
@@ -904,23 +902,26 @@ fn invoke_all(
         let mark = vm.exec_registry_mark();
         // TICKET-200 — `rank_end` before the reap: the reap takes the slots `rank_end` reads.
         let ran = vm.invoke_test(*proto);
-        let mut verdict = match vm.rank_end(ran) {
+        let ran = vm.rank_end(ran);
+        // The test's trace is taken before the reap, whose joins may latch their own.
+        let trace = vm.take_fault_trace();
+        // Join this test's own detached executors (A2). A fault here upgrades a `Pass` only — a
+        // test that already failed keeps its own bucket, and its jobs are still joined either way.
+        // The site is read after the reap: a deadlock's listing holds the reaped jobs too.
+        let reaped = vm.reap_executors_since(mark);
+        let mut verdict = match ran {
             Ok(()) => Verdict::Pass,
             Err(e) => {
-                let site = fault_site(&mut vm, &e, &files, &fallback);
+                let site = traced_fault_site(&vm, &e, trace, &files, &fallback);
                 verdict_from_fault(e, site)
             }
         };
-        // Join this test's own detached executors (A2). A fault here upgrades a `Pass` only — a
-        // test that already failed keeps its own bucket, and its jobs are still joined either way.
-        // A deadlock's listing takes the reaped jobs' blocked tasks after the test's own.
-        match vm.reap_executors_since(mark) {
+        match reaped {
             Err(e) if matches!(verdict, Verdict::Pass) => {
                 let site = fault_site(&mut vm, &e, &files, &fallback);
                 verdict = verdict_from_fault(e, site);
             }
-            Err(e) => extend_listing(&mut verdict, &e, &files),
-            Ok(()) => {}
+            Err(_) | Ok(()) => {}
         }
         let duration = start.elapsed();
         let verdict = apply_timeout_overrun(verdict, duration, opts);
@@ -1119,6 +1120,9 @@ fn run_suite(
             let site = fault_site(vm, &e, files, fallback);
             verdict = verdict_from_fault(e, site);
         }
+        // A reap whose fault this test does not report leaves its cut jobs in the run's listing:
+        // drop them, so the next test's listing is its own.
+        vm.take_listing();
         let duration = start.elapsed();
         let verdict = apply_timeout_overrun(verdict, duration, opts);
         let captured = vm.take_out_bytes();

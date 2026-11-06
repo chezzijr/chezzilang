@@ -139,7 +139,11 @@ impl Vm {
         };
         match target {
             SpawnTarget::Nursery => self.register_task(task, span),
-            SpawnTarget::Scope { sched, settle } => {
+            SpawnTarget::Scope {
+                sched,
+                settle,
+                executor,
+            } => {
                 let rw = self.prepare_worker(task)?;
                 // A job's values are objects of the run's one heap, which `live_bytes` counts
                 // already, so the starter is charged no worker heap of its own.
@@ -156,6 +160,7 @@ impl Vm {
                     sched.reserve_job_slot(&mut c, &mut fiber, settle);
                     sched.claim_runners(&mut c)
                 };
+                fiber.ctx.task = super::deadlock::TaskPath::job(&executor, fiber.task_index);
                 // TICKET-230 — once another runner exists, main hands its permit over at slice
                 // ends, at every worker count (one runner budget of N, main included).
                 if self.mn.is_none() && !wids.is_empty() {

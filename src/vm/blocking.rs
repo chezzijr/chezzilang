@@ -191,10 +191,10 @@ impl Vm {
         // The listing names each party's own wait; the latched report is the fallback for a party
         // reached outside a wait.
         let (msg, site) = self.quiesce.deadlock_report()?;
-        let (msg, site) = self
-            .wait_site
-            .map_or((msg, site), |(m, s)| (m.to_string(), s));
-        Some(self.err(String::new(), site).deadlock().at_site(&msg, site))
+        Some(match self.wait_site {
+            Some((wait, at)) => self.cut_at(&self.err(String::new(), at).deadlock(), wait, at),
+            None => self.err(String::new(), site).deadlock().at_site(&msg, site),
+        })
     }
 
     /// TICKET-208 — THE predicate "a run-wide halt is pending for this party": an `os.exit` from

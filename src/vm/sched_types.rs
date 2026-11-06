@@ -114,6 +114,9 @@ pub(super) struct FiberCtx {
     /// lands in its caller's stream, so a box context's buffers stay empty.
     pub(super) out: Vec<u8>,
     pub(super) stderr: Vec<u8>,
+    /// This task's place in the spawn tree ([`Vm::task`]); a task switch moves it with the
+    /// output stream.
+    pub(super) task: super::deadlock::TaskPath,
     /// M3.1 — the run's one module table (the same `Arc` every context holds), so the parked
     /// context's roots reach the run's modules. Never swapped.
     pub(super) module_objs: Arc<super::module_table::ModuleTable>,
@@ -350,9 +353,6 @@ pub(super) enum TaskOutcome {
         err: RuntimeError,
         out: Vec<u8>,
         stderr: Vec<u8>,
-        /// The parked fiber's frames (innermost first, module toplevels dropped), named by the
-        /// reducing VM ([`Vm::trace_of`]) for the deadlock listing.
-        frames: Vec<(ProtoId, Span)>,
     },
 }
 
@@ -1070,6 +1070,9 @@ pub(super) struct SchedCore {
     /// Held here so each way out of the counts moves it inside the lock hold that writes the
     /// count ([`SchedCore::note_left`]).
     pub(super) left: Arc<AtomicU64>,
+    /// The run's deadlock listing, the same `Arc` as [`quiesce::QuiesceState::listing`]: a parked
+    /// fiber the verdict cuts adds its entry here ([`SchedCore::record_deadlocked`]).
+    pub(super) listing: Arc<super::deadlock::Listing>,
     /// The global overflow / seed queue. Seed + every coordinator-path requeue (deadlock flag,
     /// cancel drain) land here; per-worker requeues go to a worker's `locals[wid]` (D4c). Drained by
     /// a worker only after its own local is empty, so the global queue is the shared fallback.

@@ -127,8 +127,10 @@ impl Vm {
         }
         // The callee and args are in no root set from here to `into_fiber` (`vm/gc_door.rs`).
         let payload = super::gc_door::PayloadInFlight::new();
+        let mut worker = self.spawn_worker();
+        worker.task = self.task.child();
         Ok(ReadyWorker {
-            worker: self.spawn_worker(),
+            worker,
             call: ReadyCall::Invoke { callee, args },
             span,
             payload,

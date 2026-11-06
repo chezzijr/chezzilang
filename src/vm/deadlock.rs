@@ -2,13 +2,15 @@
 //!
 //! Go's model (`fatal error: all goroutines are asleep - deadlock!`, then every goroutine with its
 //! wait and stack). A verdict cuts every blocked task; each cut task ends with a deadlock fault
-//! whose text is its own wait ([`Wait::phrase`]) at its own site. A join that reduces deadlock
-//! slots folds them into one listing in task order ([`fold`]), and an enclosing join folds again,
-//! so the run's report lists every blocked task of the run in spawn-tree order. A driver renders it
-//! through [`listing`] and [`render`].
+//! whose text is its own wait ([`Wait::phrase`]) at its own site, and adds its own entry to the
+//! run's [`Listing`] at that cut, keyed by its place in the spawn tree ([`TaskPath`]). The listing
+//! is THE report: a driver takes it once, after every join and the Executor drain
+//! ([`super::Vm::take_listing`]), and renders it through [`render`].
 
-use super::{RuntimeError, TraceFrame};
+use super::{ProtoId, RuntimeError, TraceFrame};
 use crate::ast::Span;
+use std::collections::BTreeMap;
+use std::sync::Mutex;
 
 /// What one blocked task waits on. THE owner of each wait's wording: the deadlock listing names a
 /// task's wait with [`Wait::phrase`], and a wait that cannot block at all faults with
@@ -111,13 +113,14 @@ pub struct BlockedTask {
     pub frames: Vec<TraceFrame>,
 }
 
-/// A deadlock fault's blocked tasks, in task order. Boxed on the error so a `RuntimeError` that
-/// carries none stays one pointer wider.
+/// A deadlock fault's blocked tasks, in spawn-tree order. Boxed on the error so a `RuntimeError`
+/// that carries none stays one pointer wider.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Blocked {
     pub tasks: Vec<BlockedTask>,
     /// One task's own cut ([`cut`]): its one entry has no frames yet, and takes the frames of the
-    /// task the fault ends ([`listing`]). `false` once folded by a join.
+    /// task the fault ends ([`listing`]). `false` once the run's listing replaced it
+    /// ([`super::Vm::list_blocked`]).
     own: bool,
 }
 
@@ -147,10 +150,10 @@ pub fn header(n: usize) -> String {
     }
 }
 
-/// The blocked tasks a deadlock verdict's fault reports: its folded listing, or, for one task's own
-/// cut, that task with `trace` (the frames of the task the fault ends). Empty for every other
-/// fault, a `deadlock`-stamped one included (a fault that ends a run the verdict halted keeps its
-/// own text, DEC-135).
+/// The blocked tasks a deadlock verdict's fault reports: the run's listing the driver attached
+/// ([`super::Vm::list_blocked`]), or, for one task's own cut, that task with `trace` (the frames of
+/// the task the fault ends). Empty for every other fault, a `deadlock`-stamped one included (a
+/// fault that ends a run the verdict halted keeps its own text, DEC-135).
 pub fn listing(err: &RuntimeError, trace: &[TraceFrame]) -> Vec<BlockedTask> {
     match &err.blocked {
         Some(b) if b.own => b
@@ -166,25 +169,148 @@ pub fn listing(err: &RuntimeError, trace: &[TraceFrame]) -> Vec<BlockedTask> {
     }
 }
 
-/// The blocked tasks of several deadlock faults, in the order given: each part is a fault and the
-/// frames of the task it ends ([`listing`]). The one way two listings are joined before a [`fold`].
-pub(super) fn listings(parts: &[(&RuntimeError, &[TraceFrame])]) -> Vec<BlockedTask> {
-    parts
-        .iter()
-        .flat_map(|(e, trace)| listing(e, trace))
-        .collect()
+/// A task's place in the run's spawn tree: its parent's path and its index among the tasks and
+/// Executors its parent made, in the order it made them. The run's own tasks sit under [`RUN`],
+/// an Executor's jobs under [`JOBS`], by the Executor's place then the job's submission index, so
+/// every job follows every task of the run. Travels with its task ([`super::Vm::swap_task`]).
+#[derive(Clone, Debug)]
+pub(crate) struct TaskPath {
+    path: Vec<u32>,
+    /// The index of the next task or Executor this task makes.
+    next: u32,
 }
 
-/// Fold the blocked tasks of a join's deadlock slots, in task order, into one fault. `first` is the
-/// lowest-index deadlock fault, whose markers the folded fault keeps.
-pub(super) fn fold(first: RuntimeError, tasks: Vec<BlockedTask>) -> RuntimeError {
-    let mut e = first;
-    e.message = header(tasks.len());
-    if let Some(t) = tasks.first() {
-        e.span = t.span;
+const RUN: u32 = 0;
+const JOBS: u32 = 1;
+
+impl Default for TaskPath {
+    /// The run's root task (`main`, a `test fn`).
+    fn default() -> Self {
+        TaskPath {
+            path: vec![RUN],
+            next: 0,
+        }
     }
-    e.blocked = Some(Box::new(Blocked { tasks, own: false }));
-    e
+}
+
+impl TaskPath {
+    /// The next child's place: a task this task spawns, or the key of an Executor it creates.
+    fn next_child(&mut self) -> Vec<u32> {
+        let mut path = self.path.clone();
+        path.push(self.next);
+        self.next += 1;
+        path
+    }
+
+    /// The path of the task this task spawns now.
+    pub(super) fn child(&mut self) -> TaskPath {
+        TaskPath {
+            path: self.next_child(),
+            next: 0,
+        }
+    }
+
+    /// The key of the Executor this task creates now ([`TaskPath::job`]).
+    pub(super) fn executor(&mut self) -> Vec<u32> {
+        self.next_child()
+    }
+
+    /// The path of job `index` of the Executor keyed `executor`.
+    pub(super) fn job(executor: &[u32], index: usize) -> TaskPath {
+        let mut path = vec![JOBS];
+        path.extend_from_slice(executor);
+        path.push(u32::try_from(index).unwrap_or(u32::MAX - 1));
+        TaskPath { path, next: 0 }
+    }
+}
+
+/// One entry of the run's listing: the wait, its site, and the task's frames (innermost first).
+struct Entry {
+    wait: &'static str,
+    span: Span,
+    frames: Vec<(ProtoId, Span)>,
+}
+
+/// THE deadlock listing of a run: one entry per task the verdict cut, added at the cut and keyed by
+/// the task's [`TaskPath`], so the report lists each task once, in spawn-tree order, whichever task
+/// a join or unwind reached first. One per run, shared by every sched of the run
+/// (`QuiesceState::listing`).
+#[derive(Default)]
+pub(crate) struct Listing(Mutex<BTreeMap<Vec<u32>, Entry>>);
+
+impl Listing {
+    /// The cut task at `task` waits on `wait` at `span`, with `frames`. A task's own entry follows
+    /// its children's (a nursery's tasks in place of the task that opened it, then its own wait).
+    /// A task is listed once: the first cut stands.
+    pub(super) fn add(
+        &self,
+        task: &TaskPath,
+        wait: &'static str,
+        span: Span,
+        frames: Vec<(ProtoId, Span)>,
+    ) {
+        let mut key = task.path.clone();
+        key.push(u32::MAX);
+        self.0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .entry(key)
+            .or_insert(Entry { wait, span, frames });
+    }
+
+    /// Take every entry, in spawn-tree order.
+    fn take(&self) -> Vec<Entry> {
+        std::mem::take(&mut *self.0.lock().unwrap_or_else(|e| e.into_inner()))
+            .into_values()
+            .collect()
+    }
+}
+
+impl super::Vm {
+    /// The fault of this task's cut on `wait` at `span`, from the verdict's fault `base`: the one
+    /// way a task the verdict cut in place enters the run's listing.
+    pub(super) fn cut_at(
+        &self,
+        base: &RuntimeError,
+        wait: &'static str,
+        span: Span,
+    ) -> RuntimeError {
+        self.quiesce
+            .listing
+            .add(&self.task, wait, span, self.raw_frames());
+        base.at_site(wait, span)
+    }
+
+    /// Take the run's listing, in spawn-tree order, each entry's frames named. Empties it, so a
+    /// `chezzi test` run takes each test's listing alone.
+    pub fn take_listing(&self) -> Vec<BlockedTask> {
+        self.quiesce
+            .listing
+            .take()
+            .into_iter()
+            .map(|e| BlockedTask {
+                wait: e.wait.to_string(),
+                span: e.span,
+                frames: self.trace_of(&e.frames),
+            })
+            .collect()
+    }
+
+    /// A run's end, for a driver: a deadlock verdict's fault reports the run's listing, its first
+    /// task's site and the header. Every other result is returned as is. The listing is taken
+    /// either way.
+    pub(crate) fn list_blocked(&self, r: Result<(), RuntimeError>) -> Result<(), RuntimeError> {
+        let tasks = self.take_listing();
+        match r {
+            Err(mut e) if e.blocked.is_some() && !tasks.is_empty() => {
+                e.message = header(tasks.len());
+                e.span = tasks[0].span;
+                e.blocked = Some(Box::new(Blocked { tasks, own: false }));
+                Err(e)
+            }
+            r => r,
+        }
+    }
 }
 
 /// The rendered entries of a listing: `  task k: <wait> at <site>`, then the task's frames as

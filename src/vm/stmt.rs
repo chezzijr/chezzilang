@@ -163,11 +163,10 @@ impl Vm {
     /// that has already said so; Go's `fatal error: all goroutines are asleep - deadlock!` runs
     /// none, and parked siblings already run none (DEC-092). `report_escaped` stays `true`: DEC-135
     /// (W14-39) measured that skipping the escaped-nursery abort orphans parked children and hangs
-    /// the join at `CHEZZI_THREADS=1`. Returns the first fault an aborted nursery's children ended
-    /// with, as [`Vm::unwind_deferred_escaped`] does.
-    pub(super) fn unwind_no_defer(&mut self, target_frame_len: usize) -> Option<RuntimeError> {
-        self.unwind_deferred_escaped(target_frame_len, true, false, false)
-            .1
+    /// the join at `CHEZZI_THREADS=1`. What the aborted nurseries' children ended with is not
+    /// reported: the verdict's fault stands, and its cut tasks are in the run's listing.
+    pub(super) fn unwind_no_defer(&mut self, target_frame_len: usize) {
+        self.unwind_deferred_escaped(target_frame_len, true, false, false);
     }
 
     /// TICKET-147 (W14-12) — the bypass funnels' unwind: run [`Vm::unwind_deferred_escaped`] and rank

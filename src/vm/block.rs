@@ -677,11 +677,15 @@ impl Vm {
     /// The fault of this thread's wait when the verdict cut it ([`Vm::in_place_cut`]): `sched`'s
     /// deadlock fault, sited at the wait this thread is in ([`Vm::wait_site`], named by its
     /// [`Blocked`]).
+    /// A wait no site named (a nursery join) adds no listing entry: its blocked children stand in
+    /// its place.
     pub(super) fn cut_fault(&self, sched: &MnSched, span: Span) -> RuntimeError {
-        let (wait, at) = self
-            .wait_site
-            .unwrap_or((super::deadlock::Wait::Nursery.phrase(), span));
-        sched.deadlock_err.at_site(wait, at)
+        match self.wait_site {
+            Some((wait, at)) => self.cut_at(&sched.deadlock_err, wait, at),
+            None => sched
+                .deadlock_err
+                .at_site(super::deadlock::Wait::Nursery.phrase(), span),
+        }
     }
 
     pub(super) fn in_place_cut(&mut self, c: &SchedCore, tok: Option<u64>) -> bool {

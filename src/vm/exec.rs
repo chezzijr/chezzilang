@@ -164,6 +164,7 @@ impl Vm {
             exit_origin: false,
             fault_trace: None,
             fault_trace_depth: 0,
+            task: deadlock::TaskPath::default(),
             gc_stress: gc_door::gc_stress_env(),
             nurseries: Vec::new(),
             mn_scopes: Vec::new(),
@@ -259,6 +260,7 @@ impl Vm {
         self.swap_ctx(ctx);
         std::mem::swap(&mut self.out, &mut ctx.out);
         std::mem::swap(&mut self.stderr, &mut ctx.stderr);
+        std::mem::swap(&mut self.task, &mut ctx.task);
     }
 
     /// Swap the live per-execution `Vm` fields with `ctx` (B1). Used by the nursery scheduler to
@@ -1219,6 +1221,7 @@ impl Vm {
             // unrelated executor.
             creator_cancel: self.scope_ancestors(),
             created_at: span,
+            key: self.task.executor(),
             ..Default::default()
         });
         // Heap-independent registration for the program-exit join (W7-5b) — this is the one

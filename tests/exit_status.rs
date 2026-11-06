@@ -1862,3 +1862,240 @@ main()
         }
     }
 }
+
+// THE listing grid: every deadlock shape so far, each with its exact listing, in `chezzi run` and
+// `chezzi test`, concurrently at 1, 2 and 4 workers. The listing is the verdict's snapshot: each
+// task the verdict cut is one entry, in spawn-tree order (a nursery's tasks in place of the task
+// that opened it, then that task's own wait; an Executor's jobs after the run's tasks). Each shape
+// is a `fn main()` after [`LISTING_HEAD`] (11 lines); the run calls `main()` on the next line, the
+// test calls it from `test fn t()`, so `{main}` is the call site of `main` and `<f>` the file.
+// Before the snapshot, a listing folded through joins and unwinds dropped or duplicated the tasks
+// of nested shapes (`h1`, `h2`, `h6`, `deep`).
+const LISTING_HEAD: &str = r#"import Shared from std.concurrency
+import std.concurrency
+
+fn take(ch: Channel[int], held: Channel[int]) -> int:
+    held.send(1)
+    v := ch.recv() else: panic("ch closed")
+    return v
+
+fn w(c: Channel[int]):
+    _ := c.recv() else: panic("closed")
+
+"#;
+
+/// One grid shape: its name, its source (after [`LISTING_HEAD`] unless `own_head`) and its
+/// listing entries as `chezzi run` renders them.
+struct ListingShape {
+    name: &'static str,
+    own_head: bool,
+    src: &'static str,
+    entries: Vec<String>,
+}
+
+fn listing_shapes() -> Vec<ListingShape> {
+    let take = |line: u32, col: u32, task: &str| {
+        format!(
+            "recv() on an empty channel at <f>:6:10\n    at take (called at <f>:{line}:{})\n    \
+             at <closure> (called at <f>:{line}:{col})\n    at {task}",
+            col + 32
+        )
+    };
+    let w = |at: &str| {
+        format!("recv() on an empty channel at <f>:10:10\n    at w (called at <f>:{at})")
+    };
+    let job = |at: &str| {
+        format!(
+            "{}\n    at <closure> (called at <native:std.concurrency>:127:19)\n    \
+             at _run_outcome (called at <native:std.concurrency>:106:36)\n    \
+             at <closure> (called at <native:std.concurrency>:106:9)",
+            w(at)
+        )
+    };
+    let guard =
+        |at: &str, task: &str| format!("waiting for the Shared guard at <f>:{at}\n    at {task}");
+    let main = "main (called at {main})";
+    vec![
+        ListingShape {
+            name: "guard_waiter",
+            own_head: false,
+            src: "fn main():\n    s := Shared(0)\n    ch := Channel[int]()\n    held := Channel[int](1)\n    parallel:\n        spawn:\n            s.update(fn(x: int) -> int: x + take(ch, held))\n        spawn:\n            _ := held.recv() else: panic(\"held closed\")\n            s.set(5)\n",
+            entries: vec![
+                take(18, 13, "<spawned task> (called at <f>:17:9)"),
+                guard("21:13", "<spawned task> (called at <f>:19:9)"),
+            ],
+        },
+        ListingShape {
+            name: "cross_nursery",
+            own_head: false,
+            src: "fn main():\n    a := Channel[int]()\n    b := Channel[int](1)\n    parallel:\n        spawn:\n            _ := a.recv() else: panic(\"a closed\")\n        spawn:\n            parallel:\n                spawn:\n                    b.send(1)\n                    b.send(2)\n                spawn w(a)\n",
+            entries: vec![
+                "recv() on an empty channel at <f>:17:18\n    at <spawned task> (called at <f>:16:9)".to_string(),
+                "send() on a full channel at <f>:22:21\n    at <spawned task> (called at <f>:20:17)".to_string(),
+                w("23:23"),
+            ],
+        },
+        ListingShape {
+            name: "d10",
+            own_head: false,
+            src: "fn main():\n    a := Channel[int]()\n    ex1 := concurrency.Executor()\n    _ := ex1.submit(fn(): w(a))\n    ex2 := concurrency.Executor()\n    _ := ex2.submit(fn(): w(a))\n    parallel:\n        spawn w(a)\n",
+            entries: vec![w("19:15"), job("15:27"), job("17:27")],
+        },
+        ListingShape {
+            name: "d7",
+            own_head: false,
+            src: "fn joiner(a: Channel[int]):\n    ex := concurrency.Executor()\n    _ := ex.submit(fn(): w(a))\n    ex.shutdown()\n\nfn main():\n    a := Channel[int]()\n    b := Channel[int]()\n    ex := concurrency.Executor()\n    _ := ex.submit(fn(): w(b))\n    parallel:\n        spawn joiner(a)\n        spawn w(b)\n",
+            entries: vec![
+                "waiting for an Executor join at <f>:15:5\n    at joiner (called at <f>:23:15)".to_string(),
+                w("24:15"),
+                job("21:26"),
+                job("14:26"),
+            ],
+        },
+        ListingShape {
+            name: "body2",
+            own_head: false,
+            src: "fn main():\n    s := Shared(0)\n    ch := Channel[int]()\n    held := Channel[int](1)\n    parallel:\n        spawn:\n            s.update(fn(x: int) -> int: x + take(ch, held))\n        _ := held.recv() else: panic(\"held closed\")\n        s.set(5)\n",
+            entries: vec![
+                take(18, 13, "<spawned task> (called at <f>:17:9)"),
+                guard("20:9", main),
+            ],
+        },
+        ListingShape {
+            name: "mirror",
+            own_head: false,
+            src: "fn main():\n    s := Shared(0)\n    ch := Channel[int]()\n    held := Channel[int](1)\n    parallel:\n        spawn:\n            _ := held.recv() else: panic(\"held closed\")\n            s.set(5)\n        s.update(fn(x: int) -> int: x + take(ch, held))\n",
+            entries: vec![
+                guard("19:13", "<spawned task> (called at <f>:17:9)"),
+                take(20, 9, main),
+            ],
+        },
+        ListingShape {
+            name: "h1",
+            own_head: false,
+            src: "fn main():\n    s := Shared(0)\n    ch := Channel[int]()\n    held := Channel[int](1)\n    z := Channel[int]()\n    parallel:\n        spawn w(z)\n        spawn:\n            s.update(fn(x: int) -> int: x + take(ch, held))\n        _ := held.recv() else: panic(\"held closed\")\n        parallel:\n            spawn w(z)\n            s.set(5)\n",
+            entries: vec![
+                w("18:15"),
+                take(20, 13, "<spawned task> (called at <f>:19:9)"),
+                w("23:19"),
+                guard("24:13", main),
+            ],
+        },
+        ListingShape {
+            name: "h2",
+            own_head: false,
+            src: "fn main():\n    s := Shared(0)\n    ch := Channel[int]()\n    held := Channel[int](1)\n    parallel:\n        spawn:\n            s.update(fn(x: int) -> int: x + take(ch, held))\n        _ := held.recv() else: panic(\"held closed\")\n        parallel:\n            s.set(5)\n",
+            entries: vec![
+                take(18, 13, "<spawned task> (called at <f>:17:9)"),
+                guard("21:13", main),
+            ],
+        },
+        ListingShape {
+            name: "h6",
+            own_head: false,
+            src: "fn main():\n    s := Shared(0)\n    ch := Channel[int]()\n    held := Channel[int](1)\n    parallel:\n        spawn:\n            parallel:\n                spawn:\n                    s.update(fn(x: int) -> int: x + take(ch, held))\n        _ := held.recv() else: panic(\"held closed\")\n        s.set(5)\n",
+            entries: vec![
+                take(20, 21, "<spawned task> (called at <f>:19:17)"),
+                guard("22:9", main),
+            ],
+        },
+        ListingShape {
+            name: "box_direct",
+            own_head: true,
+            src: "import std.concurrency\n\nfn park(ch: Channel[int], x: int) -> int:\n    _ := ch.recv()\n    return x\n\nfn main():\n    ch := Channel[int](0)\n    ch2 := Channel[int](0)\n    w := concurrency.Shared(0)\n    parallel:\n        spawn:\n            _ := ch2.recv()\n        w.update(fn(x: int) -> int: park(ch, x))\n",
+            entries: vec![
+                "recv() on an empty channel at <f>:13:18\n    at <spawned task> (called at <f>:12:9)".to_string(),
+                format!(
+                    "recv() on an empty channel at <f>:4:10\n    at park (called at <f>:14:37)\n    \
+                     at <closure> (called at <f>:14:9)\n    at {main}"
+                ),
+            ],
+        },
+        ListingShape {
+            name: "deep",
+            own_head: false,
+            src: "fn main():\n    a := Channel[int]()\n    parallel:\n        spawn w(a)\n        spawn:\n            parallel:\n                spawn w(a)\n                spawn:\n                    parallel:\n                        spawn w(a)\n                w(a)\n        _ := a.recv() else: panic(\"closed\")\n",
+            entries: vec![
+                w("15:15"),
+                w("18:23"),
+                w("21:31"),
+                format!("{}\n    at <spawned task> (called at <f>:16:9)", w("22:17")),
+                format!("recv() on an empty channel at <f>:23:14\n    at {main}"),
+            ],
+        },
+    ]
+}
+
+#[test]
+fn every_deadlock_shape_lists_each_cut_task_once_in_spawn_tree_order() {
+    let t = TmpDir::new();
+    let dir = t.0.display().to_string();
+    let mut failures = Vec::new();
+    for shape in listing_shapes() {
+        let src = if shape.own_head {
+            shape.src.to_string()
+        } else {
+            format!("{LISTING_HEAD}{}", shape.src)
+        };
+        let main_line = src.lines().count() + 1;
+        let listing = |file: &str, main: &str| {
+            let n = shape.entries.len();
+            let header = if n == 1 {
+                "deadlock: 1 task is blocked and cannot proceed".to_string()
+            } else {
+                format!("deadlock: {n} tasks are blocked and none can proceed")
+            };
+            let first = shape.entries[0].split('\n').next().unwrap();
+            let pos = first.rsplit(" at ").next().unwrap().replace("<f>", file);
+            let mut body = String::new();
+            for (k, e) in shape.entries.iter().enumerate() {
+                let e = e.replace("{main}", main).replace("<f>", file);
+                body.push_str(&format!("  task {}: {e}\n", k + 1));
+            }
+            (pos, header, body)
+        };
+        let run_file = format!("{}.chz", shape.name);
+        let run_entry = t.write(&run_file, &format!("{src}main()\n"));
+        let f = format!("<dir>/{run_file}");
+        let (pos, header, body) = listing(&f, &format!("{f}:{main_line}:1"));
+        let want_run = format!("Some(1) runtime error ({pos}): {header}\n{body}");
+        let test_file = format!("{}_test.chz", shape.name);
+        let test_entry = t.write(&test_file, &format!("{src}test fn t():\n    main()\n"));
+        let f = format!("<dir>/{test_file}");
+        let (pos, header, body) = listing(&f, &format!("{f}:{}:5", main_line + 1));
+        let want_test =
+            format!("ERROR t ({pos}) {header}\n{body}\n1 test(s): 0 passed, 0 failed, 1 errored\n");
+        for threads in ["1", "2", "4"] {
+            let runs: Vec<_> = std::thread::scope(|s| {
+                let hs: Vec<_> = (0..8)
+                    .map(|_| {
+                        s.spawn(|| hang_deadline::run_with_hang_deadline(&run_entry, Some(threads)))
+                    })
+                    .collect();
+                hs.into_iter().map(|h| h.join().unwrap()).collect()
+            });
+            for (i, run) in runs.into_iter().enumerate() {
+                let got = run.map_or("hung".to_string(), |out| {
+                    let err = String::from_utf8_lossy(&out.stderr).replace(&dir, "<dir>");
+                    let at = err.find("runtime error").unwrap_or(0);
+                    format!("{:?} {}", out.status.code(), &err[at..])
+                });
+                if got != want_run {
+                    failures.push(format!(
+                        "{} run threads={threads} run {i}:\n--- want\n{want_run}--- got\n{got}",
+                        shape.name
+                    ));
+                    break;
+                }
+            }
+            let tests = concurrent_test_runs(&test_entry, &["--timeout=2000"], threads, 8);
+            if let Some((i, out)) = tests.iter().enumerate().find(|(_, o)| **o != want_test) {
+                failures.push(format!(
+                    "{} test threads={threads} run {i}:\n--- want\n{want_test}--- got\n{out}",
+                    shape.name
+                ));
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}

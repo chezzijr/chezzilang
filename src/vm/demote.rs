@@ -557,7 +557,7 @@ impl Vm {
             if let Some(s) = &sched
                 && self.in_place_cut(&s.lock(), reg.tok())
             {
-                break Err(s.deadlock_err.at_site(Wait::Socket.phrase(), span));
+                break Err(self.cut_at(&s.deadlock_err, Wait::Socket.phrase(), span));
             }
             match attempt(self) {
                 SockPoll::Ready(r) => break r,

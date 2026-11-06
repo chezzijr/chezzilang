@@ -976,9 +976,9 @@ impl Vm {
         let mut first_cancel_fault: Option<(RuntimeError, Vec<TraceFrame>)> = None;
         // TICKET-284 — how much exit output this reduce took; its take counted each one.
         let mut exits = 0;
-        // Every deadlock slot's blocked tasks, in task order: the report folds them into one
-        // listing ([`super::deadlock::fold`]).
-        let mut blocked: Vec<super::deadlock::BlockedTask> = Vec::new();
+        // Whether a slot ended with the verdict's cut: then this join's fault is the verdict's, and
+        // the run's listing reports its tasks ([`super::deadlock::Listing`]).
+        let mut cut = false;
         for slot in slots {
             // W7-60 — a `None` here means the slot was already drained by `MnSched::take_finished_streams`
             // on a `join_executor` bail-out (its output is flushed, its outcome consumed), which is
@@ -1028,7 +1028,7 @@ impl Vm {
                     // fault output ordering is a separate, pre-existing nondeterminism (see the
                     // single-producer case covered by the test
                     // `parallel_faulting_task_flushes_partial_output_3engine`).
-                    blocked.extend(super::deadlock::listing(&err, &trace));
+                    cut |= err.blocked.is_some();
                     if first_hard_fault.is_none() && (executor_hard_halt(&err) || err.is_deadlock) {
                         first_hard_fault = Some((err.clone(), trace.clone()));
                     }
@@ -1038,13 +1038,8 @@ impl Vm {
                         first_fault = Some((err, trace));
                     }
                 }
-                TaskOutcome::Deadlocked {
-                    err,
-                    out,
-                    stderr,
-                    frames,
-                } => {
-                    blocked.extend(super::deadlock::listing(&err, &self.trace_of(&frames)));
+                TaskOutcome::Deadlocked { err, out, stderr } => {
+                    cut |= err.blocked.is_some();
                     // The M:N deadlock detector recorded EVERY still-parked fiber with this synthetic
                     // outcome (`flag_deadlock`). Unlike a real `Fault`, ALL parked buffers flush at
                     // their task-order slot (no `is_none()` gate) — so with two-or-more parked fibers
@@ -1091,23 +1086,15 @@ impl Vm {
         // TICKET-208 — the run-wide halt, read through its one funnel after a slot's own exit and
         // before any slot fault: a `recover:` around this nursery must not catch a sibling fault
         // and outlive a job fault that ends the run. Every slot's output is already flushed.
-        // The latched deadlock verdict is the one the slots' blocked tasks report: they are this
-        // join's listing, and a deadlock fault is fatal, so no `recover:` catches it either.
+        // The latched deadlock verdict is the one a cut slot reports, and a deadlock fault is
+        // fatal, so no `recover:` catches it either.
         if first_exit.is_none()
             && let Some(e) = self.run_exit_err(Span::RUNTIME)
-            && !(e.is_deadlock && !blocked.is_empty())
+            && !(e.is_deadlock && cut)
         {
             return (Err(e), None);
         }
         let fault = first_hard_fault.or(first_fault).or(first_cancel_fault);
-        // A deadlock report lists every blocked task of this join, whichever slot ranks first.
-        let fold = |e: RuntimeError| {
-            if e.blocked.is_some() {
-                super::deadlock::fold(e, blocked)
-            } else {
-                e
-            }
-        };
         match (first_exit, fault, deadlock_err) {
             // A child `os.exit` hard-halts the parent: set `pending_exit` and return the exit
             // sentinel. The op→`step`→`run_until` chain sees `pending_exit` and unwinds past every
@@ -1123,9 +1110,9 @@ impl Vm {
             // A real fault propagates normally so an outer `recover:` can still catch it (unless it
             // carries a hard-halt marker, in which case `first_hard_fault` already selected it above
             // and `exec.rs`'s cancel-bypass check keeps `recover:` from swallowing it anyway).
-            (None, Some((e, trace)), _) => (Err(fold(e)), Some(trace)),
+            (None, Some((e, trace)), _) => (Err(e), Some(trace)),
             // Deadlock abort: all parked buffers already flushed above; propagate ONE deadlock error.
-            (None, None, Some(e)) => (Err(fold(e)), None),
+            (None, None, Some(e)) => (Err(e), None),
             (None, None, None) => (Ok(()), None),
         }
     }

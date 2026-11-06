@@ -1533,7 +1533,6 @@ fn finish_wakes_the_join_parked_owner_of_the_completed_family() {
             err: dl_err(),
             out: Vec::new(),
             stderr: Vec::new(),
-            frames: Vec::new(),
         },
     );
     let c = s.lock();

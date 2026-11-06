@@ -385,9 +385,12 @@ Each group below is one fact decided in two or more places (grouped 2026-10-16).
     (`deadlock: N tasks are blocked and none can proceed`), then `task k: <wait> at <site>` and its
     frames for every blocked task of the run, in spawn-tree order, the same every run;
     `chezzi test --errors=json` adds a `tasks` array. `vm/deadlock.rs` owns each wait's phrase, the
-    header, the fold and the rendering; the five old texts are gone. A deadlock fault no longer
+    header, the listing and the rendering; the five old texts are gone. The listing is a snapshot
+    taken at the verdict (2026-11-07): each cut task adds its own entry at its cut, keyed by its
+    spawn-tree place (`deadlock::TaskPath`), and the driver reports it once after every join and
+    the drain, so nested nurseries no longer drop, repeat or misplace a task. A deadlock fault no longer
     cancels a blocked sibling, and a cut guard waiter no longer takes the guard its cut holder
-    frees. Every executor's blocked jobs are listed, in creation order, and a deadlock whose cut
+    frees. Every executor's blocked jobs are listed, by executor place, and a deadlock whose cut
     joiner leaves its Executor finished and unjoined no longer hangs the exit drain. A
     `parallel:` body blocked in its own wait lists its nursery's blocked tasks ahead of its own,
     and a body blocked inside a callback (`update`) is cut by its nursery's verdict, not left hung.

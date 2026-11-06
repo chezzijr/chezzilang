@@ -89,8 +89,8 @@ pub struct RuntimeError {
     pub is_timed_out: bool,
     pub is_deadlock: bool,
     pub is_panic: bool,
-    /// A folded deadlock report: every blocked task of the joins it crossed, in task order
-    /// ([`deadlock::fold`]). `None` for every other fault, and for one task's own cut.
+    /// A deadlock verdict's cut ([`deadlock::cut`]): the task's own wait, until the driver attaches
+    /// the run's listing ([`Vm::list_blocked`]). `None` for every other fault.
     pub blocked: Option<Box<deadlock::Blocked>>,
 }
 
@@ -1024,6 +1024,9 @@ pub struct Vm {
     /// whenever a `recover:` boundary catches a fault. Read by the driver.
     fault_trace: Option<Vec<TraceFrame>>,
     fault_trace_depth: usize,
+    /// The running task's place in the run's spawn tree, the key of its deadlock listing entry
+    /// ([`deadlock::TaskPath`]). Each spawned task's is set at [`Vm::prepare_worker`].
+    pub(super) task: deadlock::TaskPath,
     /// Test mode: collect before *every* instruction, to surface any missing GC root.
     gc_stress: bool,
     /// Active `parallel:` nurseries (C4), innermost last. `EnterNursery` pushes; each `spawn`

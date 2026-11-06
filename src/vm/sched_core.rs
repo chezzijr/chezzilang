@@ -115,8 +115,8 @@ impl SchedCore {
         // DEC-048.
         // TICKET-208 — else, on an `Executor`'s sched, the fiber's own blocking op: the text and
         // span the in-place path raises there. Else the sched-wide `err`.
-        // The listing names each task's own wait: its park site, else its scope's own fault
-        // (an owner parked at a join names no site), else the sched-wide `err`.
+        // Each task names its own wait: its park site, else its scope's own fault (an owner
+        // parked at a join names no site), else the sched-wide `err`.
         let scope_err = match (f.park_site, &self.scopes[sid].deadlock_err) {
             (Some((msg, span)), _) => err.at_site(msg, span),
             (None, Some(e)) => e.clone(),
@@ -125,18 +125,16 @@ impl SchedCore {
         // M1.4 — take the context out of the registry before any field moves: this thread may not
         // be attached to the GC (see `RootRegistry::roots`).
         let ctx = f.ctx.into_inner();
-        let frames = ctx
-            .frames
-            .iter()
-            .rev()
-            .filter(|f| !f.is_toplevel)
-            .map(|f| (f.proto, f.call_span))
-            .collect();
+        // A fiber parked at a wait is one entry of the run's listing, with its frames; an owner
+        // parked at a join is not (its blocked children stand in its place).
+        if let Some((msg, span)) = f.park_site {
+            let frames = super::frames::raw_frames(&ctx.frames);
+            self.listing.add(&ctx.task, msg, span, frames);
+        }
         self.slots[ti] = Some(TaskOutcome::Deadlocked {
             err: scope_err,
             out: ctx.out,
             stderr: ctx.stderr,
-            frames,
         });
         self.task_done(sid);
         self.job_event(
@@ -615,6 +613,7 @@ impl ReadyWorker {
             executors: worker.executors,
             // M19 Phase 3 — the intern cache holds the worker's own strings; they are this fiber's.
             str_intern: worker.str_intern,
+            task: worker.task,
             ..FiberCtx::default()
         };
         debug_assert!(ctx.start.is_some(), "a Pending fiber holds its task");
