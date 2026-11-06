@@ -427,7 +427,7 @@ fn into_overload_grid() {
         (
             "no target type",
             src(&three, "", "f := r.into()"),
-            "into on Rat needs a target type: r.into[T]()",
+            "into on Rat needs a target type: write `.into[T]()`",
         ),
         (
             "no overload for the target",
@@ -594,6 +594,150 @@ fn protocol_slot_gate_grid() {
         failures.push(format!(
             "reject `W.parse(1.5) from another module`: wanted {needle:?}, got {errs:?}"
         ));
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// One pick rule for every protocol slot, static or instance, one decl or several: `m[X]` names
+/// the type at the stored slot (the source of a `Param` slot, the target of a `Ret` slot), and
+/// with no `[X]` an argument picks a `Param` slot and the annotation a `Ret` slot (a carrier
+/// annotation's payload for a `try_` form). `[X]` wins over the annotation: a disagreement is the
+/// normal assignment error. A plain method keeps its own type params. Messages print no receiver
+/// text (`?.` desugars the receiver to an internal name).
+#[test]
+fn slot_pick_grid() {
+    const CONV: &str = "import From, TryFrom, Into, TryInto from std.convert\n";
+    let prog = |types: &str, stmt: &str| format!("{CONV}{types}fn main():\n    {stmt}\nmain()\n");
+    let rat2 = "struct Rat:\n    n: int\n    fn from(x: int) -> Rat:\n        return Rat(x)\n    fn from(x: str) -> Rat:\n        return Rat(x.len())\n";
+    let rat1 = "struct Rat:\n    n: int\n    fn from(x: int) -> Rat:\n        return Rat(x)\n";
+    let k = "struct K:\n    n: int\n    fn into(self) -> int:\n        return self.n\n    fn into(self) -> str:\n        return \"k\"\n    fn try_into(self) -> int!:\n        return self.n\n    fn try_into(self) -> str!:\n        return \"k\"\n";
+    let bx = "struct Box[T]:\n    v: T\n    fn into(self) -> T:\n        return self.v\n";
+    let parse = "protocol Parse[S]:\n    fn parse(x: S) -> Self\nstruct W:\n    n: int\n    fn parse(x: int) -> W:\n        return W(x)\n    fn make(x: int) -> W:\n        return W(x)\n";
+    let mk = "protocol Mk[S]:\n    fn mk(n: int, x: S) -> Self\nstruct M:\n    n: int\n    fn mk(n: int, x: int) -> M:\n        return M(n + x)\n    fn mk(n: int, x: str) -> M:\n        return M(n + x.len())\n";
+    let gbox = "struct Box[T]:\n    v: T\n    fn from(x: T) -> Box[T]:\n        return Box(x)\n";
+    let accept: Vec<(&str, String)> = vec![
+        (
+            "a lone generic from binds T by [X]",
+            prog(gbox, "b: Box[int] = Box.from[int](3)"),
+        ),
+        (
+            "a lone generic from with no [X] infers T",
+            prog(gbox, "b: Box[int] = Box.from(3)"),
+        ),
+        (
+            "Rat.from[int] on a set",
+            prog(rat2, "r := Rat.from[int](3)"),
+        ),
+        (
+            "Rat.from[int] on one decl",
+            prog(rat1, "r := Rat.from[int](3)"),
+        ),
+        ("an annotation picks into", prog(k, "s: str = K(1).into()")),
+        (
+            "a carrier annotation picks a try_into",
+            prog(k, "n: int! = K(1).try_into()"),
+        ),
+        (
+            "an annotation picks a static into",
+            prog(k, "s: str = K.into(K(1))"),
+        ),
+        (
+            "a lone generic into on Box[int]",
+            prog(bx, "n: int = Box(7).into[int]()"),
+        ),
+        (
+            "a user protocol, one decl, W.parse[int]",
+            prog(parse, "w := W.parse[int](3)"),
+        ),
+        (
+            "a Param(1) slot picks by argument 2",
+            prog(mk, "m := M.mk(1, \"ab\")"),
+        ),
+        (
+            "a Param(1) slot picks by [X]",
+            prog(mk, "m := M.mk[str](1, \"ab\")"),
+        ),
+        (
+            "a Param(1) slot picks by a keyword argument",
+            prog(mk, "m := M.mk(1, x=\"ab\")"),
+        ),
+    ];
+    let reject: Vec<(&str, String, &str)> = vec![
+        (
+            "a lone generic from, [X] binds T, the argument disagrees",
+            prog(gbox, "b := Box.from[int](\"a\")"),
+            "argument to 'from' has type str, expected int",
+        ),
+        (
+            "a lone generic from, [X] gives Box[str]",
+            prog(gbox, "b: Box[int] = Box.from[str](\"a\")"),
+            "cannot assign Box[str] to variable of type Box[int]",
+        ),
+        (
+            "a Param(1) slot, its keyword missing",
+            prog(mk, "m := M.mk(1, n=2)"),
+            "an overloaded mk is picked by argument 'x': it is missing",
+        ),
+        (
+            "Rat.from[float] on a set",
+            prog(rat2, "r := Rat.from[float](3)"),
+            "type Rat has no from for float (it has: int, str)",
+        ),
+        (
+            "Rat.from[float] on one decl",
+            prog(rat1, "r := Rat.from[float](3)"),
+            "type Rat has no from for float (it has: int)",
+        ),
+        (
+            "an annotation no into takes",
+            prog(k, "f: float = K(1).into()"),
+            "type K has no into for float (it has: int, str)",
+        ),
+        (
+            "a lone generic into, another target",
+            prog(bx, "s := Box(7).into[str]()"),
+            "type Box[int] has no into for str (it has: int)",
+        ),
+        (
+            "a plain method takes no [X]",
+            prog(parse, "w := W.make[int](3)"),
+            "method 'make' takes no type argument(s)",
+        ),
+        (
+            "no [X] and no annotation",
+            prog(k, "x := K(1).into()"),
+            "into on K needs a target type: write `.into[T]()`",
+        ),
+        (
+            "no target through ?.",
+            prog(k, "r: K? = K(1)\n    x := r?.into()"),
+            "into on K needs a target type: write `.into[T]()`",
+        ),
+        (
+            "[X] wins over the annotation",
+            prog(k, "x: int = K(1).into[str]()"),
+            "cannot assign str to variable of type int",
+        ),
+        (
+            "a Param(1) slot, no overload for the argument",
+            prog(mk, "m := M.mk(1, 1.5)"),
+            "type M has no mk for float (it has: int, str)",
+        ),
+    ];
+    let mut failures = Vec::new();
+    for (cell, src) in &accept {
+        let errs = check_entry(src);
+        if !errs.is_empty() {
+            failures.push(format!("accept `{cell}`: {errs:?}"));
+        }
+    }
+    for (cell, src, needle) in &reject {
+        let errs = check_entry(src);
+        if !errs.iter().any(|e| e.message.contains(needle)) {
+            failures.push(format!("reject `{cell}`: wanted {needle:?}, got {errs:?}"));
+        } else if errs.iter().any(|e| e.message.contains("__opt")) {
+            failures.push(format!("reject `{cell}`: an internal name leaks: {errs:?}"));
+        }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }

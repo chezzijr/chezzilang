@@ -2,7 +2,7 @@
 
 Chezzi has **no `as` cast operator** and no value-level conversion protocol; the
 **bound-only** `From[S]` and `TryFrom[S]` protocols exist as generic bounds, and a type converts itself
-with `x.into[T]()` (below). A conversion is a method on the source value, display is interpolation, and there is no implicit `int`→`float` widening at a slot
+with `x.into[T]()` or an annotated `t: T = x.into()` (below). A conversion is a method on the source value, display is interpolation, and there is no implicit `int`→`float` widening at a slot
 (rule D3). A conversion is therefore always visible in the source.
 
 **A call on a scalar type's name gives its zero value.** A constructor sets fields only, and a scalar
@@ -157,6 +157,12 @@ b := Rat.from("ab")    # the str overload: Rat(2, 3)
   takes `3` and `None`). There is no widening: `Rat.from(1.5)` is *type Rat has no from for float
   (it has: int, str)*. An argument that fits two overloads (`[]` against `List[int]` and `List[str]`)
   is *type annotations needed*.
+- `Rat.from[S](x)` names the source instead: `Rat.from[str]("ab")` runs the `str` overload, on a
+  set or on one `from`, and the argument is then checked against it. On a generic type the `[S]`
+  fills the type's param: `Box.from[int](3)` on `fn from(x: T) -> Box[T]` is a `Box[int]`. `Rat.from[float](3)` is *type
+  Rat has no from for float (it has: int, str)*. The `[S]` is the protocol slot, not a method type
+  argument; on a plain method (no protocol keys it) a `[X]` stays *method 'make' takes no type
+  argument(s)*.
 - Each overload takes one parameter named `x`, of a concrete type (not a type parameter), and declares
   its return type: `Self` for `from`, `Self!E` for `try_from`. Any other is *an overloaded from
   returns Self, found int*; a fallible `from` is *an overloaded from returns Self, found Rat!str; a
@@ -215,13 +221,18 @@ n := r.try_into[int]()     # an error value: 1/2 is not an int
 ```
 
 - Two or more `into`s are an overload set. The `[T]` picks the overload whose return is `T`, exactly
-  (Rust's `Into<T>`; Chezzi infers bottom-up, so the target is written). `r.into()` is *into on Rat
-  needs a target type: r.into[T]()*; a target with no overload is *type Rat has no into for int (it
-  has: float, str)*, the one error of the call. `Rat.into[float](r)` is the same call through the type.
+  (Rust's `Into<T>`). With no `[T]`, the annotation picks (Rust `let f: f64 = r.into()`):
+  `f: float = r.into()`, and a carrier annotation picks a `try_into` by its payload
+  (`n: int! = r.try_into()`). `[T]` wins over the annotation, so `x: int = r.into[str]()` is the
+  assignment's *cannot assign str to variable of type int*. With neither, `x := r.into()` is *into
+  on Rat needs a target type: write `.into[T]()`* (no message names the receiver); a target with
+  no overload is *type Rat has no into for int (it has: float, str)*, the one error of the call.
+  `Rat.into[float](r)` (or `s: str = Rat.into(r)`) is the same call through the type.
 - One `into` is a plain method, as one `from`: `r.into()` calls it, `[r].map(Rat.into)` reads it, it
   satisfies a protocol that requires `fn into(self) -> float`, and it may take more params. A `[T]`
   on it is the same pick: `r.into[float]()` works when it returns `float`, and `r.into[int]()` is
-  *type Rat has no into for int (it has: float)*.
+  *type Rat has no into for int (it has: float)*. The receiver's type args are substituted first:
+  `Box(7).into[int]()` on `struct Box[T]`'s `fn into(self) -> T` returns `int`.
 - Each `into` of an overload set takes only `self` and returns a concrete type (not a type
   parameter): `T` for `into`, `T!E` for `try_into`. A `float!` `into` is *an overloaded into returns
   T, found float!; a fallible conversion is try_into*. Two `into`s with one target are *conflicting into for float: into(self) ->

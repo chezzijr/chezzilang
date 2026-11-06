@@ -120,9 +120,10 @@ A type declares each method name once (`method 'show' is already defined`). The 
 method a parameterized protocol keys, when the declaring module declares or imports that protocol
 ([`09-protocols.md`](09-protocols.md#a-parameterized-protocol-keys-overloads)): a static `from`
 (after `import From from std.convert`), one per source type, picked by the argument's type
-(`Rat.from(3)`, `Rat.from("1/3")`). A conversion that can fail is a static
+(`Rat.from(3)`, `Rat.from("1/3")`) or by a `[S]` naming the source (`Rat.from[str]("1/3")`). A conversion that can fail is a static
 `try_from(x: S) -> Self!`, overloaded the same way. A type converts itself with an instance
-`into(self) -> T`, one per target type and picked by the call's `[T]` (`r.into[float]()`), and
+`into(self) -> T`, one per target type and picked by the call's `[T]` (`r.into[float]()`) or its
+annotation (`f: float = r.into()`), and
 `try_into(self) -> T!` when it can fail. The rules are in
 [`05-conversions.md`](../spec/05-conversions.md).
 
@@ -158,7 +159,8 @@ b := Box[int].make[str]("hi")         # combined turbofish: T=int + U=str ⇒ Bo
 
 - A method type param may not shadow an enclosing one (`fn make[T]` inside `Box[T]` is an error).
 - A member turbofish on a member with no type params (or a builtin like `xs.len[int]()` /
-  `xs.iter[int]()`) is an arity error.
+  `xs.iter[int]()`) is an arity error, except on a method a protocol keys, where `[X]` names the
+  key (`Rat.from[int](3)`, `r.into[float]()`).
 - Instance methods take the member turbofish, multi-arg: `pair.first[int, str](1, "x")`.
 
 #### Static protocol requirements — calling `T.method(...)` through a bound

@@ -2,7 +2,6 @@
 //! records.
 //! Split out of `src/checker/expr.rs`. `super::*` is the parent module.
 
-use super::from_overload::OverloadSlot;
 use super::setup::{HeadBinding, TypeHead};
 use super::*;
 
@@ -36,24 +35,18 @@ impl Checker {
     ) -> Ty {
         // The call through a type is the path's value applied: `type_member_fn` is the value
         // side's answer, so an instance method takes its receiver first (`P.get(p)`).
-        // An overloaded name (several `from`s): the argument's type picks the overload first,
-        // and the call binds against that one's sig. The compiler reads the pick off the table.
+        // An overloaded name (several `from`s): the slot pick (`[X]`, else the argument for a
+        // source, the annotation for a target) chooses the overload first, and the call binds
+        // against that one's sig. The compiler reads the pick off the table. `[X]` is no method
+        // type argument.
         let mut mtargs = mtargs;
         let pick = match self.head_overloads(th, method) {
-            // `A.into[T](x)`: the `[T]` picks the target, and is no method type argument.
-            Some((set, slot @ OverloadSlot::Ret)) => {
-                let Some(k) = self.pick_target(&set, tname, method, mtargs, "x", span) else {
-                    self.infer_all(args);
+            Some((set, slot)) => {
+                let Some(k) = self.pick_slot(&set, slot, tname, method, mtargs, hint, args, span)
+                else {
                     return Ty::Unknown;
                 };
                 mtargs = &[];
-                self.record_overload_call(method, slot, &set[k], name_span, span);
-                Some(k)
-            }
-            Some((set, slot @ OverloadSlot::Param(_))) => {
-                let Some(k) = self.pick_overload(&set, slot, tname, method, args, span) else {
-                    return Ty::Unknown;
-                };
                 self.record_overload_call(method, slot, &set[k], name_span, span);
                 Some(k)
             }
@@ -79,19 +72,33 @@ impl Checker {
             let fty = crate::checker::fn_value_ty(&sig);
             self.hover_record_at(name_span, &fty, HoverKind::Func, sig.doc.clone());
         }
-        // `A.into[T](x)` on a lone `into`: the overload pick checks the `[T]` against its return.
+        // `Rat.from[int](3)` / `A.into[T](x)` on a lone slotted method: the same slot pick checks
+        // the `[X]` against its slot (the enclosing type's written args substituted). An enclosing
+        // param still free at the slot is bound by `X` (`Box.from[int](3)` on `fn from(x: T)` is
+        // `Box[int]`): `slot_sub` seeds the generic call below.
+        let mut slot_sub: HashMap<String, Ty> = HashMap::new();
         if pick.is_none()
             && !mtargs.is_empty()
             && sig.type_params.is_empty()
-            && !sig.is_static
-            && self.head_slot(th, method) == Some(OverloadSlot::Ret)
+            && let Some(slot) = self.head_slot(th, method)
         {
-            let one = std::slice::from_ref(&sig);
+            let map: HashMap<String, Ty> = tps
+                .iter()
+                .map(|tp| tp.name.clone())
+                .zip(targs.iter().cloned())
+                .collect();
+            let mut inst = subst_sig(&sig, &map);
+            if let [x] = mtargs
+                && let Some(key) = slot.key(&inst).cloned()
+            {
+                self.unify_arg(&key, x, &mut slot_sub);
+                inst = subst_sig(&inst, &slot_sub);
+            }
+            let one = [inst];
             if self
-                .pick_target(one, tname, method, mtargs, "x", span)
+                .pick_slot(&one, slot, tname, method, mtargs, None, args, span)
                 .is_none()
             {
-                self.infer_all(args);
                 return Ty::Unknown;
             }
             mtargs = &[];
@@ -127,6 +134,9 @@ impl Checker {
         let mut sub = self.seed_targs(tname, &tps, targs, span);
         let msub = self.seed_targs(method, &sig.type_params, mtargs, span);
         sub.extend(msub);
+        for (name, ty) in slot_sub {
+            sub.entry(name).or_insert(ty);
+        }
         let all_tps: Vec<TyParam> = tps.iter().chain(sig.type_params.iter()).cloned().collect();
         let (owned, seed) = self.slot_seed(&sub, hint, &sig.ret);
         let (arg_tys, passes) =

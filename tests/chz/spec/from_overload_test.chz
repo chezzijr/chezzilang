@@ -233,3 +233,26 @@ test fn a_bound_source_with_holes_picks_the_one_overload_it_fits():
     assert c.v == -1, "the int? body"
     d: OptLast = make(None)
     assert d.v == -1, "the int? body"
+
+# ---- `[X]` names the source: `Rat.from[str]("ab")` runs the `str` overload, on a set or on one
+# decl (the argument is still checked against it). The checker test owns the rejects. ----
+
+test fn a_source_type_argument_picks_the_overload():
+    a := Rat.from[int](3)
+    assert a.n == 3 and a.d == 1, "the int body"
+    b := Rat.from[str]("abcd")
+    assert b.n == 4 and b.d == 3, "the str body"
+    assert Opt.from[int?](5).v == 5, "`[int?]` names the optional overload"
+    assert Sign.from[bool](false) == Sign.Neg
+    assert One.from[int](2).v == 1002, "a single from takes `[int]` too"
+
+struct GBox[T]:
+    v: T
+    fn from(x: T) -> GBox[T]:
+        return GBox(x)
+
+test fn a_source_type_argument_binds_the_types_param():
+    b: GBox[int] = GBox.from[int](3)
+    assert b.v == 3, "`[int]` fills `T`"
+    c := GBox.from("ab")
+    assert c.v == "ab", "no `[X]`: the argument infers `T`"

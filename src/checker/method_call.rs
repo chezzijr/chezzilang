@@ -34,9 +34,9 @@ impl Checker {
             self.range_literal_fault(obj, true);
         }
         let obj_ty = self.infer(obj);
-        // `x.into[T]()`: a conversion keyed by its target, picked by the `[T]`.
+        // `x.into[T]()`: a conversion keyed by its target, picked by the `[T]` or the annotation.
         if let Some(ty) =
-            self.infer_target_call(obj, &obj_ty, method, args, &mut type_args, name_span, span)
+            self.infer_target_call(&obj_ty, method, args, &mut type_args, hint, name_span, span)
         {
             return ty;
         }

@@ -20,6 +20,22 @@ struct W:
     fn parse(x: str) -> W:
         return W(x.len() * 10)
 
+# The slot is the param that mentions the protocol's type param, here the second one.
+protocol Build[S]:
+    fn build(n: int, x: S) -> Self
+
+struct M:
+    n: int
+    fn build(n: int, x: int) -> M:
+        return M(n + x)
+    fn build(n: int, x: str) -> M:
+        return M(n * 100 + x.len())
+
+struct Lone:
+    n: int
+    fn parse(x: int) -> Lone:
+        return Lone(x * 2)
+
 fn make[S, T: Parse[S]](x: S) -> T:
     return T.parse(x)
 
@@ -36,3 +52,14 @@ test fn a_bound_call_picks_the_same_overload():
 test fn an_importer_of_the_struct_alone_calls_the_overloads():
     assert Tag.parse(7).s == "int 7"
     assert Tag.parse("x").s == "str x"
+
+test fn a_type_argument_names_the_source():
+    assert W.parse[int](3).n == 3
+    assert W.parse[str]("ab").n == 20
+    assert Lone.parse[int](4).n == 8, "one decl takes `[int]` too"
+
+test fn the_slot_may_be_a_later_param():
+    assert M.build(1, 2).n == 3
+    assert M.build(1, "ab").n == 102
+    assert M.build[str](2, "a").n == 201
+    assert M.build(3, x="abc").n == 303

@@ -479,7 +479,8 @@ A type may declare one method name several times when a parameterized protocol k
 declaration per argument (Rust's several `impl Parse<S> for W`). The key is the requirement's
 parameter that names the protocol's type parameter (a static `fn parse(x: S) -> Self`: the argument
 picks), or the return of a `self`-only method that is the type parameter (`fn into(self) -> T`: the
-call's `[T]` picks). `std.convert`'s `From`, `TryFrom`, `Into` and `TryInto` are such protocols;
+call's `[T]` or its annotation picks). `m[X]` names the type at the key, one declaration or several:
+`W.parse[str]("ab")` runs the `str` overload, `r.into[float]()` the `float` one. `std.convert`'s `From`, `TryFrom`, `Into` and `TryInto` are such protocols;
 any user protocol is too:
 
 ```chezzi
@@ -504,6 +505,8 @@ b := W.parse("ab")    # the str overload
   `W` calls `W.parse("a")` with no import of `Parse`.
 - Two visible protocols that key one method name differently (`parse(x: S)` and `parse(self) -> T`)
   are *protocols Emit[T] and Parse[S] both declare 'parse' with different overload keys*.
+- The key may be a later parameter: `protocol Build[S]: fn build(n: int, x: S) -> Self` picks by
+  the second argument (`M.build(1, "ab")`, `M.build(1, x="ab")`, `M.build[str](1, "ab")`).
 - The declaration rules (shape, overlap) and the picks are the conversions' rules:
   [`05-conversions.md`](../spec/05-conversions.md).
 

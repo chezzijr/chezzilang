@@ -325,8 +325,8 @@ Each group below is one fact decided in two or more places (grouped 2026-10-16).
 32. **`into` / `try_into` (done 2026-11-06).** A type converts
     itself with an instance `fn into(self) -> T` (Rust `impl Into<T>`), one per target type, or
     `fn try_into(self) -> T!`; protocols `Into[T]` / `TryInto[T]` in `std.convert` (not bounds
-    yet). A call on two or more names the target: `r.into[float]()`, `Rat.into[float](r)` (bottom-up
-    inference). No blanket `into` from a `from`: `r.into[Big]()` finds only a written `into`. The
+    yet). A call on two or more names the target: `r.into[float]()`, `Rat.into[float](r)`, or
+    an annotation picks it (item 34). No blanket `into` from a `from`: `r.into[Big]()` finds only a written `into`. The
     one-owner-per-pair rule shipped here is deleted (item 33). One `into` is a plain method
     (`r.into()`, a value, a protocol witness); 2+ make the overload set. Grids:
     `tests/chz/spec/into_test.chz`, `checker::tests::from_overloads::into_overload_grid`.
@@ -343,6 +343,16 @@ Each group below is one fact decided in two or more places (grouped 2026-10-16).
     beside `B.from(x: A)` is accepted (Rust's E0119 comes from a blanket impl Chezzi does not
     have). Grids: `checker::tests::from_overloads::protocol_slot_gate_grid`,
     `tests/chz/spec/protocol_overload_test.chz`.
+34. **One pick rule for `m[X]` and annotations (done 2026-11-06).** `m[X]` names the type at the
+    method's stored protocol slot, static or instance, one decl or several: `Rat.from[str]("ab")`
+    (the source), `r.into[float]()` (the target), `W.parse[int](3)` on a user protocol. With no
+    `[X]`, an argument picks a source slot (the slot may be a later param: `Build[S]`'s
+    `build(n: int, x: S)`), the annotation a target slot (`s: str = r.into()`;
+    `n: int! = r.try_into()` by the payload). `[X]` wins; a disagreement is the assignment error. A
+    lone generic `into(self) -> T` on `Box[int]` takes `[int]`. Messages name no receiver
+    (`write .into[T]()`), so `?.`'s internal name never shows. A plain method keeps `takes no type
+    argument(s)`. One pick: `from_overload::pick_slot`. Grids:
+    `checker::tests::from_overloads::slot_pick_grid`, the three conversion spec files.
 
 ### Open questions for the owner
 

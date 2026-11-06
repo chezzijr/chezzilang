@@ -471,7 +471,7 @@ impl Checker {
             OverloadSlot::Param(i) => i,
             OverloadSlot::Ret => {
                 return Some(Err(format!(
-                    "its {name} is picked by the target type, as x.{name}[T]()"
+                    "its {name} is picked by the target type: write `.{name}[T]()`"
                 )));
             }
         };
@@ -491,11 +491,12 @@ impl Checker {
         })
     }
 
-    /// The direct call `Type.name(arg)` on an overloaded `name`: the index of the one overload in
-    /// `set` whose param at `slot` (the type's stored slot) the argument [`Self::fits`]. The argument is the one positional argument
-    /// or the keyword argument named as the param. No overload fits (no widening, Rust `E0277`),
-    /// or more than one fits (Rust `E0283`), is an error that lists the overloads; `None` then, and
-    /// the arguments are inferred for their own errors.
+    /// The direct call `Type.name(args)` on an overloaded `name`: the index of the one overload in
+    /// `set` whose param at `slot` (the type's stored slot, `Param(i)`) the argument for that param
+    /// [`Self::fits`]: the `i`th positional argument, or the keyword argument named as the param.
+    /// The call passes every param of the requirement. No overload fits (no widening, Rust
+    /// `E0277`), or more than one fits (Rust `E0283`), is an error that lists the overloads;
+    /// `None` then, and the arguments are inferred for their own errors.
     pub(super) fn pick_overload(
         &mut self,
         set: &[FnSig],
@@ -510,25 +511,48 @@ impl Checker {
             .as_ref()
             .map(|c| c.named.clone())
             .unwrap_or_default();
-        let label = set
-            .first()
-            .and_then(|s| s.slots.as_ref())
-            .and_then(|sl| sl.first())
-            .and_then(|sl| sl.name.clone())
-            .unwrap_or_else(|| "x".to_string());
-        let arg = match (args, named.as_slice()) {
-            ([a], []) => Some(a.clone()),
-            ([], [(n, a)]) if *n == label => Some(a.clone()),
-            _ => None,
+        let i = match slot {
+            OverloadSlot::Param(i) => i,
+            OverloadSlot::Ret => 0,
+        };
+        let arity = set.first().map_or(1, |s| s.params.len()).max(i + 1);
+        let labels: Vec<String> = (0..arity)
+            .map(|j| {
+                set.first()
+                    .and_then(|s| s.slots.as_ref())
+                    .and_then(|sl| sl.get(j))
+                    .and_then(|sl| sl.name.clone())
+                    .unwrap_or_else(|| "x".to_string())
+            })
+            .collect();
+        let arg = if args.len() + named.len() != arity
+            || named.iter().any(|(n, _)| !labels.contains(n))
+        {
+            None
+        } else if let Some(a) = args.get(i) {
+            Some(a.clone())
+        } else {
+            named
+                .iter()
+                .find(|(n, _)| *n == labels[i])
+                .map(|(_, a)| a.clone())
         };
         let Some(arg) = arg else {
             self.infer_all(args);
             self.consume_named();
-            let msg = match named.iter().find(|(n, _)| *n != label) {
-                Some((k, _)) => super::expr::unknown_named_arg(k, &[label.as_str()]),
+            let n = args.len() + named.len();
+            let msg = match named.iter().find(|(n, _)| !labels.contains(n)) {
+                Some((k, _)) => {
+                    let known: Vec<&str> = labels.iter().map(String::as_str).collect();
+                    super::expr::unknown_named_arg(k, &known)
+                }
+                None if n == arity => {
+                    let l = &labels[i];
+                    format!("an overloaded {name} is picked by argument '{l}': it is missing")
+                }
                 None => {
-                    let n = args.len() + named.len();
-                    format!("an overloaded {name} takes 1 argument, found {n}")
+                    let s = if arity == 1 { "" } else { "s" };
+                    format!("an overloaded {name} takes {arity} argument{s}, found {n}")
                 }
             };
             self.error(span, msg);
@@ -646,42 +670,34 @@ impl Checker {
 }
 
 impl Checker {
-    /// `x.into[T]()` on a receiver of type `obj_ty`, when the receiver's type stores `method` as a
-    /// slot keyed by its target (`Into[T]`'s `into`, `TryInto[T]`'s `try_into`): the `[T]` picks
-    /// the one overload of the receiver whose target is `T`, and the call is that overload's
-    /// return. A lone `into` is a plain method: the same pick checks a `[T]` on it against its
-    /// return, then clears `type_args` for the ordinary call. `None` when the ordinary method call
-    /// runs.
-    #[allow(clippy::too_many_arguments)] // receiver + its type + method + args + targs + spans
+    /// `x.into()` on a receiver of type `obj_ty`, when the receiver's type stores `method` as a
+    /// slot keyed by its target (`Into[T]`'s `into`, a user `Emit[T]`'s `emit(self) -> T`): the
+    /// overload [`Self::pick_slot`] picks (by `[T]`, else by the annotation `hint`), and the call
+    /// is that overload's return. A lone decl is a plain method: a `[T]` on it is checked by the
+    /// same pick against its return (the receiver's type args substituted), then `type_args` is
+    /// cleared for the ordinary call. `None` when the ordinary method call runs.
+    #[allow(clippy::too_many_arguments)] // receiver type + method + args + targs + hint + spans
     pub(super) fn infer_target_call(
         &mut self,
-        obj: &Expr,
         obj_ty: &Ty,
         method: &str,
         args: &[Expr],
         type_args: &mut &[Ty],
+        hint: Option<&Ty>,
         name_span: Span,
         span: Span,
     ) -> Option<Ty> {
-        let set = self
-            .nominal_overloads(obj_ty)
-            .and_then(|o| o.get(method))
-            .cloned();
-        if set.is_none() && type_args.is_empty() {
-            return None;
-        }
         let slot = self.slot_of(obj_ty, method)?.slot;
         if slot != OverloadSlot::Ret {
             return None;
         }
-        let recv = if let ExprKind::Ident(n) = &obj.kind {
-            n.clone()
-        } else {
-            "x".to_string()
-        };
+        let set = self
+            .nominal_overloads(obj_ty)
+            .and_then(|o| o.get(method))
+            .cloned();
         let tname = obj_ty.to_string();
         let Some(set) = set else {
-            if self.member_own_type_params(obj_ty, method) == Some(true) {
+            if type_args.is_empty() || self.member_own_type_params(obj_ty, method) == Some(true) {
                 return None;
             }
             let one = self.conversion_sigs(obj_ty, method);
@@ -690,11 +706,9 @@ impl Checker {
             {
                 let targs = *type_args;
                 if self
-                    .pick_target(&one, &tname, method, targs, &recv, name_span)
+                    .pick_slot(&one, slot, &tname, method, targs, None, args, name_span)
                     .is_none()
                 {
-                    self.infer_all(args);
-                    self.consume_named();
                     return Some(Ty::Unknown);
                 }
                 *type_args = &[];
@@ -712,69 +726,99 @@ impl Checker {
             );
             return Some(Ty::Unknown);
         }
-        let Some(k) = self.pick_target(&set, &tname, method, type_args, &recv, name_span) else {
+        let k = self.pick_slot(&set, slot, &tname, method, type_args, hint, args, name_span);
+        let Some(k) = k else {
             return Some(Ty::Unknown);
         };
         self.record_overload_call(method, slot, &set[k], name_span, span);
         Some(set[k].ret.clone())
     }
 
-    /// The call `x.name[T]()` (or `A.name[T](x)`) on `set`, an overload set keyed by its target,
-    /// with `targs` its type arguments: the index of the one overload whose target is `T`. No
-    /// `[T]` ("needs a target type"), or no overload for `T`, is an error.
-    pub(super) fn pick_target(
+    /// THE pick of a protocol-slot call on `set` (one decl or several, static or instance), keyed
+    /// at the type's stored `slot`: `[X]` (`targs`) names the type at the slot (`Rat.from[int](3)`:
+    /// the source; `r.into[str]()`: the target) and wins; with no `[X]`, a `Param` slot picks by
+    /// its argument ([`Self::pick_overload`]) and a `Ret` slot by the annotation `hint`
+    /// ([`Self::hint_target`]). The index of the one overload that takes `X`; else an error that
+    /// names no receiver (a `?.` receiver is an internal name), `None`, and the arguments inferred
+    /// for their own errors.
+    #[allow(clippy::too_many_arguments)] // set + slot + names + targs + hint + args + span
+    pub(super) fn pick_slot(
         &mut self,
         set: &[FnSig],
+        slot: OverloadSlot,
         tname: &str,
         name: &str,
         targs: &[Ty],
-        recv: &str,
+        hint: Option<&Ty>,
+        args: &[Expr],
         span: Span,
     ) -> Option<usize> {
-        let t = match targs {
-            [t] => t,
-            [] => {
-                self.error(
-                    span,
-                    format!("{name} on {tname} needs a target type: {recv}.{name}[T]()"),
-                );
-                return None;
+        let t = match (targs, slot) {
+            ([t], _) => Ok(t.clone()),
+            ([], OverloadSlot::Param(_)) => {
+                return self.pick_overload(set, slot, tname, name, args, span);
             }
-            [..] => {
+            ([], OverloadSlot::Ret) => self.hint_target(set, hint).ok_or_else(|| {
+                format!("{name} on {tname} needs a target type: write `.{name}[T]()`")
+            }),
+            ([..], _) => {
                 let n = targs.len();
-                self.error(
-                    span,
-                    format!("{name} takes 1 type argument (the target), found {n}"),
-                );
-                return None;
+                let what = match slot {
+                    OverloadSlot::Param(_) => "the source",
+                    OverloadSlot::Ret => "the target",
+                };
+                Err(format!("{name} takes 1 type argument ({what}), found {n}"))
             }
         };
-        let slot = OverloadSlot::Ret;
-        let fitting = self.fitting_overloads(set, slot, t);
-        if let [k] = fitting.as_slice() {
-            return Some(*k);
-        }
-        let msg = overload_misfit(set, slot, &fitting, tname, name, Some(t));
+        let msg = match t {
+            Ok(t) => {
+                let fitting = self.fitting_overloads(set, slot, &t);
+                if let [k] = fitting.as_slice() {
+                    return Some(*k);
+                }
+                overload_misfit(set, slot, &fitting, tname, name, Some(&t))
+            }
+            Err(msg) => msg,
+        };
+        self.infer_all(args);
+        self.consume_named();
         self.error(span, msg);
         None
     }
 
+    /// The target an annotation `hint` names for a call of the target-keyed `set`: the hint
+    /// itself when an overload returns it, else a carrier hint's payload (`n: int! = k.try_into()`
+    /// picks `try_into(self) -> int!`; a plain `int` wraps into `int!`), else the hint, for the
+    /// misfit message. `None` with no hint or an unknown one.
+    fn hint_target(&self, set: &[FnSig], hint: Option<&Ty>) -> Option<Ty> {
+        let h = hint.filter(|h| !h.is_unknown())?;
+        let slot = OverloadSlot::Ret;
+        if self.fitting_overloads(set, slot, h).is_empty()
+            && let Some((_, payload, _)) = h.carrier_parts()
+            && !self.fitting_overloads(set, slot, payload).is_empty()
+        {
+            return Some(payload.clone());
+        }
+        Some(h.clone())
+    }
+
     /// The one method `name` of `ty` (a struct, an enum or a builtin scalar's native struct), as a
-    /// set of one.
+    /// set of one, with the receiver's type args substituted (`Box[int]`'s `into(self) -> T`
+    /// returns `int`).
     fn conversion_sigs(&self, ty: &Ty, name: &str) -> Vec<FnSig> {
-        let table = if let Ty::Enum(k, _) = ty {
-            self.enum_methods_of(k)
+        let (table, map) = if let Ty::Enum(k, targs) = ty {
+            (self.enum_methods_of(k), self.enum_param_map(k, targs))
+        } else if let Ty::Struct(k, targs) = ty {
+            let info = self.struct_shape(k);
+            let map = info.map(|i| struct_param_map(i, targs)).unwrap_or_default();
+            (info.map(|i| &i.methods), map)
         } else {
-            let key = if let Ty::Struct(k, _) = ty {
-                Some(k.as_str())
-            } else {
-                Self::native_witness_key(ty)
-            };
-            key.and_then(|k| self.struct_shape(k)).map(|i| &i.methods)
+            let info = Self::native_witness_key(ty).and_then(|k| self.struct_shape(k));
+            (info.map(|i| &i.methods), HashMap::new())
         };
         table
             .and_then(|t| t.get(name))
-            .cloned()
+            .map(|sig| instantiate_method(sig, &map))
             .into_iter()
             .collect()
     }
