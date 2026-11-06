@@ -27,7 +27,7 @@
 //! was a silent no-op (both runs used the same auto-sized pool). `test_runner.rs`'s
 //! `over_memory_trips_on_an_all_native_task_body` test already documented this exact gap ("the env
 //! var is read by `main::cmd_run`, not by `run_tests_capped`"). `main::apply_env_worker_count` closes
-//! it for `test` too — `chezzi_test_cli_honors_chezzi_threads_via_a_two_worker_precondition` below is
+//! it for `test` too — `chezzi_test_cli_honors_chezzi_threads_via_the_worker_count` below is
 //! the black-box proof that it actually reaches the pool through the CLI `test` path, not merely
 //! `worker_count()` in the lib test binary (which `vm::tests::chezzi_threads_env_reaches_worker_count`
 //! already covers separately).
@@ -160,75 +160,44 @@ fn assert_chz_dir_at_two_worker_counts(dir: &str) {
     );
 }
 
-/// The causal proof that `CHEZZI_THREADS` actually reaches the pool through the `chezzi test` CLI
-/// path specifically (not merely `vm::worker_count()` in the lib test binary).
+/// The causal proof that `CHEZZI_THREADS` reaches the pool through the `chezzi test` and `chezzi run`
+/// CLI paths (not merely `vm::worker_count()` in the lib test binary). The probe is the run's worker
+/// count, which sizes the pool and every scheduler, printed by `CHEZZI_SCHED_STATS=1` as
+/// `[sched-stats] workers=N`: a dropped env read prints the default (all-cores) count at both settings.
 ///
-/// The probe is a CORES measurement. Two CPU jobs on one `Executor` burn in parallel when the pool
-/// has two runners and one at a time when it has one, so child CPU time over child wall time is
-/// past `MAX_CORES_AT_ONE_WORKER` at `CHEZZI_THREADS=2` and at or under it at `CHEZZI_THREADS=1`.
-/// A dropped/no-op env read would make both runs behave like the default (>= 2 cores on any CI
-/// box), and the `=1` run would then exceed the ceiling.
-///
-/// Until TICKET-205 this test proved the knob by STARVATION: a job spinning on a flag that only a
-/// second job could set timed out at one worker. An Executor job is preempted at the end of its
-/// reduction budget now, so that program finishes at every worker count and a starvation probe
-/// cannot exist. Measured on the debug binary: T=1 wall 5.61 s user 5.44 s, T=2 wall 1.13 s user
-/// 2.22 s.
-#[cfg(unix)]
+/// Until 2026-11-06 this test compared child CPU time with wall time, which failed whenever the box
+/// was busy (the two jobs could not get two cores). Before TICKET-205 it proved the knob by
+/// starvation.
 #[test]
-fn chezzi_test_cli_honors_chezzi_threads_via_a_two_worker_precondition() {
+fn chezzi_test_cli_honors_chezzi_threads_via_the_worker_count() {
     let dir = std::env::temp_dir().join(format!("chz-threads-cli-{}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("temp dir");
-    let path = dir.join("two_cpu_jobs_test.chz");
-    std::fs::write(
-        &path,
-        "import Executor from std.concurrency\n\n\
-         fn burn(n: int) -> int:\n    \
-         x := 0\n    \
-         i := 0\n    \
-         while i < n:\n        \
-         x = x + i * i - i\n        \
-         i += 1\n    \
-         return x\n\n\
-         fn job():\n    \
-         burn(750000)\n\n\
-         test fn two_cpu_jobs():\n    \
-         ex := Executor()\n    \
-         ex.submit(job)\n    \
-         ex.submit(job)\n    \
-         ex.shutdown()\n    \
-         assert true\n",
-    )
-    .expect("write program");
-    let path_str = path.to_str().unwrap();
+    let test_path = dir.join("one_test.chz");
+    std::fs::write(&test_path, "test fn one():\n    assert true\n").expect("write test program");
+    let run_path = dir.join("one.chz");
+    std::fs::write(&run_path, "print(1)\n").expect("write run program");
 
-    // CHEZZI_THREADS=1: one runner, so the two jobs share one core.
-    let (wall, user, sys, status, stdout) = child_rusage::run_timed(&["test", path_str], "1");
-    assert!(
-        status.success() && stdout.contains(" passed, 0 failed, 0 errored"),
-        "CHEZZI_THREADS=1 must pass the two-CPU-job test: {stdout}"
-    );
-    let cpu = user + sys;
-    assert!(
-        cpu <= wall.mul_f64(MAX_CORES_AT_ONE_WORKER),
-        "CHEZZI_THREADS=1 must run the two CPU jobs on one runner: cpu={cpu:?} wall={wall:?} (cpu \
-         must be <= wall * {MAX_CORES_AT_ONE_WORKER}) — more means CHEZZI_THREADS did not reach \
-         chezzi test's pool"
-    );
-
-    // CHEZZI_THREADS=2: two runners, so the two jobs burn in parallel.
-    let (wall, user, sys, status, stdout) = child_rusage::run_timed(&["test", path_str], "2");
-    assert!(
-        status.success() && stdout.contains(" passed, 0 failed, 0 errored"),
-        "CHEZZI_THREADS=2 must pass the two-CPU-job test: {stdout}"
-    );
-    let cpu = user + sys;
-    assert!(
-        cpu > wall.mul_f64(MAX_CORES_AT_ONE_WORKER),
-        "CHEZZI_THREADS=2 must run the two CPU jobs on two runners: cpu={cpu:?} wall={wall:?} (cpu \
-         must be > wall * {MAX_CORES_AT_ONE_WORKER}) — less means the pool stayed one-wide"
-    );
-
+    for (cmd, path) in [("test", &test_path), ("run", &run_path)] {
+        for threads in ["1", "2"] {
+            let out = Command::new(env!("CARGO_BIN_EXE_chezzi"))
+                .args([cmd, path.to_str().unwrap()])
+                .env("CHEZZI_THREADS", threads)
+                .env("CHEZZI_SCHED_STATS", "1")
+                .output()
+                .expect("spawn chezzi");
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            assert!(
+                out.status.success(),
+                "chezzi {cmd} at CHEZZI_THREADS={threads} failed: {stderr}"
+            );
+            let want = format!("[sched-stats] workers={threads}\n");
+            assert!(
+                stderr.contains(&want),
+                "chezzi {cmd} at CHEZZI_THREADS={threads} must run at {threads} worker(s): \
+                 want {want:?} on stderr, got {stderr:?}"
+            );
+        }
+    }
     let _ = std::fs::remove_dir_all(&dir);
 }
 

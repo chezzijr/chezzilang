@@ -96,8 +96,8 @@ fn main() -> ExitCode {
         "tokens" => cmd_tokens(args.get(1)),
         "ast" => cmd_ast(args.get(1)),
         "check" => cmd_check(&args[1..]),
-        "run" => report_sched_seed(cmd_run(&args[1..])),
-        "test" => report_sched_seed(cmd_test(&args[1..])),
+        "run" => report_sched_stats(report_sched_seed(cmd_run(&args[1..]))),
+        "test" => report_sched_stats(report_sched_seed(cmd_test(&args[1..]))),
         "init" => cmd_init(&args[1..]),
         "docs" => cmd_docs(&args[1..]),
         other => {
@@ -492,6 +492,15 @@ fn apply_env_sched_seed(cmd: &str) {
             "chezzi {cmd}: ignoring invalid CHEZZI_SCHED_SEED='{bad}' (expected an unsigned 64-bit integer)"
         ),
     }
+}
+
+/// Under `CHEZZI_SCHED_STATS=1`, print the run's worker count to stderr: `[sched-stats] workers=<n>`.
+/// It is [`vm::worker_count`], the one count the pool, every scheduler and the eager gate are sized by.
+fn report_sched_stats(code: ExitCode) -> ExitCode {
+    if std::env::var_os("CHEZZI_SCHED_STATS").is_some() {
+        chezzi::errln!("[sched-stats] workers={}", vm::worker_count());
+    }
+    code
 }
 
 /// TICKET-167 — on a nonzero exit under a seeded run, print the seed and worker count so the failure
