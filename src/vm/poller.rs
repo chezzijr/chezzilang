@@ -258,7 +258,7 @@ impl NetPoller {
         // TICKET-188: a tripped flag of a nursery this fiber OWNS (a child faulted) hands it back too.
         // TICKET-200: so does an ANCESTOR's flag (`ScopeCancel::tripped`, an `Executor`'s
         // `cancel`), or the drain scan that recorded this trip's `CANCEL_GEN` misses this park.
-        if cancel.tripped() || fiber.owned_tripped() || closed.load(Ordering::Acquire) {
+        if fiber.cancel_wakes(cancel.tripped()) || closed.load(Ordering::Acquire) {
             return Some(fiber);
         }
         // The key is never a duplicate: a second op on the same socket is rejected by the `in_flight`
@@ -599,6 +599,9 @@ mod tests {
             park_site: None,
             park_deadline: None,
             job_cancel: None,
+            defer_cut: None,
+            cut: None,
+            cancel_unwind_faulted: false,
         }
     }
 

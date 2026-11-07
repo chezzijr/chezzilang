@@ -234,8 +234,10 @@ impl Vm {
         let op = PendingOp::new(p.unwrap(), vec![(Arc::clone(&core), 0, true)]);
         // A send with room or a waiting receiver committed above and is never cut. A halt here
         // withdraws the offer, unless a receiver already took it (DEC-185).
+        let latch = self.halt_latch();
         if let Err(e) = self.wait_halt(span) {
-            return self.send_settled(op, span).unwrap_or(Err(e));
+            let settled = self.send_settled(op, span);
+            return self.settled_over_halt(latch, settled, Err(e));
         }
         // An `Offered` send wakes no parked fiber: every parked cap-0 receiver holds a live slot,
         // published in the same `core.q` hold as its "not ready" check, so the failed `give` proves
@@ -269,6 +271,7 @@ impl Vm {
     ) -> Result<SendStep, RuntimeError> {
         let msg = Wait::send(core.cap).phrase();
         let p = Arc::clone(&op.p);
+        let latch = self.halt_latch();
         let mut r = Ok(());
         while p.is_queued() {
             let on = Blocked::at(quiesce::PartyWait::Send(Arc::clone(&p)), msg, span);
@@ -277,8 +280,8 @@ impl Vm {
                 break;
             }
         }
-        self.send_settled(op, span)
-            .unwrap_or_else(|| r.map(|()| SendStep::Sent))
+        let settled = self.send_settled(op, span);
+        self.settled_over_halt(latch, settled, r.map(|()| SendStep::Sent))
     }
 
     /// TICKET-194 — THE mapping from a send's settled offer to its result. A taken offer means the
@@ -436,12 +439,12 @@ impl Vm {
         // W7-17 — `--timeout` ABOVE the cancellation checkpoint, because the deadline outranks a cancel
         // and because ending a timer park early TRIPS this fiber's cancel to close the park gap
         // ([`deadline_gap_wake`]): read in the other order, that fiber would report `cancelled` instead
-        // of the honest hard halt. Suppressed inside a `defer` by the SAME `deferring > 0` term
+        // of the honest hard halt. Suppressed inside a `defer` by the SAME `in_defer()` term
         // `halt_requested` uses — a cleanup body's `ch.recv()` on an already-queued value must still
         // complete (measured: ungated, it silently truncated the defer at that `recv`, which is exactly
         // the "stopped promptly ≠ cleaned up" failure W7-16 was caught on). A defer that would PARK is
         // still aborted, at the park checkpoint below — that one is a hang, not cleanup.
-        if self.deferring == 0 {
+        if !self.in_defer() {
             self.deadline_halt(span)?;
         }
         // TICKET-194 — a receive with a value, a tripped latch, a fired timer or a close ready does

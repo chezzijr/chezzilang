@@ -662,7 +662,7 @@ fn mnsched_cancelled_scope_whose_only_fiber_is_demoted_is_deadlock() {
     let a = take_run(&sched);
     let b = take_run(&sched);
     // Fiber b enters its `defer` and blocks in place on an empty channel (running → a registered waiter).
-    // Inside a `defer` a cancel is SUPPRESSED (`cancel_requested()`'s `deferring == 0` term), so it
+    // Inside a `defer` a cancel is SUPPRESSED (`halt_requested()`'s `in_defer()` term), so it
     // registers NO cancel watch — nothing can ever wake it. That is what makes it a real deadlock.
     {
         let mut c = sched.lock();
@@ -717,7 +717,7 @@ fn mnsched_demoted_fiber_with_a_tripped_cancel_is_not_deadlock() {
     let a = take_run(&sched);
     let b = take_run(&sched);
     // Fiber b blocks in place on an empty channel from inside a native callback, in its BODY
-    // (`deferring == 0`) — a cancel would be honoured, so it watches its scope's flag.
+    // (`!in_defer()`) — a cancel would be honoured, so it watches its scope's flag.
     let tok = {
         let mut c = sched.lock();
         c.running -= 1;

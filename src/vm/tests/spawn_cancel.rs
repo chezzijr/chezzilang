@@ -1006,15 +1006,26 @@ fn fibers_recv_inside_index_overload_demotes_on_mn() {
     assert_eq!(run(src), "7\n");
 }
 
-/// Native-reentry guard, M:N: a blocking `recv` inside a `defer`red call (run during frame
-/// teardown, off the suspendable path) now completes via M:N's demotion path — the exact mechanism
-/// `docs/contributing/gaps.md` N6g documents ("M:N demotes and completes the cleanup"). The `recv` is in the
-/// deferred function's body — only the receiver handle is captured at the `defer` statement — so it
-/// runs at teardown.
+/// A blocking `recv` inside a `defer`red call (run during frame teardown) parks the fiber like any
+/// other wait (plan 2026-11-07-defer-drain-frames): the run completes and no worker demotes. The
+/// `recv` is in the deferred function's body — only the receiver handle is captured at the `defer`
+/// statement — so it runs at teardown. It re-runs alone in a child test binary, so the process-wide
+/// demote count is this test's own.
 #[test]
-fn fibers_recv_inside_defer_demotes_on_mn() {
+fn fibers_recv_inside_defer_parks_on_mn() {
+    #[rustfmt::skip]
+    let in_parent = crate::vm::rerun_in_child(module_path!(), "fibers_recv_inside_defer_parks_on_mn");
+    if in_parent {
+        return;
+    }
     let src = "fn consume(ch: Channel[int]):\n    ch.recv()\nfn worker(ch: Channel[int]):\n    defer consume(ch)\n    print(\"body\")\nfn sender(ch: Channel[int]):\n    ch.send(5)\nfn main():\n    ch := Channel[int]()\n    parallel:\n        spawn worker(ch)\n        spawn sender(ch)\nmain()\n";
+    let before = crate::vm::demote_count();
     assert_eq!(run(src), "body\n");
+    assert_eq!(
+        crate::vm::demote_count() - before,
+        0,
+        "the wait in the defer body must park, not demote"
+    );
 }
 
 /// A nested `parallel:` inside a child fiber runs its own scheduler level (recursively); the

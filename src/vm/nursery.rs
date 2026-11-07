@@ -335,10 +335,18 @@ impl Vm {
     /// when none faulted, or on an `os.exit`, which keeps its `pending_exit` route). A caller whose
     /// escape carries its own fault keeps that as the root cause and drops this; a cancel funnel, whose
     /// escape is only the `cancelled` sentinel, replaces the sentinel with it.
+    #[inline]
     pub(super) fn drain_escaped_nursery(&mut self, from_len: usize) -> Option<RuntimeError> {
         if self.nurseries.len() <= from_len {
             return None; // nothing escaped past the join (e.g. normal fall-through already popped it)
         }
+        self.abort_escaped_nurseries(from_len)
+    }
+
+    /// [`Vm::drain_escaped_nursery`]'s body, out of line: every return calls the check above, and
+    /// this body's large stack frame would cost each of them.
+    #[inline(never)]
+    fn abort_escaped_nurseries(&mut self, from_len: usize) -> Option<RuntimeError> {
         let mut child_fault: Option<RuntimeError> = None;
         // Every inline abort below waits as a nursery join: one wait, with the permit given back.
         let reg = self.wait_permit(WaitSpec::Nursery);
@@ -415,39 +423,40 @@ impl Vm {
         None
     }
 
-    /// W14-4 -- escape every `parallel:` level above `from_len`, innermost-first: run the level's
-    /// body defers (down to its `nursery_defer_floors` entry), then cancel it and wait for its
-    /// children. Enclosing defers therefore run after the cancelled children unwind (Go cancel +
-    /// `wg.Wait()`, asyncio `TaskGroup`). Returns `true` when it parked (TICKET-132); the rewound op
-    /// re-runs with the drained defers consumed. TICKET-287 — a fault already in hand parks with
-    /// the fiber ([`Vm::store_escape_park`]) and comes back to `err` on the re-run.
-    pub(super) fn unwind_escaped_levels(
-        &mut self,
-        from_len: usize,
-        err: &mut Option<RuntimeError>,
-    ) -> bool {
-        if let Some(e) = self.take_escape_park() {
-            *err = Some(e);
-        }
-        while self.nurseries.len() > from_len {
+    /// W14-4 -- a `return` escapes every `parallel:` level above the frame's own nurseries,
+    /// innermost-first: run the level's body defers (down to its `nursery_defer_floors` entry),
+    /// then cancel it and wait for its children ([`Vm::return_level_done`]); then the rest of the
+    /// return ([`Vm::return_join`]). Enclosing defers therefore run after the cancelled children
+    /// unwind (Go cancel + `wg.Wait()`, asyncio `TaskGroup`). `err` is the fault in hand.
+    pub(super) fn return_levels(&mut self, err: Option<RuntimeError>) -> Result<(), RuntimeError> {
+        let f = self.frames.last().unwrap();
+        let from_len = f.nursery_len + usize::from(f.has_implicit_nursery);
+        if self.nurseries.len() > from_len {
             let top = self.nurseries.len() - 1;
             let floor = self.nursery_defer_floors[top];
-            if let Some(e) = self.drain_frame_to(floor) {
-                *err = Some(e);
-            }
-            if self.park_escaped_abort(top) {
-                if let Some(e) = err.take() {
-                    self.store_escape_park(e);
-                }
-                return true;
-            }
-            // TICKET-147 — a body defer fault stays the root cause; a child fault only fills the gap.
-            let child = self.drain_escaped_nursery(top);
-            if err.is_none() {
-                *err = child;
-            }
+            return self.drain_then(floor, DrainCont::ReturnLevel { top, err });
         }
-        false
+        self.return_join(err)
+    }
+
+    /// Level `top` of [`Vm::return_levels`] after its body defers ran (`err`: the latest fault).
+    /// A level that parks (TICKET-132) rewinds the op, which re-runs with the drained defers
+    /// consumed; TICKET-287 — the fault in hand parks with the fiber ([`Vm::store_escape_park`])
+    /// and comes back on the re-run.
+    pub(super) fn return_level_done(
+        &mut self,
+        top: usize,
+        mut err: Option<RuntimeError>,
+    ) -> Result<(), RuntimeError> {
+        if self.park_escaped_abort(top) {
+            if let Some(e) = err.take() {
+                self.store_escape_park(e);
+            }
+            return Ok(());
+        }
+        // TICKET-147 — a body defer fault stays the root cause; a child fault only fills the gap.
+        let child = self.drain_escaped_nursery(top);
+        self.return_levels(err.or(child))
     }
 
     pub(super) fn join_nursery(&mut self) -> Result<(), RuntimeError> {

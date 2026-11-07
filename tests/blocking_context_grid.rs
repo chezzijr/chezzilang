@@ -249,7 +249,7 @@ fn contexts() -> Vec<Ctx> {
         ctx(
             "fiber_defer",
             "        spawn:\n            viadefer()\n",
-            true,
+            false,
             false,
             dead,
         ),

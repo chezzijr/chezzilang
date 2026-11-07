@@ -112,9 +112,10 @@ impl Vm {
         Ok(true)
     }
 
-    /// `ic`: the per-call-site method inline-cache id from the `CallMethod` op, or [`NO_IC`] for the
-    /// native-re-entry callers (`spawn`/`defer` method tasks) that need a *synchronous* result and so
-    /// must take the re-entrant `run_proto` path (never the in-place frame flatten). A real `ic` ⟺ the
+    /// `ic`: the per-call-site method inline-cache id from the `CallMethod` op or a `defer` site
+    /// (`Deferred::Method::ic`; the synchronous hard-halt drain `Vm::run_loaded` runs a pushed frame in
+    /// its own `run_until`). No production caller passes [`NO_IC`] (only `gc_tests.rs`), which takes the
+    /// re-entrant `run_proto` path (never the in-place frame flatten). A real `ic` ⟺ the
     /// caller is the running dispatch loop (the sole emit path), so a real `ic` is exactly the
     /// "flatten-safe" signal: the pushed frame is executed by the `run_until` that called us.
     /// TICKET-250 — does the declared type of `v` have `hook`? The checker decided it
@@ -754,8 +755,8 @@ impl Vm {
             // W7-8 — a module member can now be a BODIED Chezzi fn (`std.fs`'s `PathLike`
             // wrappers), not only an `Obj::Native`. `do_call` FLATTENS such a callee (installs the
             // frame for the *running* `run_until` to execute), which is only correct on the real
-            // dispatch-loop path. A re-entrant caller passes `NO_IC` (`defer fs.remove_file(p)`
-            // runs during frame teardown, with no loop to hand the frame to) — it must use the
+            // dispatch-loop path (a synchronous hard-halt drain runs it in `Vm::run_loaded`'s own
+            // loop). A `NO_IC` caller (tests only) has no loop to hand the frame to — it must use the
             // synchronous `invoke_value`, exactly like the struct/enum arms below. Before this the
             // arm was unconditional and safe only because every module member was a native.
             if ic != NO_IC {

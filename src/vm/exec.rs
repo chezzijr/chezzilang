@@ -222,6 +222,8 @@ impl Vm {
             deadline: None,
             back_edge_tick: 0,
             deferring: 0,
+            drains: Vec::new(),
+            unwound: false,
             mn: None,
         }
     }
@@ -280,6 +282,7 @@ impl Vm {
         std::mem::swap(&mut self.held_reads, &mut ctx.held_reads);
         std::mem::swap(&mut self.held_guards, &mut ctx.held_guards);
         std::mem::swap(&mut self.held_gens, &mut ctx.held_gens);
+        std::mem::swap(&mut self.drains, &mut ctx.drains);
         // stdin is NOT swapped: it is ONE source every task shares (Go/Python) — see `Stdin` and
         // `spawn_worker`, which hands the M:N worker the same shared handle.
         //
@@ -449,8 +452,8 @@ impl Vm {
         // remaining element (with its prints / `Shared` writes / fs writes) to completion. The
         // per-element re-entry IS this loop's back-edge, so it is where the cancel is delivered; the
         // `?` on `guarded` aborts the native loop, exactly as the old every-instruction check did via
-        // the callback's nested `run_until`. A DEFERRED call also runs through `guarded`
-        // (`run_one_deferred`) — `halt_requested` is `None` while `deferring > 0`, so the defer body
+        // the callback's nested `run_until`. A synchronous (hard-halt) DEFERRED call also runs through
+        // `guarded` (`run_one_deferred`) — `halt_requested` is `None` while `in_defer()`, so the defer body
         // itself is never killed here (that bug swallowed the LIFO-first defer of any task that
         // returned normally / faulted on its own under a tripped scope flag).
         // `chezzi test --timeout` — FIRST, because a wall-clock cap outranks both cancel and exit
@@ -460,7 +463,7 @@ impl Vm {
         // test which blew through it by 4× is worse than a cap that is merely late — it teaches
         // distrust of every green run.
         //
-        // **Not** suppressed while `deferring > 0`, unlike the cancel and exit rungs below — matching
+        // **Not** suppressed while `in_defer()`, unlike the cancel and exit rungs below — matching
         // `jump_checked`'s deadline rung exactly. A cap a `defer` can outrun is the same hole one rung
         // down, and `--timeout` is the backstop those two suppressions are allowed to lean on.
         //
@@ -498,7 +501,7 @@ impl Vm {
         //
         // (`--timeout` had the identical gap at this checkpoint and is closed by the rung ABOVE — the
         // two were found together and are fixed together; see it for why it is first and unthrottled by
-        // `deferring`.)
+        // `in_defer()`.)
         //
         // [`Vm::exit_halt`], not `run_exit_err`: it sends a fiber that holds a cancel flag down the
         // `Cancelled` path. An exit is delivered inside a `defer` body too (TICKET-213); a job

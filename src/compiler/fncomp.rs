@@ -284,6 +284,7 @@ impl FnComp {
             | other @ Op::EnterDeferScope
             | other @ Op::LeaveDeferScope
             | other @ Op::DrainHandlerDefers
+            | other @ Op::Drain(_)
             | other @ Op::Try
             | other @ Op::JsonDecode(_)
             | other @ Op::JsonToValue
@@ -429,6 +430,7 @@ impl FnComp {
             | other @ Op::EnterDeferScope
             | other @ Op::LeaveDeferScope
             | other @ Op::DrainHandlerDefers
+            | other @ Op::Drain(_)
             | other @ Op::Try
             | other @ Op::JsonDecode(_)
             | other @ Op::JsonToValue

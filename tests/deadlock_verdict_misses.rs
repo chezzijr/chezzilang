@@ -240,7 +240,7 @@ fn executor_job_and_main_nested_nursery_trees_fault_deadlock() {
 #[test]
 fn an_exit_from_a_job_outranks_a_main_defer_that_can_never_complete() {
     // The `ready.send` inside the `defer` (a handshake, DEC-050) releases the job only once `main`
-    // is in the defer drain, so `os.exit(3)` always lands while `deferring > 0`. Go twin: exit 3.
+    // is in the defer drain, so `os.exit(3)` always lands while the defer runs. Go twin: exit 3.
     let src = [
         "import std.concurrency\nimport Executor from std.concurrency",
         "import std.os",

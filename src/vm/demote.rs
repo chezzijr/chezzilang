@@ -54,13 +54,13 @@ impl Vm {
         let op =
             crate::vm::core::PendingOp::new(Arc::clone(&p), vec![(Arc::clone(&core), 0, false)]);
         // A filled slot is a delivered value: it outranks every other way out of this block.
-        let finish =
-            |op: crate::vm::core::PendingOp, r: Result<RecvStep, RuntimeError>| match op.settle() {
-                crate::vm::core::Settled::Got(_, v) => Ok(RecvStep::Filled(v)),
-                crate::vm::core::Settled::Cancelled
-                | crate::vm::core::Settled::Closed
-                | crate::vm::core::Settled::Sent(_) => r,
-            };
+        let filled = |op: crate::vm::core::PendingOp| match op.settle() {
+            crate::vm::core::Settled::Got(_, v) => Some(Ok(RecvStep::Filled(v))),
+            crate::vm::core::Settled::Cancelled
+            | crate::vm::core::Settled::Closed
+            | crate::vm::core::Settled::Sent(_) => None,
+        };
+        let latch = self.halt_latch();
         // 1. Account running → a registered waiter AND register the channel (#1 fix), under core lock A, then
         //    notify so an idle puller sitting in an untimed `take_runnable` `cv.wait` re-evaluates the
         //    deadlock predicate now that this fiber left `running` (without this notify a genuine
@@ -80,7 +80,7 @@ impl Vm {
             span,
         ) {
             Ok(reg) => reg,
-            Err(e) => return finish(op, Err(e)),
+            Err(e) => return self.settled_over_halt(latch, filled(op), Err(e)),
         };
         // 2. Spin up a replacement worker ONCE per demoted thread (covers this `wid` while we block).
         //    Subsequent re-entries of this loop on the SAME thread (a callback that recvs repeatedly)
@@ -131,8 +131,8 @@ impl Vm {
                     drop(qg);
                     // Cancel (a sibling faulted): set `cancelled` BEFORE returning the Err so the
                     // outcome is SWALLOWED (a cancelled task is dropped, not reported). MUST go through
-                    // `halt_requested()`, never a raw `self.cancel` load: a `defer` body runs under
-                    // `guarded` (native_reentry > 0), and the predicate's `deferring == 0` term is what
+                    // `halt_requested()`, never a raw `self.cancel` load: a synchronous `defer` drain runs
+                    // under `guarded` (native_reentry > 0), and the predicate's `!in_defer()` term is what
                     // keeps cleanup atomic; it also folds in `cancel_outer` and (TICKET-188) a child
                     // fault of a nursery this party owns.
                     if let Some(e) = self.blocked_halt(halt, span) {
@@ -177,7 +177,7 @@ impl Vm {
             pins.extend(v.child_gcref());
         }
         self.wait_end(reg, &pins);
-        finish(op, exit)
+        self.settled_over_halt(latch, filled(op), exit)
     }
 
     /// TICKET-185 — a blocking `send` reached INSIDE a native callback, whose offer is already
@@ -194,9 +194,10 @@ impl Vm {
         op: crate::vm::core::PendingOp,
         span: Span,
     ) -> Result<SendStep, RuntimeError> {
+        let latch = self.halt_latch();
         let r = self.demote_send_block_in_place(h, &core, &op.p, span);
-        self.send_settled(op, span)
-            .unwrap_or_else(|| r.map(|()| SendStep::Sent))
+        let settled = self.send_settled(op, span);
+        self.settled_over_halt(latch, settled, r.map(|()| SendStep::Sent))
     }
 
     fn demote_send_block_in_place(

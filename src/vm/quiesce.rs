@@ -360,7 +360,7 @@ pub(super) struct QuiesceState {
     /// and nothing more. The window left is the gap between the cell store and this store: a
     /// function entry, a loop back-edge and the return of a call that held its thread
     /// (`Vm::return_halts`) read the hint and miss a halt published in it, and see it at their next
-    /// read; a `defer` pop reads the cell itself for that reason (`stmt.rs` `next_deferred`,
+    /// read; a `defer` pop reads the cell itself for that reason (`stmt.rs` `has_next_deferred`,
     /// TICKET-213). **It does NOT order the two rungs against each other**: an acquire orders only
     /// the reads that FOLLOW it, and both CPU checkpoints read cancel BEFORE exit, so a stale
     /// `cancel == false` beside `exit == true` is a legal interleaving. An earlier revision leaned on
@@ -420,7 +420,7 @@ impl RunHalt {
 
     /// THE answer to which halts cut a `defer`: an exit (TICKET-213) and a latched verdict
     /// (TICKET-152) stop a running `defer` and every queued one; a job fault waits for the cleanup.
-    /// `Vm::run_halt_due` and `Vm::next_deferred` read it.
+    /// `Vm::run_halt_due` and `Vm::has_next_deferred` read it.
     pub(super) fn cuts_cleanup(self) -> bool {
         matches!(self, RunHalt::Exit | RunHalt::Deadlock)
     }

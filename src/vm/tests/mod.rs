@@ -106,6 +106,9 @@ fn mk_fiber(task_index: usize) -> Fiber {
         park_site: None,
         park_deadline: None,
         job_cancel: None,
+        defer_cut: None,
+        cut: None,
+        cancel_unwind_faulted: false,
     }
 }
 
@@ -132,6 +135,9 @@ fn mk_pending_fiber(task_index: usize) -> Fiber {
         park_site: None,
         park_deadline: None,
         job_cancel: None,
+        defer_cut: None,
+        cut: None,
+        cancel_unwind_faulted: false,
     }
 }
 

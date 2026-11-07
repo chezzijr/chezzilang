@@ -163,7 +163,7 @@ fn assert_chz_dir_at_two_worker_counts(dir: &str) {
 /// The causal proof that `CHEZZI_THREADS` reaches the pool through the `chezzi test` and `chezzi run`
 /// CLI paths (not merely `vm::worker_count()` in the lib test binary). The probe is the run's worker
 /// count, which sizes the pool and every scheduler, printed by `CHEZZI_SCHED_STATS=1` as
-/// `[sched-stats] workers=N`: a dropped env read prints the default (all-cores) count at both settings.
+/// `[sched-stats] workers=N demotes=M`: a dropped env read prints the default (all-cores) count at both settings.
 ///
 /// Until 2026-11-06 this test compared child CPU time with wall time, which failed whenever the box
 /// was busy (the two jobs could not get two cores). Before TICKET-205 it proved the knob by
@@ -190,7 +190,7 @@ fn chezzi_test_cli_honors_chezzi_threads_via_the_worker_count() {
                 out.status.success(),
                 "chezzi {cmd} at CHEZZI_THREADS={threads} failed: {stderr}"
             );
-            let want = format!("[sched-stats] workers={threads}\n");
+            let want = format!("[sched-stats] workers={threads} demotes=");
             assert!(
                 stderr.contains(&want),
                 "chezzi {cmd} at CHEZZI_THREADS={threads} must run at {threads} worker(s): \

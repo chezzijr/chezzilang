@@ -60,7 +60,7 @@ Contexts:
 | context | what it is |
 |---|---|
 | **Park** | an M:N fiber with no host frame under it |
-| **Demote** | an M:N fiber inside a nested native callback (a hook reached from a nested container walk, a map/set probe, `drain_iterable`, a `json.decode` default, an FFI callback) or a `defer:` drain. A hook, an operator, a HOF callback, a sort comparator, a `from_iter` drain, a `Shared`/`RwShared` closure and a generator body run as frames on the fiber, so their waits are **Park** (since 2026-11-07) |
+| **Demote** | an M:N fiber inside a nested native callback (a hook reached from a nested container walk, a map/set probe, `drain_iterable`, a `json.decode` default, an FFI callback) or a hard-halt `defer` drain (`--max-heap`, `--timeout`). A hook, an operator, a HOF callback, a sort comparator, a `from_iter` drain, a `Shared`/`RwShared` closure, a generator body and a `defer` drain run as frames on the fiber, so their waits are **Park** (since 2026-11-07) |
 | **Builder** | the inline outermost-`parallel:` builder (`job` = it carries an eager `Executor` core) |
 | **PoolJob** | an eager `Executor` job |
 | **OwnThread** | `main` (inside a frame-run callback too), a `main` `defer:`, `main` inside a nested native callback |
@@ -95,7 +95,7 @@ Modes:
 | `parallel:` nursery join | P | D | H¹ | H¹ | I | H¹ | no |
 | `extern` C call (the watcher hands over a long call's permit) | I | I | I | I | I | I | yes |
 
-¹ I when a host frame is under the joiner (a native callback or a defer drain): the joiner only waits.
+¹ I when a host frame is under the joiner (a native callback, or a `defer` drain of a hard halt): the joiner only waits.
 A fiber's nursery join in a Demote context hands its runner slot to a replacement worker and waits; it
 runs no other fiber on its stack, because that fiber could wait for something only the buried frame
 can give.
@@ -114,8 +114,10 @@ How `will_return` drives the deadlock accounting, and the cells judged against G
   can satisfy it HANGS, where Go faults: the verdict declines rather than risk a false fault
   ([`lessons.md`](../../contributing/lessons.md) §4). Since 2026-11-07 a callback that runs as a
   frame (a hook, an operator, a HOF callback, a sort comparator, a `from_iter` drain, a box closure,
-  a generator body) is not one: `recv/main_cb/Nothing` (`[0].map(op)`) faults `deadlock`, and so does
-  `recv/main_defer/Nothing` (a `defer` body is judged through the drain's `deferring` exception).
+  a generator body, a `defer` drain) is not one: `recv/main_cb/Nothing` (`[0].map(op)`) faults
+  `deadlock`, and so does `recv/main_defer/Nothing`. A wait in a hard-halt `defer` drain
+  (`--max-heap`, `--timeout`) runs on the Rust stack and is still judged in `main`, through the
+  `deferring` exception of `BlockCtx::judged`.
   What still hangs is the nested list of `docs/contributing/gaps.md` W23-1, pinned by the `Residual`
   kinds of `tests/callback_park_grid.rs`.
 

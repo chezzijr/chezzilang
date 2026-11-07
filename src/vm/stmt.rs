@@ -42,46 +42,40 @@ impl<'a> BoxCore<'a> {
 }
 
 impl Vm {
-    /// Drain the current (top) frame's deferred calls, LIFO, popping one at a time from the frame's
-    /// own list so the not-yet-run records stay GC-rooted in the frame. Stops once any party's
-    /// `std.os.exit` is published, between two `defer`s too (Go: `os.Exit` does not run deferred
-    /// calls). Returns the latest fault, if any.
-    pub(super) fn drain_top_frame_deferred(&mut self) -> Option<RuntimeError> {
-        self.drain_frame_to(0)
-    }
-
-    /// THE one pop and the one read of the halts that cut a `defer` (`RunHalt::cuts_cleanup`: an
-    /// exit or the latched verdict), asked before EACH pop: `Ok(None)` when no
-    /// `defer` is left or this party is already exiting; `Err` when another party's exit is
-    /// published with a `defer` still pending. The exit is delivered here, so no `recover:` catches
-    /// the unwind and no caller runs on.
+    /// THE one read of the halts that cut a `defer` (`RunHalt::cuts_cleanup`: an exit or the
+    /// latched verdict), asked before EACH record of frame `fi` above `marker` runs: `Ok(false)`
+    /// when no `defer` is left or this party is already exiting; `Err` when another party's exit
+    /// is published with a `defer` still pending. The exit is delivered here, so no `recover:`
+    /// catches the unwind and no caller runs on. Stops a drain between two `defer`s too (Go:
+    /// `os.Exit` does not run deferred calls). The record stays in the frame while it runs, so it
+    /// stays GC-rooted; the drain pops it after.
     ///
     /// The length test comes first, so a return with no `defer` takes no mutex. The read is the
     /// exit cell (`quiesce.pending()`), never `run_halt_hint()`: the hint is stored after the cell,
     /// and a party that reads it in that gap would still run its `defer` (TICKET-213, measured at two
     /// workers).
-    fn next_deferred(
+    pub(super) fn has_next_deferred(
         &mut self,
         fi: usize,
         marker: usize,
-    ) -> Result<Option<Deferred>, RuntimeError> {
+    ) -> Result<bool, RuntimeError> {
         if self.frames[fi].deferred.len() <= marker || self.pending_exit.is_some() {
-            return Ok(None);
+            return Ok(false);
         }
         if self.quiesce.run_halt().cuts_cleanup()
             && let Some(e) = self.run_exit_err(Span::RUNTIME)
         {
             return Err(e);
         }
-        Ok(self.frames[fi].deferred.pop())
+        Ok(true)
     }
 
     /// TICKET-223 — THE post-drain read of "a hard halt cut this cleanup": this party is exiting
-    /// (`next_deferred` delivered the exit), the deadlock verdict is latched, or `rte` itself is a
+    /// (`has_next_deferred` delivered the exit), the deadlock verdict is latched, or `rte` itself is a
     /// hard halt (`--timeout`, `--max-heap`: [`executor_hard_halt`]) or a deadlock fault
     /// (`is_deadlock`, DEC-135), which a cleanup met while a fault unwound or a recover block
     /// drained (TICKET-289). `Err` carries `rte`, stamped fatal
-    /// for a verdict (DEC-135), so no `recover:` catches it; `next_deferred` already stops the
+    /// for a verdict (DEC-135), so no `recover:` catches it; `has_next_deferred` already stops the
     /// remaining `defer`s (DEC-152). `rte` keeps its message, so a delivered cause still outranks
     /// its stuck cleanup in the report (DEC-147). Every route that binds a `recover:`'s `Err`
     /// reads it: `finish_catch` and the recover-scoped `?` catch in `stmt.rs`.
@@ -95,46 +89,35 @@ impl Vm {
         Ok(rte)
     }
 
-    /// Run frame `fi`'s pending `defer`s down to `marker`, LIFO, each popped by
-    /// [`Vm::next_deferred`]. Returns the latest fault; an exit ends the drain and is the result.
-    fn drain_deferred(&mut self, fi: usize, marker: usize) -> Option<RuntimeError> {
+    /// Run frame `fi`'s pending `defer`s down to `marker`, LIFO, on the Rust stack, each asked for
+    /// by [`Vm::has_next_deferred`]. Returns the latest fault; an exit ends the drain and is the
+    /// result. The dispatch loop's drains run as a trampoline instead ([`Vm::drain_then`]).
+    pub(super) fn drain_deferred(&mut self, fi: usize, marker: usize) -> Option<RuntimeError> {
         let mut err = None;
         loop {
-            match self.next_deferred(fi, marker) {
-                Ok(Some(d)) => {
-                    if let Err(e) = self.run_one_deferred(d) {
+            match self.has_next_deferred(fi, marker) {
+                Ok(true) => {
+                    if let Err(e) = self.run_one_deferred(fi) {
                         err = Some(e);
                     }
+                    self.frames[fi].deferred.pop();
                 }
-                Ok(None) => return err,
+                Ok(false) => return err,
                 Err(exit) => return Some(exit),
             }
         }
     }
 
     /// Leave a lexical defer scope (`LeaveDeferScope`): pop the top marker and run the current
-    /// frame's defers registered since it, LIFO. This is the block-scoped analogue of
-    /// `drain_top_frame_deferred` — it drains down to a marker, not to the bottom of the frame.
-    /// Stops once any party's `std.os.exit` is published, between two `defer`s too. Returns the
-    /// latest fault from a deferred call, if any.
-    pub(super) fn leave_defer_scope(&mut self) -> Option<RuntimeError> {
+    /// frame's defers registered since it, LIFO ([`Vm::drain_then`]); a fault of one is the op's.
+    pub(super) fn leave_defer_scope(&mut self) -> Result<(), RuntimeError> {
         let fi = self.frames.len() - 1;
         debug_assert!(
             !self.frames[fi].defer_markers.is_empty(),
             "LeaveDeferScope without a matching EnterDeferScope (compiler scope-count desync)"
         );
         let marker = self.frames[fi].defer_markers.pop().unwrap_or(0);
-        self.drain_frame_to(marker)
-    }
-
-    /// Drain the current (top) frame's pending defers down to `marker` (the count to leave behind),
-    /// LIFO. The block-scoped analogue of `drain_top_frame_deferred` for an explicit marker — used
-    /// by `LeaveDeferScope` and by every `recover:` boundary path. Stops once any party's
-    /// `std.os.exit` is published, between two `defer`s too. Returns the latest fault from a
-    /// deferred call, if any.
-    pub(super) fn drain_frame_to(&mut self, marker: usize) -> Option<RuntimeError> {
-        let fi = self.frames.len() - 1;
-        self.drain_deferred(fi, marker)
+        self.drain_then(marker, DrainCont::Op)
     }
 
     /// Unwind frames from the current depth down to `target_frame_len`, running each discarded
@@ -153,7 +136,7 @@ impl Vm {
         target_frame_len: usize,
         report_escaped: bool,
     ) -> Option<RuntimeError> {
-        self.unwind_deferred_escaped(target_frame_len, report_escaped, true, false)
+        self.unwind_deferred_escaped(target_frame_len, report_escaped, true)
             .0
     }
 
@@ -166,7 +149,7 @@ impl Vm {
     /// the join at `CHEZZI_THREADS=1`. What the aborted nurseries' children ended with is not
     /// reported: the verdict's fault stands, and its cut tasks are in the run's listing.
     pub(super) fn unwind_no_defer(&mut self, target_frame_len: usize) {
-        self.unwind_deferred_escaped(target_frame_len, true, false, false);
+        self.unwind_deferred_escaped(target_frame_len, true, false);
     }
 
     /// TICKET-147 (W14-12) — the bypass funnels' unwind: run [`Vm::unwind_deferred_escaped`] and rank
@@ -178,8 +161,7 @@ impl Vm {
         report_escaped: bool,
         rte: RuntimeError,
     ) -> RuntimeError {
-        let (defer, escaped) =
-            self.unwind_deferred_escaped(target_frame_len, report_escaped, true, false);
+        let (defer, escaped) = self.unwind_deferred_escaped(target_frame_len, report_escaped, true);
         self.unwind_result(rte, defer.or(escaped), report_escaped)
     }
 
@@ -194,7 +176,7 @@ impl Vm {
     ///    `classify_mn_outcome` reports `CancelledFault`; a deadlock-marked one stays swallowed;
     /// 4. an own fault keeps Go's rule: the `defer`'s fault supersedes it.
     ///
-    /// A drain with no cause to rank (`Op::DrainHandlerDefers`, `unwind_escaped_levels`,
+    /// A drain with no cause to rank (`Op::DrainHandlerDefers`, `return_levels`,
     /// `leave_defer_scope`) does not call it.
     pub(super) fn unwind_result(
         &mut self,
@@ -228,57 +210,68 @@ impl Vm {
     /// `run_defers` — `false` ONLY on the fatal-deadlock unwind, TICKET-152: the frames are dropped
     /// where they stand.
     ///
-    /// `park` — TICKET-287: the fault unwind of a fiber's outermost dispatch loop. At a frame whose
-    /// escaped nursery is fiber-owned and not done, the unwind stops BEFORE that frame's abort and
-    /// defers, with `join_suspend` set ([`Vm::park_abort_origin`]); the caller stores a
-    /// [`FaultPark`](super::frames::FaultPark) and re-enters here at the same frame on resume.
+    /// The synchronous unwind: a hard halt's, a fatal deadlock's, and a bypass inside a nested loop.
+    /// A fault's or a cancel's unwind runs its `defer`s on the dispatch loop ([`Vm::unwind_on`]);
+    /// both report each frame's escaped nurseries above [`Vm::escaped_floor`] before its `defer`s
+    /// and drop it with [`Vm::pop_unwound_frame`]. A drain
+    /// trampoline met on the way ends its drain ([`Vm::drop_drain_frame`]): the fault its records
+    /// raised ranks as a `defer` fault of this unwind.
     pub(super) fn unwind_deferred_escaped(
         &mut self,
         target_frame_len: usize,
         report_escaped: bool,
         run_defers: bool,
-        park: bool,
     ) -> (Option<RuntimeError>, Option<RuntimeError>) {
         let mut err = None;
         let mut escaped_err: Option<RuntimeError> = None;
         while self.frames.len() > target_frame_len {
             let fi = self.frames.len() - 1;
-            // Report this frame's escaped nurseries BEFORE its defers (drain pops innermost-first, so
-            // inner `parallel:` levels report before the frame's implicit one — the interp's order).
             if report_escaped {
-                let f = &self.frames[fi];
-                let floor = if f.is_toplevel && f.has_implicit_nursery {
-                    f.nursery_len + 1 // preserve the module nursery
-                } else {
-                    f.nursery_len
-                };
-                let floor = floor.min(self.nurseries.len());
-                if park && let Some(origin) = self.park_abort_origin(floor) {
-                    self.join_suspend = Some(origin);
-                    return (err, escaped_err);
-                }
-                let child = self.drain_escaped_nursery(floor);
+                let child = self.drain_escaped_nursery(self.escaped_floor(fi));
                 escaped_err = escaped_err.or(child);
             }
-            if run_defers && let Some(e) = self.drain_deferred(fi, 0) {
+            if self.frames[fi].proto == DRAIN_PROTO {
+                if let Some(e) = self.drop_drain_frame(fi) {
+                    err = Some(e);
+                }
+            } else if run_defers && let Some(e) = self.drain_deferred(fi, 0) {
                 err = Some(e);
             }
-            let frame = self.frames.pop().unwrap();
-            self.drop_ret(frame.ret, frame.base);
-            if frame.counted {
-                self.call_depth -= 1;
-            }
-            self.stack.truncate(frame.base);
-            self.cur_base = self.frames.last().map(|f| f.base).unwrap_or(0);
-            while self
-                .handlers
-                .last()
-                .is_some_and(|h| h.frame_len > self.frames.len())
-            {
-                self.handlers.pop();
-            }
+            self.pop_unwound_frame();
         }
         (err, escaped_err)
+    }
+
+    /// The nurseries an unwind of frame `fi` reports as escaped, before the frame's `defer`s: those
+    /// above this count (innermost-first, so inner `parallel:` levels report before the frame's
+    /// implicit one — the interp's order). The module nursery is kept.
+    pub(super) fn escaped_floor(&self, fi: usize) -> usize {
+        let f = &self.frames[fi];
+        let floor = if f.is_toplevel && f.has_implicit_nursery {
+            f.nursery_len + 1 // preserve the module nursery
+        } else {
+            f.nursery_len
+        };
+        floor.min(self.nurseries.len())
+    }
+
+    /// Drop the top frame of an unwind, after its `defer`s, with the `recover:` handlers it
+    /// installed.
+    pub(super) fn pop_unwound_frame(&mut self) {
+        let frame = self.frames.pop().unwrap();
+        self.drop_ret(frame.ret, frame.base);
+        if frame.counted {
+            self.call_depth -= 1;
+        }
+        self.stack.truncate(frame.base);
+        self.cur_base = self.frames.last().map(|f| f.base).unwrap_or(0);
+        while self
+            .handlers
+            .last()
+            .is_some_and(|h| h.frame_len > self.frames.len())
+        {
+            self.handlers.pop();
+        }
     }
 
     pub(super) fn do_try(&mut self, span: Span) -> Result<(), RuntimeError> {
@@ -311,107 +304,17 @@ impl Vm {
                 // A `?` directly inside a `recover:` block (a handler installed in THIS frame)
                 // short-circuits to that boundary (try-block style): the `Err`/`None` value becomes
                 // the recover's result. Function-scoped `?` (no same-frame handler) falls through.
-                let frame_len = self.frames.len();
-                let same_frame = self
-                    .handlers
-                    .last()
-                    .copied()
-                    .filter(|h| h.frame_len == frame_len);
-                // The escaped `parallel:` body's defers (ORDERING below), drained before the
-                // handler pops so the TICKET-287 park can still rewind this `?`. A re-run finds
+                // The escaped `parallel:` body's defers (ORDERING in `try_escape`), drained before
+                // the handler pops so the TICKET-287 park can still rewind this `?`. A re-run finds
                 // them consumed and takes back the fault the first run parked with.
-                let body_defers = match same_frame {
-                    Some(h) if self.nurseries.len() > h.nursery_len => {
-                        let floor = self.nursery_defer_floors[h.nursery_len];
-                        let parked = self.take_escape_park();
-                        self.drain_frame_to(floor).or(parked)
-                    }
-                    _ => None,
-                };
-                // TICKET-287 — a fiber-owned nursery that is not done parks this fiber, as
-                // `park_escaped_abort` does for `return`. A body defer fault parks with it.
-                if let Some(h) = same_frame
-                    && let Some(origin) = self.park_abort_origin(h.nursery_len)
+                if let Some(h) = self.same_frame_handler()
+                    && self.nurseries.len() > h.nursery_len
                 {
-                    if let Some(e) = body_defers {
-                        self.store_escape_park(e);
-                    }
-                    self.rewind_op();
-                    self.join_suspend = Some(origin);
-                    return Ok(());
+                    let floor = self.nursery_defer_floors[h.nursery_len];
+                    let parked = self.take_escape_park();
+                    return self.drain_then(floor, DrainCont::TryBody { span, parked });
                 }
-                if let Some(h) = self.handlers.pop_if(|h| h.frame_len == frame_len) {
-                    self.stack.truncate(h.stack_len);
-                    self.push(v); // the recover's value slot, rooted across the drains below
-                    self.call_depth = h.call_depth;
-                    // Drop scope markers of defer scopes opened inside the recover block — the `?`
-                    // jumps past their `LeaveDeferScope`s, so they would otherwise leak.
-                    self.frames
-                        .last_mut()
-                        .unwrap()
-                        .defer_markers
-                        .truncate(h.markers_len);
-                    // TASK B — a recover-scoped `?` jumps past the `JoinNursery` of any `parallel:`
-                    // opened inside the recover block: cancel its tasks HERE
-                    // (before the handler binds its result and execution continues), so a recover-caught
-                    // `?` reports IDENTICALLY-AND-AS-EARLY as an uncaught one — matching the interp,
-                    // whose `exec_parallel` reports during the `?` unwind, before the recover's value is
-                    // produced. Without this the nursery lingered until the whole frame returned (the
-                    // report then trailed `print("recovered")`, an interp/VM divergence).
-                    //
-                    // ORDERING (matches the interp oracle): the escaped `parallel:` BODY's own defers
-                    // must run BEFORE the nursery reclaim, and the recover block's defers AFTER it —
-                    // because in the interp the body is its own `exec_scoped_block` whose defers drain
-                    // as the `?` unwinds out of the body, and only then does `exec_parallel` report;
-                    // the recover block's defers run later, at the recover boundary. So: drain the
-                    // body defers down to the outermost escaped nursery's floor, report, then drain the
-                    // remaining (recover-block) defers down to the handler's install-time floor. A body
-                    // defer fault is held and superseded by any later recover-block defer fault.
-                    let mut body_defer_err = body_defers;
-                    if let Some(e) = body_defer_err.take() {
-                        body_defer_err = Some(self.cleanup_halt(e)?);
-                    }
-                    // TICKET-147 — the propagated `Err` is the recover's value; a body defer fault
-                    // supersedes it, and an aborted nursery's child fault fills that gap.
-                    let child = self.drain_escaped_nursery(h.nursery_len);
-                    body_defer_err = body_defer_err.or(child);
-                    // Drain the recover block's own defers before binding the result. A fault in one
-                    // supersedes the propagated value (becomes the recover's `Err`); a recover-block
-                    // defer fault in turn supersedes a body defer fault (it unwinds later).
-                    // A body defer fault becomes the recover's `Err` when no recover-block defer
-                    // faulted (Go semantics — a defer fault supersedes).
-                    let fault = match self.drain_frame_to(h.defer_len) {
-                        Some(e) => Some(self.cleanup_halt(e)?),
-                        None => body_defer_err,
-                    };
-                    // With no fault, the propagated Result/Option value, already in place, IS the result.
-                    if let Some(e) = fault {
-                        self.pop(); // superseded
-                        let sp = e.span;
-                        let msg = self.alloc_str(e.message);
-                        self.stamp_err_span(msg, sp);
-                        let err = self.alloc_enum("Result", "Err", &[msg]);
-                        self.push(err);
-                    }
-                    // A fault either drain above raised is handled here; a trace one of them
-                    // captured in its own nested loop must not decorate a later uncaught fault.
-                    self.fault_trace = None;
-                    self.fault_trace_depth = 0;
-                    self.jump(h.ip);
-                    return Ok(());
-                }
-                // A `?` at the top level (no enclosing function) is an unhandled error → exit. Use
-                // the `?` op's own `span` so the reported location matches the interp (which threads
-                // the `?`'s `expr.span` through its propagation marker).
-                if self.frames.last().unwrap().is_toplevel {
-                    return Err(self.top_level_error(v, span).unwrap_or_else(|| {
-                        self.err(format!("unhandled error: {}", self.display(v)), span)
-                    }));
-                }
-                // Otherwise early-return this value from the enclosing function (running its
-                // deferred calls first; a fault in one propagates as a fault). `v` is on top.
-                self.do_return(true)?;
-                return Ok(());
+                return self.try_escape(span, None);
             }
         }
         Err(self.err(
@@ -421,6 +324,127 @@ impl Vm {
             ),
             span,
         ))
+    }
+
+    /// The `recover:` handler installed in the top frame, if any.
+    fn same_frame_handler(&self) -> Option<Handler> {
+        let frame_len = self.frames.len();
+        self.handlers
+            .last()
+            .copied()
+            .filter(|h| h.frame_len == frame_len)
+    }
+
+    /// The `?` of `do_try` after the escaped `parallel:` body's defers ran (`body_defers`: their
+    /// fault). The propagated value is on top of the stack.
+    pub(super) fn try_escape(
+        &mut self,
+        span: Span,
+        body_defers: Option<RuntimeError>,
+    ) -> Result<(), RuntimeError> {
+        let v = *self.stack.last().expect("the propagated value");
+        let frame_len = self.frames.len();
+        let same_frame = self.same_frame_handler();
+        // TICKET-287 — a fiber-owned nursery that is not done parks this fiber, as
+        // `park_escaped_abort` does for `return`. A body defer fault parks with it.
+        if let Some(h) = same_frame
+            && let Some(origin) = self.park_abort_origin(h.nursery_len)
+        {
+            if let Some(e) = body_defers {
+                self.store_escape_park(e);
+            }
+            self.rewind_op();
+            self.join_suspend = Some(origin);
+            return Ok(());
+        }
+        if let Some(h) = self.handlers.pop_if(|h| h.frame_len == frame_len) {
+            self.stack.truncate(h.stack_len);
+            self.push(v); // the recover's value slot, rooted across the drains below
+            self.call_depth = h.call_depth;
+            // Drop scope markers of defer scopes opened inside the recover block — the `?`
+            // jumps past their `LeaveDeferScope`s, so they would otherwise leak.
+            self.frames
+                .last_mut()
+                .unwrap()
+                .defer_markers
+                .truncate(h.markers_len);
+            // TASK B — a recover-scoped `?` jumps past the `JoinNursery` of any `parallel:`
+            // opened inside the recover block: cancel its tasks HERE
+            // (before the handler binds its result and execution continues), so a recover-caught
+            // `?` reports IDENTICALLY-AND-AS-EARLY as an uncaught one — matching the interp,
+            // whose `exec_parallel` reports during the `?` unwind, before the recover's value is
+            // produced. Without this the nursery lingered until the whole frame returned (the
+            // report then trailed `print("recovered")`, an interp/VM divergence).
+            //
+            // ORDERING (matches the interp oracle): the escaped `parallel:` BODY's own defers
+            // must run BEFORE the nursery reclaim, and the recover block's defers AFTER it —
+            // because in the interp the body is its own `exec_scoped_block` whose defers drain
+            // as the `?` unwinds out of the body, and only then does `exec_parallel` report;
+            // the recover block's defers run later, at the recover boundary. So: drain the
+            // body defers down to the outermost escaped nursery's floor, report, then drain the
+            // remaining (recover-block) defers down to the handler's install-time floor. A body
+            // defer fault is held and superseded by any later recover-block defer fault.
+            let mut body_defer_err = body_defers;
+            if let Some(e) = body_defer_err.take() {
+                body_defer_err = Some(self.cleanup_halt(e)?);
+            }
+            // TICKET-147 — the propagated `Err` is the recover's value; a body defer fault
+            // supersedes it, and an aborted nursery's child fault fills that gap.
+            let child = self.drain_escaped_nursery(h.nursery_len);
+            body_defer_err = body_defer_err.or(child);
+            // Drain the recover block's own defers before binding the result (`try_recover`).
+            return self.drain_then(
+                h.defer_len,
+                DrainCont::TryRecover {
+                    ip: h.ip,
+                    body: body_defer_err,
+                },
+            );
+        }
+        // A `?` at the top level (no enclosing function) is an unhandled error → exit. Use
+        // the `?` op's own `span` so the reported location matches the interp (which threads
+        // the `?`'s `expr.span` through its propagation marker).
+        if self.frames.last().unwrap().is_toplevel {
+            return Err(self.top_level_error(v, span).unwrap_or_else(|| {
+                self.err(format!("unhandled error: {}", self.display(v)), span)
+            }));
+        }
+        // Otherwise early-return this value from the enclosing function (running its
+        // deferred calls first; a fault in one propagates as a fault). `v` is on top.
+        self.do_return(true)
+    }
+
+    /// The recover-scoped `?` after its recover block's defers ran (`drained`: their latest
+    /// fault): bind the recover's value and resume at its exit `ip`. A fault in one of those
+    /// defers supersedes the propagated value (becomes the recover's `Err`); a recover-block
+    /// defer fault in turn supersedes the body defer fault `body` (it unwinds later). A body
+    /// defer fault becomes the recover's `Err` when no recover-block defer faulted (Go
+    /// semantics — a defer fault supersedes).
+    pub(super) fn try_recover(
+        &mut self,
+        ip: usize,
+        body: Option<RuntimeError>,
+        drained: Option<RuntimeError>,
+    ) -> Result<(), RuntimeError> {
+        let fault = match drained {
+            Some(e) => Some(self.cleanup_halt(e)?),
+            None => body,
+        };
+        // With no fault, the propagated Result/Option value, already in place, IS the result.
+        if let Some(e) = fault {
+            self.pop(); // superseded
+            let sp = e.span;
+            let msg = self.alloc_str(e.message);
+            self.stamp_err_span(msg, sp);
+            let err = self.alloc_enum("Result", "Err", &[msg]);
+            self.push(err);
+        }
+        // A fault either drain raised is handled here; a trace one of them captured in its own
+        // loop must not decorate a later uncaught fault.
+        self.fault_trace = None;
+        self.fault_trace_depth = 0;
+        self.jump(ip);
+        Ok(())
     }
 
     // ----- construction / access -----

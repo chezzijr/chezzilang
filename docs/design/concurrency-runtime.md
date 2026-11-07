@@ -158,11 +158,13 @@ blocking wait still parks it.
 **What still re-enters.** A push is legal only from the dispatch loop (`flat`, the `ic != NO_IC`
 rule). A hook reached from a nested container walk (`==`/`hash`/`str`/`<` inside a list, tuple, map
 or set), a map/set probe, `unique`/`dedup`, set algebra, a tuple or list `sort_by_key` key,
-`drain_iterable` (`T.from_iter(x)` where `x` has an `iter` hook), a `json.decode` default thunk, a
-callback inside a deferred native method and an FFI callback keep `Vm::reentered`: the fiber
-demotes, and `main` there is unjudged (`gaps.md` W23-1). A `defer` body runs in a synchronous drain
-too, but it is judged in `main` through the `deferring` exception of `BlockCtx::judged`; a
-frame-based defer drain is a follow-up plan. The grid is `tests/callback_park_grid.rs`: every
+`drain_iterable` (`T.from_iter(x)` where `x` has an `iter` hook), a `json.decode` default thunk and
+an FFI callback keep `Vm::reentered`: the fiber demotes, and `main` there is unjudged (`gaps.md`
+W23-1). A `defer` drain runs on frames too (since 2026-11-07, `src/vm/defer_drain.rs`): it is a
+trampoline frame that calls each record through a real call op, so a wait in a `defer` body, or in a
+callback of a deferred native method (`defer xs.map(f)`), parks its task and is judged in `main`.
+Only the synchronous hard-halt drains (`--max-heap`, `--timeout`) run on the Rust stack; a wait in
+one is still judged in `main`, through the `deferring` exception of `BlockCtx::judged`. The grid is `tests/callback_park_grid.rs`: every
 callback kind × `main`, a helper, top level, `spawn:` and a `test fn`, with no sender (`deadlock`,
 the same text at T=1, 2, 4) and with a live sender (the golden output, no false deadlock).
 

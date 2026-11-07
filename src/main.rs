@@ -494,11 +494,17 @@ fn apply_env_sched_seed(cmd: &str) {
     }
 }
 
-/// Under `CHEZZI_SCHED_STATS=1`, print the run's worker count to stderr: `[sched-stats] workers=<n>`.
-/// It is [`vm::worker_count`], the one count the pool, every scheduler and the eager gate are sized by.
+/// Under `CHEZZI_SCHED_STATS=1`, print the run's worker count and demote count to stderr:
+/// `[sched-stats] workers=<n> demotes=<m>`. `workers` is [`vm::worker_count`], the one count the
+/// pool, every scheduler and the eager gate are sized by; `demotes` is [`vm::demote_count`], how
+/// many workers handed their slot to a replacement thread because a wait could not park.
 fn report_sched_stats(code: ExitCode) -> ExitCode {
     if std::env::var_os("CHEZZI_SCHED_STATS").is_some() {
-        chezzi::errln!("[sched-stats] workers={}", vm::worker_count());
+        chezzi::errln!(
+            "[sched-stats] workers={} demotes={}",
+            vm::worker_count(),
+            vm::demote_count()
+        );
     }
     code
 }

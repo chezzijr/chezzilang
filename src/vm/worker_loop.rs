@@ -282,6 +282,7 @@ impl Vm {
                 return false;
             }
             self.demoted = true;
+            DEMOTES.fetch_add(1, Ordering::Relaxed);
         }
         true
     }
@@ -634,9 +635,11 @@ impl Vm {
         // TICKET-096 review fix — a delivered cut's floor indexes THIS fiber's `nurseries` (swapped
         // by `swap_ctx`, not carried in `FiberCtx`), so a cut left by the fiber that just parked/died
         // on this shell must not survive into the next fiber scheduled in here, or an unrelated
-        // `recover:` in that fiber is wrongly bypassed (`run_until`'s `owner_bypass`).
-        self.cut = None;
-        self.cancel_unwind_faulted = false;
+        // `recover:` in that fiber is wrongly bypassed (`run_until`'s `owner_bypass`). The cut and
+        // its latch are this fiber's own: saved at every leave below and taken back here, so an
+        // unwind that parks or yields (a `defer` drain on frames, a fault park) keeps its cut.
+        self.cut = fiber.cut.take();
+        self.cancel_unwind_faulted = std::mem::take(&mut fiber.cancel_unwind_faulted);
         self.pending_exit = None;
         // D3 — a fresh reduction budget on a fresh slice (BEAM semantics). TICKET-199 — a `runnext`
         // pick (`Slice::Inherit`, Go `inheritTime`) keeps the budget the previous fiber left, so a
@@ -652,6 +655,8 @@ impl Vm {
         let resume_native = fiber.resume_native.take();
         self.pending = fiber.pending.take();
         self.fault_park = fiber.fault_park.take();
+        let verdict_cut = fiber.defer_cut.take();
+        let park_site = fiber.park_site;
         let disp = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             // D5 — lower + push the offloaded native's result before resuming, so the operand stack
             // holds what the `Call` would have pushed and `run_until` continues correctly. The `Err`
@@ -701,17 +706,27 @@ impl Vm {
                         // re-stamping the hard-halt markers a mid-unwind `defer` fault would strip, so
                         // `--timeout`/`--max-heap` stay un-catchable. A native PANIC keeps its
                         // documented no-defer behavior: it sets neither the cancel latch nor a marker.
-                        let rte = if self.is_cancelled() || rte.is_over_memory || rte.is_timed_out {
-                            let (over_mem, timed) = (rte.is_over_memory, rte.is_timed_out);
-                            // TICKET-135 (W14-39): as in `run_until`'s cancel bypass, abort the
-                            // escaped nurseries of a task whose offloaded sleep a cancel ended.
-                            let r = self.unwind_cancelled(0, self.is_cancelled(), rte);
-                            let r = if over_mem { r.over_memory() } else { r };
-                            if timed { r.timed_out() } else { r }
+                        // A hard halt unwinds on the Rust stack (its `defer`s run synchronously);
+                        // a cancelled task's fault takes `run_until`'s own fault arm, whose cancel
+                        // funnel runs its `defer`s on frames, so a wait in one parks.
+                        if self.is_cancelled() && !rte.is_over_memory && !rte.is_timed_out {
+                            if let Err(e) = self.on_step_fault(0, rte) {
+                                return Disp::Finish(self.classify_mn_outcome(Err(e)));
+                            }
                         } else {
-                            rte
-                        };
-                        return Disp::Finish(self.classify_mn_outcome(Err(rte)));
+                            let rte = if rte.is_over_memory || rte.is_timed_out {
+                                let (over_mem, timed) = (rte.is_over_memory, rte.is_timed_out);
+                                // TICKET-135 (W14-39): as in `run_until`'s cancel bypass, abort
+                                // the escaped nurseries of a task whose offloaded sleep a cancel
+                                // ended.
+                                let r = self.unwind_cancelled(0, self.is_cancelled(), rte);
+                                let r = if over_mem { r.over_memory() } else { r };
+                                if timed { r.timed_out() } else { r }
+                            } else {
+                                rte
+                            };
+                            return Disp::Finish(self.classify_mn_outcome(Err(rte)));
+                        }
                     }
                 }
             }
@@ -751,7 +766,17 @@ impl Vm {
                     self.push(v);
                 }
             }
-            // TICKET-287 — a fiber that parked mid fault-unwind ([`Vm::store_fault_park`])
+            // A fiber the verdict cut while it waited in a `defer` ([`SchedCore::cut_parked`]) ends
+            // that wait with the verdict's fault here, before its rewound op re-runs. A fiber that
+            // parked mid fault-unwind resumes that unwind instead (its family is done now).
+            if self.join_suspend.is_none()
+                && self.fault_park.is_none()
+                && let Some(how) = verdict_cut
+                && let Err(e) = self.take_verdict_cut(how, park_site, span)
+            {
+                return Disp::Finish(self.classify_mn_outcome(Err(e)));
+            }
+            // TICKET-287 — a fiber that parked mid fault-unwind ([`FaultPark`](super::frames::FaultPark))
             // resumes that unwind here, not at its `ip`. It may park again at a lower level. A park
             // raised by this resume's own halt arms above (`join_suspend` already set) has not
             // waited yet: it goes to the join as it is.
@@ -823,6 +848,8 @@ impl Vm {
         .unwrap_or_else(|p| Disp::Finish(self.panic_outcome(p, span)));
         fiber.pending = self.pending.take();
         fiber.fault_park = self.fault_park.take();
+        fiber.cut = self.cut;
+        fiber.cancel_unwind_faulted = self.cancel_unwind_faulted;
         // A fiber that parks carries its site; one that runs on carries `None`.
         fiber.park_site = self.park_site.take();
         fiber.park_deadline = self.deadline;

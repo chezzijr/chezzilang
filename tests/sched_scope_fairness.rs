@@ -162,6 +162,42 @@ fn fiber_owned_nursery_scope_id_is_stable_two_deep_child_fault_at_default_thread
     }
 }
 
+/// A cancelled cap-0 sender whose `send` reads its cancel just after a receiver took the offer:
+/// the send happened (DEC-185), so the cancel was not delivered and must not latch. A latched
+/// cancel suppresses every later cancel check of that sender, and it ping-pongs with the
+/// receiver forever.
+const CANCELLED_SENDER_OFFER_TAKEN: &str = r#"fn main():
+    for _k in 0..200:
+        c := Channel[int](0)
+        _r := recover:
+            parallel:
+                spawn:
+                    parallel:
+                        spawn:
+                            while true:
+                                c.send(1)
+                        spawn: panic("boom")
+                spawn:
+                    for _v in c:
+                        pass
+    print("done")
+main()
+"#;
+
+#[test]
+fn a_cancel_a_settled_send_did_not_deliver_leaves_no_latch() {
+    for t in ["2", "4"] {
+        for round in 0..3 {
+            let r = run(CANCELLED_SENDER_OFFER_TAKEN, t, "latch");
+            let (out, err, code) = r.expect("hang: no exit within 20s");
+            assert!(
+                out == "done\n" && code == Some(0),
+                "T={t} round {round}: code={code:?} stdout={out:?} stderr={err:?}"
+            );
+        }
+    }
+}
+
 /// Indent every line of `piece` by `n` spaces.
 fn indent(piece: &str, n: usize) -> String {
     let pad = " ".repeat(n);

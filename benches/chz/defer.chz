@@ -1,0 +1,20 @@
+# Bench: `defer` drain throughput (plan 2026-11-07-defer-drain-frames). Each of 500k calls
+# registers two defers, a closure (`defer:` block) and a native method call (`xs.pop`), and
+# drains both when it returns: one drain trampoline per return. Prints 125000250000.
+
+fn step(xs: List[int], acc: List[int], i: int):
+    defer:
+        acc[0] = acc[0] + i
+    xs.push(i)
+    defer xs.pop()
+
+fn main():
+    xs: List[int] = []
+    acc := [0]
+    i := 0
+    while i < 500000:
+        step(xs, acc, i + 1)
+        i += 1
+    print(acc[0])
+
+main()

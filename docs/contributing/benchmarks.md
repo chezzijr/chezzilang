@@ -221,6 +221,25 @@ Record: [2026-11](../history/benchmarks/2026-11.md) "Callbacks as frames".
 | generator loop (scratch bench) | −1.72% |
 | `s.update` loop (scratch bench, after Task 5) | −6.73% |
 
+### `defer` drain as frames (2026-11-07)
+
+Plan `2026-11-07-defer-drain-frames`: a `defer` drain is a trampoline frame (`src/vm/defer_drain.rs`).
+Release, `perf stat -e instructions:u`, median of 5 interleaved single runs, base `fb8edf37` built
+in its own worktree and target dir. Budget: +3% per bench. Record:
+[2026-11](../history/benchmarks/2026-11.md) "`defer` drain as frames".
+
+| bench | change vs base |
+|---|---|
+| `benches/chz/hof.chz` | −0.54% |
+| `benches/chz/hook_dispatch.chz` | −0.75% |
+| `benches/chz/struct.chz` | −1.19% |
+| `print(1)` | −0.07% |
+| `benches/chz/defer.chz` (new) | +2.71% |
+| `benches/sched/rendezvous_pingpong.chz` (cap-0 send) | +0.50% |
+
+2000 tasks that each wait in a `defer` at `--threads=2` (`tests/defer_park_scale.rs`): 5 OS threads
+and 0.47 s, `demotes=0`; before, 2005 threads and 38.3 s.
+
 ### Peak memory vs Go
 
 Peak process RSS, `benches/maxrss.py`, median of 3, 2026-07-25 after the four memory levers

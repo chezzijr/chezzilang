@@ -81,7 +81,7 @@ impl Compiler {
     /// exactly once). W14-4: a `parallel:` level the escape leaves runs its OWN body defers, then a
     /// `ReclaimNursery` (cancel + wait, so its children run their defers), and only then the defers
     /// of the enclosing blocks down to the loop body (inclusive) -- the order
-    /// `Vm::unwind_escaped_levels` gives `return`/`?`. Every level between a loop and its `break` is
+    /// `Vm::return_levels` gives `return`/`?`. Every level between a loop and its `break` is
     /// a `parallel:` level: implicit nurseries open at `FnComp` entry, below every loop's
     /// `nursery_floor`. The compiler's `defer_scopes`/`nursery_scopes` counts are unchanged: the
     /// scopes stay lexically open and emit their natural ops on the fall-through path.
