@@ -60,10 +60,10 @@ Contexts:
 | context | what it is |
 |---|---|
 | **Park** | an M:N fiber with no host frame under it |
-| **Demote** | an M:N fiber inside a native callback, `defer:`, generator resume or `Shared.update` closure |
+| **Demote** | an M:N fiber inside a nested native callback (a hook reached from a nested container walk, a map/set probe, `drain_iterable`, a `json.decode` default, an FFI callback) or a `defer:` drain. A hook, an operator, a HOF callback, a sort comparator, a `from_iter` drain, a `Shared`/`RwShared` closure and a generator body run as frames on the fiber, so their waits are **Park** (since 2026-11-07) |
 | **Builder** | the inline outermost-`parallel:` builder (`job` = it carries an eager `Executor` core) |
 | **PoolJob** | an eager `Executor` job |
-| **OwnThread** | `main`, a `main` `defer:`, `main` inside a callback |
+| **OwnThread** | `main` (inside a frame-run callback too), a `main` `defer:`, `main` inside a nested native callback |
 
 Modes:
 
@@ -110,10 +110,14 @@ How `will_return` drives the deadlock accounting, and the cells judged against G
 **Deliberate differences from Go**, each a `R` or hang cell of the table:
 
 - A socket op in an Executor job returns the "doesn't own its thread" `!e`; `connect` there too.
-- An unjudged context (`main` inside a real callback, a job inside a callback) with nothing that can
-  satisfy it HANGS, where Go faults: the verdict declines rather than risk a false fault
-  ([`lessons.md`](../../contributing/lessons.md) §4). The grid pins it (`recv/main_cb/Nothing` hangs,
-  `recv/main_defer/Nothing` faults).
+- An unjudged context (`main` inside a nested native callback, a job inside one) with nothing that
+  can satisfy it HANGS, where Go faults: the verdict declines rather than risk a false fault
+  ([`lessons.md`](../../contributing/lessons.md) §4). Since 2026-11-07 a callback that runs as a
+  frame (a hook, an operator, a HOF callback, a sort comparator, a `from_iter` drain, a box closure,
+  a generator body) is not one: `recv/main_cb/Nothing` (`[0].map(op)`) faults `deadlock`, and so does
+  `recv/main_defer/Nothing` (a `defer` body is judged through the drain's `deferring` exception).
+  What still hangs is the nested list of `docs/contributing/gaps.md` W23-1, pinned by the `Residual`
+  kinds of `tests/callback_park_grid.rs`.
 
 ---
 

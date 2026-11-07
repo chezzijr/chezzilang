@@ -132,6 +132,40 @@ waiter that held its permit sat out the full 5 ms whenever the holder was preemp
 closure, and the seeded two-box program (`CHEZZI_SCHED_SEED=1`, `--threads=1`) took about 9 s; it
 now runs under the 3 s debug `GRID_CEILING` (`tests/shared_update_contention.rs`).
 
+## A wait inside a callback
+
+**A callback runs as a frame, so its wait parks (plan `2026-11-07-frame-reentry`).** A wait in a
+hook, an operator (`a + b`, `x[k]`, `-x`, `in`, `==`, `<`), an f-string part, `print`'s `str`, a list
+HOF callback (`map`, `filter`, `fold`, `take_while`, `count`, `position`, `min_by`, the
+`sort_by_key` key pass), a sort comparator (`sort_by`, a struct key's `compare`, `sort()` and
+`min`/`max` over structs), a `T.from_iter(it)` drain, a `Shared`/`RwShared` closure or a generator
+body parks the fiber (Park) and is judged in `main` (OwnThread with `native_reentry == 0`), as in
+Go. The handler on the dispatch loop pushes the callee's frame with a `RetAction` (`CallFrame.ret`,
+`src/vm/ret_action.rs`, `Copy`, 2 bytes) and returns; `do_return` runs the rest of the op through
+`Vm::apply_ret`, and a frame that leaves without a return gives its state back through
+`Vm::drop_ret`. A loop keeps its state in stack slots below the callback frame (a HOF
+`[src, snap, acc, f, i]`, a drain `[src, list]`, `print` `[argc, i, line]`, a box `[box, f]`, a
+generator its handle), so it needs no extra GC root and no unwind change. A sort is an iterative
+merge (the same top-down split, walked with an explicit stack, so the comparator call order is
+unchanged). A generator resume copies the body's one saved frame onto the caller's stacks and
+copies it back at `yield`.
+
+A box guard belongs to the task, not the worker: the task's `held_guards` and guard token travel in
+its `FiberCtx` across a park. A task that holds a guard is not preempted at the D3 safepoint (its
+guard's waiters wait in place, so a yielded holder would cost each of them a demote budget); a
+blocking wait still parks it.
+
+**What still re-enters.** A push is legal only from the dispatch loop (`flat`, the `ic != NO_IC`
+rule). A hook reached from a nested container walk (`==`/`hash`/`str`/`<` inside a list, tuple, map
+or set), a map/set probe, `unique`/`dedup`, set algebra, a tuple or list `sort_by_key` key,
+`drain_iterable` (`T.from_iter(x)` where `x` has an `iter` hook), a `json.decode` default thunk, a
+callback inside a deferred native method and an FFI callback keep `Vm::reentered`: the fiber
+demotes, and `main` there is unjudged (`gaps.md` W23-1). A `defer` body runs in a synchronous drain
+too, but it is judged in `main` through the `deferring` exception of `BlockCtx::judged`; a
+frame-based defer drain is a follow-up plan. The grid is `tests/callback_park_grid.rs`: every
+callback kind × `main`, a helper, top level, `spawn:` and a `test fn`, with no sender (`deadlock`,
+the same text at T=1, 2, 4) and with a live sender (the golden output, no false deadlock).
+
 ## Wait implementation
 
 **Implementation notes.** *(Done. A new `Op::WaitPoll` holds the arm operands on the

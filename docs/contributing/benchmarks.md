@@ -202,6 +202,25 @@ requirement's `FnSig`. Now a slot is `{name, protocol key, slot}` behind an `Arc
 modules filter one per-process table (`std_slot_table`, a `OnceLock`). The remainder is that table's
 one-time derivation (~15k) and the prelude `int`/`float` slots.
 
+### Callbacks as frames (2026-11-07)
+
+Plan `2026-11-07-frame-reentry` (Tasks 2-6: hooks, HOF callbacks, sorts, box closures and
+generators run as frames with a `RetAction`). Release, `perf stat -e instructions:u`, median of 5,
+after Task 6, base `97012a20` built in its own worktree and target dir. Budget: +3% per bench.
+Record: [2026-11](../history/benchmarks/2026-11.md) "Callbacks as frames".
+
+| bench | change vs base |
+|---|---|
+| `benches/chz/hof.chz` | −2.75% |
+| `benches/chz/hook_dispatch.chz` | −4.51% |
+| `benches/chz/struct.chz` | −1.19% |
+| `benches/chz/list.chz` | −0.49% |
+| `benches/chz/many_list.chz` | +0.96% |
+| `print(1)` | −0.12% |
+| `sort_by` loop (scratch bench) | −0.02% |
+| generator loop (scratch bench) | −1.72% |
+| `s.update` loop (scratch bench, after Task 5) | −6.73% |
+
 ### Peak memory vs Go
 
 Peak process RSS, `benches/maxrss.py`, median of 3, 2026-07-25 after the four memory levers

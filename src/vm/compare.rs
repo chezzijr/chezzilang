@@ -25,7 +25,8 @@ impl Vm {
     /// `#[inline(never)]` keeps `step`'s own stack frame lean (its String/Vec locals would otherwise
     /// bloat the deep-recursion path `step → run_proto → run_until → step`).
     #[inline(never)]
-    pub(super) fn op_contains(&mut self, span: Span) -> Result<(), RuntimeError> {
+    /// `flat` as for [`Vm::arith`].
+    pub(super) fn op_contains(&mut self, flat: bool, span: Span) -> Result<(), RuntimeError> {
         let container = self.pop();
         let needle = self.pop();
         // `Contains` protocol (L5): a struct/enum with a `contains(self, item) -> bool` method
@@ -35,21 +36,17 @@ impl Vm {
         if let Some(h) = container.as_obj()
             && matches!(self.heap.get(h), Obj::Struct { .. } | Obj::Enum { .. })
         {
-            let Some(res) =
-                self.reentered(|vm| vm.invoke_hook(Hook::Contains, container, &[needle], span))?
-            else {
+            if !self.hook_op(
+                flat,
+                Hook::Contains,
+                container,
+                &[needle],
+                RetAction::ToBool,
+                span,
+            )? {
                 return Err(self.missing_hook(container, Hook::Contains, span));
-            };
-            return match res.as_bool() {
-                Some(b) => {
-                    self.push(Value::bool(b));
-                    Ok(())
-                }
-                None => Err(self.err(
-                    format!("contains() must return bool, got {}", self.type_name(res)),
-                    span,
-                )),
-            };
+            }
+            return Ok(());
         }
         let found = match container.view() {
             ValueView::Obj(h) => match self.heap.get(h) {
@@ -597,7 +594,8 @@ impl Vm {
     }
 
     /// Dispatch an ordering operator on two structs to the receiver's `compare(self, other) -> int`
-    /// method, mapping the sign of the result to a boolean.
+    /// method as a frame (it runs on the dispatch loop: `compare_op`'s only callers are steps); its
+    /// return maps the sign of the result to a boolean ([`RetAction::CmpOp`]).
     pub(super) fn struct_ordering(
         &mut self,
         op: &Op,
@@ -605,12 +603,11 @@ impl Vm {
         r: Value,
         span: Span,
     ) -> Result<(), RuntimeError> {
-        let ord = self.struct_compare(l, r, span)?;
-        let b = match op {
-            Op::Lt => ord.is_lt(),
-            Op::LtEq => ord.is_le(),
-            Op::Gt => ord.is_gt(),
-            Op::GtEq => ord.is_ge(),
+        let cmp = match op {
+            Op::Lt => Cmp::Lt,
+            Op::LtEq => Cmp::LtEq,
+            Op::Gt => Cmp::Gt,
+            Op::GtEq => Cmp::GtEq,
             Op::ConstInt(_)
             | Op::ConstFloat(_)
             | Op::ConstStr(_)
@@ -723,12 +720,15 @@ impl Vm {
             | Op::NewExecutor
             | Op::NewExecutorN => unreachable!(),
         };
-        self.push(Value::bool(b));
+        if !self.push_hook_frame(Hook::Compare, l, &[r], RetAction::CmpOp(cmp), span)? {
+            return Err(self.missing_hook(l, Hook::Compare, span));
+        }
         Ok(())
     }
 
     /// Call a struct's `compare(self, other) -> int` method and return the resulting `Ordering`.
-    /// Shared by ordering operators (`struct_ordering`) and `list.sort()` over Comparable structs.
+    /// The synchronous form, for a native walk: `list.sort()` over Comparable structs and the
+    /// sequence ordering walk (`struct_ordering` runs the hook as a frame).
     pub(super) fn struct_compare(
         &mut self,
         l: Value,
@@ -738,13 +738,7 @@ impl Vm {
         let Some(res) = self.reentered(|vm| vm.invoke_hook(Hook::Compare, l, &[r], span))? else {
             return Err(self.missing_hook(l, Hook::Compare, span));
         };
-        match self.int_val(res) {
-            Some(n) => Ok(n.cmp(&0)),
-            None => Err(self.err(
-                format!("compare() must return int, got {}", self.type_name(res)),
-                span,
-            )),
-        }
+        self.hook_ord(res, span)
     }
 
     /// Which lexicographic container `v` is, for the TICKET-146 ordering walk: `0` tuple, `1` list.

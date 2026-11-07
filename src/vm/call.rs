@@ -116,6 +116,58 @@ impl Vm {
         Ok(())
     }
 
+    /// The arity check of a call to a fn value (`closure`: a closure, whose lambda form cannot
+    /// declare a default and keeps the exact count and its message).
+    fn callee_arity(
+        &self,
+        proto: ProtoId,
+        closure: bool,
+        argc: usize,
+        span: Span,
+    ) -> Result<(), RuntimeError> {
+        let p = &self.program.protos[proto];
+        if !closure || p.min_arity < p.arity {
+            return self.check_proto_arity(proto, argc, span);
+        }
+        if argc != p.arity {
+            return Err(self.err(
+                format!("closure expects {} argument(s), got {argc}", p.arity),
+                span,
+            ));
+        }
+        Ok(())
+    }
+
+    /// [`Vm::invoke_value`] for a loop continuation on the dispatch loop: push `f`'s frame over
+    /// `args` with `ret` and return `true`; the loop runs it and its return applies `ret`, so a
+    /// wait in `f` parks like any call. `false`, with nothing pushed, for a callee that runs no
+    /// frame of its own (a native, a builtin, an extern, a generator fn): the caller runs it with
+    /// `invoke_value`.
+    pub(super) fn push_callback_frame(
+        &mut self,
+        f: Value,
+        args: &[Value],
+        ret: RetAction,
+        span: Span,
+    ) -> Result<bool, RuntimeError> {
+        let (proto, home, closure) = match self.callable(f) {
+            Some(Callee::Func { proto, home }) => (proto, home, None),
+            Some(Callee::Closure { proto, home }) => (proto, home, f.as_obj()),
+            Some(Callee::Native { .. } | Callee::Builtin(_) | Callee::Cffi(_)) | None => {
+                return Ok(false);
+            }
+        };
+        if self.program.protos[proto].is_generator {
+            return Ok(false);
+        }
+        self.callee_arity(proto, closure.is_some(), args.len(), span)?;
+        self.frame_depth_guard(true, span)?;
+        let base = self.stack.len();
+        self.stack.extend_from_slice(args);
+        self.finish_frame(proto, home, closure, base, true, false, span, ret);
+        Ok(true)
+    }
+
     /// Dispatch an already-evaluated callable `Value` on evaluated args, *returning* the result
     /// instead of pushing it. Shared by `do_call` (which pushes) and the higher-order list methods
     /// (which call it per element while keeping their source/result lists rooted on the stack).
@@ -135,7 +187,7 @@ impl Vm {
         };
         match callee_kind {
             Callee::Func { proto, home } => {
-                self.check_proto_arity(proto, argc, span)?;
+                self.callee_arity(proto, false, argc, span)?;
                 // Experimental generators — allocate, don't run (see `do_call`'s fast path).
                 if self.program.protos[proto].is_generator {
                     return Ok(self.alloc_generator(proto, home, None, args));
@@ -144,17 +196,7 @@ impl Vm {
             }
             Callee::Closure { proto, home } => {
                 let h = callee.as_obj().expect("callable is an object");
-                if self.program.protos[proto].min_arity < self.program.protos[proto].arity {
-                    self.check_proto_arity(proto, argc, span)?;
-                } else if argc != self.program.protos[proto].arity {
-                    return Err(self.err(
-                        format!(
-                            "closure expects {} argument(s), got {argc}",
-                            self.program.protos[proto].arity
-                        ),
-                        span,
-                    ));
-                }
+                self.callee_arity(proto, true, argc, span)?;
                 if self.program.protos[proto].is_generator {
                     return Ok(self.alloc_generator(proto, home, Some(h), args));
                 }
@@ -196,7 +238,7 @@ impl Vm {
                     for v in &items {
                         self.push(*v);
                     }
-                    self.do_print_sep(items.len(), &sep, &end, span)?;
+                    self.do_print_sep(items.len(), false, &sep, &end, false, span)?;
                     Ok(self.pop())
                 }
                 Builtin::Ord => self.builtin_ord(&args, span),
@@ -777,9 +819,26 @@ impl Vm {
         // TICKET-147 — a defer fault stays the root cause; an aborted nursery's child fault fills the gap.
         if let Some(e) = defer_err.or(escaped) {
             self.pop();
+            self.drop_ret(frame.ret, frame.base);
             return Err(e);
         }
-        Ok(())
+        // A hook frame's operator post-step, at the operator's own span.
+        match frame.ret {
+            RetAction::Push => Ok(()),
+            ret @ (RetAction::Discard
+            | RetAction::ToBool
+            | RetAction::EqBool { .. }
+            | RetAction::CmpOp(_)
+            | RetAction::Stringify
+            | RetAction::StringifyFmt
+            | RetAction::Hof(_)
+            | RetAction::Drain(_)
+            | RetAction::Print { .. }
+            | RetAction::Sort(_)
+            | RetAction::MinMax { .. }
+            | RetAction::Box(_)
+            | RetAction::Gen(_)) => self.apply_ret(ret, frame.call_span),
+        }
     }
 
     /// `defer f(args)` / `defer recv.m(args)` — pop the callee/receiver + `argc` args off the stack

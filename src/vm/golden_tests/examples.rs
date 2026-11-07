@@ -877,9 +877,8 @@ fn stack_trace_reports_call_chain() {
 
 /// W13-20: a fault raised inside a generator's body, driven by a `for` loop in an OUTER function,
 /// must report the FULL call chain (generator frames AND driver frames), not just one side. The
-/// generator swaps its own private frame stack into the live `Vm` while it runs (`swap_gen_ctx`),
-/// and `generator_next` restores the host frames before propagating the fault — so a fault captured
-/// while `self.frames` held only the generator's frames drops the driver's frames on the floor.
+/// generator's body frame runs on the driver's frame stack (`Vm::gen_resume`), so one capture
+/// holds both.
 #[test]
 fn generator_fault_trace_includes_driver_frames() {
     let src = "fn h() -> int:\n    xs: List[int] = []\n    return xs[3]\nfn g() -> Iterator[int]:\n    yield h()\nfn drive():\n    for x in g():\n        print(x)\nfn main():\n    drive()\nmain()\n";
@@ -921,6 +920,29 @@ fn generator_fault_trace_names_the_faulting_drain_site() {
         "outer is called at the faulting List.from_iter(g)"
     );
     assert_eq!(line_of("inner"), 6, "inner is driven by outer's for loop");
+}
+
+/// W14-35c: a `T.from_iter(g)` drain resumes `g` once per item; a fault on a later resume still
+/// names the `from_iter` call (line 6), not the `yield` the body last stopped at.
+#[test]
+fn generator_fault_trace_names_from_iter_on_a_later_resume() {
+    for ty in ["List", "Set"] {
+        let src = format!(
+            "fn g() -> Iterator[int]:\n    yield 1\n    yield 2\n    x := [1][4]\nfn main():\n    s := {ty}.from_iter(g())\n    print(s)\nmain()\n"
+        );
+        let dir = std::env::temp_dir().join("chezzi_gen_trace_test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(format!("drain_{ty}.chz"));
+        std::fs::write(&path, src).unwrap();
+        let (_out, _err, res, _) = run_file(&path);
+        let e = res.expect_err("program should fault");
+        let g = e
+            .trace
+            .iter()
+            .find(|f| f.function == "g")
+            .unwrap_or_else(|| panic!("no frame named g: {:?}", e.trace));
+        assert_eq!(g.span.line, 6, "{ty}.from_iter: g is called at the drain");
+    }
 }
 
 /// W13-20: the other half of the merge-guard bug — a `for` loop driving the generator directly in
@@ -987,10 +1009,9 @@ fn a_generator_fault_caught_by_the_driver_leaves_no_frames_behind() {
 }
 
 /// W13-20 guard: a generator fault raised by a DEFERRED `.next()` call, during an unwind a
-/// `recover:` catches, must not leave `Vm::gen_fault_prefix` set for a later, unrelated fault to
-/// pick up. `unwind_deferred` runs the deferred `.next()` outside the dispatch loop's own error
-/// arm, so the prefix `generator_next` parks on that inner fault is never taken there — it must be
-/// cleared when the OUTER fault is caught instead.
+/// `recover:` catches, must not leave its trace latched for a later, unrelated fault to pick up.
+/// `unwind_deferred` runs the deferred `.next()` in its own nested loop, which captures the inner
+/// fault's trace; it must be cleared when the OUTER fault is caught instead.
 #[test]
 fn a_deferred_generator_fault_does_not_leak_its_prefix_to_a_later_fault() {
     let src = "fn h() -> int:\n    xs: List[int] = []\n    return xs[3]\nfn g() -> Iterator[int]:\n    yield h()\nfn f():\n    it := g()\n    defer it.next()\n    ys: List[int] = []\n    print(ys[5])\nfn main():\n    r := recover:\n        f()\n    print(\"caught\")\n    zs: List[int] = []\n    print(zs[9])\nmain()\n";
@@ -1039,6 +1060,30 @@ fn a_defer_inside_a_recover_scoped_question_mark_does_not_leak_its_prefix() {
     assert_eq!(e.message, "index 9 out of bounds (len 0)");
     let names: Vec<&str> = e.trace.iter().map(|f| f.function.as_str()).collect();
     assert_eq!(names, vec!["main"]);
+}
+
+/// The same leak through a HOF callback (base `97012a20` printed `at h / at k / at main` for the
+/// later fault): a recover-block `defer [1].map(k)` whose `k` faults captures a trace in its own
+/// nested loop, and both catch paths (a fault, a `?`) discard it after their drains.
+#[test]
+fn a_recover_block_defer_callback_fault_does_not_leak_its_trace() {
+    for (tag, body) in [
+        ("fault", "ys: List[int] = []\n        print(ys[5])"),
+        ("try", "maybe()?"),
+    ] {
+        let src = format!(
+            "fn h() -> int:\n    xs: List[int] = []\n    return xs[3]\nfn k(x: int) -> int:\n    return h()\nfn maybe() -> int!str:\n    return !\"boom\"\nfn main():\n    r := recover:\n        defer [1].map(k)\n        {body}\n    print(\"caught\")\n    zs: List[int] = []\n    print(zs[9])\nmain()\n"
+        );
+        let dir = std::env::temp_dir().join("chezzi_gen_trace_test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(format!("defer_callback_leak_{tag}.chz"));
+        std::fs::write(&path, src).unwrap();
+        let (_out, _err, res, _) = run_file(&path);
+        let e = res.expect_err("program should fault");
+        assert_eq!(e.message, "index 9 out of bounds (len 0)", "{tag}");
+        let names: Vec<&str> = e.trace.iter().map(|f| f.function.as_str()).collect();
+        assert_eq!(names, vec!["main"], "{tag}");
+    }
 }
 
 /// Helper: write deep-infinite-recursion source to a temp file and return its path. The recursion

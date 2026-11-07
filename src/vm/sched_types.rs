@@ -103,6 +103,16 @@ pub(super) struct FiberCtx {
     pub(super) eager_scheds: Vec<Option<EagerScope>>,
     pub(super) fault_trace: Option<Vec<TraceFrame>>,
     pub(super) fault_trace_depth: usize,
+    /// The task's guard identity ([`Vm::guard_token`]); 0 until its first swap-in.
+    pub(super) guard_token: u64,
+    /// See [`Vm::held_reads`]: the read guards the task holds, carried across a park.
+    pub(super) held_reads: Vec<usize>,
+    /// See [`Vm::held_guards`]: the guards the task's box-closure frames hold. Dropping a context
+    /// releases them.
+    pub(super) held_guards: Vec<super::core::UpdateGuard>,
+    /// See [`Vm::held_gens`]: the holds the task's generator body frames keep. Dropping a context
+    /// puts those generators back `Done`.
+    pub(super) held_gens: Vec<super::core::GenHold>,
     /// M1.6 — this context owns its own per-fiber side state (`executors`, `str_intern` and the
     /// in-flight socket-op state below), so [`Vm::swap_ctx`] swaps it. `false`
     /// for a context that aliases the shell's (tests only: every fiber and box context owns its

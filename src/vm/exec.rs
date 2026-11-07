@@ -193,25 +193,20 @@ impl Vm {
             poll_park: None,
             pending_connect: None,
             held_reads: Vec::new(),
+            held_guards: Vec::new(),
+            held_gens: Vec::new(),
             poll_timed_out: false,
             poll_deadline: None,
             poll_partial: None,
             poll_written: None,
             native_reentry: 0,
-            guard_token: {
-                static GUARD_TOKENS: std::sync::atomic::AtomicU64 =
-                    std::sync::atomic::AtomicU64::new(0);
-                GUARD_TOKENS.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1
-            },
+            guard_token: fresh_guard_token(),
             walk_base: 0,
             eq_hook_off: false,
             stdout_writes: 0,
-            reds: 0,             // D3 — set to CONTEXT_REDS per schedule-in (run_one_fiber)
-            yield_now: false,    // D3
-            gen_yielding: false, // experimental generators
-            gen_host_ctx: Vec::new(),
-            active_generators: Vec::new(),
-            gen_fault_prefix: Vec::new(),
+            reds: 0,          // D3 — set to CONTEXT_REDS per schedule-in (run_one_fiber)
+            yield_now: false, // D3
+            gen_spare: None,
             repr_active: Vec::new(),
             wid: 0,         // D5 owe #3 (Path C) — set in mn_worker_loop
             demoted: false, // D5 owe #3 (Path C)
@@ -245,18 +240,7 @@ impl Vm {
     /// M1.6 — a task switch: [`Vm::swap_ctx`] plus the task's output stream. A task owns its
     /// `out` / `stderr` (Decision F), so only a task switch moves them; a box call runs in its
     /// caller's stream and swaps with `swap_ctx` alone.
-    ///
-    /// M1.7 (brief item 4) — the running generators and their parked hosts are `Vm` fields that
-    /// `FiberCtx` does not carry, so a task switch asserts they are empty: a generator body runs
-    /// under [`Vm::reentered`], where a blocking op demotes instead of parking, so no fiber parks
-    /// with one open. `Vm::gc_roots` roots them while they are open.
     pub(super) fn swap_task(&mut self, ctx: &mut FiberCtx) {
-        assert!(
-            self.gen_host_ctx.is_empty()
-                && self.active_generators.is_empty()
-                && self.held_reads.is_empty(),
-            "a task switch with a generator or a box read open"
-        );
         self.swap_ctx(ctx);
         std::mem::swap(&mut self.out, &mut ctx.out);
         std::mem::swap(&mut self.stderr, &mut ctx.stderr);
@@ -287,6 +271,15 @@ impl Vm {
         std::mem::swap(&mut self.eager_scheds, &mut ctx.eager_scheds);
         std::mem::swap(&mut self.fault_trace, &mut ctx.fault_trace);
         std::mem::swap(&mut self.fault_trace_depth, &mut ctx.fault_trace_depth);
+        // The task's guard identity and the guards it holds: a task parked in a box closure keeps
+        // them. A context gets its token on its first swap-in.
+        if ctx.guard_token == 0 {
+            ctx.guard_token = fresh_guard_token();
+        }
+        std::mem::swap(&mut self.guard_token, &mut ctx.guard_token);
+        std::mem::swap(&mut self.held_reads, &mut ctx.held_reads);
+        std::mem::swap(&mut self.held_guards, &mut ctx.held_guards);
+        std::mem::swap(&mut self.held_gens, &mut ctx.held_gens);
         // stdin is NOT swapped: it is ONE source every task shares (Go/Python) — see `Stdin` and
         // `spawn_worker`, which hands the M:N worker the same shared handle.
         //
@@ -445,7 +438,7 @@ impl Vm {
     /// Non-generic and out of line: `guarded` is generic over its callback, so its body is
     /// monomorphized at every call site and these rungs would be duplicated into all of them.
     #[inline(never)]
-    fn guarded_checkpoint(&mut self) -> Result<(), RuntimeError> {
+    pub(super) fn guarded_checkpoint(&mut self) -> Result<(), RuntimeError> {
         // CANCELLATION CHECKPOINT — a native LOOP that re-enters user code per element drives it
         // from a RUST loop (`list.map`/`filter`/`fold`, `sort`'s comparator, an `Executor` handler:
         // `for e in .. { self.guarded(|vm| vm.invoke_value(f, ..))? }`, call.rs). A single-call
@@ -523,19 +516,6 @@ impl Vm {
 
     // ----- experimental generators (VM-only) -----
 
-    /// Swap the live execution context (frames/stack/depth/base/handlers) with a parked [`GenCtx`].
-    /// Smaller sibling of [`Vm::swap_ctx`]: a generator shares the host heap (the same share-by-ref,
-    /// decision A, as a fiber with no heap of its own) and cannot open nurseries/spawn
-    /// (checker-forbidden), so none of the
-    /// heap-keyed or nursery state moves.
-    pub(super) fn swap_gen_ctx(&mut self, ctx: &mut GenCtx) {
-        std::mem::swap(&mut self.frames, &mut ctx.frames);
-        std::mem::swap(&mut self.stack, &mut ctx.stack);
-        std::mem::swap(&mut self.call_depth, &mut ctx.call_depth);
-        std::mem::swap(&mut self.cur_base, &mut ctx.cur_base);
-        std::mem::swap(&mut self.handlers, &mut ctx.handlers);
-    }
-
     /// Allocate a not-yet-started generator object over a generator proto + its call args. Calling a
     /// `yield`-ing function lands here instead of running the body (see `do_call`/`invoke_value`).
     pub(super) fn alloc_generator(
@@ -549,10 +529,10 @@ impl Vm {
             proto,
             home,
             closure,
-            parked: rvec::AtomicBox::new(Parked {
+            parked: Arc::new(rvec::AtomicBox::new(Parked {
                 state: GenState::Pending(args),
                 ctx: GenCtx::default(),
-            }),
+            })),
         };
         Value::obj(self.heap.alloc(Obj::Generator(Box::new(core))))
     }
@@ -578,159 +558,201 @@ impl Vm {
         }
     }
 
-    /// Resume a generator until its next `yield` (→ `Some(v)`) or until its body ends (→ `None`,
-    /// state `Done`). Driven intrinsically by `.next()` (see `do_method_call`). The generator runs in
-    /// its own private base-0 context swapped into the live `Vm`; the host context is parked in
-    /// `gen_host_ctx` (GC-rooted) for the duration. Runs `reentered`, so a would-be blocking op inside a
-    /// generator faults `deadlock` rather than parking the host.
+    /// Resume generator `h` from a synchronous native caller: run it to its next `yield`
+    /// (→ `Some(v)`) or its end (→ `None`, state `Done`). The body runs on this frame stack under
+    /// [`Vm::reentered`] ([`Vm::gen_resume`] with [`GenThen::Push`]), so a wait in it re-enters as in
+    /// any nested callback. The dispatch loop resumes with `gen_resume` itself and does not come here.
     pub(super) fn generator_next(&mut self, h: GcRef, span: Span) -> Result<Value, RuntimeError> {
-        // A RE-ENTRANT resume — `.next()` (or a `for`) on a generator that is already running, from
-        // inside its own body — is a fault, not an answer. The take sees the null owner pointer a
-        // running generator leaves, so it faults before any state read; the same take faults a
-        // resume from another thread. The box comes back on every return below (yield,
-        // exhaustion, a fault in the body, a fault caught by `recover:`), so a generator never
-        // stays "running". Python: `ValueError: generator already executing`.
-        let mut parked = self.gen_take(h, span)?;
-        if matches!(parked.state, GenState::Done) {
-            self.gen_put(h, parked);
-            return Ok(self.alloc_enum("Option", "None", &[]));
-        }
-        // The box goes back on every exit of the resume. A Rust panic inside it (a task fault)
-        // puts it back `Done` with an empty ctx: Python marks a generator that raised as finished.
+        let level = self.frames.len();
+        let len = self.stack.len();
+        let holds = self.held_gens.len();
+        // A Rust panic inside the resume (a task fault) leaves the generator `Done`, not running:
+        // Python marks a generator that raised as finished. A caught panic (an FFI callback's
+        // trampoline) keeps this `Vm` alive, so the holds the resume pushed are dropped here:
+        // each puts its still-running generator back `Done`.
         let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            self.generator_resume(h, span, &mut parked)
+            self.gen_resume(h, GenThen::Push, span)?;
+            self.reentered(|s| s.run_until(level))
         }));
         match run {
-            Ok(r) => {
-                self.gen_put(h, parked);
-                match r? {
-                    Some(v) => Ok(self.alloc_enum("Option", "Some", &[v])),
-                    None => Ok(self.alloc_enum("Option", "None", &[])),
-                }
+            Ok(Ok(())) => Ok(self.pop()),
+            Ok(Err(e)) => {
+                self.stack.truncate(len);
+                Err(e)
             }
             Err(p) => {
-                parked.state = GenState::Done;
-                parked.ctx = GenCtx::default();
-                self.gen_put(h, parked);
+                self.held_gens.truncate(holds);
                 std::panic::resume_unwind(p)
             }
         }
     }
 
-    /// The body of [`Vm::generator_next`] while it holds `parked`: run generator `h` to its next
-    /// `yield` (→ `Some(v)`, `parked` suspended) or to its end (→ `None`, `parked` stays `Done`).
-    /// A fault leaves `parked` `Done` with an empty ctx.
-    fn generator_resume(
+    /// Resume generator `h` on this frame stack: push `h`, then its body frame over its slots with
+    /// [`RetAction::Gen`] (`then` is what the resume's `Option` result feeds). The frame's `yield`
+    /// ([`Vm::gen_yield`]) or return hands `Some(v)` / `None` to `then`; a `Done` generator hands
+    /// `None` at once. The generator's box stays out (null) while the body runs, so a second resume,
+    /// from its own body or another task, faults `generator already running`
+    /// ([`Vm::gen_take`]). Python: `ValueError: generator already executing`.
+    pub(super) fn gen_resume(
         &mut self,
         h: GcRef,
+        then: GenThen,
         span: Span,
-        parked: &mut Parked,
-    ) -> Result<Option<Value>, RuntimeError> {
-        // Take the lifecycle state + parked context out of the box, which holds `Done` and an
-        // empty ctx while this run owns it; the real state goes back after the run.
+    ) -> Result<(), RuntimeError> {
+        let mut parked = self.gen_take(h, span)?;
         let state = std::mem::replace(&mut parked.state, GenState::Done);
-        let mut gen_ctx = std::mem::take(&mut parked.ctx);
+        if matches!(state, GenState::Done) {
+            self.gen_put(h, parked);
+            let none = self.alloc_enum("Option", "None", &[]);
+            self.push(none);
+            return self.gen_then(then, span);
+        }
+        // From here the slot is empty (the generator is running) and the task holds it: a context
+        // dropped, or a resume that panics, with the body frame in it puts the generator back
+        // `Done`.
         let Obj::Generator(g) = self.heap.get(h) else {
             unreachable!("gen_take checked a generator")
         };
-        let (proto, home, closure) = (g.proto, g.home, g.closure);
+        self.held_gens
+            .push(core::GenHold::new(Arc::clone(&g.parked)));
+        // The resume is a call: it counts toward the call depth. A fault here leaves the generator
+        // `Done` (its state was taken above).
+        if let Err(e) = self.frame_depth_guard(true, span) {
+            self.gen_release(h, parked);
+            return Err(e);
+        }
+        self.push(Value::obj(h));
+        let base = self.stack.len();
+        let ret = RetAction::Gen(then);
+        match state {
+            GenState::Pending(args) => {
+                let Obj::Generator(g) = self.heap.get(h) else {
+                    unreachable!("gen_take checked a generator")
+                };
+                let (proto, home, closure) = (g.proto, g.home, g.closure);
+                self.stack.extend(args);
+                self.finish_frame(proto, home, closure, base, true, false, span, ret);
+            }
+            GenState::Suspended => {
+                let ctx = &mut parked.ctx;
+                let mut frame = ctx
+                    .frame
+                    .take()
+                    .expect("a suspended generator holds its frame");
+                // The resumed body reports THIS resume as its call site (W14-35c; CPython names
+                // the faulting `next(g)` line), and opens no nursery (`spawn` / `parallel:` are
+                // checker-banned in a generator), so its floor is the driver's.
+                frame.base = base;
+                frame.call_span = span;
+                frame.nursery_len = self.nurseries.len();
+                frame.ret = ret;
+                let (frame_len, depth) = (self.frames.len(), self.call_depth - 1);
+                self.stack.append(&mut ctx.stack);
+                self.handlers.extend(ctx.handlers.drain(..).map(|mut hd| {
+                    hd.stack_len += base;
+                    hd.frame_len += frame_len;
+                    hd.call_depth += depth;
+                    hd.nursery_len = frame.nursery_len;
+                    hd
+                }));
+                self.frames.push(frame);
+                self.cur_base = base;
+            }
+            GenState::Done => unreachable!("a done generator returned above"),
+        }
+        // The box, now empty, is kept for the next `yield` to fill: the null pointer it leaves
+        // marks the generator running until its `yield` or end puts one back.
+        self.gen_spare = Some(parked);
+        Ok(())
+    }
 
-        // Park the host context (rooted via `gen_host_ctx`) and install the generator's private
-        // context into the live `Vm`. Two swaps: host out to a temp, then the generator in.
-        let mut host = GenCtx::default();
-        self.swap_gen_ctx(&mut host); // self.* now default-empty; `host` holds the real host context
-        self.swap_gen_ctx(&mut gen_ctx); // self.* now the generator's (suspended) context; gen_ctx empty
-        // A resumed body frame reports THIS resume site as "called at", not the first `.next()` that
-        // ever drove it (W14-35c; CPython names the faulting `next(g)` line). A suspended generator
-        // holds exactly one frame — a `yield` cannot sit in a nested call.
-        if !matches!(state, GenState::Pending(_))
-            && let Some(f) = self.frames.first_mut()
-        {
-            f.call_span = span;
-        }
-        // NURSERY-FLOOR REBASE. `nurseries` is NOT part of `GenCtx` (never swapped by `swap_gen_ctx`),
-        // so `self.nurseries` is the RESUMING driver's stack, while a parked frame's / recover
-        // handler's `nursery_len` was captured (absolutely) against whatever floor existed when the
-        // generator was FIRST driven — a different, possibly deeper, driver's floor (or, for a generator
-        // another task drove first, that task's floor). A generator provably opens NO nursery of its own (`spawn` /
-        // `parallel:` are checker-banned inside a generator, recover blocks included), so its
-        // frame-return drain (`do_return` → `drain_escaped_nursery(frame.nursery_len)`) and its
-        // recover-catch drain (`drain_escaped_nursery(handler.nursery_len)`) MUST be no-ops — they
-        // must never truncate the driver's own live nurseries. Rebase both to the current floor so
-        // every generator-internal drain is a no-op. Identity when the drive floor is unchanged (the
-        // common case: existing generators drive at a fixed depth), so it is behaviour-preserving
-        // there; it fixes a latent same-heap over-drain when a generator is resumed deeper than it
-        // was first driven, and makes another task's handler `nursery_len` safe.
-        // On the first (Pending) drive `self.frames`/`self.handlers` are empty here (the body frame is
-        // pushed just below), so this is a no-op then; the pushed frame gets the correct floor from
-        // `push_frame`.
-        let floor = self.nurseries.len();
-        for f in &mut self.frames {
-            f.nursery_len = floor;
-        }
-        for hd in &mut self.handlers {
-            hd.nursery_len = floor;
-        }
-        // W13-20 — give this resume its OWN fault latch. `fault_trace_depth` is a frame COUNT, and
-        // the generator's private `frames` (just swapped in above) is a different stack than the
-        // driver's, so comparing a generator-side count against the restored driver frame count
-        // compares two different stacks. Park the host's latch and start the generator on an empty
-        // one; on `Err` the generator's own capture becomes a PREFIX the driver-side capture
-        // prepends, instead of a value the merge guard compares against the wrong stack.
-        let host_trace = self.fault_trace.take();
-        let host_trace_depth = std::mem::replace(&mut self.fault_trace_depth, 0);
-        self.gen_host_ctx.push(host);
-        self.active_generators.push(h);
-
-        // First `.next()` builds the initial frame over the pending args (private stack starts empty,
-        // so the frame lands at base 0). A resumed generator's frames are already in `self`.
-        let first_call = matches!(state, GenState::Pending(_));
-        let push_res = if let GenState::Pending(args) = state {
-            self.push_frame(proto, home, closure, args, true, false, span)
-        } else {
-            Ok(())
+    /// `Op::Yield` in a generator body frame (the top frame, `RetAction::Gen`): copy the frame, its
+    /// slots and its `recover:` handlers back into the generator, pop them and the handle below
+    /// them, and hand `Some(v)` to the resume's `then`.
+    pub(super) fn gen_yield(&mut self) -> Result<(), RuntimeError> {
+        let v = self.pop();
+        let mut frame = self.frames.pop().expect("a yield runs in its body frame");
+        let RetAction::Gen(then) = frame.ret else {
+            unreachable!("a generator body frame is pushed only by gen_resume")
         };
+        // The `then` continues at the resume site (a `from_iter` drain faults there), as a return
+        // does (`do_return` passes the frame's `call_span`), not at this `yield`.
+        let call = frame.call_span;
+        self.call_depth -= 1;
+        let mut b = self
+            .gen_spare
+            .take()
+            .unwrap_or_else(|| Box::new(Parked::done()));
+        b.ctx.stack.extend(self.stack.drain(frame.base..));
+        let h = self
+            .pop()
+            .as_obj()
+            .expect("the generator handle sits below its frame");
+        let frame_len = self.frames.len();
+        let at = self
+            .handlers
+            .iter()
+            .position(|hd| hd.frame_len > frame_len)
+            .unwrap_or(self.handlers.len());
+        let depth = self.call_depth;
+        b.ctx
+            .handlers
+            .extend(self.handlers.drain(at..).map(|mut hd| {
+                hd.stack_len -= frame.base;
+                hd.frame_len -= frame_len;
+                hd.call_depth -= depth;
+                hd
+            }));
+        frame.base = 0;
+        frame.ret = RetAction::Push;
+        b.ctx.frame = Some(frame);
+        b.state = GenState::Suspended;
+        self.cur_base = self.frames.last().map(|f| f.base).unwrap_or(0);
+        let some = self.alloc_enum("Option", "Some", &[v]);
+        self.gen_release(h, b);
+        self.push(some);
+        self.gen_then(then, call)
+    }
 
-        // Run to the next suspension / end (re-entered: no parking inside a generator).
-        self.gen_yielding = false;
-        let run = push_res.and_then(|()| self.reentered(|s| s.run_until(0)));
-        let yielded = self.gen_yielding;
-        self.gen_yielding = false;
+    /// A generator body frame returned (its value, unused, on the stack top, the handle below it):
+    /// the generator is `Done`, and the resume's `then` gets `None`.
+    pub(super) fn gen_return(&mut self, then: GenThen, span: Span) -> Result<(), RuntimeError> {
+        self.pop();
+        self.gen_drop(self.stack.len());
+        let none = self.alloc_enum("Option", "None", &[]);
+        self.push(none);
+        self.gen_then(then, span)
+    }
 
-        // Pull the generator's now-updated context back out and restore the host.
-        let mut new_ctx = GenCtx::default();
-        self.swap_gen_ctx(&mut new_ctx); // new_ctx = generator's current context; self.* now empty
-        let mut host = self.gen_host_ctx.pop().expect("generator host context");
-        self.swap_gen_ctx(&mut host); // self.* = host restored
-        self.active_generators.pop();
-        let _ = first_call;
+    /// A generator body frame based at `base` left without a yield (a return, a fault, a cancel):
+    /// drop its slots, pop its handle (at `base - 1`) and put the generator back `Done`.
+    pub(super) fn gen_drop(&mut self, base: usize) {
+        self.stack.truncate(base);
+        let h = self
+            .pop()
+            .as_obj()
+            .expect("the generator handle sits below its frame");
+        self.gen_release(h, Box::new(Parked::done()));
+    }
 
-        // Pull the generator's own capture back out and restore the host's latch. On `Err` the
-        // generator's frames become the prefix the driver-side capture (in the dispatch loop's
-        // error arm) prepends to.
-        let gen_trace = self.fault_trace.take();
-        self.fault_trace = host_trace;
-        self.fault_trace_depth = host_trace_depth;
-        if run.is_err() {
-            self.gen_fault_prefix = gen_trace.unwrap_or_default();
-        }
+    /// A generator body frame left (a `yield` or an exit): put `b` back into generator `h` and
+    /// disarm the frame's hold (pushed by [`Vm::gen_resume`]; body frames nest, so it is the top).
+    fn gen_release(&mut self, h: GcRef, b: Box<Parked>) {
+        self.gen_put(h, b);
+        self.held_gens
+            .pop()
+            .expect("a generator body frame holds its slot")
+            .disarm();
+    }
 
-        // A fault inside the generator: `parked` stays `Done` (already set) with an empty ctx.
-        run?;
-
-        if yielded {
-            // The yielded value sits on the generator's private stack top. Park the rest to resume.
-            let v = new_ctx
-                .stack
-                .pop()
-                .expect("yielded value on the generator stack");
-            parked.ctx = new_ctx;
-            parked.state = GenState::Suspended;
-            Ok(Some(v))
-        } else {
-            // Body returned / fell off → exhausted: the box keeps `Done` and an empty ctx, and the
-            // drained context drops.
-            Ok(None)
+    /// Hand the resume's `Option` result, on the stack top, to `then`.
+    fn gen_then(&mut self, then: GenThen, span: Span) -> Result<(), RuntimeError> {
+        match then {
+            GenThen::Push => Ok(()),
+            GenThen::Drain(which) => {
+                let out = self.pop();
+                self.drain_resume(which, Some(out), span)
+            }
         }
     }
 
@@ -834,7 +856,6 @@ impl Vm {
         self.arm_deadline();
         self.fault_trace = None;
         self.fault_trace_depth = 0;
-        self.gen_fault_prefix.clear();
         // TICKET-195 — a delivered cut belongs to the invoke it unwound; a cancel stays (DEC-010).
         if matches!(self.cut, Some(Cut::Delivered { .. } | Cut::RunFault)) {
             self.cut = None;
@@ -1242,6 +1263,13 @@ impl Vm {
     }
 
     // ----- arithmetic / comparison -----
+}
+
+/// A new task identity for the guard registry (`Vm::guard_token`), from a process-wide counter;
+/// never 0 (`BoxLock::writer`'s "no writer").
+pub(super) fn fresh_guard_token() -> u64 {
+    static GUARD_TOKENS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    GUARD_TOKENS.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1
 }
 
 #[cfg(test)]

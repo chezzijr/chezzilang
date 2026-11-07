@@ -403,6 +403,9 @@ impl Vm {
     /// then precision — and is resolved and capped by [`crate::fmtspec::field_from_int`] BEFORE
     /// anything is rendered or allocated, so a huge runtime width is a clean error, never an OOM.
     /// Lives in its own `#[inline(never)]` helper to keep `step`'s frame small (commit 1450077).
+    ///
+    /// A value with a `str` hook runs the hook as a frame ([`RetAction::StringifyFmt`]) once the
+    /// nested fields are checked; its return renders through [`Vm::render_str_fmt`].
     #[inline(never)]
     pub(super) fn op_to_str_fmt(
         &mut self,
@@ -410,38 +413,72 @@ impl Vm {
         span: Span,
     ) -> Result<(), RuntimeError> {
         let nested = spec.dyn_width as usize + spec.dyn_precision as usize;
-        let resolved;
-        let spec = if nested > 0 {
-            let mut fs = spec.clone();
-            let mut slot = self.stack.len() - nested;
-            if fs.dyn_width {
-                fs.width = crate::fmtspec::field_from_int(self.int_val(self.stack[slot]), "width")
-                    .map_err(|m| self.err(m, span))?;
-                slot += 1;
-            }
-            if fs.dyn_precision {
-                let p = crate::fmtspec::field_from_int(self.int_val(self.stack[slot]), "precision")
-                    .map_err(|m| self.err(m, span))?;
-                fs.precision = Some(p);
-            }
-            for _ in 0..nested {
-                self.pop();
-            }
-            resolved = fs;
-            &resolved
-        } else {
-            spec
-        };
+        let v = self.stack[self.stack.len() - 1 - nested];
+        if self.hook_of(v, Hook::Str) {
+            self.fmt_fields(spec, span)?;
+            self.push_hook_frame(Hook::Str, v, &[], RetAction::StringifyFmt, span)?;
+            return Ok(());
+        }
+        self.render_str_fmt(spec, false, span)
+    }
+
+    /// `spec` with its nested width/precision fields (the `nested` values on the stack top)
+    /// resolved and capped; `None` when it has none.
+    fn fmt_fields(
+        &self,
+        spec: &crate::fmtspec::FormatSpec,
+        span: Span,
+    ) -> Result<Option<crate::fmtspec::FormatSpec>, RuntimeError> {
+        let nested = spec.dyn_width as usize + spec.dyn_precision as usize;
+        if nested == 0 {
+            return Ok(None);
+        }
+        let mut fs = spec.clone();
+        let mut slot = self.stack.len() - nested;
+        if fs.dyn_width {
+            fs.width = crate::fmtspec::field_from_int(self.int_val(self.stack[slot]), "width")
+                .map_err(|m| self.err(m, span))?;
+            slot += 1;
+        }
+        if fs.dyn_precision {
+            let p = crate::fmtspec::field_from_int(self.int_val(self.stack[slot]), "precision")
+                .map_err(|m| self.err(m, span))?;
+            fs.precision = Some(p);
+        }
+        Ok(Some(fs))
+    }
+
+    /// `Op::ToStrFmt`'s render: the value under its nested fields becomes the formatted str.
+    /// `hooked`: the value's `str` hook returned, and its result sits on the stack top; it takes
+    /// the value's slot and renders as a plain string.
+    pub(super) fn render_str_fmt(
+        &mut self,
+        spec: &crate::fmtspec::FormatSpec,
+        hooked: bool,
+        span: Span,
+    ) -> Result<(), RuntimeError> {
+        let nested = spec.dyn_width as usize + spec.dyn_precision as usize;
+        if hooked {
+            let res = self.pop();
+            let at = self.stack.len() - 1 - nested;
+            self.stack[at] = res;
+        }
+        let resolved = self.fmt_fields(spec, span)?;
+        for _ in 0..nested {
+            self.pop();
+        }
+        let spec = resolved.as_ref().unwrap_or(spec);
         let v = self.stack[self.stack.len() - 1]; // leave rooted; rendering may run user code
         let mut out = String::new();
-        if let Some(n) = self.int_val(v) {
+        if !hooked && let Some(n) = self.int_val(v) {
             crate::fmtspec::apply(spec, crate::fmtspec::FmtArg::Int(n), &mut out)
                 .map_err(|m| self.err(m, span))?;
-        } else if v.is_float() {
+        } else if !hooked && v.is_float() {
             let x = self.float_of(v);
             crate::fmtspec::apply(spec, crate::fmtspec::FmtArg::Float(x), &mut out)
                 .map_err(|m| self.err(m, span))?;
-        } else if let Some(h) = v.as_obj()
+        } else if !hooked
+            && let Some(h) = v.as_obj()
             && matches!(self.heap.get(h), Obj::Str(_))
         {
             let s = match self.heap.get(h) {
@@ -480,8 +517,9 @@ impl Vm {
             crate::fmtspec::apply(spec, crate::fmtspec::FmtArg::Str(&s), &mut out)
                 .map_err(|m| self.err(m, span))?;
         } else {
-            // Bool/Nil/containers/structs: render with the normal stringify, then treat as a
-            // string for fill/align/width (type chars/precision error via `apply`).
+            // Bool/Nil/containers/structs, or a `str` hook's result: render with the normal
+            // stringify, then treat as a string for fill/align/width (type chars/precision error
+            // via `apply`).
             let mut rendered = String::new();
             self.stringify_into(&mut rendered, v, span, 0)?;
             crate::fmtspec::apply(spec, crate::fmtspec::FmtArg::Other(&rendered), &mut out)

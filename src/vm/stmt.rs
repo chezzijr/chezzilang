@@ -264,6 +264,7 @@ impl Vm {
                 err = Some(e);
             }
             let frame = self.frames.pop().unwrap();
+            self.drop_ret(frame.ret, frame.base);
             if frame.counted {
                 self.call_depth -= 1;
             }
@@ -392,13 +393,10 @@ impl Vm {
                         let err = self.alloc_enum("Result", "Err", &[msg]);
                         self.push(err);
                     }
-                    // W13-20 — a deferred `.next()` run by either drain above (the escaped `parallel:`
-                    // body's, or the recover block's own) can fault and park its own frames in
-                    // `gen_fault_prefix` without ever passing through the dispatch loop's error arm
-                    // to be taken (this recover-scoped `?` catches inline, never via that arm). Clear
-                    // it here too, or it survives to decorate a later, unrelated uncaught fault — the
-                    // same leak class as the `recover:`-catch path in `exec.rs`, one level lower.
-                    self.gen_fault_prefix.clear();
+                    // A fault either drain above raised is handled here; a trace one of them
+                    // captured in its own nested loop must not decorate a later uncaught fault.
+                    self.fault_trace = None;
+                    self.fault_trace_depth = 0;
                     self.jump(h.ip);
                     return Ok(());
                 }

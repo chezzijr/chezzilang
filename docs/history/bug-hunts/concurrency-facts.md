@@ -29,7 +29,7 @@ minor; doc = the docs disagree with the code.
 | I-4b' | P1 | who ends a blocked party | main's `defer` blocks in a callback (`[1].map(rd)`), a sibling panics | hangs; `boom` is never reported | `panic: boom` |
 | J-leak | P1 | does a test end clean | `chezzi test --timeout=300`: test 1 times out while its nursery has a live child | test 2 (`sleep_ms(10)`) reports TIMED-OUT (0 ms) | test isolation (`13-testing-and-entry.md:51`) |
 | E1 | P1 | may a joiner run fibers | a task's `parallel:` faults while a child is parked, beside a spinner | hangs at T=1 10/10, T=2 5/10 | `panic: inner boom` |
-| W23-1 | P1 | is the party judged | `s.update(fn(v: int) -> int: ch.recv())`, no sender | hangs | deadlock (declined row, `gaps.md:48`) |
+| W23-1 | P1 | is the party judged | `s.update(fn(v: int) -> int: ch.recv())`, no sender | hangs; `deadlock` since 2026-11-07 (frame-based re-entry); the nested walks still hang | deadlock (declined row, narrowed, `gaps.md:48`) |
 | I-2c | P2 | which fault the run reports | a `defer` from a normal return blocks forever, then a sibling panics | `deadlock: every task in this parallel: ...`; `boom` lost | `panic: boom` (`05-cancel.md:239-247` agrees with Go) |
 | J-2a | P2 | halt order of a blocked party | `--timeout` with a `recv` inside `[0].map(r)` | the test ends on the sibling's `boom`, not TIMED-OUT; the direct `recv` twin is TIMED-OUT | `test timed out` |
 | J-2c | P2 | which halt wins | an expired `--timeout` beside a nursery deadlock | `deadlock` after 2 s | `test timed out` (`04-native-core.md:21` agrees) |
@@ -68,6 +68,15 @@ hard halt leaves open.
 DEC-136) is `native_reentry == deferring`; a callback inside a `defer` drain or an `update` closure
 is never judged, so no verdict and no recorded fault ends its wait. W23-1 is a declined row. Owner
 decision: may such a party be judged when a recorded sibling fault exists?
+**Update 2026-11-07 (plan `2026-11-07-frame-reentry`, Tasks 2-6).** The rule is unchanged
+(`native_reentry == deferring`), but the callbacks no longer raise `native_reentry`: a hook, an
+operator, an f-string part, `print`'s `str`, a HOF callback, a sort comparator, a `from_iter`
+drain, a `Shared`/`RwShared` closure and a generator body run as frames on the caller's stack
+(`RetAction`, `src/vm/ret_action.rs`), so a wait there parks in a fiber and is judged in `main`. The
+`update` shape above now reports `deadlock`. Still unjudged: a hook reached from a nested
+container walk, a map/set probe, `drain_iterable`, a `json.decode` default, a callback inside a
+deferred native method, an FFI callback (`gaps.md` W23-1, narrowed). A `defer` body stays judged
+through the `deferring` exception; the frame-based drain is a follow-up plan.
 
 **Family 5: a joiner runs other fibers on its own stack (E1). Fixed by TICKET-287.** A faulting or cancelled fiber at its outermost loop now parks at a fiber-owned nursery that is not done (`FaultPark`, `src/vm/frames.rs`), as `park_escaped_abort` parks a `return`; a `return` or recover-scoped `?` parks the same way and carries its body `defer` fault. An owner bypass (a child fault delivered under a `recover:` inside the body) now aborts its nurseries. `mn_worker_loop_inner` reads `SchedCore::owner_scope_done` at every fiber boundary of an inline owner, and main's eager abort never runs fibers (`JoinCover::RunnersAbort`). This closes the DEC-103 ancestor residual. The grid `owner_fault_is_reported_at_every_owner_escape_child_neighbour_and_worker_count` reports in every cell. TICKET-294: the `recover:` catch parked only at its first level that was not done, and its resume waited inline at the next one. The catch now parks per level on its first run and on every resume (`reclaim_caught`, `src/vm/frames.rs`), so every `ParkAt` arm re-runs `park_abort_origin`. The grid adds a nesting depth of 1 to 3 levels for `caught`, `question` and `cancelled`, and a `late_inplace` neighbour; base hung 10 of 4095 cells. A park raised at an offload or connect resume (a child fault wakes an owner asleep in its body) goes to the join as it is; `caught_fault_woken_at_an_offload_resume_parks_before_it_waits` covers it. Its `callback_*` cells (an owner under a native frame, `native_reentry > 0`) still wait inline, and every one of them reports.
 

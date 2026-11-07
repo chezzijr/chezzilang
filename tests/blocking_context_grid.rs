@@ -142,8 +142,6 @@ enum Expect {
     Out(&'static str),
     /// exit non-zero with this text on stderr
     Fault(&'static str),
-    /// still running at the 2 s probe (a declined verdict: nothing can satisfy it)
-    Hang,
 }
 
 /// One execution context: `call` is the parallel-body text that reaches `op`.
@@ -232,13 +230,7 @@ fn contexts() -> Vec<Ctx> {
     let dead = Expect::Fault(DEADLOCK);
     vec![
         ctx("main", "        _ := op(0)\n", false, false, dead),
-        ctx(
-            "main_cb",
-            "        _ := [0].map(op)\n",
-            false,
-            false,
-            Expect::Hang,
-        ),
+        ctx("main_cb", "        _ := [0].map(op)\n", false, false, dead),
         ctx("main_defer", "        viadefer()\n", false, false, dead),
         ctx(
             "fiber",
@@ -539,16 +531,12 @@ fn check_cell(c: &Cell) -> Vec<String> {
             }
         }
     }
-    let limit = match c.expect {
-        Expect::Hang => Duration::from_secs(2),
-        _ => Duration::from_secs(10),
-    };
+    let limit = Duration::from_secs(10);
     let tag = c.name.replace('/', "-");
     let mut misses = Vec::new();
     for (t, seed) in runs {
         let got = run_with(&tag, &c.src, t, seed, c.stdin, limit);
         let ok = match (&got, c.expect) {
-            (None, Expect::Hang) => true,
             (Some((0, out, _)), Expect::Out(w)) => out == w,
             (Some((code, _, err)), Expect::Fault(w)) => *code != 0 && err.contains(w),
             _ => false,
