@@ -158,7 +158,6 @@ impl Parser {
             | Token::ShlEq
             | Token::ShrEq
             | Token::Arrow
-            | Token::Pipe
             | Token::Question
             | Token::QuestionDot
             | Token::QuestionQuestion
@@ -304,7 +303,6 @@ impl Parser {
             | t @ Token::ShlEq
             | t @ Token::ShrEq
             | t @ Token::Arrow
-            | t @ Token::Pipe
             | t @ Token::Question
             | t @ Token::QuestionDot
             | t @ Token::QuestionQuestion
@@ -470,7 +468,6 @@ impl Parser {
             | Token::ShlEq
             | Token::ShrEq
             | Token::Arrow
-            | Token::Pipe
             | Token::Question
             | Token::QuestionDot
             | Token::QuestionQuestion
@@ -595,7 +592,6 @@ impl Parser {
                 | Token::ShlEq
                 | Token::ShrEq
                 | Token::Arrow
-                | Token::Pipe
                 | Token::Question
                 | Token::QuestionDot
                 | Token::QuestionQuestion
@@ -688,7 +684,6 @@ impl Parser {
             | Token::ShlEq
             | Token::ShrEq
             | Token::Arrow
-            | Token::Pipe
             | Token::Question
             | Token::QuestionDot
             | Token::QuestionQuestion
@@ -883,7 +878,6 @@ impl Parser {
                 | k @ Token::ShlEq
                 | k @ Token::ShrEq
                 | k @ Token::Arrow
-                | k @ Token::Pipe
                 | k @ Token::Question
                 | k @ Token::QuestionDot
                 | k @ Token::QuestionQuestion
@@ -977,7 +971,6 @@ impl Parser {
                 | Token::ShlEq
                 | Token::ShrEq
                 | Token::Arrow
-                | Token::Pipe
                 | Token::Question
                 | Token::QuestionDot
                 | Token::QuestionQuestion
@@ -1027,7 +1020,6 @@ pub(super) fn describe(tok: &Token) -> String {
         PlusEq => "'+='",
         MinusEq => "'-='",
         Arrow => "'->'",
-        Pipe => "'|>'",
         Question => "'?'",
         Bang => "'!'",
         LParen => "'('",

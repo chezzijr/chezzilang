@@ -17,7 +17,7 @@ Chapters (`chezzi docs syntax` prints them in this order):
 9. [Errors](12-errors.md) (§9)
 10. [Testing and program entry](13-testing-and-entry.md) (§9c, §9b)
 11. [Strings and interpolation](14-strings.md) (§10)
-12. [Pipe and concurrency](15-pipe-and-concurrency.md) (§11, §11b)
+12. [Concurrency](15-concurrency.md) (§11b)
 13. [Imports and modules](16-imports.md) (§12)
 14. [FFI](17-ffi.md) (§12b)
 15. [Native declarations, stdlib, full example](18-native-decls-and-example.md) (§12c to §13)

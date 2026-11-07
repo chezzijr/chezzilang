@@ -1,7 +1,0 @@
-# rule: value
-# expect: unexpected '|>' in expression
-n := 1
-x := match n:
-    1: 10
-    _: 20
-|> inc()

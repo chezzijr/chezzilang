@@ -62,7 +62,6 @@ exhaustiveness treat them like a user enum. Any module can import the variants o
     `obj[i] = v` / `obj.f = v` included. See `syntax.md §3/§4`.
 - **Struct methods**: `fn dist(self)` on structs. Composition + structural `protocol`s, no classes or
   inheritance.
-- **Pipe `|>`**: functional chaining (a parse-time desugar to a call).
 - **Tuples**: `(1, "a")`, fixed-arity, immutable; nestable in patterns.
 - **Transparent type aliases**: `type UserId = int`.
 - **Bitwise ops**: `& | ^ << >>` (int-only).
@@ -232,10 +231,7 @@ fn safe_div(a: int, b: int) -> int!:
 
 fn main() -> int!:                     # must return `T!E` or `T?` to use `?` — no `fn main` exception
     r := safe_div(10, 2)?              # ? propagates the error to main's return
-    nums := [1, 2, 3, 4]
-        |> iter.filter(fn(x: int) -> bool: x % 2 == 0)   # pipe (needs: import std.iter);
-                                                         #   a leading `|>` continues the line
-        |> iter.map(fn(x: int) -> int: x * 10)
+    nums := [x * 10 for x in [1, 2, 3, 4] if x % 2 == 0]   # list comprehension: [20, 40]
     print(nums)
     return ?0
 

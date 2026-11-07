@@ -924,7 +924,7 @@ const DOC_TOPICS: &[(&str, &str)] = &[
             "\n",
             include_str!("../docs/reference/syntax/14-strings.md"),
             "\n",
-            include_str!("../docs/reference/syntax/15-pipe-and-concurrency.md"),
+            include_str!("../docs/reference/syntax/15-concurrency.md"),
             "\n",
             include_str!("../docs/reference/syntax/16-imports.md"),
             "\n",

@@ -1,0 +1,4 @@
+# rule: expr
+# expect: unexpected '>' in expression
+fn f(x: int) -> int: x
+x := 5 |> f()

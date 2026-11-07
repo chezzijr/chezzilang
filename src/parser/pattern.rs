@@ -192,7 +192,6 @@ impl Parser {
                         | Token::ShlEq
                         | Token::ShrEq
                         | Token::Arrow
-                        | Token::Pipe
                         | Token::QuestionDot
                         | Token::QuestionQuestion
                         | Token::Amp
@@ -301,7 +300,6 @@ impl Parser {
             | Token::ShlEq
             | Token::ShrEq
             | Token::Arrow
-            | Token::Pipe
             | Token::QuestionDot
             | Token::QuestionQuestion
             | Token::Amp

@@ -150,7 +150,6 @@ fn block_end_grid() {
         ("<< 1", None),
         (">> 1", None),
         (".. 3", None),
-        ("|> inc()", None),
         (", 2", None),
         ("else: 0", None),
         ("else e: 0", None),
@@ -311,7 +310,7 @@ fn block_end_grid() {
             }
         }
     }
-    assert_eq!(total, 4508);
+    assert_eq!(total, 4410);
     report_cells("block-end", total, &failed);
 }
 

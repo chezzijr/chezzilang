@@ -1,37 +1,10 @@
-//! VM tests: pipe chains, cross-module witness defer, TICKET-063 guards.
+//! VM tests: `iter.sum`, cross-module witness defer, TICKET-063 guards.
 //! Split out of `src/vm/tests.rs`. `super::*` is the parent module.
 
 use super::*;
 use crate::vm::core::acquire_update_guard_within;
 
-// ===== Multi-line pipe chains (leading-`|>` line continuation) + `iter.sum` =====
-
-/// A line starting with `|>` continues the previous logical line — same result as the one-liner,
-///. Also covers a chain nested inside a fn body.
-#[test]
-fn pipe_multiline_chain_both_engines() {
-    let src = "\
-fn dbl(x: int) -> int:
-    return x * 2
-
-fn inc(x: int) -> int:
-    return x + 1
-
-fn f(n: int) -> int:
-    r := n
-        |> dbl()
-        # keep going
-        |> inc()
-    return r
-
-r := 5
-    |> dbl()
-    |> inc()
-print(r)
-print(f(10))
-";
-    assert_mc_parity(src, "11\n21\n");
-}
+// ===== `iter.sum` =====
 
 /// `iter.sum` delegates to the native List `sum` method — including its empty-list → `0`.
 #[test]
@@ -45,28 +18,6 @@ fn iter_sum_delegates_and_empty_is_zero() {
     let _ = std::fs::remove_file(&entry);
     assert!(pres.is_ok(), "M:N iter.sum faulted: {pres:?}");
     assert_eq!(pout, "6\n0\n", "M:N");
-}
-
-/// The verbatim docs/reference/syntax/ §11 pipe example must run and print 60.
-#[test]
-fn docs_syntax_pipe_example_runs_on_both_engines() {
-    let src = "\
-import std.iter
-
-total := [1, 2, 3, 4]
-    |> iter.filter(fn(x: int) -> bool: x % 2 == 0)   # → iter.filter([1,2,3,4], ...)
-    |> iter.map(fn(x: int) -> int: x * 10)
-    |> iter.sum()
-print(total)                                         # 60
-";
-    let entry = write_temp_chz("docs_s11", src);
-    let (out, _e, res, _c) = run_file(&entry);
-    assert!(res.is_ok(), "serial docs §11 faulted: {res:?}");
-    assert_eq!(out, "60\n", "serial");
-    let (pout, _pe, pres, _pc) = run_file_with(&entry, crate::native::HostConfig::default());
-    let _ = std::fs::remove_file(&entry);
-    assert!(pres.is_ok(), "M:N docs §11 faulted: {pres:?}");
-    assert_eq!(pout, "60\n", "M:N");
 }
 
 /// Regression net for the check-time `return`-in-`defer:`/`spawn:` rejection: every legal nesting

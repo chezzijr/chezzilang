@@ -136,7 +136,7 @@ impl Checker {
         // bounds, and substitute into the return type.
         if !sig.type_params.is_empty() {
             // M24 — the witness key span is the CALLEE TOKEN (`name_span`), never the
-            // call node: a pipe chain's links all carry the infix expression's span, so
+            // call node: a postfix chain's links all carry the primary expression's span, so
             // keying on it aliased two witness calls onto one entry.
             return self.infer_generic_call(
                 name,

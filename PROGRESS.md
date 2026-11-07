@@ -23,7 +23,7 @@ The core language is implemented through M24 and still evolves:
   witness passing;
 - exhaustive `match` with guards, closures and higher-order functions;
 - modules, including Python full paths (`a.b.X`);
-- GC, interpolation, pipe, `defer`, `recover:`, `Iterator[T]`, slicing and indexing protocols, ranges
+- GC, interpolation, `defer`, `recover:`, `Iterator[T]`, slicing and indexing protocols, ranges
   as values.
 
 Concurrency is complete through Tier-D: `spawn`, the `parallel:` nursery, `Channel[T]`,

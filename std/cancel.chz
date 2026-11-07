@@ -202,7 +202,7 @@ fn timeout(ms: int) -> Token:
     return Token(flag=concurrency.Shared(false), deadline=time.monotonic() + m.to_float() / 1000.0, dl=time.timer(m),
                  parent=None, kids=Channel[Token]())
 
-# Derive a child token from `parent` (the free-function form of `parent.derive()`, for a pipe / when
-# the parent is the obvious subject). Identical semantics: tightest deadline, live link, one-directional.
+# Derive a child token from `parent` (the free-function form of `parent.derive()`, for when the
+# parent is the obvious subject). Identical semantics: tightest deadline, live link, one-directional.
 fn derive(parent: Token) -> Token:
     return parent.derive()

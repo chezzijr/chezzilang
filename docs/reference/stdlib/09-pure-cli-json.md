@@ -82,8 +82,7 @@ Not provided: handlers/formatters, hierarchical (named) loggers, structured key/
 - `reduce` needs a **non-empty** list: with no seed there is no accumulator, so an empty list faults
   `reduce: empty list with no initial value` (recoverable, catchable by `recover:`). Use
   `fold(xs, init, f)` if the list can be empty.
-- `sum` is **int-only** (empty → `0`): the free-function form of `xs.sum()` for the right side of a
-  pipe. For a float list use the method, which is generic.
+- `sum` is **int-only** (empty → `0`): the free-function form of `xs.sum()`. For a float list use the method, which is generic.
 
 **Lazy adapters (itertools)** return a lazy `Iterator[T]` (a generator, not a `List`) and pull from
 their source only as the consumer pulls, so an infinite source under `islice` terminates:

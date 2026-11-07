@@ -108,7 +108,6 @@ impl Parser {
             | Token::ShlEq
             | Token::ShrEq
             | Token::Arrow
-            | Token::Pipe
             | Token::Question
             | Token::QuestionDot
             | Token::QuestionQuestion
@@ -233,7 +232,6 @@ impl Parser {
             | Token::ShlEq
             | Token::ShrEq
             | Token::Arrow
-            | Token::Pipe
             | Token::Question
             | Token::QuestionDot
             | Token::QuestionQuestion
@@ -407,7 +405,6 @@ impl Parser {
             | Token::ShlEq
             | Token::ShrEq
             | Token::Arrow
-            | Token::Pipe
             | Token::Question
             | Token::QuestionDot
             | Token::QuestionQuestion
@@ -651,7 +648,6 @@ impl Parser {
             | Token::Gt
             | Token::GtEq
             | Token::Arrow
-            | Token::Pipe
             | Token::Question
             | Token::QuestionDot
             | Token::QuestionQuestion

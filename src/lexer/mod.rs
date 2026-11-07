@@ -110,7 +110,6 @@ pub enum Token {
     ShlEq,            // <<=
     ShrEq,            // >>=
     Arrow,            // ->
-    Pipe,             // |>
     Question,         // ?
     QuestionDot,      // ?.  (optional chaining; `?..` is `?` then `..`)
     QuestionQuestion, // ??  (null-coalescing; `Lexer::question` decides by spacing)
@@ -503,7 +502,6 @@ pub fn open_layout(toks: &mut Vec<Tok>, colon: usize) -> Result<bool, LexError> 
             break;
         }
         if depth == 0
-            && t.kind != Token::Pipe
             && let Some(w) = t.indent
         {
             let w = w as usize;
@@ -646,7 +644,6 @@ pub const PUNCTUATION: &[Token] = &[
     Token::ShlEq,
     Token::ShrEq,
     Token::Arrow,
-    Token::Pipe,
     Token::Question,
     Token::QuestionDot,
     Token::QuestionQuestion,
@@ -713,7 +710,6 @@ impl Token {
             ShlEq => "<<=",
             ShrEq => ">>=",
             Arrow => "->",
-            Pipe => "|>",
             Question => "?",
             QuestionDot => "?.",
             QuestionQuestion => "??",
@@ -790,9 +786,6 @@ pub struct Lexer {
     /// so they can never become docs. The token stream is unaffected — this is a pure side table the
     /// parser consults for the contiguous comment run immediately above a declaration.
     doc_comments: Vec<DocComment>,
-    /// Memoized char index of the `|` of a resolved leading-`|>` continuation (see
-    /// [`Lexer::pipe_continues_next_line`]): scan a blank/comment run once, not once per line.
-    pipe_cont: Option<usize>,
     /// Whether the last emitted token ends an operand ([`ends_operand`]): a `??` after one can
     /// be the coalesce, a `??` after anything else is two prefix `?` ([`Lexer::question`]).
     after_operand: bool,
@@ -820,7 +813,6 @@ impl Lexer {
             hole_nest: 0,
             hole_comment: None,
             doc_comments: Vec::new(),
-            pipe_cont: None,
             after_operand: false,
         }
     }
@@ -854,57 +846,6 @@ impl Lexer {
     /// HINT: like `peek`, but at `self.pos + 1`.
     fn peek_next(&self) -> char {
         *self.chars.get(self.pos + 1).unwrap_or(&'\0')
-    }
-
-    /// Non-consuming lookahead from `self.pos` (which sits just past a '\n'): does the next real
-    /// content begin with the two chars `|>`, indented at least as deep as the block currently
-    /// open? Blank lines, indentation and comment-only lines are skipped. Exactly `|>` — `|`,
-    /// `||`, `|=` are not continuations.
-    ///
-    /// The indent floor keeps the offside rule intact: a `|>` line SHALLOWER than the open block
-    /// must close that block (a Dedent) rather than be silently absorbed into it — otherwise a
-    /// column-0 `|>` after an indented body would rewrite that body's last statement with no
-    /// diagnostic. Below the floor we return false and let the normal layout path run, so the
-    /// parser reports the stray `|>`. Indentation is spaces-only (`scan_indentation` rejects
-    /// tabs), so a tab-indented `|>` line is likewise not a continuation — it falls through to
-    /// that error.
-    ///
-    /// The resolved target is memoized: inside a continuation region `at_line_start` stays false,
-    /// so every blank/comment line's '\n' re-enters this lookahead. Without the memo a run of k
-    /// such lines costs O(k²) chars (a 50k-blank-line file lexed in ~9s); with it, each run is
-    /// scanned once.
-    fn pipe_continues_next_line(&mut self) -> bool {
-        match self.pipe_cont {
-            Some(t) if self.pos <= t => return true,
-            Some(_) => self.pipe_cont = None,
-            None => {}
-        }
-        let mut i = self.pos;
-        let mut line_start = self.pos; // index just past the most recent '\n'
-        loop {
-            match self.chars.get(i) {
-                Some(' ') | Some('\t') | Some('\r') => i += 1,
-                Some('\n') => {
-                    i += 1;
-                    line_start = i;
-                }
-                Some('#') => {
-                    while self.chars.get(i).is_some_and(|c| *c != '\n') {
-                        i += 1;
-                    }
-                }
-                _ => break,
-            }
-        }
-        if self.chars.get(i) != Some(&'|') || self.chars.get(i + 1) != Some(&'>') {
-            return false;
-        }
-        let indent = &self.chars[line_start..i];
-        if indent.iter().any(|c| *c != ' ') || indent.len() < *self.indents.last().unwrap() {
-            return false;
-        }
-        self.pipe_cont = Some(i);
-        true
     }
 
     /// Consume the current char and return it. Remember to advance `self.pos`.
@@ -1137,13 +1078,6 @@ impl Lexer {
                     // is frozen. Forward progress is guaranteed: we already advance()d past '\n'.
                     continue 'scan;
                 }
-                if self.pipe_continues_next_line() {
-                    // Leading-`|>` line continuation: the next content line starts with `|>`, so it
-                    // continues THIS logical line — suppress the Newline and (by leaving
-                    // `at_line_start` false) its Indent/Dedent too, exactly like the bracket case.
-                    // Forward progress: we already advance()d past '\n'.
-                    continue 'scan;
-                }
                 self.at_line_start = true;
                 return Ok(Tok {
                     kind: Token::Newline,
@@ -1250,9 +1184,7 @@ impl Lexer {
                     }
                 }
                 '|' => {
-                    if self.match_char('>') {
-                        Token::Pipe
-                    } else if self.match_char('=') {
+                    if self.match_char('=') {
                         Token::PipeEq
                     } else {
                         Token::BitOr
@@ -2303,8 +2235,8 @@ fn ends_operand(t: &Token, before: bool) -> bool {
         | Wait | Yield | Import | Extern | Native | From | As | Const | And | Or | Not | Where
         | Plus | Minus | Star | Slash | Percent | Assign | Walrus | EqEq | NotEq | Lt | LtEq
         | Gt | GtEq | PlusEq | MinusEq | StarEq | SlashEq | PercentEq | AmpEq | PipeEq
-        | CaretEq | ShlEq | ShrEq | Arrow | Pipe | QuestionDot | QuestionQuestion | Bang | Amp
-        | Caret | BitOr | Shl | Shr | LParen | LBracket | LBrace | Comma | Colon | Dot | DotDot
+        | CaretEq | ShlEq | ShrEq | Arrow | QuestionDot | QuestionQuestion | Bang | Amp | Caret
+        | BitOr | Shl | Shr | LParen | LBracket | LBrace | Comma | Colon | Dot | DotDot
         | DotDotEq | DotDotDot | Newline | Indent | Dedent | Eof => false,
     }
 }

@@ -1,9 +1,9 @@
-//! Parser tests: the pipe operator, tuples and destructuring, default and named args, or-patterns.
+//! Parser tests: tuples and destructuring, default and named args, or-patterns.
 //! Split out of `src/parser/mod.rs`. `super::*` is the parent module.
 
 use super::*;
 
-// ===== M6: pipe operator desugars to a call =====
+// ===== M6: explicit type args and call parsing =====
 
 #[test]
 fn explicit_type_args_parse() {
@@ -58,71 +58,6 @@ fn speculative_type_arg_steal_does_not_leak_recursion_depth() {
         src.push_str(&format!("b{i} := a[0]\n"));
     }
     parse_ok(&src);
-}
-
-#[test]
-fn pipe_desugars_to_call_with_lhs_first() {
-    // `x := 5 |> inc()` ⇒ `inc(5)`
-    let v = let_value("x := 5 |> inc()\n");
-    let ExprKind::Call { callee, args, .. } = v.kind else {
-        panic!("expected a Call, got {:?}", v.kind)
-    };
-    assert!(matches!(callee.kind, ExprKind::Ident(ref n) if n == "inc"));
-    assert_eq!(args.len(), 1);
-    assert_eq!(args[0].kind, ExprKind::Int(5));
-}
-
-#[test]
-fn pipe_prepends_before_existing_args() {
-    // `x := 5 |> add(2)` ⇒ `add(5, 2)`
-    let v = let_value("x := 5 |> add(2)\n");
-    let ExprKind::Call { args, .. } = v.kind else {
-        panic!("expected a Call, got {:?}", v.kind)
-    };
-    assert_eq!(args.len(), 2);
-    assert_eq!(args[0].kind, ExprKind::Int(5));
-    assert_eq!(args[1].kind, ExprKind::Int(2));
-}
-
-#[test]
-fn pipe_chain_is_left_associative() {
-    // `x := 5 |> inc() |> dbl()` ⇒ `dbl(inc(5))`
-    let v = let_value("x := 5 |> inc() |> dbl()\n");
-    let ExprKind::Call { callee, args, .. } = v.kind else {
-        panic!("expected outer Call, got {:?}", v.kind)
-    };
-    assert!(matches!(callee.kind, ExprKind::Ident(ref n) if n == "dbl"));
-    assert_eq!(args.len(), 1);
-    let ExprKind::Call {
-        callee: inner_callee,
-        args: inner_args,
-        ..
-    } = &args[0].kind
-    else {
-        panic!("expected inner Call, got {:?}", args[0].kind)
-    };
-    assert!(matches!(inner_callee.kind, ExprKind::Ident(ref n) if n == "inc"));
-    assert_eq!(inner_args[0].kind, ExprKind::Int(5));
-}
-
-#[test]
-fn pipe_non_call_rhs_rejected() {
-    let e = parse_err("x := 5 |> 7\n");
-    assert!(
-        e.to_string()
-            .contains("right side of '|>' must be a function call"),
-        "{e}"
-    );
-}
-
-#[test]
-fn pipe_bare_identifier_rhs_rejected() {
-    let e = parse_err("x := 5 |> f\n");
-    assert!(
-        e.to_string()
-            .contains("right side of '|>' must be a function call"),
-        "{e}"
-    );
 }
 
 // ===== gap #8: tuples + multi-return + destructuring =====
@@ -380,23 +315,6 @@ fn type_named_carries_span() {
     assert_eq!(name, "int");
     assert_eq!(span.line, 1);
     assert_eq!(span.col, 4);
-}
-
-#[test]
-fn pipe_binds_looser_than_arithmetic() {
-    // `x := 1 + 2 |> f()` ⇒ `f(1 + 2)`, not `1 + f(2)`.
-    let v = let_value("x := 1 + 2 |> f()\n");
-    let ExprKind::Call { args, .. } = v.kind else {
-        panic!("expected a Call, got {:?}", v.kind)
-    };
-    assert_eq!(args.len(), 1);
-    assert!(matches!(
-        args[0].kind,
-        ExprKind::Binary {
-            op: BinaryOp::Add,
-            ..
-        }
-    ));
 }
 
 // ---- default args + named args (parser layer) ----

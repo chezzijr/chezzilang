@@ -34,8 +34,8 @@ fn reverse(s: str) -> str:
 # `pad_left: fill must not be empty`. A `width` too large to allocate faults `string pad capacity
 # overflow` — recoverable via `recover:`, like every other fault in docs/reference/stdlib/'s fault table.
 #
-# Delegates to the native `s.pad_left(...)` receiver method — the free-function form exists so it can
-# sit on the right of a pipe (`s |> string.pad_left(8, " ")`), not to reimplement it. This used to be
+# Delegates to the native `s.pad_left(...)` receiver method — it is the free-function form of that
+# method, not a reimplementation of it. This used to be
 # a hand-written `while pad.len() < need: pad = pad + fill` loop with NO capacity guard, so a huge
 # `width` HUNG (measured 2026-08-18: still running at 15s, rc=124) where the method faults cleanly —
 # the same free-fn-vs-method split that `string.repeat` had. Verified byte-identical on every
