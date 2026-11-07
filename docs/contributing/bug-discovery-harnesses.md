@@ -215,8 +215,8 @@ cargo build --release --bin chezzi --bin difffuzz
 ./target/release/difffuzz --seeds 0..5000 --floats   # floats (on by default; explicit here)
 ```
 
-A finding prints the seed, both sources and both captures. Reproduce it with `--seed N`, then route it
-through `auto-task` -> `post-merge-gate`.
+A finding prints the seed, both sources and both captures. Reproduce it with `--seed N`, then triage it
+with `/kit:debug`, fix it and run `/kit:review`.
 
 ## DSA known-answer harness (`judge/`)
 

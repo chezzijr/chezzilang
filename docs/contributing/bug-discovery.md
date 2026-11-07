@@ -37,7 +37,7 @@ The remedy has two parts:
 | CPython differential | `src/difftest/`, `tests/difftest.rs`, `src/bin/difffuzz.rs` | stdout that differs from CPython on generated programs |
 | DSA known-answer judge | `judge/`, `tests/judge.rs` | wrong answers on hand-written CSES solutions |
 | Seeded scheduler | `src/schedfuzz/`, `src/vm/sched_seed.rs`, `src/bin/schedfuzz.rs` | hangs, panics, exit-code or output changes under explored schedules |
-| Adversarial review | `auto-task` (prosecute, defend, judge) + `post-merge-gate` | defects in a known change (not a discovery tool) |
+| Adversarial review | `/kit:review` (prosecute, defend, judge) | defects in a known change (not a discovery tool) |
 
 `benches/run.chz` also runs paired Chezzi and Python programs, but it compares timing only.
 
@@ -98,7 +98,7 @@ adversarial input generation.
 ## Recommended starting point
 
 Run #1 (panic-fuzz) and #2 (CPython differential) unattended. Together they cover crashes and wrong
-answers. Triage findings through `auto-task` -> `post-merge-gate`.
+answers. Triage a finding with `/kit:debug`, then fix it and run `/kit:review`.
 
 Pre-JIT gate: the JIT must produce byte-identical results to the VM, so it assumes the VM semantics
 are correct. Fuzz and differentially validate the reference semantics before you write the JIT.

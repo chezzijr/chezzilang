@@ -42,10 +42,10 @@ The full text of every convention, moved out of `CLAUDE.md` (which every agent t
   not own — the `std.io` stdin readers run inline, and the engine demotes the worker for the call),
   or `InterceptIo`/`InterceptNet` (the engine runs it; the registered fn never executes). Getting it wrong is a live starvation bug, not
   a style nit; omitting it is a compile error, which is the point (`docs/design/roadmap.md` §3c).
-- After merging an auto-task branch (post-gate ships): delete the branch + prune its worktree
+- After merging a worktree branch (a pipeline ticket or a `kit` worktree): delete the branch + prune its worktree
   (`git worktree remove --force <wt>; git worktree prune; git branch -D <branch>`). Stale worktree
   `target/` dirs (~1.6G each) accumulate and fill the disk. Delete rejected branches too.
-- **Two auto-task runs in parallel MUST NOT share a release target dir.** Both writing the same warm
+- **Two builds in parallel (worktrees, pipeline tickets) MUST NOT share a release target dir.** Both writing the same warm
   `CARGO_TARGET_DIR` (e.g. `~/.cache/chezzi-target`) means one run's `release/chezzi` overwrites the
   other's, cargo then reports "up to date", and the binary you verify SILENTLY LACKS your change — a
   a green test run proving nothing (hit 2026-07-26). Give each concurrent run its own

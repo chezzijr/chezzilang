@@ -67,8 +67,8 @@ read that rule's entry there.
 - **No wildcard arm on an enum in library or binary code.**
 - **New builtin types/ctors/fns go in their owning `std.*` module (import-gated), NOT the global namespace.** (No name but a keyword is reserved: a module declaration shadows a builtin. An import binds only the names it lists, for a std module too.)
 - **A new native fn's `MEMBERS` entry is `(name, fn, Kind)` — the third element is not paperwork.**
-- After merging an auto-task branch (post-gate ships): delete the branch + prune its worktree (`git worktree remove --force <wt>; git worktree prune; git branch -D <branch>`).
-- **Two auto-task runs in parallel MUST NOT share a release target dir.**
+- After merging a worktree branch (a pipeline ticket or a `kit` worktree): delete the branch + prune its worktree (`git worktree remove --force <wt>; git worktree prune; git branch -D <branch>`).
+- **Two builds in parallel (worktrees, pipeline tickets) MUST NOT share a release target dir.**
 - Unit tests live next to the code in `#[cfg(test)] mod tests`.
 - **Testing is HYBRID — write the test in Chezzi if you can, fall back to Rust only when you can't.**
 - **ONE ENGINE.** The bytecode VM on its M:N scheduler is the only engine: a test compares against a literal golden, never against a second run.
