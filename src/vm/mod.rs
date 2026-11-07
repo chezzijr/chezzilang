@@ -584,6 +584,15 @@ pub fn worker_count() -> usize {
     }
 }
 
+/// Every demote of this process: a worker that handed its runner slot to a replacement thread
+/// ([`Vm::demote_once`]). `CHEZZI_SCHED_STATS=1` prints it as `demotes=<n>`.
+static DEMOTES: AtomicUsize = AtomicUsize::new(0);
+
+/// How many workers this process has demoted so far (see [`DEMOTES`]).
+pub fn demote_count() -> usize {
+    DEMOTES.load(Ordering::Relaxed)
+}
+
 /// One activation record.
 // `Clone` is only used to snapshot a generator's suspended frames (experimental); the hot call
 // paths never clone a frame.
@@ -774,7 +783,9 @@ enum Deferred {
     /// `defer recv.name(args)` — dispatch the named method on the receiver.
     Method {
         recv: Value,
-        name: String,
+        name: Arc<str>,
+        /// The `defer` site's own method-IC id ([`NO_IC`] when no compiled site built it).
+        ic: u32,
         args: Vec<Value>,
         span: Span,
     },
@@ -1106,7 +1117,7 @@ pub struct Vm {
     /// TICKET-103 — origin scope of the fiber-owned nursery whose `JoinNursery` parked the running
     /// fiber; consumed by `run_one_fiber` into `Disp::JoinPark`.
     join_suspend: Option<usize>,
-    /// TICKET-287 — the fault unwind the running fiber parked in ([`Vm::store_fault_park`]);
+    /// TICKET-287 — the fault unwind the running fiber parked with ([`frames::FaultPark`]);
     /// moved into `Fiber::fault_park` at the park and back at the resume.
     fault_park: Option<frames::FaultPark>,
     /// `wait` (§6d) — the multi-channel analogue of `suspend`: the live arm-channel handles a blocking
@@ -1305,14 +1316,24 @@ pub struct Vm {
     ///
     /// Either way a cap-off run does ZERO added `Instant::now()` calls on either hot path.
     back_edge_tick: u16,
-    /// Depth of deferred calls currently executing ([`Vm::run_one_deferred`]). A cancel is NEVER
-    /// delivered while this is non-zero: a `defer` IS the cleanup a cancelled task is being unwound
-    /// to run, so its body (loops, blocking ops, HOF callbacks — every cancellation checkpoint) must
-    /// run to completion. Defers also drain on the NORMAL-return and own-fault paths, where
-    /// `cancelled` is still false while the scope flag is already tripped by a faulted sibling —
-    /// without this counter the first checkpoint inside the first deferred call would eat it.
-    /// See [`Vm::halt_requested`].
+    /// Depth of deferred calls running on the Rust stack ([`Vm::run_one_deferred`]: the
+    /// synchronous hard-halt drains, `--max-heap` / `--timeout`); the drains on the dispatch loop
+    /// are [`Vm::drains`]. `BlockCtx::judged` reads it: a wait in such a drain is still judged.
+    /// A cancel is NEVER delivered while either is non-empty ([`Vm::in_defer`]): a `defer` IS the
+    /// cleanup a cancelled task is being unwound to run, so its body (loops, blocking ops, HOF
+    /// callbacks — every cancellation checkpoint) must run to completion. Defers also drain on the
+    /// NORMAL-return and own-fault paths, where `cancelled` is still false while the scope flag is
+    /// already tripped by a faulted sibling — without this the first checkpoint inside the first
+    /// deferred call would eat it. See [`Vm::halt_requested`].
     deferring: usize,
+    /// The running task's live drains on the dispatch loop, innermost last: one per trampoline
+    /// frame (`vm/defer_drain.rs`). Per task, swapped by [`Vm::swap_ctx`]: a drain parks with its
+    /// task.
+    drains: Vec<Drain>,
+    /// The fault a drain trampoline's `DrainStep::Next` step just returned went through the fault
+    /// arm already (an unwind's or a catch's continuation): [`Vm::on_step_fault`] hands it on
+    /// unchanged. Set and read inside one step.
+    unwound: bool,
     /// D2b — set on an M:N **worker shell** to the scheduler of the `parallel:` nursery it is draining.
     /// `Some` flips the `recv`/`send` arms onto the park/wake protocol ([`MnSched`]) instead of the
     /// legacy condvar-block; `None` on the top-level VM, the inline outermost-`parallel:` builder VM
@@ -1436,6 +1457,8 @@ mod hash;
 use block::Waiter;
 use block::{BlockMode, Blocked, WaitReg, WaitSpec};
 mod call;
+mod defer_drain;
+use defer_drain::{DRAIN_PROTO, Drain, DrainCont};
 mod core_method;
 mod json_decode;
 mod list_hof;

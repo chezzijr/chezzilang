@@ -44,39 +44,72 @@ impl SchedCore {
                     }
                 };
                 if let Some(f) = fiber {
-                    self.record_deadlocked(f, err);
+                    self.verdict_victim(f, err);
                 }
             }
         }
         // TICKET-103 — `terminate` stops every worker before its next global pop, so a join-parked
-        // owner requeued here would never run: record it `Deadlocked` instead.
+        // owner requeued here would never run: record it `Deadlocked` instead (or cut it, in a
+        // `defer`, and keep the workers).
         for (origin, f) in std::mem::take(&mut self.join_parked) {
             self.scopes[origin].joins_blocked -= 1;
             self.scopes[f.scope_id].owners_blocked -= 1;
-            self.record_deadlocked(f, err);
+            self.verdict_victim(f, err);
         }
         self.parked_n = 0;
         // TICKET-296: a demoted fiber reads the cut, unwinds and can requeue itself, so the workers
-        // stay until it settles. Returns whether `terminate` latched.
+        // stay until it settles, as they do for a fiber cut in a `defer`. Returns whether
+        // `terminate` latched.
         self.verdict_cut = true;
-        self.terminate = !self.any_fiber_waiter();
+        self.terminate = !self.any_fiber_waiter() && self.cut_requeued == 0;
         self.terminate
     }
 
-    /// The verdict's cut of an aborting family: a demoted fiber of a cancelled scope (its owner's
-    /// own fault, or a child's fault, tripped the scope's cancel, before or after the owner reached
-    /// its join) waits in a `defer` that nothing can finish, and the owner waits for that family
-    /// alone. The verdict cuts those waiters as the scope's cancel ([`Vm::in_place_cut`]) and
-    /// nothing else, and latches nothing: the cause wins (DEC-147), the owner unwinds, and a later
-    /// wait is judged again. Returns whether such a waiter exists; without one the verdict is
-    /// sched-wide.
+    /// THE verdict's treatment of a parked fiber it meets: one in a `defer` (it does not honour a
+    /// cancel, [`Fiber::honours_cancel`]) has its wait cut ([`SchedCore::cut_parked`]), as the
+    /// demoted cleanup it replaces is cut in place; any other is recorded `Deadlocked`.
+    /// A fiber of an aborting scope is cut as that scope's cancel, wherever the verdict meets it.
+    fn verdict_victim(&mut self, f: Fiber, err: &RuntimeError) {
+        if f.honours_cancel() {
+            self.record_deadlocked(f, err);
+        } else if self.aborting(f.scope_id) {
+            self.cut_parked(f, VerdictCut::Family);
+        } else {
+            self.cut_parked(f, VerdictCut::Sched);
+        }
+    }
+
+    /// Is scope `sid` an aborting family's: incomplete, with its cancel (or an ancestor's)
+    /// tripped? A stuck cleanup there is cut as the cancel ([`SchedCore::cut_aborting_families`]).
+    fn aborting(&self, sid: usize) -> bool {
+        let s = &self.scopes[sid];
+        s.done < s.total && self.scope_cancel_tripped(sid)
+    }
+
+    /// Requeue parked fiber `f` with its wait cut (`how`): never recorded, never listed. The
+    /// verdict's caller adds it to `runnable` ([`MnSched::take_cut_requeued`]).
+    fn cut_parked(&mut self, mut f: Fiber, how: VerdictCut) {
+        f.defer_cut = Some(how);
+        f.state = FiberState::Ready;
+        self.global.push_back(f);
+        self.cut_requeued += 1;
+    }
+
+    /// The verdict's cut of an aborting family: a fiber of a cancelled scope (its owner's own
+    /// fault, or a child's fault, tripped the scope's cancel, before or after the owner reached its
+    /// join) waits in a `defer` that nothing can finish, and the owner waits for that family alone.
+    /// The verdict cuts those waits as the scope's cancel and nothing else, and latches nothing:
+    /// the cause wins (DEC-147), the owner unwinds, and a later wait is judged again. A demoted
+    /// fiber reads its cut in place ([`Vm::in_place_cut`]); a fiber parked in a `defer` (it does
+    /// not honour the cancel, [`Fiber::honours_cancel`]) is requeued with its wait cut
+    /// ([`SchedCore::cut_parked`]). Returns whether such a wait exists; without one
+    /// the verdict is sched-wide.
     fn cut_aborting_families(&mut self) -> bool {
         let cancelled: Vec<usize> = self
             .scopes
             .iter()
-            .filter(|(_, s)| s.done < s.total)
             .map(|(i, _)| i)
-            .filter(|&i| self.scope_cancel_tripped(i))
+            .filter(|&i| self.aborting(i))
             .collect();
         let mut any = false;
         for w in self.waiters.values_mut() {
@@ -84,6 +117,51 @@ impl SchedCore {
                 w.cut = true;
                 any = true;
             }
+        }
+        let stuck = |f: &Fiber| !f.honours_cancel() && cancelled.contains(&f.scope_id);
+        let buckets: Vec<(usize, Vec<ParkedEntry>)> = self.parked.drain().collect();
+        let mut cut = Vec::new();
+        for (key, v) in buckets {
+            let mut keep = Vec::new();
+            for entry in v {
+                match entry {
+                    ParkedEntry::Recv(f) | ParkedEntry::Send(f) if stuck(&f) => cut.push(f),
+                    ParkedEntry::Wait(wp) => {
+                        // `None`: a claimed token's stale copy, dropped as `drain_parked` drops it.
+                        let take = wp
+                            .fiber
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .as_ref()
+                            .map(stuck);
+                        if take == Some(false) {
+                            keep.push(ParkedEntry::Wait(wp));
+                        } else if take == Some(true)
+                            && wp
+                                .claimed
+                                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                                .is_ok()
+                        {
+                            cut.push(
+                                wp.fiber
+                                    .lock()
+                                    .unwrap_or_else(|e| e.into_inner())
+                                    .take()
+                                    .expect("WaitPark fiber claimed twice"),
+                            );
+                        }
+                    }
+                    other @ (ParkedEntry::Recv(_) | ParkedEntry::Send(_)) => keep.push(other),
+                }
+            }
+            if !keep.is_empty() {
+                self.parked.insert(key, keep);
+            }
+        }
+        self.parked_n -= cut.len();
+        for f in cut {
+            any = true;
+            self.cut_parked(f, VerdictCut::Family);
         }
         any
     }
@@ -440,7 +518,7 @@ impl SchedCore {
                     }
                 };
                 if let Some(f) = fiber {
-                    self.record_deadlocked(f, err);
+                    self.verdict_victim(f, err);
                     flagged += 1;
                 }
             }
@@ -633,6 +711,9 @@ impl ReadyWorker {
             park_site: None,
             park_deadline: None,
             job_cancel: None,
+            defer_cut: None,
+            cut: None,
+            cancel_unwind_faulted: false,
         }
     }
 }

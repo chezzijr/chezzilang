@@ -106,6 +106,17 @@ impl AssertCmp {
     }
 }
 
+/// The steps of the defer-drain trampoline proto, in its code order: `Call` calls the loaded
+/// `defer` record (its callee or receiver and args are on the stack) as `Op::Call` /
+/// `Op::CallMethod` would, so a wait parks and rewinds to `Call`; `Next` drops its result and the
+/// record, then loads the next record and jumps back to `Call`, or ends the drain and runs its
+/// continuation. The drain's start loads its first record.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DrainStep {
+    Call,
+    Next,
+}
+
 /// A single VM instruction. Operands are inline (typed), so there is no separate constant pool —
 /// strings and numbers live in the op. Jump targets are absolute indices into the proto's `code`.
 #[derive(Debug, Clone)]
@@ -233,9 +244,9 @@ pub enum Op {
     /// `obj.method(args)` — stack `[recv, arg0, …]`. Resolves a struct method (binds `self`) or a
     /// module member (plain call, no `self`). `ic`: per-call-site method inline-cache id (dense
     /// `0..Program::method_ic_sites`). Every compiler-emitted `CallMethod` gets a real `ic` (including
-    /// the synthetic iterator-protocol `next`/`values` sites); [`NO_IC`] is passed ONLY by the
-    /// VM-internal native-re-entry callers (`spawn`/`defer`/fiber-start method tasks), never at compile
-    /// time — a real `ic` is exactly the "flatten-safe, called-from-the-dispatch-loop" signal.
+    /// the synthetic iterator-protocol `next`/`values` sites), and so does every `DeferMethod` site;
+    /// no production caller passes [`NO_IC`] (only `gc_tests.rs`) — a real `ic` is exactly the
+    /// "flatten-safe, the caller's `run_until` runs the pushed frame" signal.
     CallMethod {
         name: String,
         argc: usize,
@@ -293,8 +304,9 @@ pub enum Op {
     /// the current frame. Drained LIFO when the frame exits (return / `?` / panic).
     DeferCall(usize),
     /// `defer recv.name(args)` — stack `[recv, arg0, …]`; pops `argc + 1` and records a deferred
-    /// method call on the current frame.
-    DeferMethod(String, usize),
+    /// method call on the current frame. The third field is the site's own method-IC id (the
+    /// `CallMethod` allocator), carried in the record so the drain dispatches through this site.
+    DeferMethod(std::sync::Arc<str>, usize, u32),
     /// Enter a lexical block that contains a `defer`: push a scope marker (the current count of
     /// pending defers) on the frame. Emitted by the compiler only for blocks that statically hold a
     /// `defer`, so defer-free code is unchanged.
@@ -307,6 +319,9 @@ pub enum Op {
     /// runs at the recover boundary, like the fault and `?`-short-circuit paths. Keyed off the
     /// top handler's marker, so it touches no `EnterDeferScope` bookkeeping.
     DrainHandlerDefers,
+    /// One step of the defer-drain trampoline (`vm/defer_drain.rs`). The VM builds the one proto
+    /// that holds these; the compiler never emits them.
+    Drain(DrainStep),
     /// `?` — unwrap `Ok`/`Some`, else propagate `Err`/`None` out of the enclosing function.
     Try,
     /// `json.decode[T](s)` coercion step. Stack: `[result_json]` where `result_json` is the

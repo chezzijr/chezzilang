@@ -439,6 +439,7 @@ impl Vm {
             | Op::EnterDeferScope
             | Op::LeaveDeferScope
             | Op::DrainHandlerDefers
+            | Op::Drain(_)
             | Op::Try
             | Op::JsonDecode(_)
             | Op::JsonToValue
@@ -566,6 +567,7 @@ impl Vm {
                 | Op::EnterDeferScope
                 | Op::LeaveDeferScope
                 | Op::DrainHandlerDefers
+                | Op::Drain(_)
                 | Op::Try
                 | Op::JsonDecode(_)
                 | Op::JsonToValue
@@ -901,6 +903,7 @@ impl Vm {
             | Op::EnterDeferScope
             | Op::LeaveDeferScope
             | Op::DrainHandlerDefers
+            | Op::Drain(_)
             | Op::Try
             | Op::JsonDecode(_)
             | Op::JsonToValue
@@ -1031,6 +1034,7 @@ impl Vm {
             | Op::EnterDeferScope
             | Op::LeaveDeferScope
             | Op::DrainHandlerDefers
+            | Op::Drain(_)
             | Op::Try
             | Op::JsonDecode(_)
             | Op::JsonToValue
@@ -1173,6 +1177,7 @@ impl Vm {
                         | Op::EnterDeferScope
                         | Op::LeaveDeferScope
                         | Op::DrainHandlerDefers
+                        | Op::Drain(_)
                         | Op::Try
                         | Op::JsonDecode(_)
                         | Op::JsonToValue

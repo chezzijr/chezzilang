@@ -256,7 +256,8 @@ impl MnSched {
             // `park`/`park_send`/`park_wait`, not by this predicate scan) still requeues that fiber
             // instead of getting faulted as deadlocked. `cancel_drain` moves the family's parks to
             // `global`; each requeued fiber re-checks the same flags at its recv/send/`wait:`
-            // checkpoint and unwinds; a `defer` body demotes and never parks so it is unaffected; a
+            // checkpoint and unwinds; a fiber parked in a `defer` does not honour the cancel
+            // ([`Fiber::honours_cancel`]), so it is not requeued for it; a
             // park landing after the trip is caught by step 8's own re-check, not this scan. ONE read
             // per lock hold: a trip landing between two separate reads could let this scan say
             // `false` while the N4 veto inside `is_deadlocked`/`local_quiesced` said `true` (or vice
@@ -557,6 +558,7 @@ impl MnSched {
         let ok = self.may_fault_unproven();
         let err = self.verdict_err();
         let done = c.flag_deadlock_leaves(&err, ok)?;
+        self.take_cut_requeued(c);
         if !done {
             self.wake_completed_joins(c);
         }

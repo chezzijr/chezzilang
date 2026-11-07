@@ -113,6 +113,8 @@ pub(super) struct FiberCtx {
     /// See [`Vm::held_gens`]: the holds the task's generator body frames keep. Dropping a context
     /// puts those generators back `Done`.
     pub(super) held_gens: Vec<super::core::GenHold>,
+    /// See [`Vm::drains`]: the task's live defer drains, carried across a park.
+    pub(super) drains: Vec<super::Drain>,
     /// M1.6 — this context owns its own per-fiber side state (`executors`, `str_intern` and the
     /// in-flight socket-op state below), so [`Vm::swap_ctx`] swaps it. `false`
     /// for a context that aliases the shell's (tests only: every fiber and box context owns its
@@ -222,6 +224,25 @@ pub(super) struct Fiber {
     /// TICKET-289 — an Executor job's own cancel flag ([`JobSettle::flag`]); `None` for every
     /// other fiber. A running job reads it in place of its scope's shared flag.
     pub(super) job_cancel: Option<Arc<AtomicBool>>,
+    /// The verdict cut this fiber's wait inside a `defer` it parked in ([`SchedCore::cut_parked`]);
+    /// the resume ends the wait with the cut (`Vm::take_verdict_cut`).
+    pub(super) defer_cut: Option<VerdictCut>,
+    /// This fiber's [`Vm::cut`] and `cancel_unwind_faulted` while it is not the running fiber:
+    /// saved at every leave of `run_one_fiber` and taken back at the resume.
+    pub(super) cut: Option<super::block::Cut>,
+    pub(super) cancel_unwind_faulted: bool,
+}
+
+/// How a verdict cut a fiber parked in a `defer`, as it cuts a demoted cleanup's in-place wait
+/// ([`Vm::in_place_cut`]).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) enum VerdictCut {
+    /// The sched-wide verdict ([`SchedCore::flag_deadlock`], a joined leaf): the wait ends with
+    /// the verdict's fault, which ranks below a cause the task already holds.
+    Sched,
+    /// An aborting family's cut ([`SchedCore::cut_aborting_families`]): the scope's cancel, so the
+    /// task unwinds as `Cancelled` unless it holds a cut already.
+    Family,
 }
 
 impl Fiber {
@@ -237,13 +258,28 @@ impl Fiber {
         open_nurseries(&self.ctx.eager_scheds).any(|o| o.flag.load(Ordering::Relaxed))
     }
 
+    /// Does a cancel reach this parked fiber at all? Not while it runs a `defer` on frames (its
+    /// `drains`): a `defer` is never cancelled ([`Vm::in_defer`]), so a cancel would only requeue
+    /// it to park again. THE gate of every park gap re-check and every cancel drain matcher.
+    pub(super) fn honours_cancel(&self) -> bool {
+        self.ctx.drains.is_empty()
+    }
+
+    /// The park gap re-check's cancel half: `scope_tripped` (this fiber's scope cancel, or an
+    /// ancestor's) or a nursery this fiber owns, for a fiber that honours a cancel.
+    pub(super) fn cancel_wakes(&self, scope_tripped: bool) -> bool {
+        self.honours_cancel() && (scope_tripped || self.owned_tripped())
+    }
+
     /// TICKET-188 — does a cancel of scope `family` wake this parked fiber? It is a member of the
-    /// family, or it owns one of the family's scopes (its child faulted). Every per-fiber drain
-    /// matcher reads this.
+    /// family, or it owns one of the family's scopes (its child faulted), and it honours a cancel.
+    /// Every per-fiber drain matcher reads this.
     pub(super) fn woken_by(&self, family: &[usize]) -> bool {
-        family.contains(&self.scope_id)
-            || open_nurseries(&self.ctx.eager_scheds)
-                .any(|o| family.contains(&o.scope) || o.more.iter().any(|s| family.contains(s)))
+        self.honours_cancel()
+            && (family.contains(&self.scope_id)
+                || open_nurseries(&self.ctx.eager_scheds).any(|o| {
+                    family.contains(&o.scope) || o.more.iter().any(|s| family.contains(s))
+                }))
     }
 }
 
@@ -1126,6 +1162,9 @@ pub(super) struct SchedCore {
     /// cancelled scope owing a drain. Written only by [`SchedCore::drain_scan_due`].
     pub(super) drain_scan_gen: u64,
     pub(super) parked_n: usize, // total fibers across every `parked` bucket
+    /// Parked fibers [`SchedCore::cut_aborting_families`] moved to `global`, owed their
+    /// `runnable` count by the verdict's caller ([`MnSched::take_cut_requeued`]).
+    pub(super) cut_requeued: usize,
     /// TICKET-103 — owners parked at the `JoinNursery` of a fiber-owned nursery (`Disp::JoinPark`),
     /// as `(origin scope id, fiber)`. In neither `running` nor `parked_n`. Woken by
     /// `MnSched::wake_completed_joins` once every scope of the origin's family is done; recorded

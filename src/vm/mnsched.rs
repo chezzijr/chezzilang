@@ -73,13 +73,15 @@ impl SchedCore {
     /// BOUNDED TO THAT WINDOW (this is the whole liveness argument): the veto asks for an UNDRAINED
     /// PARKED fiber of the cancelled scope, not merely `done < total`. "Some incomplete cancelled scope"
     /// was too wide and could never lift: a `defer` is not itself cancellable (`halt_requested`'s
-    /// `deferring == 0` term), so a cleanup body that blocks FOREVER (`ch.recv()` nobody will ever
-    /// answer) demotes and sits there — the scope is then incomplete *because of* that fiber, the veto
+    /// `in_defer` term), so a cleanup body that blocks FOREVER (`ch.recv()` nobody will ever
+    /// answer) demotes or parks and sits there — a parked one is no drain's fiber
+    /// ([`Fiber::honours_cancel`]) — the scope is then incomplete *because of* that fiber, the veto
     /// held forever and the M:N engine hung SILENTLY (serial reports it). The harm the veto exists to
     /// prevent is only possible while parked fibers are still owed their `cancel_drain`; once drained
     /// they are in `global` (`runnable > 0`), so the predicate is false on its own terms and the veto is
-    /// no longer needed. A cancelled scope cannot RE-accumulate parked fibers after its drain: every
-    /// park path re-checks this scope's cancel OR an ancestor's (`park`/`park_send`/`park_wait` re-read
+    /// no longer needed. A cancelled scope cannot RE-accumulate drainable parked fibers after its
+    /// drain (a fiber parked in a `defer` is none: it ignores the cancel and the verdict cuts it,
+    /// `SchedCore::cut_aborting_families`): every park path re-checks this scope's cancel OR an ancestor's (`park`/`park_send`/`park_wait` re-read
     /// `c.scope_cancel_tripped(fiber.scope_id)` under the core lock and requeue `Ready` instead of
     /// parking; `poll_park_offload` hands the netpoller's `register` the same `ScopeCancel`, which
     /// rejects the park under the registry lock `drain_family` sweeps under) — pinned by
@@ -373,6 +375,7 @@ impl MnSched {
                 pool_joiner: None,
                 drain_scan_gen: 0,
                 parked_n: 0,
+                cut_requeued: 0,
                 join_parked: Vec::new(),
                 scopes: ScopeTable::with_root(JoinScope {
                     base_index: 0,
@@ -1225,8 +1228,9 @@ pub(super) fn arm_timer_sleep(sched: Arc<MnSched>, mut fiber: Fiber, t: TimerSle
     // pinned the previous order.
     let halt = if t.run_deadline.is_some_and(|rd| now >= rd) {
         Some(super::exec::timed_out_err(t.timeout_ms, span))
-    } else if t.wake.halt().is_some() {
-        // TICKET-188 — a cancel, or a child fault of a nursery this fiber owns. `cancelled` is only
+    } else if fiber.honours_cancel() && t.wake.halt().is_some() {
+        // TICKET-188 — a cancel, or a child fault of a nursery this fiber owns. Not inside a
+        // `defer`: a cleanup's sleep runs its full length (`Fiber::honours_cancel`). `cancelled` is only
         // the resume marker: the resume re-derives the halt through `Vm::take_halt`. A tripped flag
         // with no recorded fault yet (the child is between its trip and `finish`) re-arms below.
         Some(RuntimeError {

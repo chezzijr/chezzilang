@@ -1,0 +1,48 @@
+# tests/chz/spec/defer_method_ic_site_test.chz — each `defer recv.m(..)` site dispatches its OWN
+# method: two deferred methods of different names and arities on one receiver run LIFO, each with
+# its own arguments, cold (first call) and warm (the same sites re-run in a loop), on the main task
+# and on a spawned task. Go twin: `defer s.a(); defer s.b(1, "x")` prints b then a.
+
+
+struct S:
+    log: List[str]
+
+    fn a(self):
+        self.log.push("a")
+
+    fn b(self, n: int, tag: str):
+        self.log.push("b {n} {tag}")
+
+
+fn run(s: S, i: int):
+    defer s.a()
+    defer s.b(i, "t{i}")
+    s.log.push("body {i}")
+
+
+fn three() -> List[str]:
+    s := S([])
+    for i in 0..3:
+        run(s, i)
+    return s.log
+
+
+EXPECT := ["body 0", "b 0 t0", "a", "body 1", "b 1 t1", "a", "body 2", "b 2 t2", "a"]
+
+
+test fn deferred_methods_each_dispatch_their_own_site():
+    s := S([])
+    run(s, 7)
+    assert s.log == ["body 7", "b 7 t7", "a"]
+
+
+test fn deferred_methods_stay_per_site_when_warm():
+    assert three() == EXPECT
+
+
+test fn deferred_methods_per_site_on_a_spawned_task():
+    out := Channel[List[str]](1)
+    parallel:
+        spawn:
+            out.send(three())
+    assert (out.recv() ?? []) == EXPECT

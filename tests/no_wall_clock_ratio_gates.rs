@@ -306,7 +306,7 @@ fn sleep_synchronised_tests() -> BTreeSet<String> {
 /// rejected it (the walk returns 68). Obtain it by compiling once with an empty array and copying
 /// the "sleeps but is not listed" list `no_new_rust_test_sleeps_to_order_two_events` reports,
 /// verbatim, the same way `stack_trace_reports_call_chain`'s golden was obtained.
-const SLEEP_SYNCHRONISED_TESTS: [&str; 118] = [
+const SLEEP_SYNCHRONISED_TESTS: [&str; 120] = [
     "cousin_fed_recovered_deadlock_is_fatal_not_a_hang_at_two_and_four_workers",
     // TICKET-208, `tests/executor_task_grid.rs`. Every `time.sleep_ms` of these five is inside a
     // fixture .chz program's SOURCE STRING: a job's long work (3 s, 6 s) that a cut must end, or a
@@ -521,6 +521,13 @@ const SLEEP_SYNCHRONISED_TESTS: [&str; 118] = [
     // `tests/hook_conformance_grid.rs`, the cancel cell: a job that must be INSIDE the sleep when
     // cancelled (the owner sleeps inside `next`/`eq`/`add` when the sibling faults).
     "every_hook_consumer_gives_the_same_failure_path",
+    // `tests/callback_park_grid.rs`, defer drains on frames. Every `time.sleep_ms` is inside a
+    // fixture .chz program's SOURCE STRING, never a happens-before edge in the Rust test's own
+    // control flow: the sibling's fault lands while the task waits in its `defer` (the seeded
+    // yield mid-drain is the shape under test), and the `sleep` cell's sleep IS the verdict path
+    // under test (a timer sleep before the stuck wait). The assertions hold the cause's report.
+    "defer_cut_keeps_the_cancel_across_a_yield",
+    "stuck_cleanup_reports_the_cause_on_every_verdict_path",
 ];
 
 #[test]

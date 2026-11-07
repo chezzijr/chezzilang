@@ -351,8 +351,9 @@ still catches it.
 **Cleanup that blocks, blocks the teardown.** A `defer` that sleeps, waits on a socket or sends a last
 message is *uninterruptible*: it delays the nursery join by exactly as long as it takes, with no cap
 (`defer time.sleep_ms(10000)` in a cancelled task = a 10s join). That is Go's rule for a deferred
-function during a panic. A `recv` in a cleanup demotes (the worker blocks in place on its own thread,
-a replacement is spun) and the sibling's `send` reaches it, so the cleanup completes.
+function during a panic. A `recv` in a cleanup parks its task, as any other wait does, and the
+sibling's `send` reaches it, so the cleanup completes (since 2026-11-07; before, it demoted the
+worker).
 
 **Cleanup that can NEVER complete is REPORTED, never a silent hang.** A `defer` whose body waits for
 something that can never arrive (`ch.recv()` no one will ever answer) leaves the program quiesced, and
@@ -362,7 +363,8 @@ belongs to an owner whose child faulted. The same holds for a `defer` that runs 
 a `defer` in `main`, at module top level, or in a `parallel:` body (which runs AFTER the join): a
 cleanup that can never complete faults `deadlock` (fatal) instead of hanging. A pending `os.exit` from
 another party outranks that verdict (Go: the exit status). A cleanup a live task WILL feed is not
-judged.
+judged. Nor is a wait on a socket: the other end may still write, so a cleanup that reads a socket
+nobody writes to waits for it (Go: a goroutine blocked in a network read is never a deadlock).
 
 **An owner that faults beside a stuck child reports its own fault.** When an owner faults on its
 own while a child's cleanup can never complete, the verdict tears down the stuck child and the

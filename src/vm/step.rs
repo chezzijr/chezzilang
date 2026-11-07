@@ -332,27 +332,24 @@ impl Vm {
             }
             Op::Return => self.do_return(false)?,
             Op::DeferCall(argc) => self.do_defer(None, *argc, span),
-            Op::DeferMethod(name, argc) => self.do_defer(Some(name.clone()), *argc, span),
+            Op::DeferMethod(name, argc, ic) => {
+                self.do_defer(Some((name.clone(), *ic)), *argc, span)
+            }
             Op::EnterDeferScope => {
                 let frame = self.frames.last_mut().unwrap();
                 let marker = frame.deferred.len();
                 frame.defer_markers.push(marker);
             }
-            Op::LeaveDeferScope => {
-                if let Some(e) = self.leave_defer_scope() {
-                    return Err(e);
-                }
-            }
+            Op::LeaveDeferScope => self.leave_defer_scope()?,
             Op::DrainHandlerDefers => {
                 // The live recover handler is still installed (its `PopHandler` follows). Drain the
                 // block's defers down to its marker; a fault propagates and is caught by that same
                 // handler (becoming the recover's `Err`).
-                if let Some(marker) = self.handlers.last().map(|h| h.defer_len)
-                    && let Some(e) = self.drain_frame_to(marker)
-                {
-                    return Err(e);
+                if let Some(marker) = self.handlers.last().map(|h| h.defer_len) {
+                    self.drain_then(marker, DrainCont::Op)?;
                 }
             }
+            Op::Drain(step) => self.defer_drain_step(*step)?,
             Op::Try => self.do_try(span)?,
             Op::JsonDecode(desc) => {
                 let desc = desc.clone();

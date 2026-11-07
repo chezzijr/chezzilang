@@ -49,7 +49,7 @@ impl MnSched {
         // Cross-nursery flat scheduler — read the PARKING fiber's SCOPE cancel (not the sched's global
         // `cancel`), so an inner fault that tripped only its scope re-checks the right flag here.
         let cancelled =
-            c.scope_cancel_tripped(fiber.scope_id) || fiber.owned_tripped() || fiber.deadline_due();
+            fiber.cancel_wakes(c.scope_cancel_tripped(fiber.scope_id)) || fiber.deadline_due();
         // The fiber carries its slot (and, with or without one, its channel) until its re-run
         // `recv` settles it; a requeued fiber settles at once on that re-run.
         op.at.push((core, 0, false));
@@ -82,7 +82,7 @@ impl MnSched {
         let mut c = self.lock();
         c.leave_running();
         let cancelled =
-            c.scope_cancel_tripped(fiber.scope_id) || fiber.owned_tripped() || fiber.deadline_due();
+            fiber.cancel_wakes(c.scope_cancel_tripped(fiber.scope_id)) || fiber.deadline_due();
         let settled = fiber.pending.as_ref().is_none_or(|op| !op.p.is_queued());
         if settled || cancelled {
             fiber.state = FiberState::Ready;
@@ -251,8 +251,7 @@ impl MnSched {
         // — read the parking fiber's SCOPE cancel (not the sched's global `cancel`). A SEND arm is
         // ready exactly when its offer settled — taken by a receiver, or closed by `close()` — which
         // the shared `Pending`'s state says for every send arm at once.
-        let mut ready_now = c.scope_cancel_tripped(fiber.scope_id)
-            || fiber.owned_tripped()
+        let mut ready_now = fiber.cancel_wakes(c.scope_cancel_tripped(fiber.scope_id))
             || fiber.deadline_due()
             || p.as_ref().is_some_and(|p| !p.is_queued());
         // D2 — an arm is READY (requeue: the re-run `WaitPoll` takes it) or LIVE (empty but still

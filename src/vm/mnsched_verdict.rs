@@ -243,10 +243,12 @@ impl MnSched {
                 .collect()
         };
         self.drain_where(|f| {
-            f.job_cancel.as_ref().is_some_and(|j| Arc::ptr_eq(j, flag))
-                || under.contains(&f.scope_id)
-                || open_nurseries(&f.ctx.eager_scheds)
-                    .any(|o| under.contains(&o.scope) || o.more.iter().any(|s| under.contains(s)))
+            f.honours_cancel()
+                && (f.job_cancel.as_ref().is_some_and(|j| Arc::ptr_eq(j, flag))
+                    || under.contains(&f.scope_id)
+                    || open_nurseries(&f.ctx.eager_scheds).any(|o| {
+                        under.contains(&o.scope) || o.more.iter().any(|s| under.contains(s))
+                    }))
         });
     }
 
@@ -566,6 +568,14 @@ impl MnSched {
         holds(&c).then_some(c)
     }
 
+    /// The `runnable` count of the parked fibers a verdict's cut requeued
+    /// ([`SchedCore::cut_aborting_families`]); every caller of a verdict flag calls it under the
+    /// same lock hold, then notifies.
+    pub(super) fn take_cut_requeued(&self, c: &mut SchedCore) {
+        let n = std::mem::take(&mut c.cut_requeued);
+        self.runnable.fetch_add(n, Ordering::Relaxed); // parked → ready
+    }
+
     /// TICKET-256 — the fault this sched writes into a victim: the latched report when a verdict
     /// is latched (the first blocked party's own site), else this sched's `deadlock_err`. Takes the
     /// `deadlock` cell under the caller's `SchedCore` lock, the order `run_halt` already uses.
@@ -584,6 +594,7 @@ impl MnSched {
         if let Some(mut c) = self.latch_own_verdict(|_| true) {
             let err = self.verdict_err();
             c.flag_deadlock(&err);
+            self.take_cut_requeued(&mut c);
             drop(c);
             self.notify_waiters();
         }
@@ -746,9 +757,9 @@ impl MnSched {
         // skipping their `defer`s — and `reduce_task_slots` ranks Fault > Deadlocked, so the spurious
         // deadlock never even surfaced; the lost `defer` was the only symptom) and LATCH `terminate`,
         // truncating the cleanup of anything demoted inside its own `defer`. BOUNDED to real progress:
-        // a cancelled scope with no undrained park whose last fiber is demoted-blocked forever INSIDE
-        // an uncancellable `defer` (no cancel watch — `halt_requested()` is `None` while
-        // `deferring > 0`) IS a genuine deadlock and is reported, not hung. Evaluated only at the
+        // a cancelled scope with no undrained park whose last fiber is demoted-blocked or parked
+        // forever INSIDE an uncancellable `defer` (no cancel watch — `halt_requested()` is `None`
+        // while `in_defer()`) IS a genuine deadlock and is reported, not hung. Evaluated only at the
         // quiesce (after the counter gate above), so the scan is off the idle/steal hot path. A GENUINE
         // deadlock (nothing cancelled anywhere) is untouched.
         if awaiting_drain.unwrap_or_else(|| c.any_cancelled_scope_awaiting_drain(self)) {

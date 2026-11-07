@@ -78,7 +78,7 @@ case — the one that motivated this milestone — still broken.
   feature. It must carry the cancel/exit marker the surrounding halt already uses, so the existing
   precedence (`Exit` > hard fault > fault > deadlock) applies unchanged.
 - **`defer` interaction.** A `defer:` body that itself shells out must not be truncated mid-cleanup —
-  the same rule `W7-57` settled for the CPU rungs (`deferring > 0` suppresses the halt at the shared
+  the same rule `W7-57` settled for the CPU rungs (`in_defer()` suppresses the halt at the shared
   funnel). Decide explicitly whether a *cleanup* subprocess is killable; the default should be no.
 - **Idempotence + reaping.** Kill must be safe to call twice and after natural exit, and must always
   `wait()` the group so no zombie survives — including on the `os.exit` path, where the run is ending

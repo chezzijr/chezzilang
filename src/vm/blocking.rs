@@ -169,7 +169,7 @@ impl Vm {
     pub(super) fn run_exit_err(&mut self, span: Span) -> Option<RuntimeError> {
         // TICKET-213 (owner decision 5) — an exit cuts a `defer` body; a job fault does not, a
         // cleanup still runs whole for a fault. `run_halt_due` holds that split (it keeps
-        // `deferring == 0` on the job-fault arm alone), so this funnel returns the exit whenever the
+        // `!in_defer()` on the job-fault arm alone), so this funnel returns the exit whenever the
         // exit cell is set, inside a `defer` too. (W7-57 suppressed the exit here while a `defer`
         // ran; Go `os.Exit` and Python `os._exit` run no cleanup.)
         if !self.run_halt_due() {
@@ -206,7 +206,7 @@ impl Vm {
     /// due inside a `defer` even while a job fault waits.
     pub(super) fn run_halt_due(&self) -> bool {
         let halt = self.quiesce.run_halt();
-        halt.cuts_cleanup() || (halt == RunHalt::Fault && self.deferring == 0)
+        halt.cuts_cleanup() || (halt == RunHalt::Fault && !self.in_defer())
     }
 
     /// The halts of a party that comes back from a wait it could not poll (a nursery join, an
@@ -416,6 +416,7 @@ impl Vm {
                 Wait::Recv.phrase(),
                 span,
             );
+            let latch = self.halt_latch();
             let r = self.block_wait_tick(WaitSpec::Recv, on, h, core, span, |g| {
                 g.recv_ready_for(Some(&p))
                     || g.closed
@@ -424,7 +425,12 @@ impl Vm {
             });
             // Settle before acting on a fault: a filled slot is a delivered value.
             if let Settled::Got(_, v) = op.settle() {
-                return Ok(RecvStep::Filled(v));
+                let filled = Ok(RecvStep::Filled(v));
+                return self.settled_over_halt(
+                    latch,
+                    Some(filled),
+                    r.map(|()| RecvStep::Filled(v)),
+                );
             }
             r?;
         }
@@ -462,7 +468,7 @@ impl Vm {
         // exactly the reasons `chan_recv_step` documents at the same seam: the deadline outranks a
         // cancel (and ending a timer arm early trips this fiber's cancel to close the park gap), while
         // a cleanup body's already-satisfiable `wait:` must still complete.
-        if self.deferring == 0 {
+        if !self.in_defer() {
             self.deadline_halt(span)?;
         }
         let mut soonest: Option<(usize, std::time::Instant)> = None;
@@ -694,11 +700,11 @@ impl Vm {
         // and re-polls. A live timer arm (`soonest`) bounds the wait (so a real send still beats the
         // timer on the re-poll). Lower throughput but sound — the documented v1 limit (§6d).
         if wait_mode == BlockMode::Demote {
+            let latch = self.halt_latch();
             if let Err(e) = self.demote_wait_block(arms, &p, soonest, span) {
                 let settled = op.settle();
-                return self
-                    .wait_settled(settled, base, meta, span)
-                    .unwrap_or(Err(e));
+                let settled = self.wait_settled(settled, base, meta, span);
+                return self.settled_over_halt(latch, settled, Err(e));
             }
             self.pending = Some(op);
             self.rewind_op();
@@ -719,10 +725,11 @@ impl Vm {
         {
             // W7-17 — CHUNKED, not a bare `thread::sleep`: the deadline is OURS, so it is a checkpoint
             // for its whole duration.
+            let latch = self.halt_latch();
             let slept = self.block_until_deadline(wait_spec, deadline, span);
             let settled = op.settle();
             if let Some(r) = self.wait_settled(settled, base, meta, span) {
-                return r;
+                return self.settled_over_halt(latch, Some(r), slept);
             }
             slept?;
             self.take_wait_arm(base, Some(Value::bool(true)), meta.arm_targets[i]);
@@ -751,13 +758,13 @@ impl Vm {
             );
             let mut reg = self.wait_begin(wait_spec, Some(on), "wait", span)?;
             let counts = reg.take_counts();
+            let latch = self.halt_latch();
             if let Err(e) = self.block_halt_check(span) {
                 self.wait_end(reg, &[]);
                 drop(counts);
                 let settled = op.settle();
-                return self
-                    .wait_settled(settled, base, meta, span)
-                    .unwrap_or(Err(e));
+                let settled = self.wait_settled(settled, base, meta, span);
+                return self.settled_over_halt(latch, settled, Err(e));
             }
             // W7-13r(a) — wait on the FIRST arm's condvar with the tick as the timeout (every other
             // arm is observed within a tick). **The predicate must mirror what the re-run SETTLES on,

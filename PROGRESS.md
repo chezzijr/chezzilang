@@ -36,8 +36,11 @@ A wait inside a callback parks or is judged, as in Go (branch `feat/frame-reentr
 hook, an operator, an f-string part, `print`'s `str`, a HOF callback, a sort comparator, a
 `from_iter` drain, a `Shared`/`RwShared` closure and a generator body run as frames with a
 `RetAction` (`src/vm/ret_action.rs`), so `main` with no sender reports `deadlock` where it hung.
-A `defer` body stays judged through the drain's `deferring` exception; a frame-based defer drain
-is a follow-up plan. The nested container walks, map/set probes, `json.decode` defaults and FFI
+A `defer` body runs on frames too (branch `feat/defer-frames`, 2026-11-07): a drain is a trampoline
+frame (`src/vm/defer_drain.rs`), so a wait in it parks its task and is judged in `main`; 2000 tasks
+waiting in a `defer` at `--threads=2` use 5 OS threads, not 2005. Only the synchronous hard-halt
+drains (`--max-heap`, `--timeout`) keep the `deferring` exception in `BlockCtx::judged`
+([2026-11 log](docs/history/progress/2026-11.md)). The nested container walks, map/set probes, `json.decode` defaults and FFI
 callbacks still re-enter (`gaps.md` W23-1, narrowed). Grid: `tests/callback_park_grid.rs`.
 
 The checker has a non-fatal warning channel (`Severity::Warning`, `"severity"` in `--errors=json`,

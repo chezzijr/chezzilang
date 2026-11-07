@@ -1028,8 +1028,7 @@ fn a_deferred_generator_fault_does_not_leak_its_prefix_to_a_later_fault() {
 
 /// Review finding (2026-09-15): the prior fix closed the leak only for a `defer it.next()` OUTSIDE
 /// the `recover:` block. A `defer it.next()` DIRECTLY INSIDE the `recover:` block still leaked: the
-/// clear used to run BEFORE the recover block's own defer drain (`drain_frame_to(h.defer_len)` in
-/// `exec.rs`), so a deferred generator fault drained AFTER the clear set the prefix again and it
+/// clear used to run BEFORE the recover block's own defer drain (now `DrainCont::Catch`), so a deferred generator fault drained AFTER the clear set the prefix again and it
 /// survived to decorate the next uncaught fault.
 #[test]
 fn a_defer_inside_the_recover_block_does_not_leak_its_prefix_to_a_later_fault() {

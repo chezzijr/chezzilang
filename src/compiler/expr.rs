@@ -733,14 +733,19 @@ impl Compiler {
             if let Some(seed) = self.sum_seed(name, args, *name_span) {
                 self.compile_expr(fc, obj)?;
                 self.emit_sum_seed(fc, &seed, call.span);
-                fc.emit(Op::DeferMethod(name.clone(), 1), call.span);
+                let ic = self.next_method_ic();
+                fc.emit(Op::DeferMethod(name.as_str().into(), 1, ic), call.span);
                 return Ok(());
             }
             self.compile_expr(fc, obj)?;
             let argc = self.compile_call_args(fc, call.id, callee, args, named, call.span)?;
             // M24-5: the hidden witness arguments ride LAST, exactly as on the eager `Op::CallMethod`.
             let w = self.emit_member_witness_args(fc, callee, name, *name_span, call.span)?;
-            fc.emit(Op::DeferMethod(name.clone(), argc + w), call.span);
+            let ic = self.next_method_ic();
+            fc.emit(
+                Op::DeferMethod(name.as_str().into(), argc + w, ic),
+                call.span,
+            );
             return Ok(());
         }
         // A deferred value call: its arguments -- default fills included -- are evaluated here, at

@@ -1093,7 +1093,7 @@ impl Vm {
     ///    caught on, and no existing fence sees it (their `defer`s only `print`).
     /// 2. **Inside a `defer`, a run-deadline wake is NOT this op's timeout** — hence `Ok(false)`, which
     ///    retries the syscall so a cleanup write that can complete immediately still does (W7-17's
-    ///    `deferring > 0` suppression, same term `halt_requested` uses). If the retry would block,
+    ///    `in_defer()` suppression, same term `halt_requested` uses). If the retry would block,
     ///    `park_on_fd`'s ungated check halts it there — which is what makes that check load-bearing.
     ///
     /// Accepted degeneracy: with an op deadline SHORTER than the run deadline by less than the
@@ -1109,7 +1109,7 @@ impl Vm {
         let fired = std::mem::take(&mut self.poll_timed_out);
         match self.deadline_halt(span) {
             Ok(()) => Ok(fired),
-            Err(e) if self.deferring == 0 => Err(e),
+            Err(e) if !self.in_defer() => Err(e),
             Err(_) => Ok(false),
         }
     }
@@ -1163,7 +1163,7 @@ impl Vm {
     ) -> Result<Option<Value>, RuntimeError> {
         // W7-18 — `--timeout` ABOVE the cancellation checkpoint, mirroring W7-17's ordering in
         // `chan_recv_step`: the deadline outranks a cancel, so a fiber reaching here after the run
-        // deadline reports the honest hard halt rather than `cancelled`. UNGATED by `deferring`
+        // deadline reports the honest hard halt rather than `cancelled`. UNGATED by `in_defer()`
         // (unlike `poll_timeout_check`'s entry check): everything above a park settles without
         // blocking, and a `defer` that would PARK past the deadline is a hang, not cleanup.
         self.deadline_halt(span)?;

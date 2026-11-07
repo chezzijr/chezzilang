@@ -1245,10 +1245,10 @@ fn recover_does_not_catch_timeout() {
 fn recover_inside_defer_does_not_catch_timeout() {
     // W7-3 boundary: the cancel-bypass carve-out is (a)-ONLY. A `recover:` installed inside a
     // `defer` body now catches a CANCEL-time fault, but a `--timeout` wall-clock abort is still
-    // recover-proof there too — `is_timed_out` is not gated on `deferring`.
+    // recover-proof there too — `is_timed_out` is not gated on `in_defer()`.
     //
     // The TimedOut BUCKET alone does not discriminate: the outer `--timeout` fires in the test
-    // body (`deferring == 0`), takes the unconditional bypass, and the funnel re-stamps
+    // body (`!in_defer()`), takes the unconditional bypass, and the funnel re-stamps
     // `.timed_out()` onto whatever error emerges (exec.rs), so the bucket is TimedOut either way.
     // The load-bearing assertion is therefore the SWALLOWED marker: it can only appear if the
     // in-defer `recover:` caught the abort and execution continued past it.
@@ -1523,7 +1523,7 @@ fn a_timer_parked_task_aborted_by_the_deadline_still_runs_its_defers() {
 /// both fns, ungated, and silently truncated a cleanup body at a `recv` whose value was **already
 /// queued** (the `DEFER-RECV` line below simply vanished) — the same "stopped promptly ≠ cleaned up"
 /// failure W7-16 was caught on, re-introduced by its own fix. It is now suppressed by the same
-/// `deferring > 0` term `cancel_requested` uses, and the checkpoint that matters sits at the PARK.
+/// `in_defer()` term `halt_requested` uses, and the checkpoint that matters sits at the PARK.
 ///
 /// Mutation-verified: hoisting `deadline_halt` back above the pop turns this red.
 #[test]
@@ -2290,6 +2290,33 @@ fn over_memory_defer_is_still_capped_during_unwind() {
     }
 }
 
+/// A `--max-heap` abort drains its `defer`s synchronously, on the Rust stack. A wait in that drain
+/// that can never complete is still judged: `BlockCtx::judged` keeps the `deferring` exception for
+/// exactly these hard-halt drains (plan 2026-11-07-defer-drain-frames, Task 4). Measured on the
+/// branch with `judged = native_reentry == 0`: the run hung (rc=124) instead of this verdict.
+#[test]
+fn a_wait_in_a_max_heap_defer_drain_is_judged() {
+    let d = TmpDir::new();
+    let f = d.write(
+        "heapdefer_test.chz",
+        "ch: Channel[int] = Channel[int](4)\n\
+             test fn t():\n\
+            \x20   defer:\n\
+            \x20       v := ch.recv()\n\
+            \x20       print(\"GOT {v}\")\n\
+            \x20   xs: List[List[int]] = []\n\
+            \x20   while true:\n\
+            \x20       xs.push([1, 2, 3, 4, 5, 6, 7, 8])\n",
+    );
+    let (text, passed) = run_tests_halt_watchdog("heapdefer", &f, 0, 2_000_000);
+    assert!(!passed, "report:\n{text}");
+    assert!(
+        text.contains("OVER-MEMORY t (")
+            && text.contains("heapdefer_test.chz) deadlock: 1 task is blocked and cannot proceed"),
+        "a wait in a hard-halt defer drain that nobody can satisfy is a deadlock; report:\n{text}"
+    );
+}
+
 // ---- CLI ergonomics wave: filter / fail-fast / show-output / json / verbosity / color ----
 
 /// A 3-free-test file used by several ergonomics tests: `alpha` passes, `beta` fails (assert
@@ -2827,7 +2854,7 @@ fn run_tests_halt_watchdog(
 /// - `unwind`: the `defer` is in a callee that panics; the fault unwinds past it to the handler
 ///   (`finish_fault`, the frames below the `recover:`).
 /// - `block_panic`: the `defer` is inside the `recover:` block, whose body panics (`finish_fault`,
-///   the handler's own `drain_frame_to`).
+///   the handler's own drain, `DrainCont::Catch`).
 /// - `block_try`: the `defer` is inside the `recover:` block, whose body ends in a recover-scoped
 ///   `?` on an `Err` (`stmt.rs`, the inline catch).
 /// - `block_clean` (negative): the same `defer`, no fault. It was already correct before the fix.

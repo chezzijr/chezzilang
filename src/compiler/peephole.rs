@@ -85,6 +85,7 @@ fn bin_kind(op: &Op) -> Option<BinKind> {
         | Op::EnterDeferScope
         | Op::LeaveDeferScope
         | Op::DrainHandlerDefers
+        | Op::Drain(_)
         | Op::Try
         | Op::JsonDecode(_)
         | Op::JsonToValue
@@ -210,6 +211,7 @@ fn jump_target(op: &Op) -> Option<usize> {
         | Op::EnterDeferScope
         | Op::LeaveDeferScope
         | Op::DrainHandlerDefers
+        | Op::Drain(_)
         | Op::Try
         | Op::JsonDecode(_)
         | Op::JsonToValue
@@ -332,6 +334,7 @@ fn jump_target_mut(op: &mut Op) -> Option<&mut usize> {
         | Op::EnterDeferScope
         | Op::LeaveDeferScope
         | Op::DrainHandlerDefers
+        | Op::Drain(_)
         | Op::Try
         | Op::JsonDecode(_)
         | Op::JsonToValue
@@ -463,6 +466,7 @@ fn try_fold_tail(out: &[Op]) -> Option<Fold> {
             | Op::EnterDeferScope
             | Op::LeaveDeferScope
             | Op::DrainHandlerDefers
+            | Op::Drain(_)
             | Op::Try
             | Op::JsonDecode(_)
             | Op::JsonToValue

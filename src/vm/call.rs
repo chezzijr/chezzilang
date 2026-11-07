@@ -741,6 +741,18 @@ impl Vm {
     /// values — and the return value — rooted. A fault in a deferred call supersedes the frame's
     /// result (Go: a panic in a defer wins): it returns `Err` and the frame is still torn down.
     pub(super) fn do_return(&mut self, _propagated: bool) -> Result<(), RuntimeError> {
+        // TICKET-132 — an escaped fiber-owned level PARKS the owner (rewinds `ip`); the op re-runs
+        // with the drained defers consumed, and takes back the fault the park carried.
+        let err = self.take_escape_park();
+        self.return_levels(err)
+    }
+
+    /// `do_return` after the escaped `parallel:` levels (`return_levels`), with their fault
+    /// `defer_err`.
+    pub(super) fn return_join(
+        &mut self,
+        defer_err: Option<RuntimeError>,
+    ) -> Result<(), RuntimeError> {
         // W14-4 -- escaped `parallel:` levels unwind FIRST, innermost-first: each level's body defers,
         // then its cancel + wait (its children run their defers), THEN the implicit-nursery join, THEN
         // the frame's remaining defers. So the enclosing defers run after the cancelled children have
@@ -757,12 +769,6 @@ impl Vm {
         let frame_top = self.frames.last().unwrap();
         let nursery_floor = frame_top.nursery_len;
         let implicit = frame_top.has_implicit_nursery;
-        let mut defer_err = None;
-        // TICKET-132 — an escaped fiber-owned level PARKS the owner (rewinds `ip`); the op re-runs
-        // with the drained defers consumed.
-        if self.unwind_escaped_levels(nursery_floor + usize::from(implicit), &mut defer_err) {
-            return Ok(());
-        }
         if implicit && self.nurseries.len() > nursery_floor {
             // A body defer faulted above the implicit nursery: return `Err` with the frame intact,
             // so the fault path cancels the implicit nursery and runs the remaining defers, as for a
@@ -786,9 +792,17 @@ impl Vm {
         // Drain with the return value still on top of the stack (rooted) and the frame still on
         // `self.frames` (so `collect` roots the pending records). The frame's remaining defers run
         // AFTER the escaped levels and the implicit-nursery join above (children complete, then
-        // cleanup). `unwind_escaped_levels` leaves no level above `nursery_floor`, so no park can
-        // follow the defers.
-        let defer_err = self.drain_top_frame_deferred().or(defer_err);
+        // cleanup). `return_levels` leaves no level above `nursery_floor`, so no park can
+        // follow the defers. The rest is `return_finish`.
+        self.drain_then(0, DrainCont::Return { err: defer_err })
+    }
+
+    /// The end of `do_return`, after the frame's defers ran: `defer_err` is their latest fault, else
+    /// the escaped levels'. The return value is on top of the stack.
+    pub(super) fn return_finish(
+        &mut self,
+        defer_err: Option<RuntimeError>,
+    ) -> Result<(), RuntimeError> {
         let ret = self.pop();
         let frame = self.frames.pop().unwrap();
         if frame.counted {
@@ -844,14 +858,15 @@ impl Vm {
     /// `defer f(args)` / `defer recv.m(args)` — pop the callee/receiver + `argc` args off the stack
     /// and record a deferred call on the current frame (drained LIFO at frame exit). The values were
     /// evaluated now (Go semantics); the call runs at exit.
-    pub(super) fn do_defer(&mut self, method: Option<String>, argc: usize, span: Span) {
+    pub(super) fn do_defer(&mut self, method: Option<(Arc<str>, u32)>, argc: usize, span: Span) {
         let at = self.stack.len() - argc;
         let args: Vec<Value> = self.stack.split_off(at);
         let head = self.pop();
         let d = match method {
-            Some(name) => Deferred::Method {
+            Some((name, ic)) => Deferred::Method {
                 recv: head,
                 name,
+                ic,
                 args,
                 span,
             },
@@ -864,56 +879,31 @@ impl Vm {
         self.frames.last_mut().unwrap().deferred.push(d);
     }
 
-    /// Run one deferred call to completion (the result is discarded). `Call` rides `invoke_value`;
-    /// `Method` re-uses the normal method dispatch by pushing the receiver + args and popping the
-    /// discarded result. The pop→push window has no instruction boundary, so the moved-out values
-    /// can't be collected before they're re-rooted.
-    pub(super) fn run_one_deferred(&mut self, d: Deferred) -> Result<(), RuntimeError> {
+    /// Run frame `fi`'s next deferred call to completion on the Rust stack (the result is
+    /// discarded): the synchronous drain ([`Vm::drain_deferred`]). The record is called as the
+    /// trampoline calls it ([`Vm::run_loaded`]) and stays in the frame, rooted, until it returns.
+    pub(super) fn run_one_deferred(&mut self, fi: usize) -> Result<(), RuntimeError> {
         // A defer is the cleanup a cancel exists to run, so NO cancellation checkpoint fires inside
-        // it: `deferring > 0` ⇒ `halt_requested()` is `None` (exec.rs). It must be raised BEFORE
-        // `guarded` (whose own checkpoint would otherwise eat this very call) and lowered on every
-        // exit path, including a fault thrown by the deferred body itself.
-        // Panic-safe, same reasoning as `guarded`'s `native_reentry` (exec.rs): `run_one_deferred_inner`
+        // it: `deferring > 0` ⇒ `in_defer()` ⇒ `halt_requested()` is `None` (frames.rs). It must be
+        // raised BEFORE `guarded` (whose own checkpoint would otherwise eat this very call) and
+        // lowered on every exit path, including a fault thrown by the deferred body itself.
+        // Panic-safe, same reasoning as `guarded`'s `native_reentry` (exec.rs): this fn
         // calls `guarded`, which CATCHES a re-entered FFI callback's Rust panic and `resume_unwind`s it,
         // so a plain `-= 1` after the call would be skipped on that unwind and leak `deferring` at +1 for
         // the VM's lifetime. Since W7-3 that leak is worse than "the task stops hitting checkpoints": it
         // would also permanently disable the cancel bypass, letting an ordinary outer `recover:` defeat a
         // nursery cancel. A `Drop` guard can't be used (it would alias `self` across the call).
         self.deferring += 1;
+        // Guarded: a synchronous drain is Rust-stack state, so a blocking `recv` inside it cannot
+        // park — it demotes or is judged (B1).
         let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            self.run_one_deferred_inner(d)
+            self.guarded(|vm| vm.run_loaded(fi))
         }));
         self.deferring -= 1;
         match r {
             Ok(v) => v,
             Err(payload) => std::panic::resume_unwind(payload),
         }
-    }
-
-    fn run_one_deferred_inner(&mut self, d: Deferred) -> Result<(), RuntimeError> {
-        // Guarded: a deferred call runs during frame teardown (the LIFO drain loop is Rust-stack
-        // state), so a blocking `recv` inside it cannot park — it faults `deadlock` (B1).
-        self.guarded(|vm| match d {
-            Deferred::Call { callee, args, span } => {
-                vm.invoke_value(callee, args, span)?;
-                Ok(())
-            }
-            Deferred::Method {
-                recv,
-                name,
-                args,
-                span,
-            } => {
-                let argc = args.len();
-                vm.push(recv);
-                for a in args {
-                    vm.push(a);
-                }
-                vm.do_method_call(&name, argc, NO_IC, span)?;
-                vm.pop(); // discard the deferred call's result
-                Ok(())
-            }
-        })
     }
 
     // ----- concurrency C4: sequential, run-to-completion executor -----

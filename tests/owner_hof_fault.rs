@@ -101,7 +101,7 @@ fn an_owner_defer_running_a_map_is_not_truncated() {
     // The defer is registered in a callee of the owner (`work`), so it runs while the owner is
     // still inside the nursery — `eager_scheds` is non-empty and the child's fault is recorded.
     // `defer report(xs)` passes only `xs`: a `defer print(..{xs.map(..)}..)` evaluates its `map`
-    // eagerly at the `defer` statement, outside `deferring`, and would never reach the guard.
+    // eagerly at the `defer` statement, outside the defer drain, and would never reach the guard.
     let src = [
         "fn report(xs: List[int]):",
         "    print(\"defer map len={xs.map(fn(x) -> int: x * 2).len()}\")",

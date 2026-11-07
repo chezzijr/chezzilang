@@ -37,8 +37,10 @@ impl BlockCtx {
     ///
     /// `quiesce`'s `live` count is `1 (main) + Σ outstanding` over the run's executors, so exactly
     /// two kinds of thread are counted: `main` and an eager `Executor` job — the two with no
-    /// scheduler of any kind under them — and only while every native re-entry is a `defer` drain
-    /// (`native_reentry == deferring`; a `defer` body is VM code on the same thread). A worker
+    /// scheduler of any kind under them — and only while every native re-entry is a synchronous
+    /// hard-halt `defer` drain (`native_reentry == deferring`: `--max-heap`, `--timeout`; its body is
+    /// VM code on the same thread). Every other `defer` drain runs on frames, so it needs no
+    /// exception: its wait is judged at `native_reentry == 0`, or parks on a fiber. A worker
     /// shell, the inline builder, or a party inside a real callback is not counted; each can only
     /// run user code while some counted party is inside a nursery or a native call, and such a
     /// party is live and unregistered, which vetoes the verdict. Never widen this to a callback
@@ -680,7 +682,17 @@ impl Vm {
     /// A wait no site named (a nursery join) adds no listing entry: its blocked children stand in
     /// its place.
     pub(super) fn cut_fault(&self, sched: &MnSched, span: Span) -> RuntimeError {
-        match self.wait_site {
+        self.cut_fault_on(sched, self.wait_site, span)
+    }
+
+    /// [`Vm::cut_fault`] of the wait at `site` (`None`: a nursery join).
+    fn cut_fault_on(
+        &self,
+        sched: &MnSched,
+        site: Option<(&'static str, Span)>,
+        span: Span,
+    ) -> RuntimeError {
+        match site {
             Some((wait, at)) => self.cut_at(&sched.deadlock_err, wait, at),
             None => sched
                 .deadlock_err
@@ -695,10 +707,43 @@ impl Vm {
         if !c.waiter_cut(tok) {
             return false;
         }
+        self.cut_as_cancel();
+        true
+    }
+
+    /// An aborting family's cut of this task's stuck cleanup is its scope's cancel: the task
+    /// unwinds as `Cancelled`, unless it already holds a cut (its cause ranks first, DEC-147).
+    fn cut_as_cancel(&mut self) {
         if self.cut.is_none() {
             self.cut = Some(Cut::Cancelled);
         }
-        true
+    }
+
+    /// The verdict cut this fiber's wait in the `defer` it parked in (`how`,
+    /// [`SchedCore::cut_parked`]): the wait ends with the verdict's fault, as a demoted cleanup's
+    /// in-place wait does ([`Vm::in_place_cut`]). The resumed op does not re-run: the fault unwinds
+    /// the `defer` body ([`Vm::on_step_fault`]), and the wait's pending entry is settled.
+    /// A sched-wide cut names the fiber's own wait, `park_site` ([`Fiber::park_site`]), in the
+    /// run's listing; an aborting family's cut is that scope's cancel and adds no entry.
+    pub(super) fn take_verdict_cut(
+        &mut self,
+        how: super::sched_types::VerdictCut,
+        park_site: Option<(&'static str, Span)>,
+        span: Span,
+    ) -> Result<(), RuntimeError> {
+        let Some(sched) = self.mn.clone() else {
+            return Ok(());
+        };
+        drop(self.pending.take());
+        let site = match how {
+            super::sched_types::VerdictCut::Family => {
+                self.cut_as_cancel();
+                None
+            }
+            super::sched_types::VerdictCut::Sched => park_site,
+        };
+        let e = self.cut_fault_on(&sched, site, span);
+        self.on_step_fault(0, e)
     }
 
     /// THE demote bracket: take this worker off `running` and account the wait — `inflight` (it
@@ -1125,7 +1170,8 @@ impl Vm {
     }
 
     /// The blocking context of the running code, derived from `mn`, `mn_enlist_sched`,
-    /// `native_reentry` and `deferring` on every call. An `Executor` job is a fiber (TICKET-208).
+    /// `native_reentry` and `deferring` (the synchronous hard-halt drain depth) on every call. An
+    /// `Executor` job is a fiber (TICKET-208).
     pub(super) fn block_ctx(&self) -> BlockCtx {
         let judged = self.native_reentry == self.deferring;
         let reentered = self.native_reentry > 0;

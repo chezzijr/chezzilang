@@ -151,7 +151,7 @@ fn genuine_deadlock_is_detected_and_fatal() {
 }
 
 /// A `defer` is the cleanup the cancel exists to RUN — so no cancellation checkpoint fires INSIDE a
-/// deferred call (`Vm::deferring` ⇒ `cancel_requested()` is false). Without that, every defer of a
+/// deferred call (`Vm::in_defer` ⇒ `halt_requested()` is `None`). Without that, every defer of a
 /// task that ends on the NORMAL-return path (or faults on its own) while a sibling has already
 /// tripped the scope cancel hit the checkpoint at the top of `guarded` (`run_one_deferred` runs every
 /// deferred call through it) with `cancelled` still false: the FIRST (LIFO) deferred call returned
@@ -261,12 +261,12 @@ fn run_with_deadline(
 
 /// A `defer` that can NEVER complete (its body `recv`s on a channel nobody will ever send to) inside
 /// a CANCELLED task is REPORTED as a deadlock — never a silent hang. A defer is not itself cancellable
-/// (`cancel_requested`'s `deferring == 0`), so on M:N that cleanup demotes and blocks in place; the
+/// (`halt_requested`'s `in_defer` term), so on M:N that cleanup parks in its frame drain; the
 /// scope is then incomplete BECAUSE of it, which made the N4 cancel-teardown veto
 /// (`any_cancelled_scope_awaiting_drain`, mod.rs) permanent and the M:N engine hung SILENTLY while
 /// serial reported (measured: M:N `timeout` rc=124, serial rc=1). The veto is now bounded to the
-/// trip→`cancel_drain` window (an UNDRAINED PARKED fiber), so the quiesce is detected, the demoted
-/// fiber faults in place, and — the task being already cancelled — its error is swallowed and the
+/// trip→`cancel_drain` window (an UNDRAINED PARKED fiber), so the quiesce is detected, the verdict
+/// cuts the stuck cleanup (`SchedCore::verdict_victim`), and — the task being already cancelled — its error is swallowed and the
 /// SIBLING'S real fault is what propagates, identically.
 #[test]
 fn parity_a_defer_that_can_never_complete_is_reported_not_hung() {
@@ -324,9 +324,8 @@ fn parity_a_blocking_defer_body_completes_when_the_task_is_cancelled() {
 }
 
 /// The cleanup's OWN work must survive too: a `parallel:` (or `spawn`) opened INSIDE a cancelled task's
-/// `defer` runs to completion on BOTH engines. The `deferring > 0` suppression that makes a defer
-/// uncancellable is per-`Vm` and does NOT cross a spawn — a worker fiber is a fresh `Vm` with
-/// `deferring == 0` — while the cancel-flag chain DOES cross it (`Vm::scope_ancestors` →
+/// `defer` runs to completion on BOTH engines. The `in_defer()` suppression that makes a defer
+/// uncancellable is per-task and does NOT cross a spawn — a worker fiber starts with no drain — while the cancel-flag chain DOES cross it (`Vm::scope_ancestors` →
 /// `JoinScope::ancestors` → `cancel_outer`). So the child of a cleanup's nursery inherited the
 /// already-tripped enclosing flag and died at its first checkpoint (back-edge / blocking op): M:N
 /// printed `CLEANUP-ENTER|CLEANUP-DONE|sentinel=0` (the child silently dropped, rc 0) against serial's
