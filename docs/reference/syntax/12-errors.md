@@ -264,6 +264,9 @@ match r:
 - A fault raised inside a stdlib function (for example `submit` on a shut-down `Executor`) is located
   at your call into the stdlib (Rust's `#[track_caller]`), caught or uncaught; the trace keeps its
   frames. A stdlib `panic(...)` stays unstamped (`None`).
+- A fault that `recover:` catches leaves no trace behind, a fault in a recover-block `defer`'s
+  callback included: a later uncaught fault prints its own trace (fixed 2026-11-07; before, it
+  could print the caught `defer` callback's frames).
 
 ### `defer` — block-scoped cleanup
 

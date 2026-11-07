@@ -858,9 +858,9 @@ main()
 
 #[test]
 fn generator_guard_clears_on_every_unwind_path() {
-    // The guard is the VM's existing `active_generators` root list, pushed on resume and popped on
-    // EVERY exit path — so it is self-clearing and can never poison a generator as permanently
-    // "running". One case per unwind path.
+    // The guard is the generator's own box: a resume takes it, and a yield, a return or a fault
+    // unwind of the body frame (`RetAction::Gen`) puts one back — so it can never poison a
+    // generator as permanently "running". One case per unwind path.
     // (a) normal exhaustion, (b) an early `break` then a legitimate resume of the SAME generator,
     // (c) a generator whose body FAULTS inside a `recover:` — after recovery a fresh generator still
     //     runs to completion (and the faulted one is closed, like a Python generator: `.next()` → None),

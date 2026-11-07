@@ -225,13 +225,21 @@ pub enum GuardCycle {
 
 /// RAII handle for a held guard (TICKET-016 / W8-3): dropping it releases the hold and wakes the
 /// tasks that wait for the box, if any. It belongs to the task, not to a thread or a lock guard,
-/// so it may live across a park.
-pub struct UpdateGuard<'a> {
-    lock: &'a BoxLock,
+/// so it may live across a park: it owns its lock, so a box closure's frame keeps it in the task's
+/// state (`Vm::held_guards`) while the task parks.
+pub struct UpdateGuard {
+    lock: Arc<BoxLock>,
     mode: GuardMode,
 }
 
-impl Drop for UpdateGuard<'_> {
+impl UpdateGuard {
+    /// The box lock this guard holds.
+    pub fn lock(&self) -> &Arc<BoxLock> {
+        &self.lock
+    }
+}
+
+impl Drop for UpdateGuard {
     fn drop(&mut self) {
         match self.mode {
             GuardMode::Write => self.lock.release_write(),
@@ -239,6 +247,33 @@ impl Drop for UpdateGuard<'_> {
                 self.lock.state.fetch_sub(1, Ordering::SeqCst);
                 self.lock.wake();
             }
+        }
+    }
+}
+
+/// A generator body frame's hold on the generator's parked slot (`Vm::held_gens`, beside
+/// [`UpdateGuard`]): [`Vm::gen_resume`](super::Vm) takes the box and pushes one, and the frame's
+/// `yield` or exit disarms it and puts the box back itself. A task context dropped while the frame
+/// lives (a deadlock cut, a panic) drops it armed, and the generator is `Done`, not left running.
+pub(crate) struct GenHold(Option<Arc<super::rvec::AtomicBox<super::Parked>>>);
+
+impl GenHold {
+    pub(crate) fn new(slot: Arc<super::rvec::AtomicBox<super::Parked>>) -> Self {
+        GenHold(Some(slot))
+    }
+
+    /// The frame put the box back itself.
+    pub(crate) fn disarm(mut self) {
+        self.0 = None;
+    }
+}
+
+impl Drop for GenHold {
+    fn drop(&mut self) {
+        if let Some(slot) = self.0.take()
+            && slot.with(|p| p.is_none())
+        {
+            slot.put(Box::new(super::Parked::done()));
         }
     }
 }
@@ -318,15 +353,15 @@ impl<'a> WaitTicket<'a> {
     }
 
     /// The guard, when this waiter can take it now (no wait).
-    pub fn try_take(&mut self, me: u64) -> Option<UpdateGuard<'a>> {
+    pub fn try_take(&mut self, me: u64) -> Option<UpdateGuard> {
         // Built only on a take: a dropped guard releases a hold.
-        let (lock, mode) = (self.key.lock, self.key.mode);
+        let (lock, mode) = (Arc::clone(self.key.lock), self.key.mode);
         if self.is_admitted() {
             // The release counted this read hold and dropped the registration.
             self.admitted = None;
             return Some(UpdateGuard { lock, mode });
         }
-        if lock.try_take(mode, me, self.live) {
+        if self.key.lock.try_take(mode, me, self.live) {
             // A counted writer's take moved it from waiting to holding.
             self.live = false;
             self.unregister();
@@ -355,11 +390,11 @@ pub const GUARD_DEMOTE_BUDGET: Duration = Duration::from_millis(5);
 
 /// The fast path: take the guard `key` as task `me` with one CAS, or `None`. A `None` caller checks
 /// a same-task re-entry, then waits through a [`WaitTicket`].
-pub fn try_update_guard<'a>(key: GuardKey<'a>, me: u64) -> Option<UpdateGuard<'a>> {
+pub fn try_update_guard(key: GuardKey<'_>, me: u64) -> Option<UpdateGuard> {
     // Not `then_some`: its argument is built eagerly, and a dropped guard releases a hold.
     if key.lock.try_take(key.mode, me, false) {
         Some(UpdateGuard {
-            lock: key.lock,
+            lock: Arc::clone(key.lock),
             mode: key.mode,
         })
     } else {
@@ -468,7 +503,7 @@ pub fn acquire_update_guard_within<'a>(
     key: GuardKey<'a>,
     me: u64,
     budget: Duration,
-) -> Result<Option<UpdateGuard<'a>>, GuardCycle> {
+) -> Result<Option<UpdateGuard>, GuardCycle> {
     if let Some(g) = try_update_guard(key, me) {
         return Ok(Some(g));
     }

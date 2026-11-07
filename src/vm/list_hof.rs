@@ -1,264 +1,491 @@
 //! VM: list higher-order methods, sorting, reductions, map pairs.
 //! Split out of `src/vm/call.rs`. `super::*` is the parent module.
 
+use super::rvec::View;
 use super::*;
+use crate::base::builtin_method::ListMethod;
+use crate::base::hooks::Hook;
+
+/// A list method that calls its callback once per element, in order: the loop
+/// [`Vm::list_hof`] runs. `sort_by_key` / `min_by` / `max_by` are its key pass.
+#[derive(Clone, Copy, Debug)]
+pub(super) enum HofKind {
+    Map,
+    Filter,
+    Fold,
+    TakeWhile,
+    DropWhile,
+    Count,
+    Position,
+    SortByKey,
+    MinBy,
+    MaxBy,
+}
+
+impl HofKind {
+    /// The loop a list method runs, if it is one. The one owner of "which list methods are HOF
+    /// loops" (`do_method_call` and `core_method` both read it).
+    pub(super) fn of(m: ListMethod) -> Option<HofKind> {
+        match m {
+            ListMethod::Map => Some(HofKind::Map),
+            ListMethod::Filter => Some(HofKind::Filter),
+            ListMethod::Fold => Some(HofKind::Fold),
+            ListMethod::TakeWhile => Some(HofKind::TakeWhile),
+            ListMethod::DropWhile => Some(HofKind::DropWhile),
+            ListMethod::Count => Some(HofKind::Count),
+            ListMethod::Position => Some(HofKind::Position),
+            ListMethod::SortByKey => Some(HofKind::SortByKey),
+            ListMethod::MinBy => Some(HofKind::MinBy),
+            ListMethod::MaxBy => Some(HofKind::MaxBy),
+            ListMethod::Len
+            | ListMethod::Push
+            | ListMethod::Pop
+            | ListMethod::Reverse
+            | ListMethod::Contains
+            | ListMethod::IndexOf
+            | ListMethod::Concat
+            | ListMethod::Extend
+            | ListMethod::Sort
+            | ListMethod::Sum
+            | ListMethod::SortBy
+            | ListMethod::Min
+            | ListMethod::Max
+            | ListMethod::First
+            | ListMethod::Last
+            | ListMethod::Reversed
+            | ListMethod::Repeat
+            | ListMethod::Insert
+            | ListMethod::Remove
+            | ListMethod::Unique
+            | ListMethod::Dedup
+            | ListMethod::Chunk
+            | ListMethod::Windows
+            | ListMethod::Copy => None,
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            HofKind::Map => "map",
+            HofKind::Filter => "filter",
+            HofKind::Fold => "fold",
+            HofKind::TakeWhile => "take_while",
+            HofKind::DropWhile => "drop_while",
+            HofKind::Count => "count",
+            HofKind::Position => "position",
+            HofKind::SortByKey => "sort_by_key",
+            HofKind::MinBy => "min_by",
+            HofKind::MaxBy => "max_by",
+        }
+    }
+}
+
+/// The slots a HOF loop keeps on the caller's operand stack, below each callback frame:
+/// `[src, snap, acc, f, i]` — the receiver, its snapshot, the accumulator (the result list, the
+/// fold value, the count, the found index or the keys list), the callback and the current index.
+/// The stack roots them for the GC, and a `recover:` catch truncates them with its saved length.
+const HOF_SLOTS: usize = 5;
+
+/// A list method that orders by a comparator that may be user code (`sort_by`, `sort` over
+/// structs / enums / tuples / lists, `min`, `max`): the loop [`Vm::list_compare_method`] runs.
+#[derive(Clone, Copy, Debug)]
+pub(super) enum CmpMethod {
+    SortBy,
+    Sort,
+    Min,
+    Max,
+}
+
+impl CmpMethod {
+    /// The comparator loop a list method runs, if it is one. The one owner of which list methods
+    /// do (`do_method_call` and `core_method` both read it).
+    #[inline]
+    pub(super) fn of(m: ListMethod) -> Option<CmpMethod> {
+        match m {
+            ListMethod::SortBy => Some(CmpMethod::SortBy),
+            ListMethod::Sort => Some(CmpMethod::Sort),
+            ListMethod::Min => Some(CmpMethod::Min),
+            ListMethod::Max => Some(CmpMethod::Max),
+            ListMethod::Len
+            | ListMethod::Push
+            | ListMethod::Pop
+            | ListMethod::Reverse
+            | ListMethod::Contains
+            | ListMethod::IndexOf
+            | ListMethod::Concat
+            | ListMethod::Extend
+            | ListMethod::Sum
+            | ListMethod::First
+            | ListMethod::Last
+            | ListMethod::Reversed
+            | ListMethod::Repeat
+            | ListMethod::Insert
+            | ListMethod::Remove
+            | ListMethod::Unique
+            | ListMethod::Dedup
+            | ListMethod::Chunk
+            | ListMethod::Windows
+            | ListMethod::Copy
+            | ListMethod::Map
+            | ListMethod::Filter
+            | ListMethod::Fold
+            | ListMethod::TakeWhile
+            | ListMethod::DropWhile
+            | ListMethod::Count
+            | ListMethod::Position
+            | ListMethod::SortByKey
+            | ListMethod::MinBy
+            | ListMethod::MaxBy => None,
+        }
+    }
+}
+
+/// Which sort a merge runs: where its comparator comes from.
+#[derive(Clone, Copy, Debug)]
+pub(super) enum SortKind {
+    /// `xs.sort_by(cmp)`: the user comparator on two elements.
+    By,
+    /// `xs.sort_by_key(f)` after its key pass: the keys' natural order.
+    ByKey,
+    /// `xs.sort()` on structs / enums / tuples / lists: the elements' natural order.
+    Natural,
+}
+
+impl SortKind {
+    fn method(self) -> &'static str {
+        match self {
+            SortKind::By => "sort_by",
+            SortKind::ByKey => "sort_by_key",
+            SortKind::Natural => "sort",
+        }
+    }
+}
+
+/// The slots a merge sort keeps on the caller's operand stack, below each comparator frame:
+/// `[src, snap, vals, cmp, buf, lo, hi, depth, li, ri]` — the receiver, its snapshot, the values
+/// compared (the snapshot, or `sort_by_key`'s keys), the comparator (`sort_by`), the index buffer
+/// (two halves of `n` indices), the merge node `lo..hi`, its depth in the tree and its two
+/// cursors.
+const SORT_SLOTS: usize = 10;
+
+/// The slots a min / max scan keeps on the caller's operand stack: `[src, snap, vals, best, i]`.
+const EXTREME_SLOTS: usize = 5;
+
+/// A merge node: `lo..hi` at `depth` in the tree of `0..n`.
+type Node = (usize, usize, usize);
+
+/// The offsets of the index buffer's halves a node at `depth` merges from and into: a node writes
+/// the half its parent reads (the root, depth 0, writes half 0), so no run is copied back.
+fn halves(depth: usize, n: usize) -> (usize, usize) {
+    if depth.is_multiple_of(2) {
+        (n, 0)
+    } else {
+        (0, n)
+    }
+}
+
+/// The first merge, in the top-down merge sort's post-order, of the node `lo..hi` at `depth`
+/// (`hi - lo >= 2`): its deepest-leftmost node whose two runs need no merge of their own. A node
+/// splits at `lo + len / 2`, as the recursive form split at `n / 2`.
+fn first_merge((mut lo, mut hi, mut depth): Node) -> Node {
+    loop {
+        let mid = lo + (hi - lo) / 2;
+        if mid - lo > 1 {
+            hi = mid;
+        } else if hi - mid > 1 {
+            lo = mid;
+        } else {
+            return (lo, hi, depth);
+        }
+        depth += 1;
+    }
+}
+
+/// The merge after node `lo..hi` in the post-order over the tree of `0..n`; `None` after the
+/// root. A left child is followed by its right sibling's first merge (or the parent, when that
+/// run is one element), a right child by its parent.
+fn next_merge(n: usize, lo: usize, hi: usize) -> Option<Node> {
+    if (lo, hi) == (0, n) {
+        return None;
+    }
+    let (mut plo, mut phi, mut depth) = (0, n, 0);
+    loop {
+        let mid = plo + (phi - plo) / 2;
+        if (plo, mid) == (lo, hi) {
+            return Some(if phi - mid > 1 {
+                first_merge((mid, phi, depth + 1))
+            } else {
+                (plo, phi, depth)
+            });
+        }
+        if (mid, phi) == (lo, hi) {
+            return Some((plo, phi, depth));
+        }
+        if hi <= mid {
+            phi = mid;
+        } else {
+            plo = mid;
+        }
+        depth += 1;
+    }
+}
+
+/// Move the left (`left`) or the right run's head into the output of node `lo..hi`, whose runs
+/// are read at `src` and written at `dst` in the index buffer `ids`.
+#[inline]
+#[allow(clippy::too_many_arguments)]
+fn merge_take(
+    ids: &View<'_, Value>,
+    (src, dst): (usize, usize),
+    lo: usize,
+    mid: usize,
+    li: &mut usize,
+    ri: &mut usize,
+    left: bool,
+) {
+    let k = lo + (*li - lo) + (*ri - mid);
+    let cur = if left { li } else { ri };
+    ids.set(dst + k, ids.get(src + *cur));
+    *cur += 1;
+}
 
 impl Vm {
-    /// Higher-order list methods `map` / `filter` / `fold`. `src_h` is the receiver list.
+    /// A list HOF (`map` / `filter` / `fold` / `take_while` / `drop_while` / `count` /
+    /// `position`, and the key pass of `sort_by_key` / `min_by` / `max_by`) on the list `src_h`.
+    /// Leaves the result on the stack, or (`flat`) the next callback's frame, whose return runs
+    /// the loop on ([`RetAction::Hof`]), so a wait in the callback parks like any call. `flat` is
+    /// true only on the dispatch loop (`do_method_call` with a real `ic`); a synchronous caller
+    /// runs every callback nested.
     ///
     /// SNAPSHOT semantics: iteration walks a copy of the receiver's elements taken at call time, so
     /// a callback that MUTATES the receiver (e.g. `xs.pop()`/`xs.push(..)`) does NOT perturb the
     /// iteration sequence — it always visits exactly the elements present when the HOF was invoked.
-    /// This (a) matches comprehensions/for-loops (`Op::ListClone`) and `list_sort_by`/`sort_by_key`
-    /// (which snapshot), (b) matches Python `map`/`filter`, and (c) is OOB-safe: indexing the
-    /// original live list while a callback shrinks it would panic (regression:
+    /// This (a) matches comprehensions/for-loops (`Op::ListClone`) and the sorts (which
+    /// snapshot), (b) matches Python `map`/`filter`, and (c) is OOB-safe: indexing the original
+    /// live list while a callback shrinks it would panic (regression:
     /// `map_shrinking_callback_no_panic`).
-    ///
-    /// GC discipline: each element is fed to a closure via `invoke_value`, which runs nested VM
-    /// frames that can trigger GC at instruction boundaries. To keep the GC from collecting in-flight
-    /// heap values, the source list, the snapshot list, the partially-built result list (map/filter),
-    /// and the fold accumulator are all kept rooted on the operand stack across the iteration. Returns
-    /// the result (caller pushes it).
     pub(super) fn list_hof(
         &mut self,
         src_h: GcRef,
-        method: &str,
+        kind: HofKind,
         mut args: Vec<Value>,
+        flat: bool,
         span: Span,
-    ) -> Result<Value, RuntimeError> {
-        // ROOT the source list on the operand stack: a method receiver is popped before dispatch, so
-        // an inline temporary (`make().map(..)`) is otherwise unrooted and the callback's GC could
-        // collect it before we snapshot.
+    ) -> Result<(), RuntimeError> {
+        let want = if matches!(kind, HofKind::Fold) { 2 } else { 1 };
+        if args.len() != want {
+            return Err(self.err(
+                format!(
+                    "'{}' expects {want} argument(s), got {}",
+                    kind.name(),
+                    args.len()
+                ),
+                span,
+            ));
+        }
+        let f = args.pop().expect("the callback is the last argument");
+        // ROOT the source list: a method receiver is popped before dispatch, so an inline
+        // temporary (`make().map(..)`) is otherwise unrooted.
         self.push(Value::obj(src_h));
-        // Take a SNAPSHOT now: iterate the receiver's elements as of call
-        // time so a callback that shrinks/grows the receiver mid-iteration neither perturbs the
-        // sequence nor indexes past the live (now-shorter) Vec. The snapshot is heap-allocated and
-        // rooted on the operand stack so its elements survive the callback's collections.
-        let snap_h = {
-            let elems = match self.heap.get(src_h).as_list() {
-                Some(v) => v.clone(),
-                None => unreachable!("list_hof on non-list"),
-            };
-            self.heap.alloc(Obj::List(elems))
+        let snap = match self.heap.get(src_h).as_list() {
+            Some(v) => v.clone(),
+            None => unreachable!("list_hof on non-list"),
         };
-        self.push(Value::obj(snap_h)); // ROOT the snapshot
+        let n = snap.len();
+        let snap_h = self.heap.alloc(Obj::List(snap));
+        self.push(Value::obj(snap_h));
+        let acc = match kind {
+            HofKind::Map | HofKind::Filter | HofKind::TakeWhile | HofKind::DropWhile => {
+                Value::obj(self.heap.alloc(Obj::List(RVec::new())))
+            }
+            HofKind::Fold => args[0],
+            HofKind::Count => Value::int(0),
+            HofKind::Position => Value::nil(),
+            HofKind::SortByKey | HofKind::MinBy | HofKind::MaxBy => {
+                Value::obj(self.heap.alloc(Obj::List(RVec::with_capacity(n))))
+            }
+        };
+        self.push(acc);
+        self.push(f);
+        self.push(Value::int(0));
+        self.hof_resume(kind, None, flat, span)
+    }
+
+    /// Run a HOF loop on from its stack slots: first apply `out`, the result of the callback at
+    /// the current index, if there is one. On a fault the slots are dropped.
+    pub(super) fn hof_resume(
+        &mut self,
+        kind: HofKind,
+        out: Option<Value>,
+        flat: bool,
+        span: Span,
+    ) -> Result<(), RuntimeError> {
+        let base = self.stack.len() - HOF_SLOTS;
+        let r = self.hof_step(kind, base, out, flat, span);
+        if r.is_err() {
+            self.stack.truncate(base);
+        }
+        r
+    }
+
+    fn hof_step(
+        &mut self,
+        kind: HofKind,
+        base: usize,
+        out: Option<Value>,
+        flat: bool,
+        span: Span,
+    ) -> Result<(), RuntimeError> {
+        let snap_h = self.stack[base + 1].as_obj().expect("the snapshot");
+        let f = self.stack[base + 3];
         let n = match self.heap.get(snap_h).as_list() {
             Some(v) => v.len(),
             None => unreachable!(),
         };
-        match method {
-            "map" | "filter" => {
-                if args.len() != 1 {
-                    self.pop(); // unroot snapshot
-                    self.pop(); // unroot source
-                    return Err(self.err(
-                        format!("'{method}' expects 1 argument(s), got {}", args.len()),
-                        span,
-                    ));
-                }
-                let f = args.swap_remove(0);
-                let is_filter = method == "filter";
-                // ROOT the result list too.
-                let res_h = self.heap.alloc(Obj::List(RVec::new()));
-                self.push(Value::obj(res_h));
-                for i in 0..n {
-                    // Read from the rooted SNAPSHOT, not the live receiver: a callback that shrinks
-                    // the receiver must not affect this index (stays valid, no OOB).
-                    let elem = match self.heap.get(snap_h).as_list() {
-                        Some(v) => v.get(i),
-                        None => unreachable!(),
-                    };
-                    // May GC; source, snapshot, and result lists are rooted, so elements survive.
-                    let out = self.guarded(|vm| vm.invoke_value(f, vec![elem], span))?;
-                    if is_filter {
-                        match out.as_bool() {
-                            Some(true) => {
-                                let heap = self.heap.write(res_h);
-                                if let Obj::List(items) = heap.get(res_h) {
-                                    items.push(heap, elem);
-                                }
-                            }
-                            Some(false) => {}
-                            None => {
-                                self.pop(); // unroot result
-                                self.pop(); // unroot snapshot
-                                self.pop(); // unroot source
-                                return Err(self.err(
-                                    format!(
-                                        "filter predicate must return bool, got {}",
-                                        self.type_name(out)
-                                    ),
-                                    span,
-                                ));
-                            }
-                        }
-                    } else {
-                        let heap = self.heap.write(res_h);
-                        if let Obj::List(items) = heap.get(res_h) {
-                            items.push(heap, out);
-                        }
-                    }
-                }
-                self.pop(); // unroot result
-                self.pop(); // unroot snapshot
-                self.pop(); // unroot source
-                Ok(Value::obj(res_h))
+        let mut i = self.stack[base + 4].as_int() as usize;
+        if let Some(out) = out {
+            if !self.hof_post(kind, base, i, out, span)? {
+                return self.hof_finish(kind, base, flat, span);
             }
-            "fold" => {
-                if args.len() != 2 {
-                    self.pop(); // unroot snapshot
-                    self.pop(); // unroot source
-                    return Err(self.err(
-                        format!("'fold' expects 2 argument(s), got {}", args.len()),
-                        span,
-                    ));
-                }
-                let f = args.swap_remove(1);
-                let init = args.swap_remove(0);
-                // ROOT the accumulator: push init, remember its slot, and replace in place each step.
-                // `acc_slot` sits below every nested frame's base (frames push above the current
-                // stack top and pop back to it), so the index stays valid across `invoke_value`.
-                self.push(init);
-                let acc_slot = self.stack.len() - 1;
-                for i in 0..n {
-                    // Read from the rooted SNAPSHOT (see map/filter): OOB-safe under a shrinking
-                    // callback.
-                    let elem = match self.heap.get(snap_h).as_list() {
-                        Some(v) => v.get(i),
-                        None => unreachable!(),
-                    };
-                    let acc = self.stack[acc_slot];
-                    let new = self.guarded(|vm| vm.invoke_value(f, vec![acc, elem], span))?;
-                    self.stack[acc_slot] = new;
-                }
-                let acc = self.pop(); // unroot accumulator
-                self.pop(); // unroot snapshot
-                self.pop(); // unroot source
-                Ok(acc)
-            }
-            // take_while: NEW list of the prefix while `pred` holds; stops (pred not called) at the
-            // first false. Reads the rooted SNAPSHOT — a pred that shrinks the receiver can't OOB.
-            "take_while" | "drop_while" => {
-                if args.len() != 1 {
-                    self.pop(); // unroot snapshot
-                    self.pop(); // unroot source
-                    return Err(self.err(
-                        format!("'{method}' expects 1 argument(s), got {}", args.len()),
-                        span,
-                    ));
-                }
-                let f = args.swap_remove(0);
-                let is_drop = method == "drop_while";
-                let res_h = self.heap.alloc(Obj::List(RVec::new()));
-                self.push(Value::obj(res_h)); // ROOT the result list
-                let mut cut = n; // first index where pred is false (n = all-true)
-                for i in 0..n {
-                    let elem = match self.heap.get(snap_h).as_list() {
-                        Some(v) => v.get(i),
-                        None => unreachable!(),
-                    };
-                    let out = self.guarded(|vm| vm.invoke_value(f, vec![elem], span))?;
-                    match out.as_bool() {
-                        Some(true) => {
-                            if !is_drop {
-                                let heap = self.heap.write(res_h);
-                                if let Obj::List(items) = heap.get(res_h) {
-                                    items.push(heap, elem);
-                                }
-                            }
-                        }
-                        Some(false) => {
-                            cut = i;
-                            break;
-                        }
-                        None => {
-                            self.pop(); // unroot result
-                            self.pop(); // unroot snapshot
-                            self.pop(); // unroot source
-                            return Err(self.err(
-                                format!(
-                                    "{method} predicate must return bool, got {}",
-                                    self.type_name(out)
-                                ),
-                                span,
-                            ));
-                        }
-                    }
-                }
-                if is_drop {
-                    // Collect the snapshot suffix from the first non-matching index.
-                    for i in cut..n {
-                        let elem = match self.heap.get(snap_h).as_list() {
-                            Some(v) => v.get(i),
-                            None => unreachable!(),
-                        };
-                        let heap = self.heap.write(res_h);
-                        if let Obj::List(items) = heap.get(res_h) {
-                            items.push(heap, elem);
-                        }
-                    }
-                }
-                self.pop(); // unroot result
-                self.pop(); // unroot snapshot
-                self.pop(); // unroot source
-                Ok(Value::obj(res_h))
-            }
-            // count: number of snapshot elements satisfying `pred`. position: index of the FIRST
-            // match as Option[int] (short-circuits), else None.
-            "count" | "position" => {
-                if args.len() != 1 {
-                    self.pop(); // unroot snapshot
-                    self.pop(); // unroot source
-                    return Err(self.err(
-                        format!("'{method}' expects 1 argument(s), got {}", args.len()),
-                        span,
-                    ));
-                }
-                let f = args.swap_remove(0);
-                let is_pos = method == "position";
-                let mut count = 0_i64;
-                let mut found: Option<usize> = None;
-                for i in 0..n {
-                    let elem = match self.heap.get(snap_h).as_list() {
-                        Some(v) => v.get(i),
-                        None => unreachable!(),
-                    };
-                    let out = self.guarded(|vm| vm.invoke_value(f, vec![elem], span))?;
-                    match out.as_bool() {
-                        Some(true) => {
-                            if is_pos {
-                                found = Some(i);
-                                break;
-                            }
-                            count += 1;
-                        }
-                        Some(false) => {}
-                        None => {
-                            self.pop(); // unroot snapshot
-                            self.pop(); // unroot source
-                            return Err(self.err(
-                                format!(
-                                    "{method} predicate must return bool, got {}",
-                                    self.type_name(out)
-                                ),
-                                span,
-                            ));
-                        }
-                    }
-                }
-                self.pop(); // unroot snapshot
-                self.pop(); // unroot source
-                if is_pos {
-                    Ok(match found {
-                        Some(i) => self.alloc_enum("Option", "Some", &[Value::int(i as i64)]),
-                        None => self.alloc_enum("Option", "None", &[]),
-                    })
-                } else {
-                    Ok(Value::int(count))
-                }
-            }
-            _ => unreachable!("list_hof called with non-HOF method {method}"),
+            i += 1;
         }
+        while i < n {
+            // The per-element cancel point: this loop's back-edge.
+            self.guarded_checkpoint()?;
+            self.stack[base + 4] = Value::int(i as i64);
+            // Read from the rooted SNAPSHOT, not the live receiver.
+            let elem = match self.heap.get(snap_h).as_list() {
+                Some(v) => v.get(i),
+                None => unreachable!(),
+            };
+            let pair = [self.stack[base + 2], elem];
+            let call_args = if matches!(kind, HofKind::Fold) {
+                &pair[..]
+            } else {
+                &pair[1..]
+            };
+            if flat && self.push_callback_frame(f, call_args, RetAction::Hof(kind), span)? {
+                return Ok(());
+            }
+            let out = self.reentered(|vm| vm.invoke_value(f, call_args.to_vec(), span))?;
+            if !self.hof_post(kind, base, i, out, span)? {
+                break;
+            }
+            i += 1;
+        }
+        self.hof_finish(kind, base, flat, span)
+    }
+
+    /// Apply the callback's result `out` for element `i`. `false` stops the loop.
+    fn hof_post(
+        &mut self,
+        kind: HofKind,
+        base: usize,
+        i: usize,
+        out: Value,
+        span: Span,
+    ) -> Result<bool, RuntimeError> {
+        let acc = self.stack[base + 2];
+        let snap_h = self.stack[base + 1].as_obj().expect("the snapshot");
+        let elem = |vm: &Vm, i: usize| match vm.heap.get(snap_h).as_list() {
+            Some(v) => v.get(i),
+            None => unreachable!(),
+        };
+        let append = |vm: &mut Vm, v: Value| {
+            let h = acc.as_obj().expect("a list accumulator");
+            let heap = vm.heap.write(h);
+            if let Obj::List(items) = heap.get(h) {
+                items.push(heap, v);
+            }
+        };
+        let pred = |vm: &Vm| {
+            out.as_bool().ok_or_else(|| {
+                vm.err(
+                    format!(
+                        "{} predicate must return bool, got {}",
+                        kind.name(),
+                        vm.type_name(out)
+                    ),
+                    span,
+                )
+            })
+        };
+        match kind {
+            HofKind::Map | HofKind::SortByKey | HofKind::MinBy | HofKind::MaxBy => {
+                append(self, out)
+            }
+            HofKind::Fold => self.stack[base + 2] = out,
+            HofKind::Filter => {
+                if pred(self)? {
+                    append(self, elem(self, i));
+                }
+            }
+            HofKind::TakeWhile => {
+                if !pred(self)? {
+                    return Ok(false);
+                }
+                append(self, elem(self, i));
+            }
+            HofKind::DropWhile => {
+                if !pred(self)? {
+                    // Collect the snapshot suffix from the first non-matching index.
+                    let n = match self.heap.get(snap_h).as_list() {
+                        Some(v) => v.len(),
+                        None => unreachable!(),
+                    };
+                    for j in i..n {
+                        append(self, elem(self, j));
+                    }
+                    return Ok(false);
+                }
+            }
+            HofKind::Count => {
+                if pred(self)? {
+                    self.stack[base + 2] = Value::int(acc.as_int() + 1);
+                }
+            }
+            HofKind::Position => {
+                if pred(self)? {
+                    self.stack[base + 2] = Value::int(i as i64);
+                    return Ok(false);
+                }
+            }
+        }
+        Ok(true)
+    }
+
+    /// The loop is over: replace its slots with the result (a sort or a min / max scan by the
+    /// keys runs on from them first).
+    fn hof_finish(
+        &mut self,
+        kind: HofKind,
+        base: usize,
+        flat: bool,
+        span: Span,
+    ) -> Result<(), RuntimeError> {
+        let acc = self.stack[base + 2];
+        let result = match kind {
+            HofKind::Map
+            | HofKind::Filter
+            | HofKind::TakeWhile
+            | HofKind::DropWhile
+            | HofKind::Fold
+            | HofKind::Count => acc,
+            HofKind::Position => {
+                if acc.is_nil() {
+                    self.alloc_enum("Option", "None", &[])
+                } else {
+                    self.alloc_enum("Option", "Some", &[acc])
+                }
+            }
+            HofKind::SortByKey => return self.sort_by_keys(base, flat, span),
+            HofKind::MinBy | HofKind::MaxBy => {
+                return self.min_max_by_keys(base, matches!(kind, HofKind::MaxBy), flat, span);
+            }
+        };
+        self.stack.truncate(base);
+        self.push(result);
+        Ok(())
     }
 
     /// A sort callback must not mutate the list being sorted (W8-4): the list is a `Result`-less
@@ -289,206 +516,283 @@ impl Vm {
         Ok(())
     }
 
-    /// `xs.sort_by(cmp)` — stable in-place sort driven by a Chezzi comparator `fn(T, T) -> int`
-    /// (negative = a before b, positive = a after b, zero = equal). The comparator re-enters the VM
-    /// and may GC, so we never hold the elements in an unrooted Rust `Vec`: the source list stays
-    /// rooted on the operand stack, and the merge sort permutes plain `usize` **indices**, re-reading
-    /// elements from the rooted heap object on each comparison. The final permutation is materialised
-    /// only after all comparator calls finish (no GC in between). Returns `nil`.
-    pub(super) fn list_sort_by(
+    /// Run the comparator method `m` on the list `src_h`, leaving its result on the stack, or
+    /// (`flat`) the comparator's frame. `Ok(false)` for a `sort` whose order never calls user code
+    /// (primitives use `core_method`'s `value_order` sort).
+    pub(super) fn list_compare_method(
         &mut self,
         src_h: GcRef,
-        mut args: Vec<Value>,
+        m: CmpMethod,
+        args: &[Value],
+        flat: bool,
         span: Span,
-    ) -> Result<Value, RuntimeError> {
-        if args.len() != 1 {
-            return Err(self.err(
-                format!("'sort_by' expects 1 argument(s), got {}", args.len()),
-                span,
-            ));
+    ) -> Result<bool, RuntimeError> {
+        match m {
+            CmpMethod::SortBy => {
+                if args.len() != 1 {
+                    return Err(self.err(
+                        format!("'sort_by' expects 1 argument(s), got {}", args.len()),
+                        span,
+                    ));
+                }
+                self.sort_list(src_h, SortKind::By, args[0], flat, span)?;
+            }
+            CmpMethod::Sort => {
+                self.arity_err("sort", args, 0, span)?;
+                if !self.compare_reenters(src_h) {
+                    return Ok(false);
+                }
+                self.sort_list(src_h, SortKind::Natural, Value::nil(), flat, span)?;
+            }
+            CmpMethod::Min | CmpMethod::Max => {
+                let is_max = matches!(m, CmpMethod::Max);
+                self.arity_err(if is_max { "max" } else { "min" }, args, 0, span)?;
+                self.list_reduce_extreme(src_h, is_max, flat, span)?;
+            }
         }
-        let cmp = args.swap_remove(0);
-        // Root the source list itself: a method receiver is popped before dispatch, so an inline
-        // temporary (`make().sort_by(...)`) is otherwise unrooted and the comparator's GC could
-        // collect it before the write-back.
+        Ok(true)
+    }
+
+    /// Does ordering the list `h` call user code? Its elements are structs or enums (a `compare`
+    /// hook) or tuples / lists (the TICKET-146 walk, which may reach one; an `Option` is an
+    /// `Obj::Enum`). The list is homogeneous, so the first element answers.
+    fn compare_reenters(&self, h: GcRef) -> bool {
+        let first = match self.heap.get(h).as_list() {
+            Some(v) => v.try_get(0),
+            None => unreachable!("compare_reenters on a non-list"),
+        };
+        matches!(first.and_then(|v| v.as_obj()), Some(hh) if matches!(self.heap.get(hh), Obj::Struct { .. } | Obj::Enum { .. } | Obj::Tuple(_) | Obj::List(_)))
+    }
+
+    /// Sort the list `src_h` in place by `kind`'s comparator (`cmp` for `sort_by`), stable. The
+    /// merge reads a SNAPSHOT taken now, so a comparator that mutates the list cannot perturb it
+    /// (and [`Vm::sort_mutation_check`] reports the mutation). Leaves `nil` on the stack, or
+    /// (`flat`) the comparator's frame, whose return runs the merge on ([`RetAction::Sort`]).
+    fn sort_list(
+        &mut self,
+        src_h: GcRef,
+        kind: SortKind,
+        cmp: Value,
+        flat: bool,
+        span: Span,
+    ) -> Result<(), RuntimeError> {
+        // ROOT the source list: a method receiver is popped before dispatch, so an inline
+        // temporary (`make().sort_by(..)`) is otherwise unrooted.
         self.push(Value::obj(src_h));
-        // Sort a SNAPSHOT taken now: a comparator that mutates the source
-        // list mid-sort must not perturb the ordering, and its mutations are discarded by the final
-        // write-back. The snapshot list is itself heap-allocated and rooted on the operand stack so
-        // its elements survive the comparator's collections.
-        let snap_h = {
-            let elems = match self.heap.get(src_h).as_list() {
-                Some(v) => v.clone(),
-                None => unreachable!("list_sort_by on non-list"),
-            };
-            self.heap.alloc(Obj::List(elems))
+        let snap = match self.heap.get(src_h).as_list() {
+            Some(v) => v.clone(),
+            None => unreachable!("sort on a non-list"),
         };
-        self.push(Value::obj(snap_h)); // ROOT the snapshot
+        let snap_h = self.heap.alloc(Obj::List(snap));
+        self.push(Value::obj(snap_h));
+        // The values compared are the elements themselves.
+        self.push(Value::obj(snap_h));
+        self.push(cmp);
+        self.sort_start(kind, flat, span)
+    }
+
+    /// Start the merge over the four slots `[src, snap, vals, cmp]` on the stack top: push the
+    /// index buffer and the first merge node, then run it.
+    fn sort_start(&mut self, kind: SortKind, flat: bool, span: Span) -> Result<(), RuntimeError> {
+        let snap_h = self.stack[self.stack.len() - 3]
+            .as_obj()
+            .expect("the snapshot");
         let n = match self.heap.get(snap_h).as_list() {
             Some(v) => v.len(),
             None => unreachable!(),
         };
-        let order = match self.msort_indices(snap_h, (0..n).collect(), cmp, span) {
-            Ok(o) => o,
-            Err(e) => {
-                self.pop(); // unroot snapshot
-                self.pop(); // unroot source
-                return Err(e);
-            }
+        // Both halves start as the identity: every one-element run is already in place.
+        let ids: Vec<Value> = (0..n).chain(0..n).map(|i| Value::int(i as i64)).collect();
+        let buf_h = self.heap.alloc(Obj::List(ids.into()));
+        self.push(Value::obj(buf_h));
+        let (lo, hi, depth) = if n > 1 {
+            first_merge((0, n, 0))
+        } else {
+            (0, 0, 0)
         };
-        if let Err(e) = self.sort_mutation_check(src_h, snap_h, "sort_by", span) {
-            self.pop(); // unroot snapshot
-            self.pop(); // unroot source
-            return Err(e);
+        for k in [lo, hi, depth, lo, lo + (hi - lo) / 2] {
+            self.push(Value::int(k as i64));
         }
-        // No comparator calls remain, so no GC: read the rooted snapshot and write the result back.
-        let reordered: Vec<Value> = match self.heap.get(snap_h).as_list() {
-            Some(v) => order.iter().map(|&i| v.get(i)).collect(),
-            None => unreachable!(),
-        };
-        let heap = self.heap.write(src_h);
-        if let Obj::List(v) = heap.get(src_h) {
-            v.replace(heap, &reordered);
-        }
-        self.pop(); // unroot snapshot
-        self.pop(); // unroot source
-        Ok(Value::nil())
+        self.sort_resume(kind, None, flat, span)
     }
 
-    /// Stable top-down merge sort over `idx` (positions into the rooted list `src_h`), comparing
-    /// elements via the Chezzi comparator `cmp`.
-    pub(super) fn msort_indices(
+    /// Run a merge on from its stack slots: first apply `out`, the comparator's result for the
+    /// current pair, if there is one. On a fault the slots are dropped.
+    pub(super) fn sort_resume(
         &mut self,
-        src_h: GcRef,
-        idx: Vec<usize>,
-        cmp: Value,
+        kind: SortKind,
+        out: Option<Value>,
+        flat: bool,
         span: Span,
-    ) -> Result<Vec<usize>, RuntimeError> {
-        let n = idx.len();
-        if n <= 1 {
-            return Ok(idx);
+    ) -> Result<(), RuntimeError> {
+        let base = self.stack.len() - SORT_SLOTS;
+        let r = self.sort_step(kind, base, out, flat, span);
+        if r.is_err() {
+            self.stack.truncate(base);
         }
-        let mut idx = idx;
-        let right = idx.split_off(n / 2);
-        let left = self.msort_indices(src_h, idx, cmp, span)?;
-        let right = self.msort_indices(src_h, right, cmp, span)?;
-        let mut out = Vec::with_capacity(n);
-        let (mut li, mut ri) = (0, 0);
-        while li < left.len() && ri < right.len() {
-            let a = match self.heap.get(src_h).as_list() {
-                Some(v) => v.get(left[li]),
-                None => unreachable!(),
-            };
-            let b = match self.heap.get(src_h).as_list() {
-                Some(v) => v.get(right[ri]),
-                None => unreachable!(),
-            };
-            // `<= 0` keeps the left element first on ties → stable.
-            if self.compare_with(cmp, a, b, span)? <= 0 {
-                out.push(left[li]);
-                li += 1;
-            } else {
-                out.push(right[ri]);
-                ri += 1;
-            }
-        }
-        out.extend_from_slice(&left[li..]);
-        out.extend_from_slice(&right[ri..]);
-        Ok(out)
+        r
     }
 
-    /// Run the comparator on `(a, b)` and return its int result (errors if it returns non-int).
-    pub(super) fn compare_with(
+    /// The top-down merge sort's merges, in its post-order (the comparator sees the same pairs in
+    /// the same order as the recursive form), each node `lo..hi` merging its runs `lo..mid` and
+    /// `mid..hi` from one half of the index buffer into the other ([`halves`]).
+    fn sort_step(
         &mut self,
-        cmp: Value,
-        a: Value,
-        b: Value,
+        kind: SortKind,
+        base: usize,
+        out: Option<Value>,
+        flat: bool,
         span: Span,
-    ) -> Result<i64, RuntimeError> {
-        let res = self.guarded(|vm| vm.invoke_value(cmp, vec![a, b], span))?;
-        match self.int_val(res) {
-            Some(n) => Ok(n),
-            None => Err(self.err(
-                format!(
-                    "sort_by comparator must return int, got {}",
-                    self.type_name(res)
-                ),
-                span,
-            )),
-        }
-    }
-
-    /// `xs.sort_by_key(f)` — stable in-place sort by a derived key `f: fn(T) -> K`. Mirrors
-    /// `list_sort_by`'s GC discipline: the source list, an element snapshot, AND a parallel **keys**
-    /// list are all rooted on the operand stack so the re-entrant extractor (and a Comparable-struct
-    /// key's `compare`) can GC freely. Keys are computed once per element; the merge sort permutes
-    /// `usize` indices, re-reading keys from the rooted keys list per comparison. Returns `nil`.
-    pub(super) fn list_sort_by_key(
-        &mut self,
-        src_h: GcRef,
-        mut args: Vec<Value>,
-        span: Span,
-    ) -> Result<Value, RuntimeError> {
-        if args.len() != 1 {
-            return Err(self.err(
-                format!("'sort_by_key' expects 1 argument(s), got {}", args.len()),
-                span,
-            ));
-        }
-        let f = args.swap_remove(0);
-        self.push(Value::obj(src_h)); // ROOT the source list
-        let snap_h = {
-            let elems = match self.heap.get(src_h).as_list() {
-                Some(v) => v.clone(),
-                None => unreachable!("list_sort_by_key on non-list"),
-            };
-            self.heap.alloc(Obj::List(elems))
+    ) -> Result<(), RuntimeError> {
+        let slot = |vm: &Vm, k: usize| vm.stack[base + k];
+        let vals_h = slot(self, 2).as_obj().expect("a rooted list");
+        let buf_h = slot(self, 4).as_obj().expect("a rooted list");
+        let cmp = slot(self, 3);
+        let mut lo = slot(self, 5).as_int() as usize;
+        let mut hi = slot(self, 6).as_int() as usize;
+        let mut depth = slot(self, 7).as_int() as usize;
+        let mut li = slot(self, 8).as_int() as usize;
+        let mut ri = slot(self, 9).as_int() as usize;
+        // The verdict on the current pair, once its comparator has answered.
+        let mut left = match out {
+            Some(out) => Some(self.sort_verdict(kind, out, span)?),
+            None => None,
         };
-        self.push(Value::obj(snap_h)); // ROOT the snapshot
-        let n = match self.heap.get(snap_h).as_list() {
-            Some(v) => v.len(),
-            None => unreachable!(),
-        };
-        // Compute keys once per element into a rooted list. Each `invoke_value` may GC; already-pushed
-        // keys survive because `keys_h` is rooted (a `Vec::push` into it does not itself GC).
-        let keys_h = self.heap.alloc(Obj::List(RVec::with_capacity(n)));
-        self.push(Value::obj(keys_h)); // ROOT the keys
-        for i in 0..n {
-            let e = match self.heap.get(snap_h).as_list() {
-                Some(v) => v.get(i),
-                None => unreachable!(),
-            };
-            match self.guarded(|vm| vm.invoke_value(f, vec![e], span)) {
-                Ok(k) => {
-                    let heap = self.heap.write(keys_h);
-                    if let Obj::List(v) = heap.get(keys_h) {
-                        v.push(heap, k);
+        loop {
+            // Up to the next pair to compare, with one view of the buffer: no user code runs in
+            // between (a view lives until the next safepoint).
+            let pair = {
+                let ids = self.list_view(buf_h);
+                let n = ids.len() / 2;
+                if let Some(left) = left.take() {
+                    let mid = lo + (hi - lo) / 2;
+                    merge_take(&ids, halves(depth, n), lo, mid, &mut li, &mut ri, left);
+                }
+                loop {
+                    if hi - lo < 2 {
+                        break None;
                     }
+                    let mid = lo + (hi - lo) / 2;
+                    let (src, dst) = halves(depth, n);
+                    if li < mid && ri < hi {
+                        let vals = self.list_view(vals_h);
+                        let at = |i: usize| vals.get(ids.get(src + i).as_int() as usize);
+                        break Some((at(li), at(ri)));
+                    }
+                    // One run is spent: append the other's tail, then move on.
+                    let k = lo + (li - lo) + (ri - mid);
+                    for j in li..mid {
+                        ids.set(dst + k + (j - li), ids.get(src + j));
+                    }
+                    let k = k + (mid - li);
+                    for j in ri..hi {
+                        ids.set(dst + k + (j - ri), ids.get(src + j));
+                    }
+                    (lo, hi, depth) = next_merge(n, lo, hi).unwrap_or((0, 0, 0));
+                    li = lo;
+                    ri = lo + (hi - lo) / 2;
                 }
-                Err(err) => {
-                    self.pop(); // unroot keys
-                    self.pop(); // unroot snapshot
-                    self.pop(); // unroot source
-                    return Err(err);
+            };
+            let Some((a, b)) = pair else {
+                return self.sort_finish(kind, base, span);
+            };
+            left = Some(match kind {
+                SortKind::By => {
+                    // The per-comparison cancel point: this loop's back-edge.
+                    self.guarded_checkpoint()?;
+                    if flat {
+                        self.sort_save(base, [lo, hi, depth, li, ri]);
+                        if self.push_callback_frame(cmp, &[a, b], RetAction::Sort(kind), span)? {
+                            return Ok(());
+                        }
+                    }
+                    let out = self.reentered(|vm| vm.invoke_value(cmp, vec![a, b], span))?;
+                    self.sort_verdict(kind, out, span)?
                 }
-            }
+                SortKind::ByKey | SortKind::Natural => {
+                    if flat && self.compare_hook_pair(a, b) {
+                        self.sort_save(base, [lo, hi, depth, li, ri]);
+                        if self.push_hook_frame(
+                            Hook::Compare,
+                            a,
+                            &[b],
+                            RetAction::Sort(kind),
+                            span,
+                        )? {
+                            return Ok(());
+                        }
+                    }
+                    // `<= Equal` keeps the left element first on ties → stable.
+                    self.order_key(a, b, span)?.is_le()
+                }
+            });
         }
-        let order = match self.msort_indices_by_key(keys_h, (0..n).collect(), span) {
-            Ok(o) => o,
-            Err(e) => {
-                self.pop(); // unroot keys
-                self.pop(); // unroot snapshot
-                self.pop(); // unroot source
-                return Err(e);
-            }
+    }
+
+    /// One snapshot of the rooted list `h`; drop it before the next safepoint.
+    #[inline]
+    fn list_view(&self, h: GcRef) -> View<'_, Value> {
+        match self.heap.get(h).as_list() {
+            Some(v) => v.view(),
+            None => unreachable!("a rooted list"),
+        }
+    }
+
+    /// The comparator's result as "the left element goes first". `<= 0` keeps the left element
+    /// first on ties → stable.
+    #[inline]
+    fn sort_verdict(&self, kind: SortKind, out: Value, span: Span) -> Result<bool, RuntimeError> {
+        match kind {
+            SortKind::By => match self.int_val(out) {
+                Some(n) => Ok(n <= 0),
+                None => Err(self.err(
+                    format!(
+                        "sort_by comparator must return int, got {}",
+                        self.type_name(out)
+                    ),
+                    span,
+                )),
+            },
+            SortKind::ByKey | SortKind::Natural => Ok(self.hook_ord(out, span)?.is_le()),
+        }
+    }
+
+    /// Store the merge node and its cursors in their slots before a comparator frame.
+    #[inline]
+    fn sort_save(&mut self, base: usize, at: [usize; 5]) {
+        for (k, v) in at.into_iter().enumerate() {
+            self.stack[base + 5 + k] = Value::int(v as i64);
+        }
+    }
+
+    /// The merge is over: write the permutation (the buffer's half 0, the root's output) back
+    /// and replace the slots with `nil`.
+    fn sort_finish(&mut self, kind: SortKind, base: usize, span: Span) -> Result<(), RuntimeError> {
+        let [src_h, snap_h, buf_h] =
+            [0, 1, 4].map(|k| self.stack[base + k].as_obj().expect("a rooted list"));
+        let order: Vec<usize> = match self.heap.get(buf_h).as_list() {
+            Some(ids) => (0..ids.len() / 2)
+                .map(|i| ids.get(i).as_int() as usize)
+                .collect(),
+            None => unreachable!(),
         };
-        if let Err(e) = self.sort_mutation_check(src_h, snap_h, "sort_by_key", span) {
-            self.pop(); // unroot keys
-            self.pop(); // unroot snapshot
-            self.pop(); // unroot source
-            return Err(e);
-        }
-        // No extractor/compare calls remain, so no GC: reorder the snapshot and write back.
+        self.sort_commit(src_h, snap_h, &order, kind.method(), span)?;
+        self.stack.truncate(base);
+        self.push(Value::nil());
+        Ok(())
+    }
+
+    /// Write the snapshot `snap_h`, permuted by `order`, back into `src_h`, unless a callback
+    /// mutated the list (W8-4). No comparator call remains, so nothing collects in between.
+    fn sort_commit(
+        &mut self,
+        src_h: GcRef,
+        snap_h: GcRef,
+        order: &[usize],
+        method: &str,
+        span: Span,
+    ) -> Result<(), RuntimeError> {
+        self.sort_mutation_check(src_h, snap_h, method, span)?;
         let reordered: Vec<Value> = match self.heap.get(snap_h).as_list() {
             Some(v) => order.iter().map(|&i| v.get(i)).collect(),
             None => unreachable!(),
@@ -497,231 +801,170 @@ impl Vm {
         if let Obj::List(v) = heap.get(src_h) {
             v.replace(heap, &reordered);
         }
-        self.pop(); // unroot keys
-        self.pop(); // unroot snapshot
-        self.pop(); // unroot source
-        Ok(Value::nil())
+        Ok(())
     }
 
-    /// `xs.min()` / `xs.max()` — the extremal element by natural order. A Comparable-struct element's
-    /// `compare` re-enters the VM (may GC AND may mutate the source list), so the scan runs over a
-    /// GC-rooted SNAPSHOT (mirrors [`Vm::list_sort_by_key`]/[`Vm::list_min_max_by`]) — never the live
-    /// source, whose length can change under a re-entrant comparator. Returns `Option[T]` — `None` on
-    /// an empty list (Rust's `Iterator::min`/`max`, matching the sibling `first`/`last`/`pop`), NOT a
-    /// fault. First-seen tie-break (an equal element never displaces the earlier best), matching
+    /// `xs.sort_by_key(f)` once its key pass ([`Vm::list_hof`]) is done: a stable in-place sort
+    /// by the keys, from the loop's slots `[src, snap, keys, f, i]` at `base`. Struct / enum /
+    /// tuple / list keys run the merge ([`Vm::sort_start`]), each struct key's `compare` a frame
+    /// when `flat`; scalar keys never re-enter, so Rust's stable sort orders them.
+    fn sort_by_keys(&mut self, base: usize, flat: bool, span: Span) -> Result<(), RuntimeError> {
+        let [src_h, snap_h, keys_h] =
+            [0, 1, 2].map(|k| self.stack[base + k].as_obj().expect("a rooted list"));
+        if self.compare_reenters(keys_h) {
+            self.stack.truncate(base + 4);
+            return self.sort_start(SortKind::ByKey, flat, span);
+        }
+        let keys = match self.heap.get(keys_h).as_list() {
+            Some(v) => v.to_vec(),
+            None => unreachable!(),
+        };
+        let mut order: Vec<usize> = (0..keys.len()).collect();
+        let mut err = None;
+        order.sort_by(|&a, &b| match self.order_key(keys[a], keys[b], span) {
+            Ok(ord) => ord,
+            Err(e) => {
+                err.get_or_insert(e);
+                std::cmp::Ordering::Equal
+            }
+        });
+        if let Some(e) = err {
+            return Err(e);
+        }
+        self.sort_commit(src_h, snap_h, &order, "sort_by_key", span)?;
+        self.stack.truncate(base);
+        self.push(Value::nil());
+        Ok(())
+    }
+
+    /// `xs.min()` / `xs.max()` — the extremal element by natural order, over a rooted SNAPSHOT (a
+    /// struct element's `compare` may mutate, even shrink, the source list). Leaves `Option[T]` —
+    /// `None` on an empty list (Rust's `Iterator::min`/`max`, matching the sibling
+    /// `first`/`last`/`pop`), NOT a fault — or (`flat`) a `compare` frame ([`Vm::extreme_resume`]).
+    /// First-seen tie-break (an equal element never displaces the earlier best), matching
     /// Python's `min`/`max`.
-    pub(super) fn list_reduce_extreme(
+    fn list_reduce_extreme(
         &mut self,
         src_h: GcRef,
         is_max: bool,
+        flat: bool,
         span: Span,
-    ) -> Result<Value, RuntimeError> {
-        // A Comparable-struct element's `compare` re-enters user code, which may MUTATE (shrink) the
-        // source list, so scan an immutable SNAPSHOT (mirrors `list_sort_by_key`/`list_min_max_by`) —
-        // indexing the live source post-user-code would panic out of bounds. GC-rooted so its elements
-        // survive `order_key`'s struct-compare allocations. M3.0a — `n` is the snapshot's length:
-        // another thread can shrink the source after a read of its length.
+    ) -> Result<(), RuntimeError> {
         self.push(Value::obj(src_h)); // ROOT the source list
-        let snap_h = {
-            let elems = match self.heap.get(src_h).as_list() {
-                Some(v) => v.clone(),
-                None => unreachable!("list_reduce_extreme on non-list"),
-            };
-            self.heap.alloc(Obj::List(elems))
+        let snap = match self.heap.get(src_h).as_list() {
+            Some(v) => v.clone(),
+            None => unreachable!("list_reduce_extreme on non-list"),
         };
-        self.push(Value::obj(snap_h)); // ROOT the snapshot
+        let snap_h = self.heap.alloc(Obj::List(snap));
+        self.push(Value::obj(snap_h));
+        // The values compared are the elements themselves.
+        self.push(Value::obj(snap_h));
+        self.push(Value::int(0));
+        self.push(Value::int(1));
+        self.extreme_resume(is_max, None, flat, span)
+    }
+
+    /// `xs.min_by(f)` / `xs.max_by(f)` once its key pass ([`Vm::list_hof`]) is done: the ELEMENT
+    /// whose key is extremal (first-seen tie), scanned from the loop's slots at `base`, whose `f`
+    /// and `i` become the scan's `best` and `i`. `None` on an empty list.
+    fn min_max_by_keys(
+        &mut self,
+        base: usize,
+        is_max: bool,
+        flat: bool,
+        span: Span,
+    ) -> Result<(), RuntimeError> {
+        self.stack[base + 3] = Value::int(0);
+        self.stack[base + 4] = Value::int(1);
+        self.extreme_resume(is_max, None, flat, span)
+    }
+
+    /// Run a min / max scan on from its slots `[src, snap, vals, best, i]`: first apply `out`, the
+    /// `compare` result of `vals[i]` against `vals[best]`, if there is one. On a fault the slots
+    /// are dropped.
+    pub(super) fn extreme_resume(
+        &mut self,
+        is_max: bool,
+        out: Option<Value>,
+        flat: bool,
+        span: Span,
+    ) -> Result<(), RuntimeError> {
+        let base = self.stack.len() - EXTREME_SLOTS;
+        let r = self.extreme_step(is_max, base, out, flat, span);
+        if r.is_err() {
+            self.stack.truncate(base);
+        }
+        r
+    }
+
+    fn extreme_step(
+        &mut self,
+        is_max: bool,
+        base: usize,
+        out: Option<Value>,
+        flat: bool,
+        span: Span,
+    ) -> Result<(), RuntimeError> {
+        let [snap_h, vals_h] =
+            [1, 2].map(|k| self.stack[base + k].as_obj().expect("a rooted list"));
         let n = match self.heap.get(snap_h).as_list() {
             Some(v) => v.len(),
             None => unreachable!(),
         };
         if n == 0 {
-            self.pop(); // unroot snapshot
-            self.pop(); // unroot source
-            return Ok(self.alloc_enum("Option", "None", &[]));
+            let none = self.alloc_enum("Option", "None", &[]);
+            self.stack.truncate(base);
+            self.push(none);
+            return Ok(());
         }
-        let mut best = 0usize;
-        let mut err = None;
-        for i in 1..n {
-            let (cur, best_v) = match self.heap.get(snap_h).as_list() {
+        // min: strict `<` displaces; max: strict `>` displaces. Equal never displaces → first-seen.
+        let displaces = |ord: std::cmp::Ordering| if is_max { ord.is_gt() } else { ord.is_lt() };
+        let [mut best, mut i] = [3, 4].map(|k| self.stack[base + k].as_int() as usize);
+        if let Some(out) = out {
+            if displaces(self.hook_ord(out, span)?) {
+                best = i;
+            }
+            i += 1;
+        }
+        while i < n {
+            let (cur, best_v) = match self.heap.get(vals_h).as_list() {
                 Some(v) => (v.get(i), v.get(best)),
                 None => unreachable!(),
             };
-            match self.order_key(cur, best_v, span) {
-                // min: strict `<` displaces; max: strict `>` displaces. Equal never displaces → first-seen.
-                Ok(ord) => {
-                    if (is_max && ord.is_gt()) || (!is_max && ord.is_lt()) {
-                        best = i;
-                    }
-                }
-                Err(e) => {
-                    err = Some(e);
-                    break;
+            if flat && self.compare_hook_pair(cur, best_v) {
+                self.stack[base + 3] = Value::int(best as i64);
+                self.stack[base + 4] = Value::int(i as i64);
+                let ret = RetAction::MinMax { max: is_max };
+                if self.push_hook_frame(Hook::Compare, cur, &[best_v], ret, span)? {
+                    return Ok(());
                 }
             }
+            if displaces(self.order_key(cur, best_v, span)?) {
+                best = i;
+            }
+            i += 1;
         }
         let result = match self.heap.get(snap_h).as_list() {
             Some(v) => v.get(best),
             None => unreachable!(),
         };
-        if let Some(e) = err {
-            self.pop(); // unroot snapshot
-            self.pop(); // unroot source
-            return Err(e);
-        }
-        // Wrap while the snapshot is still rooted. Belt-and-braces, NOT load-bearing today:
-        // `Heap::alloc` never collects, and the only collection boundary THIS PATH can reach is
-        // `run_until`'s instruction boundary — the scan's last re-entry is already over, and the
-        // other collection site (`Vm::sample_mem_cap`, once per task start, `sched.rs`) runs before
-        // this method call, not during it. Kept because a shrinking comparator can leave `result`
-        // reachable ONLY through the snapshot, so if anything between here and the caller's
-        // `push` ever re-enters the VM, this is the order that is already correct.
+        // Wrap while the snapshot is still rooted: a shrinking comparator can leave `result`
+        // reachable only through it.
         let some = self.alloc_enum("Option", "Some", &[result]);
-        self.pop(); // unroot snapshot
-        self.pop(); // unroot source
-        Ok(some)
+        self.stack.truncate(base);
+        self.push(some);
+        Ok(())
     }
 
-    /// `xs.min_by(f)` / `xs.max_by(f)` — the ELEMENT whose derived key `f: fn(T) -> K` is extremal.
-    /// Same GC discipline as [`Vm::list_sort_by_key`]: source, an element snapshot, AND a parallel
-    /// keys list are rooted so the re-entrant extractor (and a Comparable-struct key's `compare`) can
-    /// GC freely. Keys are computed once per element; a linear argmin/argmax over the rooted keys picks
-    /// the extremal index (first-seen tie), then the element at that index is read from the rooted
-    /// snapshot. Returns `Option[T]` — `None` on an empty list (same lineage as `min`/`max`), NOT a
-    /// fault.
-    pub(super) fn list_min_max_by(
-        &mut self,
-        src_h: GcRef,
-        mut args: Vec<Value>,
-        is_max: bool,
-        span: Span,
-    ) -> Result<Value, RuntimeError> {
-        let name = if is_max { "max_by" } else { "min_by" };
-        if args.len() != 1 {
-            return Err(self.err(
-                format!("'{name}' expects 1 argument(s), got {}", args.len()),
-                span,
-            ));
-        }
-        let f = args.swap_remove(0);
-        // M3.0a — `n` is the snapshot's length (see `list_reduce_extreme`).
-        self.push(Value::obj(src_h)); // ROOT the source list
-        let snap_h = {
-            let elems = match self.heap.get(src_h).as_list() {
-                Some(v) => v.clone(),
-                None => unreachable!("list_min_max_by on non-list"),
-            };
-            self.heap.alloc(Obj::List(elems))
+    /// Do two values order through a `compare` hook (both structs or enums)? Such a pair is never
+    /// a TICKET-146 sequence pair. [`Vm::order_key`] reads it, and a flat sort or scan pushes the
+    /// hook's frame for it.
+    fn compare_hook_pair(&self, a: Value, b: Value) -> bool {
+        let hooked = |v: Value| {
+            v.as_obj()
+                .is_some_and(|h| matches!(self.heap.get(h), Obj::Struct { .. } | Obj::Enum { .. }))
         };
-        self.push(Value::obj(snap_h)); // ROOT the snapshot
-        let n = match self.heap.get(snap_h).as_list() {
-            Some(v) => v.len(),
-            None => unreachable!(),
-        };
-        if n == 0 {
-            self.pop(); // unroot snapshot
-            self.pop(); // unroot source
-            return Ok(self.alloc_enum("Option", "None", &[]));
-        }
-        let keys_h = self.heap.alloc(Obj::List(RVec::with_capacity(n)));
-        self.push(Value::obj(keys_h)); // ROOT the keys
-        for i in 0..n {
-            let e = match self.heap.get(snap_h).as_list() {
-                Some(v) => v.get(i),
-                None => unreachable!(),
-            };
-            match self.guarded(|vm| vm.invoke_value(f, vec![e], span)) {
-                Ok(k) => {
-                    let heap = self.heap.write(keys_h);
-                    if let Obj::List(v) = heap.get(keys_h) {
-                        v.push(heap, k);
-                    }
-                }
-                Err(err) => {
-                    self.pop(); // unroot keys
-                    self.pop(); // unroot snapshot
-                    self.pop(); // unroot source
-                    return Err(err);
-                }
-            }
-        }
-        // Linear argmin/argmax over the rooted keys (first-seen tie-break).
-        let mut best = 0usize;
-        let mut err = None;
-        for i in 1..n {
-            let (cur, best_k) = match self.heap.get(keys_h).as_list() {
-                Some(v) => (v.get(i), v.get(best)),
-                None => unreachable!(),
-            };
-            match self.order_key(cur, best_k, span) {
-                Ok(ord) => {
-                    if (is_max && ord.is_gt()) || (!is_max && ord.is_lt()) {
-                        best = i;
-                    }
-                }
-                Err(e) => {
-                    err = Some(e);
-                    break;
-                }
-            }
-        }
-        let result = match self.heap.get(snap_h).as_list() {
-            Some(v) => v.get(best),
-            None => unreachable!(),
-        };
-        if let Some(e) = err {
-            self.pop(); // unroot keys
-            self.pop(); // unroot snapshot
-            self.pop(); // unroot source
-            return Err(e);
-        }
-        // Wrap while the snapshot is still rooted — see `list_reduce_extreme` for why that is
-        // belt-and-braces rather than load-bearing.
-        let some = self.alloc_enum("Option", "Some", &[result]);
-        self.pop(); // unroot keys
-        self.pop(); // unroot snapshot
-        self.pop(); // unroot source
-        Ok(some)
-    }
-
-    /// Stable top-down merge sort over `idx` (positions into the rooted keys list `keys_h`), ordering
-    /// by each key's natural order via [`order_key`].
-    pub(super) fn msort_indices_by_key(
-        &mut self,
-        keys_h: GcRef,
-        idx: Vec<usize>,
-        span: Span,
-    ) -> Result<Vec<usize>, RuntimeError> {
-        let n = idx.len();
-        if n <= 1 {
-            return Ok(idx);
-        }
-        let mut idx = idx;
-        let right = idx.split_off(n / 2);
-        let left = self.msort_indices_by_key(keys_h, idx, span)?;
-        let right = self.msort_indices_by_key(keys_h, right, span)?;
-        let mut out = Vec::with_capacity(n);
-        let (mut li, mut ri) = (0, 0);
-        while li < left.len() && ri < right.len() {
-            let a = match self.heap.get(keys_h).as_list() {
-                Some(v) => v.get(left[li]),
-                None => unreachable!(),
-            };
-            let b = match self.heap.get(keys_h).as_list() {
-                Some(v) => v.get(right[ri]),
-                None => unreachable!(),
-            };
-            // `<= Equal` keeps the left element first on ties → stable.
-            if self.order_key(a, b, span)?.is_le() {
-                out.push(left[li]);
-                li += 1;
-            } else {
-                out.push(right[ri]);
-                ri += 1;
-            }
-        }
-        out.extend_from_slice(&left[li..]);
-        out.extend_from_slice(&right[ri..]);
-        Ok(out)
+        hooked(a) && hooked(b)
     }
 
     /// Natural order over two `sort_by_key` keys: a Comparable struct or enum key dispatches to its
@@ -740,10 +983,7 @@ impl Vm {
                 .seq_order(a, b, true, span)?
                 .unwrap_or(std::cmp::Ordering::Equal));
         }
-        if let (Some(ha), Some(hb)) = (a.as_obj(), b.as_obj())
-            && matches!(self.heap.get(ha), Obj::Struct { .. } | Obj::Enum { .. })
-            && matches!(self.heap.get(hb), Obj::Struct { .. } | Obj::Enum { .. })
-        {
+        if self.compare_hook_pair(a, b) {
             return self.struct_compare(a, b, span);
         }
         // Float keys order by `float_order` for the WHOLE comparison (not just the NaN case), exactly

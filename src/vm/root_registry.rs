@@ -97,12 +97,11 @@ impl Vm {
 }
 
 impl GenCtx {
-    /// A parked generator context (a suspended generator, or the host a running one parked) holds
-    /// frames and a stack only.
+    /// A suspended generator holds its frame and its slots only.
     pub(super) fn root_view(&self) -> RootView<'_> {
         RootView {
             stack: &self.stack,
-            frames: &self.frames,
+            frames: self.frame.as_slice(),
             ..RootView::default()
         }
     }

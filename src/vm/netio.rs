@@ -165,7 +165,7 @@ impl Vm {
         key: GuardKey<'a>,
         what: &str,
         span: Span,
-    ) -> Result<core::UpdateGuard<'a>, RuntimeError> {
+    ) -> Result<core::UpdateGuard, RuntimeError> {
         if let Some(guard) = core::try_update_guard(key, self.guard_token) {
             return Ok(guard);
         }
@@ -247,7 +247,7 @@ impl Vm {
         taking: Option<&std::sync::atomic::AtomicBool>,
         budget: std::time::Duration,
         span: Span,
-    ) -> Result<Result<Option<core::UpdateGuard<'a>>, GuardCycle>, RuntimeError> {
+    ) -> Result<Result<Option<core::UpdateGuard>, GuardCycle>, RuntimeError> {
         let me = self.guard_token;
         match self.wait_door(&[], |_| {
             core::await_update_guard_free(ticket, me, Some(budget))
@@ -298,7 +298,7 @@ impl Vm {
         ticket: &mut core::WaitTicket<'a>,
         what: &str,
         span: Span,
-    ) -> Result<Result<core::UpdateGuard<'a>, GuardCycle>, RuntimeError> {
+    ) -> Result<Result<core::UpdateGuard, GuardCycle>, RuntimeError> {
         let owned = core::GuardWait {
             lock: Arc::clone(key.lock),
             mode: key.mode,

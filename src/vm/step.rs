@@ -188,11 +188,10 @@ impl Vm {
                     }
                 }
             }
-            Op::Add | Op::Sub | Op::Mul | Op::Div | Op::Mod => self.arith(op, span)?,
+            Op::Add | Op::Sub | Op::Mul | Op::Div | Op::Mod => self.arith(op, true, span)?,
             Op::Neg => {
                 let v = self.pop();
-                let r = self.neg_value(v, span)?;
-                self.push(r);
+                self.neg_value(v, true, span)?;
             }
             Op::Not => {
                 let v = self.pop();
@@ -211,12 +210,14 @@ impl Vm {
             // `step → run_proto → run_until → step` path.
             Op::Eq => return self.eq_operator(false, span),
             Op::NotEq => return self.eq_operator(true, span),
-            Op::BitAnd | Op::BitOr | Op::BitXor | Op::Shl | Op::Shr => self.bitwise(op, span)?,
+            Op::BitAnd | Op::BitOr | Op::BitXor | Op::Shl | Op::Shr => {
+                self.bitwise(op, true, span)?
+            }
             // `return` (not `?`): keeps `step`'s frame from materializing an extra `RuntimeError`
             // temporary, which would bloat the deep re-entrant recursion path (`str(self)`-style
             // infinite recursion must hit the 10_000 call-depth limit before exhausting the host
             // stack — `self_referential_stringable_hits_depth_limit` guards exactly this).
-            Op::Contains => return self.op_contains(span),
+            Op::Contains => return self.op_contains(true, span),
             Op::AsBool => {
                 let v = *self.stack.last().unwrap();
                 if v.as_bool().is_none() {
@@ -319,16 +320,15 @@ impl Vm {
                 // The `Arc` clone ends the borrow of `self` the defaults would hold.
                 let program = Arc::clone(&self.program);
                 let [sep, end] = &program.print_defaults;
-                self.do_print_sep(*argc, sep, end, span)?
+                self.do_print_sep(*argc, false, sep, end, true, span)?
             }
-            // Stack on entry: `[args…, sep, end]`. Both are copied out as `str`, so they are no
-            // longer GC roots while the args stringify.
+            // Stack on entry: `[args…, sep, end]`. Both stay there until the line is written: a
+            // hooked arg's frame returns to them.
             Op::CallPrintSep { argc } => {
-                let end = self.pop();
-                let sep = self.pop();
-                let end = self.val_str(end).unwrap_or_default();
-                let sep = self.val_str(sep).unwrap_or_default();
-                self.do_print_sep(*argc, &sep, &end, span)?
+                let n = self.stack.len();
+                let end = self.val_str(self.stack[n - 1]).unwrap_or_default();
+                let sep = self.val_str(self.stack[n - 2]).unwrap_or_default();
+                self.do_print_sep(*argc, true, &sep, &end, true, span)?
             }
             Op::Return => self.do_return(false)?,
             Op::DeferCall(argc) => self.do_defer(None, *argc, span),
@@ -593,10 +593,10 @@ impl Vm {
                 self.push(Value::obj(h));
             }
             Op::GetField { name, ic } => self.get_field(name, *ic, span)?,
-            Op::GetIndex => self.get_index(span)?,
-            Op::SliceRange => self.slice_range(span)?,
+            Op::GetIndex => self.get_index(true, span)?,
+            Op::SliceRange => self.slice_range(true, span)?,
             Op::SetField { name, ic } => self.set_field(name, *ic, span)?,
-            Op::SetIndex => self.set_index(span)?,
+            Op::SetIndex => self.set_index(true, span)?,
             Op::Dup => {
                 let top = *self.stack.last().expect("Dup on empty stack");
                 self.push(top);
@@ -610,6 +610,18 @@ impl Vm {
             }
             Op::ToStr => {
                 let v = self.stack[self.stack.len() - 1]; // leave rooted; stringify may run user code
+                // A `str` hook runs as a frame (its receiver is the frame's local).
+                if self.hook_of(v, crate::base::hooks::Hook::Str) {
+                    self.pop();
+                    self.push_hook_frame(
+                        crate::base::hooks::Hook::Str,
+                        v,
+                        &[],
+                        RetAction::Stringify,
+                        span,
+                    )?;
+                    return Ok(());
+                }
                 let s = self.stringify(v, span, 0)?;
                 self.pop();
                 let h = self.heap.alloc(Obj::Str(s.into()));
@@ -681,14 +693,12 @@ impl Vm {
                 // Shared with `drain_iterable` (`List()`/`Set()`/`Map()`/`.iter()`) so every consumer
                 // of the checker's `Iterable` admission set accepts the same witnesses.
                 let v = self.pop();
-                let cursor = self.iterable_to_cursor(v, span)?;
-                self.push(cursor);
+                self.iterable_to_cursor(v, true, span)?;
             }
             Op::Yield => {
-                // Experimental generator suspend. The yielded value is already on the stack top; flag
-                // the request and let `run_until` return to the host `.next()` after this op (the
-                // frame `ip` has already advanced past the `Yield`, so resume continues after it).
-                self.gen_yielding = true;
+                // Experimental generator suspend: the yielded value is on the stack top and the
+                // frame `ip` is past the `Yield`, so the resume continues after it.
+                self.gen_yield()?;
             }
             Op::IsChannel => {
                 let v = self.pop();

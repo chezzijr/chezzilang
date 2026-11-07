@@ -183,6 +183,11 @@ match g.next():            # 0
   `for`, pass it to an `[S: Iterator[T], T]` bound, or call `.next()` (`v` per yield, then `None`).
 - A bare `return` stops a generator early. `defer`/`spawn`/`parallel:`/`wait:` are not allowed inside one
   (`'defer' is not allowed inside a generator body: a suspended generator does not manage frame defers`).
+- A generator body runs on its caller's frame stack (since 2026-11-07): a channel wait inside it
+  parks the task that drives it, as any call does, and a `main` that waits there with no sender
+  reports `deadlock`. Its frame counts toward the call depth, so an unbounded recursive generator
+  faults `maximum call depth (10000) exceeded (infinite recursion?)` (it overflowed the host stack
+  and aborted the process before).
 - An un-inferable element (`yield []` alone, or an int-then-float mix; no int->float coercion at a
   `yield`) is rejected.
 - A task gets a generator by handle (M3.4), a module-global one too (M3.1): every task drives the

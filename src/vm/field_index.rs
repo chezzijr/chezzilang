@@ -130,8 +130,8 @@ impl Vm {
     /// `obj[range]` read as a SLICE (TICKET-253): a copy of the elements of a list, `str`, `bytes` or
     /// `bytearray` that the `Range` value selects, or the result of a struct's `slice` hook. The
     /// shared `slice::range_indices` resolver owns all the clamp/step/reverse math. The checker chose
-    /// this reading for the subscript; the VM does not choose again.
-    pub(super) fn slice_range(&mut self, span: Span) -> Result<(), RuntimeError> {
+    /// this reading for the subscript; the VM does not choose again. `flat` as for [`Vm::arith`].
+    pub(super) fn slice_range(&mut self, flat: bool, span: Span) -> Result<(), RuntimeError> {
         let key = self.pop();
         let obj = self.pop();
         let Some(h) = obj.as_obj() else {
@@ -239,18 +239,16 @@ impl Vm {
                 self.push(Value::obj(nh));
             }
             Sliced::Struct => {
-                let Some(v) =
-                    self.reentered(|vm| vm.invoke_hook(Hook::Slice, obj, &[key], span))?
-                else {
+                if !self.hook_op(flat, Hook::Slice, obj, &[key], RetAction::Push, span)? {
                     return Err(self.err(format!("cannot slice {}", self.type_name(obj)), span));
-                };
-                self.push(v);
+                }
             }
         }
         Ok(())
     }
 
-    pub(super) fn get_index(&mut self, span: Span) -> Result<(), RuntimeError> {
+    /// `flat` as for [`Vm::arith`].
+    pub(super) fn get_index(&mut self, flat: bool, span: Span) -> Result<(), RuntimeError> {
         // The index is NOT pre-validated as int (the `AsInt` was removed so map keys can be
         // str/bool): pop it as a Value and validate per object kind.
         let key = self.pop();
@@ -442,12 +440,9 @@ impl Vm {
             }
             // A struct or enum with the `index` hook dispatches `obj[k]` to `index(self, k)`.
             Obj::Struct { .. } | Obj::Enum { .. } => {
-                let Some(v) =
-                    self.reentered(|vm| vm.invoke_hook(Hook::Index, obj, &[key], span))?
-                else {
+                if !self.hook_op(flat, Hook::Index, obj, &[key], RetAction::Push, span)? {
                     return Err(self.err(format!("cannot index {}", self.type_name(obj)), span));
-                };
-                self.push(v);
+                }
                 Ok(())
             }
             Obj::BigInt(_)
@@ -612,7 +607,8 @@ impl Vm {
         Ok(())
     }
 
-    pub(super) fn set_index(&mut self, span: Span) -> Result<(), RuntimeError> {
+    /// `flat` as for [`Vm::arith`].
+    pub(super) fn set_index(&mut self, flat: bool, span: Span) -> Result<(), RuntimeError> {
         let val = self.pop();
         // The index is NOT pre-validated as int (AsInt removed for map keys): pop as a Value.
         let key = self.pop();
@@ -669,10 +665,14 @@ impl Vm {
         }
         // A struct or enum with the `set_index` hook dispatches `obj[k] = v` to it.
         if matches!(self.heap.get(h), Obj::Struct { .. } | Obj::Enum { .. }) {
-            if self
-                .reentered(|vm| vm.invoke_hook(Hook::SetIndex, obj, &[key, val], span))?
-                .is_none()
-            {
+            if !self.hook_op(
+                flat,
+                Hook::SetIndex,
+                obj,
+                &[key, val],
+                RetAction::Discard,
+                span,
+            )? {
                 return Err(self.err(format!("cannot index-assign {}", self.type_name(obj)), span));
             }
             return Ok(());

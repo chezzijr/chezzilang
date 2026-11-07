@@ -1701,6 +1701,9 @@ fn a_panic_inside_a_resume_leaves_the_generator_done() {
         panic!("the panic put the box back")
     };
     assert!(matches!(parked.state, GenState::Done));
+    // The resume's slot hold went with the panic: a stale armed hold would be popped by the next
+    // generator's yield in its place.
+    assert!(vm.held_gens.is_empty(), "the panic left a slot hold behind");
 }
 
 /// M2.5 — two threads race on one list `L` and one map `M` through two `Vm` handles on one heap,
@@ -1758,7 +1761,7 @@ main()"
             if len > 0 {
                 w.push(Value::obj(l));
                 w.push(Value::int((x % len as u64) as i64));
-                w.get_index(sp)?;
+                w.get_index(false, sp)?;
                 let v = w.pop();
                 let good = v.as_int_inline().is_some_and(|x| (0..OPS).contains(&x));
                 seen.0 += usize::from(good);
@@ -1951,7 +1954,7 @@ main()"
                     w.push(Value::obj(l));
                     w.push(Value::int(k % 64));
                     w.push(s);
-                    w.set_index(sp).expect("a store");
+                    w.set_index(false, sp).expect("a store");
                     if k % 4 == 0 {
                         w.core_method(l, "sort", &[], sp).expect("a sort");
                     }
@@ -2058,7 +2061,7 @@ main()"
                         w.push(Value::obj(outer));
                         w.push(Value::int(1));
                         w.push(Value::obj(xs));
-                        w.set_index(sp).expect("a store");
+                        w.set_index(false, sp).expect("a store");
                         let before = w.gc_coord.epoch();
                         let text = w.stringify(Value::obj(outer), sp, 0).expect("a print");
                         printed.fetch_add(1, ordering);
@@ -2084,7 +2087,7 @@ main()"
                     w.push(Value::obj(outer));
                     w.push(Value::int(1));
                     w.push(Value::int(0));
-                    w.set_index(sp).expect("a store");
+                    w.set_index(false, sp).expect("a store");
                     // Junk that a freed slot of the unlinked list can be reused for.
                     for _ in 0..8 {
                         w.alloc_str("junk".to_string());
@@ -2147,7 +2150,7 @@ C := BIG.iter()"
     fn index(w: &mut Vm, h: GcRef, k: Value) -> Result<(), RuntimeError> {
         w.push(Value::obj(h));
         w.push(k);
-        w.get_index(Span::RUNTIME)?;
+        w.get_index(false, Span::RUNTIME)?;
         w.pop();
         Ok(())
     }
@@ -2155,19 +2158,19 @@ C := BIG.iter()"
         w.push(Value::obj(h));
         w.push(k);
         w.push(v);
-        w.set_index(Span::RUNTIME)
+        w.set_index(false, Span::RUNTIME)
     }
     fn slice(w: &mut Vm, h: GcRef, r: GcRef) -> Result<(), RuntimeError> {
         w.push(Value::obj(h));
         w.push(Value::obj(r));
-        w.slice_range(Span::RUNTIME)?;
+        w.slice_range(false, Span::RUNTIME)?;
         w.pop();
         Ok(())
     }
     fn contains(w: &mut Vm, h: GcRef, x: Value) -> Result<(), RuntimeError> {
         w.push(x);
         w.push(Value::obj(h));
-        w.op_contains(Span::RUNTIME)?;
+        w.op_contains(false, Span::RUNTIME)?;
         w.pop();
         Ok(())
     }

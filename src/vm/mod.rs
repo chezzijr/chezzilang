@@ -633,18 +633,20 @@ struct CallFrame {
     /// `push_frame`, `push_frame_in_place`, generators, `spawn`, `defer` — gets it
     /// without threading anything through the call sites.
     argc: usize,
+    /// What the return does with the value before the caller sees it: `Push` for a call, an
+    /// operator's post-step for a hook frame ([`RetAction`]).
+    ret: RetAction,
 }
 
-/// Experimental generators — a generator's private execution context. While the generator runs its
-/// frames/stack are live in the `Vm`; between `.next()` calls they are parked here so it resumes
-/// exactly where it suspended. Base/`cur_base` indices are relative to this private `stack` (the
-/// generator always runs from a base-0 stack), so resuming needs no rebasing.
+/// Experimental generators — a suspended generator's body: its one frame (a `yield` sits only in
+/// the body frame, never in a call below it), the frame's stack slots and the `recover:` handlers
+/// it installed. A resume copies them onto the caller's stacks ([`Vm::gen_resume`]) and a `yield`
+/// copies them back ([`Vm::gen_yield`]), so `frame.base` is 0 here and each handler's
+/// `stack_len`/`frame_len`/`call_depth` counts from the frame.
 #[derive(Clone, Default)]
 struct GenCtx {
-    frames: Vec<CallFrame>,
+    frame: Option<CallFrame>,
     stack: Vec<Value>,
-    call_depth: usize,
-    cur_base: usize,
     handlers: Vec<Handler>,
 }
 
@@ -653,7 +655,7 @@ struct GenCtx {
 enum GenState {
     /// Created but not yet started: holds the call args until the first `.next()` builds the frame.
     Pending(Vec<Value>),
-    /// Started and suspended at a `yield`; its frames/stack live in [`Parked::ctx`].
+    /// Started and suspended at a `yield`; its frame and slots live in [`Parked::ctx`].
     Suspended,
     /// Body returned / fell off the end (or faulted). Every further `.next()` yields `None`.
     Done,
@@ -665,6 +667,16 @@ enum GenState {
 pub(crate) struct Parked {
     state: GenState,
     ctx: GenCtx,
+}
+
+impl Parked {
+    /// A finished generator's box: every later resume yields `None`.
+    fn done() -> Parked {
+        Parked {
+            state: GenState::Done,
+            ctx: GenCtx::default(),
+        }
+    }
 }
 
 // Many threads read a parked generator at once (`AtomicBox::with`), so `Parked` must be `Sync`;
@@ -687,8 +699,9 @@ pub(crate) struct GeneratorCore {
     /// M2.4 — the parked state and context behind one atomic owner pointer (`vm/rvec.rs`). A
     /// resume takes the box (`Vm::gen_take`) and puts it back when the body suspends or ends; a
     /// null pointer means a run holds the generator, so a second resume, on this thread or
-    /// another, faults "generator already running" and never writes the frames twice.
-    parked: rvec::AtomicBox<Parked>,
+    /// another, faults "generator already running" and never writes the frames twice. The `Arc`
+    /// lets the running body frame's [`core::GenHold`] put it back from a dropped task context.
+    parked: Arc<rvec::AtomicBox<Parked>>,
 }
 
 // Hand-rolled so `CallFrame`/`Handler`/`Deferred` need not derive `Debug` (keeps the hot call
@@ -702,7 +715,7 @@ impl std::fmt::Debug for GeneratorCore {
                     GenState::Suspended => "Suspended",
                     GenState::Done => "Done",
                 },
-                p.ctx.frames.len(),
+                usize::from(p.ctx.frame.is_some()),
             ),
             None => ("Running", 0),
         });
@@ -1151,9 +1164,17 @@ pub struct Vm {
     pending_connect: Option<ConnectInProgress>,
     /// M3.3 — the `RwShared` boxes (their `BoxLock` addresses) this task holds the read guard on,
     /// innermost last. A reader is anonymous in the lock word, so a failed acquire reads this list
-    /// to find a same-task re-entry (`Vm::guard_reentry`). A `Vm` field, NOT a `FiberCtx` field: a
-    /// box closure runs under `Vm::reentered`, where no other fiber runs on this stack.
+    /// to find a same-task re-entry (`Vm::guard_reentry`). Live mirror of [`FiberCtx::held_reads`]:
+    /// a box closure is a frame, so its task can park holding the read.
     held_reads: Vec<usize>,
+    /// The guards this task's box-closure frames hold (`RetAction::Box`), innermost last. Live
+    /// mirror of [`FiberCtx::held_guards`]: a parked holder keeps them, and a dropped task releases
+    /// them. The frame's exit releases its guard ([`Vm::drop_ret`]).
+    held_guards: Vec<core::UpdateGuard>,
+    /// The holds this task's generator body frames (`RetAction::Gen`) keep on their generators'
+    /// slots, innermost last. Live mirror of [`FiberCtx::held_gens`]: a dropped task's holds put
+    /// its generators back `Done`. The frame's `yield` or exit disarms its hold.
+    held_gens: Vec<core::GenHold>,
     /// D6c — live mirror of [`FiberCtx::poll_timed_out`] while the fiber is swapped in: set by the poll
     /// thread on the detached fiber's ctx when a socket op's `timeout_ms` deadline elapsed before the
     /// fd became ready, swapped in here on schedule-in. `socket_method`/`listener_method` consume it at
@@ -1186,11 +1207,10 @@ pub struct Vm {
     /// parked into a [`Fiber`], so a `recv` reached while this is `> 0` cannot suspend — it faults
     /// `deadlock` instead (B1 v1 limitation). Maintained by [`Vm::guarded`].
     native_reentry: usize,
-    /// TICKET-016 (W8-3) — this VM's task identity in the process-global `Shared`/`RwShared` update
-    /// guard registry. Sound as a TASK identity only because a fiber cannot park while
-    /// `native_reentry > 0` (see that field): the fiber holding a guard cannot be swapped off this
-    /// `Vm`, so no second task can ever observe or inherit this token. Assigned once at construction
-    /// from a process-wide counter.
+    /// TICKET-016 (W8-3) — the running task's identity in the process-global `Shared`/`RwShared`
+    /// update guard registry. Live mirror of [`FiberCtx::guard_token`]: a task switch swaps it, so
+    /// a holder parked in its box closure keeps its identity and a sibling on the same worker has
+    /// its own. From the process-wide counter ([`fresh_guard_token`]).
     pub guard_token: u64,
     /// Structural depth already consumed by the ENCLOSING structural walks on the host stack, when a
     /// user protocol hook (`eq` / `str`) re-entered the VM from inside one. Every FAULTING
@@ -1203,14 +1223,8 @@ pub struct Vm {
     /// Per-`Vm`, not per-fiber, for the identical reason [`Vm::native_reentry`] is: a fiber cannot
     /// park or yield while a native re-entry is on the host stack (every park/yield gate is
     /// `native_reentry == 0`), so no other fiber can ever observe a non-zero value. Deliberately
-    /// absent from [`FiberCtx`], [`GenCtx`], [`Handler`], [`Vm::swap_ctx`] and the generator ctx swap
-    /// ([`Vm::swap_gen_ctx`], driven by [`Vm::generator_next`]) — do not add it to any of them.
-    ///
-    /// The generator omission is load-bearing. The tempting cheaper alternative — charge `depth` to
-    /// [`Vm::call_depth`] around each hook — FAILS because `GenCtx` carries its own `call_depth` and
-    /// the generator resume swaps it, so a generator driven from inside a hook would swap the charge
-    /// away. A plain `Vm` field is not swapped there, which is exactly right: the generator's frames
-    /// are on the same host stack.
+    /// absent from [`FiberCtx`], [`GenCtx`], [`Handler`] and [`Vm::swap_ctx`] — do not add it to any
+    /// of them.
     ///
     /// `recover:` needs no restoration. Unlike `call_depth` (restored from the snapshot because
     /// frames are heap-allocated and skipped over), native walk frames unwind through Rust `?`, so
@@ -1331,35 +1345,10 @@ pub struct Vm {
     /// requeue this fiber (round-robin) instead of treating its `run_until` return as a finish.
     /// Set at the safepoint, consumed in [`Vm::run_one_fiber`]; mutually exclusive with `suspend`.
     yield_now: bool,
-    /// Experimental generators — transient signal: an `Op::Yield` set this, asking the generator's
-    /// private `run_until` to return control to the host `.next()` call (the yielded value is on the
-    /// stack top). Reset by `generator_next` before each resume. Not swapped by `swap_ctx` (it is
-    /// only ever live across the single nested `run_until` that `generator_next` drives).
-    gen_yielding: bool,
-    /// Experimental generators — saved HOST contexts, one per generator currently executing (LIFO for
-    /// nested generators). A running generator's frames/stack live in the live `Vm` fields; the host
-    /// it suspended is parked here. `collect` roots every entry so the host's object graph survives a
-    /// GC triggered inside a generator body. Empty whenever no generator runs — and at every
-    /// fiber-switch point, since generators run `guarded` and so never park mid-body.
-    gen_host_ctx: Vec<GenCtx>,
-    /// Experimental generators — handles of generators whose bodies are currently executing (LIFO).
-    /// `collect` marks each so the generator object survives to have its state written back.
-    active_generators: Vec<GcRef>,
-    /// W13-20 — the generator-side frames of a fault that propagated OUT of a `generator_next`
-    /// resume, waiting to be prepended to the DRIVER-side capture. Consumed exactly once, by the
-    /// dispatch loop's error arm (`exec.rs`'s uncaught arm — a fault that reaches that arm for the
-    /// FIRST time takes it there). A fault a `recover:` catches instead never reaches that arm, so
-    /// EVERY catch path that can run a deferred `.next()` after this slot might already be set must
-    /// clear it explicitly, or it survives to decorate a later, unrelated uncaught fault: `exec.rs`'s
-    /// `recover:`-catch arm (after BOTH its defer drains — `unwind_deferred` for frames above the
-    /// boundary and `drain_frame_to` for the recover block's own defers, since a `defer it.next()`
-    /// can sit in either), and `stmt.rs`'s recover-scoped `?` catch (`do_try`, after both of ITS
-    /// drains). Grep for `gen_fault_prefix.clear()` for the full list — a THIRD catch path added
-    /// later needs the same clear, derived the same way (every drain it runs after this slot could
-    /// already be set), not by pattern-matching the two here. Deliberately absent from `FiberCtx`,
-    /// `GenCtx`, `Vm::swap_ctx` and `Vm::swap_gen_ctx`, for the same reason `gen_host_ctx` is: a
-    /// fiber cannot park mid-resume.
-    gen_fault_prefix: Vec<TraceFrame>,
+    /// An empty generator box ([`Parked`]) a resume left, for the next `yield` to fill
+    /// ([`Vm::gen_yield`]), so a generator loop allocates no box per step. It holds no values, so
+    /// any task on this worker may take it.
+    gen_spare: Option<Box<Parked>>,
     /// TICKET-150 (W14-35c) — the list/map/set/struct objects whose default `print`/`str` render is
     /// currently OPEN, innermost last (CPython's `Py_ReprEnter`). An object met again while open is a
     /// back edge and renders as `[...]` / `{...}` / `Set(...)` / `...`. An in-progress STACK, not a
@@ -1450,8 +1439,12 @@ mod call;
 mod core_method;
 mod json_decode;
 mod list_hof;
+use list_hof::{CmpMethod, HofKind, SortKind};
+use shared_methods::BoxCall;
 mod method_call;
+mod ret_action;
 use crate::lexer::strip_num_underscores_radix;
+use ret_action::{Cmp, GenThen, RetAction};
 mod blocking;
 mod builtins;
 mod channel;

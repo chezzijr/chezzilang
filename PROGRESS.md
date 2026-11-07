@@ -32,6 +32,14 @@ the netpoller and `std.net`. There is one engine: the bytecode VM on its M:N sch
 one heap and get values by handle (Go's model, merged to `main` 2026-10-31; see "Go shared heap"
 below).
 
+A wait inside a callback parks or is judged, as in Go (branch `feat/frame-reentry`, 2026-11-07): a
+hook, an operator, an f-string part, `print`'s `str`, a HOF callback, a sort comparator, a
+`from_iter` drain, a `Shared`/`RwShared` closure and a generator body run as frames with a
+`RetAction` (`src/vm/ret_action.rs`), so `main` with no sender reports `deadlock` where it hung.
+A `defer` body stays judged through the drain's `deferring` exception; a frame-based defer drain
+is a follow-up plan. The nested container walks, map/set probes, `json.decode` defaults and FFI
+callbacks still re-enter (`gaps.md` W23-1, narrowed). Grid: `tests/callback_park_grid.rs`.
+
 The checker has a non-fatal warning channel (`Severity::Warning`, `"severity"` in `--errors=json`,
 `DiagnosticSeverity::WARNING` in the LSP). It has five rules:
 

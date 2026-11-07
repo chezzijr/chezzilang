@@ -406,7 +406,9 @@ place (where its creator made it), then in submission order. The jobs of an exec
 job come after every job of an executor a run task made, and among themselves by the creating
 job's place. Under `chezzi test` a task is reported once: a job one test leaves blocked that a
 later test's verdict cuts is listed, with its frames, in that test's report, and the end-of-file
-drain does not report it again as an `(executor job)` row. The report is one header, then one
+drain does not report it again as an `(executor job)` row. A task blocked inside a generator body
+lists the body's frames and the frames below it (the `for` or `next()` that resumed it), since
+2026-11-07 (plan `2026-11-07-frame-reentry`). The report is one header, then one
 entry per task with its frames:
 
 ```

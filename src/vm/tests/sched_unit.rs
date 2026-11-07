@@ -1535,6 +1535,7 @@ fn fiber_roots_equal_vm_roots_after_swap() {
         has_implicit_nursery: false,
         call_span: Span::RUNTIME,
         argc: 0,
+        ret: RetAction::Push,
     });
     let (t_callee, t_arg) = (obj(&mut vm, "task-callee"), obj(&mut vm, "task-arg"));
     vm.nurseries.push(vec![QueuedTask {

@@ -2,6 +2,7 @@
 //! Split out of `src/vm/call.rs`. `super::*` is the parent module.
 
 use super::*;
+use crate::base::builtin_method::ListMethod;
 use crate::base::hooks::Hook;
 
 impl Vm {
@@ -233,6 +234,40 @@ impl Vm {
         }
         self.run_proto(proto, home, None, call_args, true, false, span)
             .map(Some)
+    }
+
+    /// [`Vm::invoke_hook`] for an operator handler on the dispatch loop: push the hook's frame with
+    /// `ret` and return; the loop runs the frame and its return applies `ret`, so a wait in the hook
+    /// parks like any call. `Ok(false)` when `recv` has no such hook. A generator hook allocates its
+    /// generator, and `ret` applies to it at once. Legal only where the caller's remaining work is
+    /// `ret` (the handler returns without pushing); a synchronous native caller uses `invoke_hook`.
+    pub(super) fn push_hook_frame(
+        &mut self,
+        hook: Hook,
+        recv: Value,
+        args: &[Value],
+        ret: RetAction,
+        span: Span,
+    ) -> Result<bool, RuntimeError> {
+        let Some((proto, home)) = self.hook_proto(recv, hook) else {
+            return Ok(false);
+        };
+        self.check_proto_arity(proto, args.len() + 1, span)?;
+        if self.program.protos[proto].is_generator {
+            let mut call_args = Vec::with_capacity(args.len() + 1);
+            call_args.push(recv);
+            call_args.extend_from_slice(args);
+            let g = self.alloc_generator(proto, home, None, call_args);
+            self.push(g);
+            self.apply_ret(ret, span)?;
+            return Ok(true);
+        }
+        self.frame_depth_guard(true, span)?;
+        let base = self.stack.len();
+        self.stack.push(recv);
+        self.stack.extend_from_slice(args);
+        self.finish_frame(proto, home, None, base, true, false, span, ret);
+        Ok(true)
     }
 
     /// The fault an operator reports on a struct or enum that has no `hook`.
@@ -491,6 +526,10 @@ impl Vm {
                     span,
                 ));
             }
+            // On the dispatch loop the body runs as a frame on this stack, so a wait in it parks.
+            if ic != NO_IC {
+                return self.gen_resume(h, GenThen::Push, span);
+            }
             let result = self.generator_next(h, span)?;
             self.push(result);
             return Ok(());
@@ -545,8 +584,18 @@ impl Vm {
             // Native op body per handle — identical to the retired per-arm dispatch, tails included.
             self.sched_seed_point();
             let result = match key {
-                "Shared" => self.shared_method(h, method, &args, span)?,
-                "RwShared" => self.rwshared_method(h, method, &args, span)?,
+                // A box closure on the dispatch loop is a frame: its return pushes the result.
+                "Shared" | "RwShared" => {
+                    let r = if key == "Shared" {
+                        self.shared_method(h, method, &args, ic != NO_IC, span)?
+                    } else {
+                        self.rwshared_method(h, method, &args, ic != NO_IC, span)?
+                    };
+                    match r {
+                        Some(v) => v,
+                        None => return Ok(()),
+                    }
+                }
                 "Atomic" => self.atomic_method(h, method, &args, span)?,
                 "AtomicInt" => self.atomic_int_method(h, method, &args, span)?,
                 "Executor" => self.executor_method(h, method, &args, span)?,
@@ -661,8 +710,27 @@ impl Vm {
             | Obj::Generator(_) => None,
         };
         if let Some(container) = container {
+            // A list HOF runs its loop here: on the dispatch loop (a real `ic`) each callback is
+            // a frame, so a wait in it parks; a `NO_IC` caller runs it nested.
+            // A list method's name is parsed once, here; `core_method_as` reads the parse.
+            let list = if let Obj::List(_) = self.heap.get(h) {
+                ListMethod::from_name(method)
+            } else {
+                None
+            };
+            if let Some(m) = list {
+                if let Some(kind) = HofKind::of(m) {
+                    return self.list_hof(h, kind, args, ic != NO_IC, span);
+                }
+                // So does a sort or a min / max whose comparator may be user code.
+                if let Some(c) = CmpMethod::of(m)
+                    && self.list_compare_method(h, c, &args, ic != NO_IC, span)?
+                {
+                    return Ok(());
+                }
+            }
             let dispatched = match container {
-                Container::Core => self.core_method(h, method, &args, span),
+                Container::Core => self.core_method_as(h, method, list, &args, span),
                 Container::Bytes => self.bytes_method(h, method, &args, span),
                 Container::ByteArray => self.bytearray_method(h, method, &args, span),
                 Container::Scalar => self.scalar_method(recv, method, &args, span),

@@ -80,7 +80,7 @@ impl Vm {
         {
             self.push(recv);
             self.push(args[0]);
-            self.arith(&bin, span)?;
+            self.arith(&bin, false, span)?;
             return Ok(Some(self.pop()));
         }
         // `BitAnd`/`BitOr`/`BitXor`/`Shl`/`Shr` → the bitwise primitive.
@@ -112,11 +112,14 @@ impl Vm {
         {
             self.push(recv);
             self.push(args[0]);
-            self.bitwise(&bit, span)?;
+            self.bitwise(&bit, false, span)?;
             return Ok(Some(self.pop()));
         }
         match (hook, args.len()) {
-            (Hook::Neg, 0) => Ok(Some(self.neg_value(recv, span)?)),
+            (Hook::Neg, 0) => {
+                self.neg_value(recv, false, span)?;
+                Ok(Some(self.pop()))
+            }
             // `Stringable` for a kind with no `str` method of its own: the SAME rendering `print`
             // and `"{x}"` use. Miss-only, so a declared `str` hook is dispatched first.
             (Hook::Str, 0) => {
@@ -185,7 +188,7 @@ impl Vm {
             (Hook::Index, 1) => {
                 self.push(recv);
                 self.push(args[0]);
-                self.get_index(span)?;
+                self.get_index(false, span)?;
                 Ok(Some(self.pop()))
             }
             // `set_index` returns `nil` per the protocol; `Vm::set_index` pushes nothing.
@@ -193,14 +196,14 @@ impl Vm {
                 self.push(recv);
                 self.push(args[0]);
                 self.push(args[1]);
-                self.set_index(span)?;
+                self.set_index(false, span)?;
                 Ok(Some(Value::nil()))
             }
             // `Slice[R]`'s one argument is the `Range` value; `c.slice(r)` is `c[r]` read as a slice.
             (Hook::Slice, 1) => {
                 self.push(recv);
                 self.push(args[0]);
-                self.slice_range(span)?;
+                self.slice_range(false, span)?;
                 Ok(Some(self.pop()))
             }
             // `Contains` for bytes / bytearray (the only containers with no `contains` method):
@@ -208,7 +211,7 @@ impl Vm {
             (Hook::Contains, 1) => {
                 self.push(args[0]);
                 self.push(recv);
-                self.op_contains(span)?;
+                self.op_contains(false, span)?;
                 Ok(Some(self.pop()))
             }
             (
@@ -369,10 +372,27 @@ impl Vm {
         }
     }
 
+    /// A str / list / map / set method by name (the GC tests' entry; the dispatch loop parses the
+    /// name itself and calls [`Vm::core_method_as`]).
+    #[cfg(test)]
     pub(super) fn core_method(
         &mut self,
         h: GcRef,
         method: &str,
+        args: &[Value],
+        span: Span,
+    ) -> Result<Value, RuntimeError> {
+        let list = ListMethod::from_name(method);
+        self.core_method_as(h, method, list, args, span)
+    }
+
+    /// A str / list / map / set method, `list` being `method` parsed as a list method (`None` when
+    /// it names none): the dispatch loop parses a list method's name once.
+    pub(super) fn core_method_as(
+        &mut self,
+        h: GcRef,
+        method: &str,
+        list: Option<ListMethod>,
         args: &[Value],
         span: Span,
     ) -> Result<Value, RuntimeError> {
@@ -769,7 +789,7 @@ impl Vm {
                 }
             }
             Obj::List(items) => {
-                let Some(which) = ListMethod::from_name(method) else {
+                let Some(which) = list else {
                     return self.container_method_miss(h, "list", method, args, span);
                 };
                 match which {
@@ -812,19 +832,24 @@ impl Vm {
                         Ok(Value::nil())
                     }
                     ListMethod::Sort => {
-                        self.arity_err("sort", args, 0, span)?;
                         // In place, ascending. Checker guarantees a homogeneous orderable element type.
-                        // A list of Comparable structs/enums orders via each one's `compare` (engine
-                        // re-entry, so a merge sort that holds `&mut self`); so does a list of tuples /
-                        // Lists / Options (TICKET-146; an `Option` is an `Obj::Enum`), whose elements may
-                        // hold a struct. Primitives use the faster `value_order`. Str elements live on
-                        // the heap, so `value_order` needs `&self.heap` — clone the elements out, sort
-                        // (no alloc/closure → no GC for the primitive path), then write back.
-                        let user_compare = matches!(items.try_get(0).and_then(|v| v.as_obj()), Some(hh) if matches!(self.heap.get(hh), Obj::Struct { .. } | Obj::Enum { .. } | Obj::Tuple(_) | Obj::List(_)));
-                        if user_compare {
-                            // A user compare (struct or enum) re-enters the VM (may GC) → rooted, index-based sort.
-                            return self.list_sort_structs(h, span);
+                        // A list whose order calls user code (structs / enums / tuples / lists) runs
+                        // the merge of `list_compare_method`. Primitives use the faster `value_order`.
+                        // Str elements live on the heap, so `value_order` needs `&self.heap` — clone
+                        // the elements out, sort (no alloc/closure → no GC for the primitive path),
+                        // then write back.
+                        if self.list_compare_method(
+                            h,
+                            CmpMethod::of(which).expect("a comparator method"),
+                            args,
+                            false,
+                            span,
+                        )? {
+                            return Ok(self.pop());
                         }
+                        let Obj::List(items) = self.heap.get(h) else {
+                            unreachable!()
+                        };
                         let mut elems = items.to_vec();
                         elems.sort_by(|a, b| self.value_order(*a, *b));
                         let heap = self.heap.write(h);
@@ -958,17 +983,31 @@ impl Vm {
                         out.reverse();
                         Ok(Value::obj(self.heap.alloc(Obj::List(out.into()))))
                     }
+                    // `do_method_call` runs these before it gets here; a direct caller runs the
+                    // same loop nested.
                     ListMethod::Map
                     | ListMethod::Filter
                     | ListMethod::Fold
                     | ListMethod::TakeWhile
                     | ListMethod::DropWhile
                     | ListMethod::Count
-                    | ListMethod::Position => self.list_hof(h, method, args.to_vec(), span),
-                    ListMethod::SortBy => self.list_sort_by(h, args.to_vec(), span),
-                    ListMethod::SortByKey => self.list_sort_by_key(h, args.to_vec(), span),
-                    ListMethod::MinBy | ListMethod::MaxBy => {
-                        self.list_min_max_by(h, args.to_vec(), which == ListMethod::MaxBy, span)
+                    | ListMethod::Position
+                    | ListMethod::SortByKey
+                    | ListMethod::MinBy
+                    | ListMethod::MaxBy => {
+                        let kind = HofKind::of(which).expect("a list HOF");
+                        self.list_hof(h, kind, args.to_vec(), false, span)?;
+                        Ok(self.pop())
+                    }
+                    ListMethod::SortBy => {
+                        self.list_compare_method(
+                            h,
+                            CmpMethod::of(which).expect("a comparator method"),
+                            args,
+                            false,
+                            span,
+                        )?;
+                        Ok(self.pop())
                     }
                     ListMethod::Copy => {
                         // TICKET-160 — a NEW list holding the SAME element handles: shallow, Python list.copy().
@@ -1014,11 +1053,17 @@ impl Vm {
                             }
                         }
                     }
-                    // min/max may re-enter the VM (a Comparable-struct `compare` → GC), which invalidates
-                    // the `items` borrow — route to a rooted, index-based helper (mirrors `sort`'s struct path).
+                    // `do_method_call` runs these before it gets here; a direct caller runs the
+                    // same scan nested.
                     ListMethod::Min | ListMethod::Max => {
-                        self.arity_err(method, args, 0, span)?;
-                        self.list_reduce_extreme(h, which == ListMethod::Max, span)
+                        self.list_compare_method(
+                            h,
+                            CmpMethod::of(which).expect("a comparator method"),
+                            args,
+                            false,
+                            span,
+                        )?;
+                        Ok(self.pop())
                     }
                     // unique/dedup: NEW list, never mutate the receiver. Equality is the same
                     // `elem_equal` `contains` uses (works on floats) — which since M23 can dispatch a

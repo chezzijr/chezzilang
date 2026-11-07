@@ -439,13 +439,7 @@ impl Vm {
                     let res = self
                         .guarded_walk(base, |vm| vm.invoke_hook(Hook::Eq, l, &[r], span))?
                         .unwrap_or(Value::nil());
-                    return match res.as_bool() {
-                        Some(b) => Ok(b),
-                        None => Err(self.err(
-                            format!("eq() must return bool, got {}", self.type_name(res)),
-                            span,
-                        )),
-                    };
+                    return self.hook_bool(res, Hook::Eq, span);
                 }
                 if ha == hb {
                     return Ok(true);

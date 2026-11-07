@@ -7,20 +7,152 @@ use crate::base::builtin_method::{
     AtomicIntMethod, AtomicMethod, ExecutorMethod, RwSharedMethod, RwSharedPrim, SharedMethod,
 };
 
+/// A box method that runs a closure on the box's value under its guard: the `RetAction::Box`
+/// frame's job when the closure returns.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) enum BoxCall {
+    /// `Shared.update(f)`: the result becomes the value.
+    Update,
+    /// `Shared.read(f)`: the result is returned.
+    Read,
+    /// `RwShared.read(f)`, under the read guard: the result is returned.
+    RwRead,
+    /// `RwShared.write(f)`: the result becomes the value.
+    RwWrite,
+}
+
+impl BoxCall {
+    fn mode(self) -> GuardMode {
+        match self {
+            BoxCall::RwRead => GuardMode::Read,
+            BoxCall::Update | BoxCall::Read | BoxCall::RwWrite => GuardMode::Write,
+        }
+    }
+}
+
+/// The slots a box-closure frame keeps below it on the caller's operand stack: `[box, f]`. The
+/// stack roots them across the guard's wait and the call.
+const BOX_SLOTS: usize = 2;
+
 impl Vm {
     /// `Shared[T]` methods: `get`, `set`, `update(f)`, `read(f)`. M3.3: the box holds ONE value by
     /// handle; every method takes the box's guard (its lock, [`Vm::take_update_guard`]) and works
     /// on the live value in this task. The receiver and the arguments are popped by the dispatcher,
     /// so they are rooted on the operand stack ([`Vm::with_method_rooted`]) across the guard's wait
-    /// and the closure call.
+    /// and the closure call. `flat` (the dispatch loop): `update` / `read` run `f` as a frame
+    /// ([`Vm::box_frame`]) and return `None`, the frame's return pushes the result.
     pub(super) fn shared_method(
         &mut self,
         h: GcRef,
         method: &str,
         args: &[Value],
+        flat: bool,
         span: Span,
+    ) -> Result<Option<Value>, RuntimeError> {
+        let Some(which) = SharedMethod::from_name(method) else {
+            return Err(self.err(format!("type Shared has no method '{method}'"), span));
+        };
+        if flat && let SharedMethod::Update | SharedMethod::Read = which {
+            self.arity_err(method, args, 1, span)?;
+            let call = if which == SharedMethod::Update {
+                BoxCall::Update
+            } else {
+                BoxCall::Read
+            };
+            return self.box_frame(h, call, args[0], span);
+        }
+        self.with_method_rooted(h, args, |vm| {
+            vm.shared_method_rooted(h, which, method, args, span)
+        })
+        .map(Some)
+    }
+
+    /// The box `h`'s lock, for `call`.
+    fn box_lock(&self, call: BoxCall, h: GcRef) -> Arc<core::BoxLock> {
+        match call {
+            BoxCall::Update | BoxCall::Read => Arc::clone(&self.shared_core(h).lock),
+            BoxCall::RwRead | BoxCall::RwWrite => Arc::clone(&self.rwshared_core(h).lock),
+        }
+    }
+
+    /// The live value of the box `h`.
+    fn box_get(&self, call: BoxCall, h: GcRef) -> Value {
+        match call {
+            BoxCall::Update | BoxCall::Read => self.shared_core(h).v.get(),
+            BoxCall::RwRead | BoxCall::RwWrite => self.rwshared_core(h).v.get(),
+        }
+    }
+
+    /// Run box method `call`'s closure `f` on `h`'s value as a frame (`RetAction::Box`): take the
+    /// guard as this task and keep it in the task's state (`Vm::held_guards`), so a wait in `f`
+    /// parks the task holding it. The frame's return ([`Vm::box_done`]) or its unwind
+    /// ([`Vm::drop_ret`]) releases it. A callback that is not a frame (a native, a generator)
+    /// runs nested, under the same hold.
+    fn box_frame(
+        &mut self,
+        h: GcRef,
+        call: BoxCall,
+        f: Value,
+        span: Span,
+    ) -> Result<Option<Value>, RuntimeError> {
+        let base = self.stack.len();
+        self.push(Value::obj(h));
+        self.push(f);
+        let lock = self.box_lock(call, h);
+        let guard = match self.box_guard(&lock, call.mode(), span) {
+            Ok(g) => g,
+            Err(e) => {
+                self.stack.truncate(base);
+                return Err(e);
+            }
+        };
+        if call.mode() == GuardMode::Read {
+            self.held_reads.push(Arc::as_ptr(&lock) as usize);
+        }
+        self.held_guards.push(guard);
+        let cur = self.box_get(call, h);
+        let r = match self.push_callback_frame(f, &[cur], RetAction::Box(call), span) {
+            Ok(true) => return Ok(None),
+            Ok(false) => self.box_closure(f, cur, span),
+            Err(e) => Err(e),
+        };
+        self.box_done(call, r).map(Some)
+    }
+
+    /// A box closure finished with `r`: store it (`update` / `write`) under the guard, drop the
+    /// slots, release the guard. The method's result: `nil` for a store, else `r`. A fault leaves
+    /// the value as `f` left it.
+    pub(super) fn box_done(
+        &mut self,
+        call: BoxCall,
+        r: Result<Value, RuntimeError>,
     ) -> Result<Value, RuntimeError> {
-        self.with_method_rooted(h, args, |vm| vm.shared_method_rooted(h, method, args, span))
+        let base = self.stack.len() - BOX_SLOTS;
+        let h = self.stack[base].as_obj().expect("a box slot holds the box");
+        let out = r.map(|r| match call {
+            BoxCall::Update => {
+                self.shared_core(h).v.set(r);
+                Value::nil()
+            }
+            BoxCall::RwWrite => {
+                self.rwshared_core(h).v.set(r);
+                Value::nil()
+            }
+            BoxCall::Read | BoxCall::RwRead => r,
+        });
+        self.stack.truncate(base);
+        self.box_release(call);
+        out
+    }
+
+    /// Release the innermost guard a box-closure frame holds (LIFO: box frames nest).
+    pub(super) fn box_release(&mut self, call: BoxCall) {
+        let guard = self.held_guards.pop().expect("a box frame holds a guard");
+        if call.mode() == GuardMode::Read {
+            let read = self.held_reads.pop();
+            debug_assert_eq!(read, Some(Arc::as_ptr(guard.lock()) as usize));
+        }
+        drop(guard);
     }
 
     /// Run a box method `f` with its popped receiver `h` and `args` rooted on the operand stack.
@@ -40,12 +172,12 @@ impl Vm {
     }
 
     /// Take the guard `lock` in `mode`, as this task.
-    fn box_guard<'a>(
+    fn box_guard(
         &mut self,
-        lock: &'a Arc<core::BoxLock>,
+        lock: &Arc<core::BoxLock>,
         mode: GuardMode,
         span: Span,
-    ) -> Result<core::UpdateGuard<'a>, RuntimeError> {
+    ) -> Result<core::UpdateGuard, RuntimeError> {
         let what = match mode {
             GuardMode::Write => "a Shared/RwShared write guard",
             GuardMode::Read => "a RwShared read guard",
@@ -63,13 +195,11 @@ impl Vm {
     fn shared_method_rooted(
         &mut self,
         h: GcRef,
+        which: SharedMethod,
         method: &str,
         args: &[Value],
         span: Span,
     ) -> Result<Value, RuntimeError> {
-        let Some(which) = SharedMethod::from_name(method) else {
-            return Err(self.err(format!("type Shared has no method '{method}'"), span));
-        };
         let core = self.shared_core(h);
         let lock = &core.lock;
         // EVERY arm takes the guard first (TICKET-016 / W8-3, the process-global wait-for graph),
@@ -113,17 +243,32 @@ impl Vm {
     ///   (`already holds the read guard`).
     ///
     /// The receiver and the arguments are popped by the dispatcher, so they are rooted here across
-    /// every user call (`hash`, `eq`, the closure).
+    /// every user call (`hash`, `eq`, the closure). `flat`: `read(f)` / `write(f)` run `f` as a
+    /// frame, as [`Vm::shared_method`] does.
     pub(super) fn rwshared_method(
         &mut self,
         h: GcRef,
         method: &str,
         args: &[Value],
+        flat: bool,
         span: Span,
-    ) -> Result<Value, RuntimeError> {
+    ) -> Result<Option<Value>, RuntimeError> {
+        if flat
+            && let Some(which @ (RwSharedMethod::Read | RwSharedMethod::Write)) =
+                RwSharedMethod::from_name(method)
+        {
+            self.arity_err(method, args, 1, span)?;
+            let call = if which == RwSharedMethod::Read {
+                BoxCall::RwRead
+            } else {
+                BoxCall::RwWrite
+            };
+            return self.box_frame(h, call, args[0], span);
+        }
         self.with_method_rooted(h, args, |vm| {
             vm.rwshared_method_rooted(h, method, args, span)
         })
+        .map(Some)
     }
 
     /// The `Option` value a RwShared map primitive returns (`_set_key` the value it replaced,

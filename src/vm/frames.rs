@@ -90,7 +90,16 @@ impl Vm {
         for a in args {
             self.stack.push(a);
         }
-        self.finish_frame(proto, home, closure, base, counted, is_toplevel, span);
+        self.finish_frame(
+            proto,
+            home,
+            closure,
+            base,
+            counted,
+            is_toplevel,
+            span,
+            RetAction::Push,
+        );
         Ok(())
     }
 
@@ -109,7 +118,16 @@ impl Vm {
         span: Span,
     ) -> Result<(), RuntimeError> {
         self.frame_depth_guard(true, span)?;
-        self.finish_frame(proto, home, closure, base, true, false, span);
+        self.finish_frame(
+            proto,
+            home,
+            closure,
+            base,
+            true,
+            false,
+            span,
+            RetAction::Push,
+        );
         Ok(())
     }
 
@@ -155,6 +173,7 @@ impl Vm {
 
     /// Reserve the non-parameter local slots above `[base..]` and push the `CallFrame`. Assumes the
     /// `argc` parameters are already on the stack starting at `base`. Shared frame-install tail.
+    /// `ret` is what the frame's return does with its value ([`RetAction`]).
     #[allow(clippy::too_many_arguments)]
     pub(super) fn finish_frame(
         &mut self,
@@ -165,6 +184,7 @@ impl Vm {
         counted: bool,
         is_toplevel: bool,
         span: Span,
+        ret: RetAction,
     ) {
         let n_slots = self.program.protos[proto].n_slots;
         // How many arguments actually arrived, BEFORE the nil-reservation below makes that
@@ -189,6 +209,7 @@ impl Vm {
             has_implicit_nursery: self.program.protos[proto].has_implicit_nursery,
             call_span: span,
             argc,
+            ret,
         });
         self.cur_base = base;
     }
@@ -313,7 +334,11 @@ impl Vm {
                         width::holds(),
                         "TICKET-230: a Chezzi slice ran without a runner permit"
                     );
-                    if self.mn.is_some() && self.native_reentry == 0 {
+                    // A task that holds a box guard (its closure is a frame) is not preempted
+                    // off the thread either: its guard's waiters wait in place, so a yielded
+                    // holder would cost each of them a demote budget. A blocking wait parks it.
+                    if self.mn.is_some() && self.native_reentry == 0 && self.held_guards.is_empty()
+                    {
                         self.yield_now = true;
                         return Ok(());
                     } else {
@@ -322,13 +347,6 @@ impl Vm {
                 } else {
                     self.reds -= 1;
                 }
-            }
-            // Experimental generators — an `Op::Yield` (handled last iteration) asked us to suspend:
-            // hand control back to the host `.next()` with the generator's frames/stack intact. The
-            // yielded value sits on the stack top for `generator_next` to take. Only ever true inside
-            // the private `run_until` that `generator_next` drives, so the host loop is unaffected.
-            if self.gen_yielding {
-                return Ok(());
             }
             let fi = self.frames.len() - 1;
             let pid = self.frames[fi].proto;
@@ -376,8 +394,8 @@ impl Vm {
                 Op::Return => self.do_return(false),
                 // M19 Tier-2 — inline the index ops (hot in the `map` bench) so they skip the `step`
                 // call + big-match jump; the helpers carry the Int-key fast path. One source of truth.
-                Op::GetIndex => self.get_index(span),
-                Op::SetIndex => self.set_index(span),
+                Op::GetIndex => self.get_index(true, span),
+                Op::SetIndex => self.set_index(true, span),
                 // M19 Tier-2 — adaptive opcode quickening (PEP 659). These are the UN-FUSED generic
                 // binop arms: `Add..GtEq` here are reached only by stack-operand binops (the
                 // `local⊕local`/`local⊕const` windows already fused to superinstructions); `Eq`/`NotEq`
@@ -589,12 +607,6 @@ impl Vm {
         // no handler above `base_level` the fault returns `Err` either way. It is kept because
         // it preserves the bypass in MORE cases (a cancelled task is more likely to die), which
         // is the safe direction. Do not "simplify" it away without re-deriving that.
-        // W13-20 — take the parked generator prefix UNCONDITIONALLY, above the bypass block
-        // and the capture below. The prefix must be consumed exactly once per fault: a fault
-        // this level CATCHES, or that leaves via the cancel / `--max-heap` / `--timeout`
-        // bypass just below, drops it here instead of surviving to decorate an unrelated
-        // later fault.
-        let gen_prefix = std::mem::take(&mut self.gen_fault_prefix);
         // TICKET-135 (D1): a deadlock verdict is fatal like Go's `all goroutines are asleep`.
         // `recover:` is transparent to it: the fault takes the uncaught path (defers and
         // escaped-nursery reports unchanged) and the marker is re-stamped so a faulting
@@ -643,9 +655,7 @@ impl Vm {
         // it. A fault this loop CAN catch resets the capture below, so no stale trace survives
         // a `recover:`.
         if !caught_here && self.frames.len() > self.fault_trace_depth {
-            let mut trace = gen_prefix;
-            trace.extend(self.capture_trace());
-            self.fault_trace = Some(trace);
+            self.fault_trace = Some(self.capture_trace());
             self.fault_trace_depth = self.frames.len();
         }
         // The nearest `recover:` boundary owned by THIS dispatch loop catches the fault; a
@@ -806,10 +816,6 @@ impl Vm {
         match self.handlers.last().copied() {
             Some(h) if !fatal && h.frame_len > base_level => {
                 self.handlers.pop();
-                // This `recover:` caught the fault — discard any trace captured deeper in (it
-                // belongs to a fault that is now handled), so a later uncaught fault re-captures.
-                self.fault_trace = None;
-                self.fault_trace_depth = 0;
                 self.cancel_unwind_faulted = false;
                 // `unwind_deferred` already dropped frames down to `h.frame_len`; restore the
                 // operand stack / call-depth / ip to the boundary's snapshot.
@@ -822,6 +828,12 @@ impl Vm {
                 // binding the result. A fault in one supersedes the original.
                 let d = self.drain_frame_to(h.defer_len);
                 let rte = self.unwind_result(rte, d, false);
+                // This `recover:` caught the fault — discard any trace captured deeper in (it
+                // belongs to a fault that is now handled, the recover-block defers' too: a
+                // `defer xs.map(f)` or `defer it.next()` captures in its own nested loop), so a
+                // later uncaught fault re-captures.
+                self.fault_trace = None;
+                self.fault_trace_depth = 0;
                 // TICKET-096 — this handler is outside the faulting nursery, so the fault is
                 // handled; the floor must not survive it and bypass an unrelated later handler.
                 // TICKET-195 — cleared only AFTER the recover-block drain just above, which still
@@ -829,16 +841,6 @@ impl Vm {
                 if matches!(self.cut, Some(Cut::Delivered { .. })) {
                     self.cut = None;
                 }
-                // W13-20 — clear the prefix HERE, after every drain this catch runs
-                // (`unwind_deferred` above AND this recover-block drain), not before either
-                // one. A deferred `.next()` — whether outside the recover block (drained by
-                // `unwind_deferred`) or DIRECTLY INSIDE it (drained by `drain_frame_to` just
-                // above) — can fault and park its own frames here without ever passing back
-                // through this loop's error arm to be taken (that only happens for a fault
-                // THIS dispatch loop raises directly). Clearing before either drain leaves the
-                // second drain's fault to survive uncleared and decorate a later, unrelated
-                // uncaught fault — the review finding this fixes.
-                self.gen_fault_prefix.clear();
                 // Drop the scope markers of any defer scopes opened inside the recover block:
                 // the fault jumped past their `LeaveDeferScope`s, so they would otherwise leak
                 // and corrupt later drains in this frame.
@@ -927,20 +929,11 @@ impl Vm {
         self.heap.sweep();
     }
 
-    /// The GC roots: the live context's fields through the one walker ([`RootView`]), the generator
-    /// hosts parked under a running generator, the running generators, and every open box call.
+    /// The GC roots: the live context's fields through the one walker ([`RootView`]) and the run's
+    /// fn values. A running generator's frame, slots and handle are on the live stacks.
     pub(super) fn gc_roots(&self) -> Vec<GcRef> {
         let mut work: Vec<GcRef> = Vec::new();
         self.root_view().walk(&mut work);
-        // Experimental generators — while a generator body runs in the live `Vm` fields above, the
-        // host(s) it suspended are parked in `gen_host_ctx` (their frames/stack are not in `self`), so
-        // root them here exactly like a parked fiber. The running generators' own handles are roots so
-        // their objects survive to be written back (each generator's PARKED ctx, if any, is empty
-        // while it runs, so `children` adds nothing extra). Both are empty outside a `generator_next`.
-        for host in &self.gen_host_ctx {
-            host.root_view().walk(&mut work);
-        }
-        work.extend(self.active_generators.iter().copied());
         // TICKET-215 / M3.1 — the run's fn-value table.
         work.extend(
             self.fn_values

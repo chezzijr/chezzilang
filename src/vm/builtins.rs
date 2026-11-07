@@ -8,26 +8,55 @@ use crate::base::hooks::Hook;
 
 impl Vm {
     /// `print` joins the `argc` args on the stack top with `sep` and appends `end`: the one print
-    /// routine. The args stay rooted on the operand stack across `stringify`, which can run user
-    /// code (a `Stringable` `str` method) and GC; its pushes sit above `at + argc`, so these indices
-    /// stay valid across the loop. Pushes `nil`.
+    /// routine. `custom`: the call's `sep` and `end` values sit above the args (`Op::CallPrintSep`).
+    /// The args stay rooted on the operand stack while they render. Pushes `nil`. `flat` (the
+    /// dispatch loop): an arg with a `str` hook runs it as a frame ([`RetAction::Print`]), so a
+    /// wait in it parks; a synchronous caller renders every arg nested.
     pub(super) fn do_print_sep(
         &mut self,
         argc: usize,
+        custom: bool,
         sep: &str,
         end: &str,
+        flat: bool,
         span: Span,
     ) -> Result<(), RuntimeError> {
-        let at = self.stack.len() - argc;
-        let mut parts = Vec::with_capacity(argc);
-        for i in 0..argc {
+        self.print_from(argc, custom, 0, String::new(), sep, end, flat, span)
+    }
+
+    /// Render args `i..` of a `print` onto `line`, then write it. A hooked arg's frame keeps the
+    /// state below it: `[argc, i, line]`.
+    #[allow(clippy::too_many_arguments)]
+    fn print_from(
+        &mut self,
+        argc: usize,
+        custom: bool,
+        i: usize,
+        mut line: String,
+        sep: &str,
+        end: &str,
+        flat: bool,
+        span: Span,
+    ) -> Result<(), RuntimeError> {
+        let at = self.stack.len() - argc - if custom { 2 } else { 0 };
+        for i in i..argc {
+            if i > 0 {
+                line.push_str(sep);
+            }
             let v = self.stack[at + i];
-            parts.push(self.stringify(v, span, 0)?);
+            if flat && self.hook_of(v, Hook::Str) {
+                let h = self.heap.alloc(Obj::Str(line.into()));
+                self.push(Value::int(argc as i64));
+                self.push(Value::int(i as i64));
+                self.push(Value::obj(h));
+                self.push_hook_frame(Hook::Str, v, &[], RetAction::Print { custom }, span)?;
+                return Ok(());
+            }
+            self.stringify_into(&mut line, v, span, 0)?;
         }
         self.stack.truncate(at);
         // ONE write (body + end joined): in stream mode that is ONE locked write, so a `print` is
         // line-atomic across tasks. Byte-identical in buffered mode.
-        let mut line = parts.join(sep);
         line.push_str(end);
         self.emit_out(&line);
         if let Some(halt) = self.stream_halt(span) {
@@ -35,6 +64,29 @@ impl Vm {
         }
         self.push(Value::nil());
         Ok(())
+    }
+
+    /// A `print` arg's `str` hook returned (its result on the stack top, over `[argc, i, line]`):
+    /// append it and render the rest.
+    pub(super) fn print_resume(&mut self, custom: bool, span: Span) -> Result<(), RuntimeError> {
+        let n = self.stack.len();
+        let mut line = self.val_str(self.stack[n - 2]).unwrap_or_default();
+        // The result stays rooted on the stack while it renders.
+        self.stringify_into(&mut line, self.stack[n - 1], span, 0)?;
+        let i = self.stack[n - 3].as_int() as usize;
+        let argc = self.stack[n - 4].as_int() as usize;
+        self.stack.truncate(n - 4);
+        let program = Arc::clone(&self.program);
+        let own;
+        let (sep, end) = if custom {
+            let m = self.stack.len();
+            own = [m - 2, m - 1].map(|k| self.val_str(self.stack[k]).unwrap_or_default());
+            (own[0].as_str(), own[1].as_str())
+        } else {
+            let [sep, end] = &program.print_defaults;
+            (sep.as_str(), end.as_str())
+        };
+        self.print_from(argc, custom, i + 1, line, sep, end, true, span)
     }
 
     /// Stamps a caught fault's origin onto its message string, unless the fault was raised inside
@@ -163,15 +215,18 @@ impl Vm {
     /// cursor by running `iter(self)`; EVERYTHING else passes through unchanged (so it is safe to
     /// call on any value). Shared by `Op::IterableToCursor` (the `for` lowering) and
     /// [`drain_iterable`](Self::drain_iterable) (`List()`/`Set()`/`Map()`/`.iter()`). `iter` wins
-    /// over `next`: a type with both hooks is iterated through `iter`.
+    /// over `next`: a type with both hooks is iterated through `iter`. Pushes the cursor; `flat`
+    /// as for [`Vm::arith`].
     pub(super) fn iterable_to_cursor(
         &mut self,
         v: Value,
+        flat: bool,
         span: Span,
-    ) -> Result<Value, RuntimeError> {
-        Ok(self
-            .reentered(|vm| vm.invoke_hook(Hook::Iter, v, &[], span))?
-            .unwrap_or(v))
+    ) -> Result<(), RuntimeError> {
+        if !self.hook_op(flat, Hook::Iter, v, &[], RetAction::Push, span)? {
+            self.push(v);
+        }
+        Ok(())
     }
 
     /// What a builtin collection yields per step, as a snapshot: list and set elements, map
@@ -235,7 +290,8 @@ impl Vm {
         // A pure-`Iterable` struct (`iter`, no `next`) is converted ONCE to its cursor first — the same
         // step the `for` lowering emits as `Op::IterableToCursor`. Without it `List(xs)`/`Set(xs)`/
         // `Map(xs)` on an `Iterable[T]`-annotated param would type-check and then fault on that witness.
-        let v = self.iterable_to_cursor(v, span)?;
+        self.iterable_to_cursor(v, false, span)?;
+        let v = self.pop();
         // A cursor (`Obj::Iter`) is CONSUMED in place: clone its REMAINING items (`items[pos..]`),
         // then advance `pos` to the end so the same cursor yields nothing on a second drain — keeping
         // `List(it)`/`Set(it)`/`for` consistent with `.next()` (which also advances the shared cursor)
@@ -332,36 +388,14 @@ impl Vm {
                         .guarded(|vm| vm.invoke_hook(Hook::Next, v, &[], span))?
                         .unwrap_or(Value::nil()),
                 };
-                let Some(rh) = res.as_obj() else {
-                    return Err(self.bad_next_value(res, span));
+                let Some(item) = self.next_item(res, span)? else {
+                    break;
                 };
-                let Obj::Enum {
-                    variant_id,
-                    payload,
-                } = self.heap.get(rh)
-                else {
-                    return Err(self.bad_next_value(res, span));
+                let heap = self.heap.write(acc);
+                let Obj::List(buf) = heap.get(acc) else {
+                    unreachable!()
                 };
-                match *variant_id {
-                    crate::base::op::VID_SOME => {
-                        let item = payload.try_get(0).ok_or_else(|| {
-                            self.err(
-                                "iterator next() returned a present value with no payload"
-                                    .to_string(),
-                                span,
-                            )
-                        })?;
-                        let heap = self.heap.write(acc);
-                        let Obj::List(buf) = heap.get(acc) else {
-                            unreachable!()
-                        };
-                        buf.push(heap, item);
-                    }
-                    crate::base::op::VID_NONE_VARIANT => break,
-                    _ => {
-                        return Err(self.bad_next_value(res, span));
-                    }
-                }
+                buf.push(heap, item);
             }
             Ok(())
         })();
@@ -374,6 +408,82 @@ impl Vm {
         self.pop(); // unroot accumulator
         self.pop(); // unroot source
         Ok(out)
+    }
+
+    /// The item a `next()` result carries: `Some(v)` → `v`, `None` → none, anything else faults.
+    fn next_item(&self, res: Value, span: Span) -> Result<Option<Value>, RuntimeError> {
+        let Some(rh) = res.as_obj() else {
+            return Err(self.bad_next_value(res, span));
+        };
+        let Obj::Enum {
+            variant_id,
+            payload,
+        } = self.heap.get(rh)
+        else {
+            return Err(self.bad_next_value(res, span));
+        };
+        match *variant_id {
+            crate::base::op::VID_SOME => payload.try_get(0).map(Some).ok_or_else(|| {
+                self.err(
+                    "iterator next() returned a present value with no payload".to_string(),
+                    span,
+                )
+            }),
+            crate::base::op::VID_NONE_VARIANT => Ok(None),
+            _ => Err(self.bad_next_value(res, span)),
+        }
+    }
+
+    /// A `T.from_iter(it)` drain over a struct or enum `next` hook or a generator, on the dispatch
+    /// loop: each `next` is a frame ([`RetAction::Drain`], [`GenThen::Drain`]), so a wait in it
+    /// parks. `out` is the result of the
+    /// `next` that just returned; the source and the drained list sit on the stack top. At `None`
+    /// the static runs on the drained list.
+    pub(super) fn drain_resume(
+        &mut self,
+        which: NativeStatic,
+        out: Option<Value>,
+        span: Span,
+    ) -> Result<(), RuntimeError> {
+        let base = self.stack.len() - 2;
+        let r = self.drain_step(which, base, out, span);
+        if r.is_err() {
+            self.stack.truncate(base);
+        }
+        r
+    }
+
+    fn drain_step(
+        &mut self,
+        which: NativeStatic,
+        base: usize,
+        out: Option<Value>,
+        span: Span,
+    ) -> Result<(), RuntimeError> {
+        let src = self.stack[base];
+        let acc = self.stack[base + 1];
+        if let Some(res) = out {
+            let Some(item) = self.next_item(res, span)? else {
+                self.stack.truncate(base);
+                self.push(acc);
+                return self.do_native_static(which, 1, span);
+            };
+            let h = acc.as_obj().expect("the drained list");
+            let heap = self.heap.write(h);
+            if let Obj::List(buf) = heap.get(h) {
+                buf.push(heap, item);
+            }
+        }
+        // The per-step cancel point: this loop's back-edge.
+        self.guarded_checkpoint()?;
+        if let Some(h) = src.as_obj()
+            && matches!(self.heap.get(h), Obj::Generator(_))
+        {
+            return self.gen_resume(h, GenThen::Drain(which), span);
+        }
+        let pushed = self.push_hook_frame(Hook::Next, src, &[], RetAction::Drain(which), span)?;
+        debug_assert!(pushed, "a drain starts only on a value with a next hook");
+        Ok(())
     }
 
     /// Run a builtin type's static method (`List.from_iter(xs)`) on the `argc` args on the stack
@@ -402,6 +512,28 @@ impl Vm {
             ));
         }
         let arg = args[0];
+        // A struct or enum iterator drains through frames (`iter` wins over `next`, as in
+        // `drain_iterable`).
+        let drains = match which {
+            NativeStatic::ListFromIter
+            | NativeStatic::SetFromIter
+            | NativeStatic::MapFromIter
+            | NativeStatic::BytesFromIter
+            | NativeStatic::BytearrayFromIter => true,
+            NativeStatic::BytesZeroed
+            | NativeStatic::BytearrayZeroed
+            | NativeStatic::IntFromBeBytes
+            | NativeStatic::IntFromLeBytes => false,
+        };
+        let generator =
+            matches!(arg.as_obj(), Some(h) if matches!(self.heap.get(h), Obj::Generator(_)));
+        if drains && (generator || self.hook_of(arg, Hook::Next) && !self.hook_of(arg, Hook::Iter))
+        {
+            let acc = self.heap.alloc(Obj::List(RVec::new()));
+            self.push(arg);
+            self.push(Value::obj(acc));
+            return self.drain_resume(which, None, span);
+        }
         let result = match which {
             NativeStatic::ListFromIter => {
                 let items = self.drain_iterable(arg, span)?;

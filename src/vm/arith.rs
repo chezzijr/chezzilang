@@ -194,6 +194,14 @@ impl Vm {
     pub(super) fn eq_operator(&mut self, negate: bool, span: Span) -> Result<(), RuntimeError> {
         let r = self.pop();
         let l = self.pop();
+        // A top-level hooked `==` runs its `eq` as a frame (the operands are its locals); a nested
+        // container walk keeps the synchronous hook call in `values_equal_guarded`.
+        if !self.eq_hook_off
+            && self.eq_hook_applies(l, r)
+            && self.push_hook_frame(Hook::Eq, l, &[r], RetAction::EqBool { negate }, span)?
+        {
+            return Ok(());
+        }
         let held = [l, r];
         let roots: &[Value] = if self.eq_may_reenter() { &held } else { &[] };
         let eq = self.with_roots(roots, |vm| vm.values_equal_guarded(l, r, 0, span))?;
@@ -289,7 +297,7 @@ impl Vm {
             self.push(cur);
             let dv = self.make_int(delta); // `delta` is an unbounded fused literal → box if wide.
             self.push(dv);
-            self.arith(&Op::Add, span)?;
+            self.arith(&Op::Add, false, span)?;
             let v = self.pop();
             let at = self.base() + slot;
             self.stack[at] = v;
@@ -351,11 +359,11 @@ impl Vm {
     ) -> Result<(), RuntimeError> {
         use crate::base::op::BinKind;
         match kind {
-            BinKind::Add => self.arith(&Op::Add, span),
-            BinKind::Sub => self.arith(&Op::Sub, span),
-            BinKind::Mul => self.arith(&Op::Mul, span),
-            BinKind::Div => self.arith(&Op::Div, span),
-            BinKind::Mod => self.arith(&Op::Mod, span),
+            BinKind::Add => self.arith(&Op::Add, true, span),
+            BinKind::Sub => self.arith(&Op::Sub, true, span),
+            BinKind::Mul => self.arith(&Op::Mul, true, span),
+            BinKind::Div => self.arith(&Op::Div, true, span),
+            BinKind::Mod => self.arith(&Op::Mod, true, span),
             BinKind::Lt => self.compare_op(&Op::Lt, span),
             BinKind::LtEq => self.compare_op(&Op::LtEq, span),
             BinKind::Gt => self.compare_op(&Op::Gt, span),
@@ -363,7 +371,9 @@ impl Vm {
         }
     }
 
-    pub(super) fn arith(&mut self, op: &Op, span: Span) -> Result<(), RuntimeError> {
+    /// `flat`: the caller is the dispatch loop's step (a hook runs as a frame, see
+    /// [`Vm::hook_op`]); a native caller that needs the value now passes `false`.
+    pub(super) fn arith(&mut self, op: &Op, flat: bool, span: Span) -> Result<(), RuntimeError> {
         let r = self.pop();
         let l = self.pop();
         let bop = match op {
@@ -622,7 +632,7 @@ impl Vm {
                         && matches!(self.heap.get(ha), Obj::Struct { .. } | Obj::Enum { .. })
                         && matches!(self.heap.get(hb), Obj::Struct { .. } | Obj::Enum { .. }) =>
                 {
-                    self.struct_arith(op, l, r, span)?
+                    return self.struct_arith(op, l, r, flat, span);
                 }
                 (ValueView::Obj(ha), ValueView::Obj(hb)) if matches!(op, Op::Add) => {
                     match (self.heap.get(ha), self.heap.get(hb)) {
@@ -695,22 +705,33 @@ impl Vm {
     /// Extracted verbatim from the `Op::Neg` handler so the two forms are observationally identical:
     /// same `integer overflow in negation`, same `-0.0` float behavior, same `cannot apply Neg to X`,
     /// same struct/enum `neg(self)` overload dispatch.
-    pub(super) fn neg_value(&mut self, v: Value, span: Span) -> Result<Value, RuntimeError> {
+    /// Pushes the result; `flat` as for [`Vm::arith`].
+    pub(super) fn neg_value(
+        &mut self,
+        v: Value,
+        flat: bool,
+        span: Span,
+    ) -> Result<(), RuntimeError> {
         if let Some(n) = self.int_val(v) {
             let neg = crate::ast::consteval::int_neg(n)
                 .map_err(|f| self.err(crate::base::hooks::int_fault_message(f), span))?;
-            Ok(self.make_int(neg))
+            let r = self.make_int(neg);
+            self.push(r);
+            Ok(())
         } else if v.is_float() {
             let f = self.float_of(v);
-            Ok(self.box_float(-f))
+            let r = self.box_float(-f);
+            self.push(r);
+            Ok(())
         } else if let Some(h) = v.as_obj()
             && matches!(self.heap.get(h), Obj::Struct { .. } | Obj::Enum { .. })
         {
             // M22: unary `-` on a struct/enum dispatches to its `neg(self) -> Self` method
             // (the `Neg` protocol). Mirrors `struct_arith`, but self-only (no `other`).
-            match self.reentered(|vm| vm.invoke_hook(Hook::Neg, v, &[], span))? {
-                Some(r) => Ok(r),
-                None => Err(self.missing_hook(v, Hook::Neg, span)),
+            if self.hook_op(flat, Hook::Neg, v, &[], RetAction::Push, span)? {
+                Ok(())
+            } else {
+                Err(self.missing_hook(v, Hook::Neg, span))
             }
         } else {
             Err(self.err(format!("cannot apply Neg to {}", self.type_name(v)), span))
@@ -808,13 +829,15 @@ impl Vm {
     /// Arithmetic operator overloading: dispatch `+`/`-`/`*` on two structs to the receiver's
     /// `add`/`sub`/`mul(self, other) -> Self` method (the `Add`/`Sub`/`Mul` protocols). `l`/`r` are
     /// passed as the call's args (rooted as the new frame's locals).
+    /// Pushes the result; `flat` as for [`Vm::arith`].
     pub(super) fn struct_arith(
         &mut self,
         op: &Op,
         l: Value,
         r: Value,
+        flat: bool,
         span: Span,
-    ) -> Result<Value, RuntimeError> {
+    ) -> Result<(), RuntimeError> {
         let hook = match op {
             Op::Add => Hook::Add,
             Op::Sub => Hook::Sub,
@@ -932,15 +955,17 @@ impl Vm {
             | Op::NewExecutor
             | Op::NewExecutorN => unreachable!("struct_arith only handles + - * / %"),
         };
-        match self.reentered(|vm| vm.invoke_hook(hook, l, &[r], span))? {
-            Some(v) => Ok(v),
-            None => Err(self.missing_hook(l, hook, span)),
+        if self.hook_op(flat, hook, l, &[r], RetAction::Push, span)? {
+            Ok(())
+        } else {
+            Err(self.missing_hook(l, hook, span))
         }
     }
 
     /// Bitwise / shift ops — int-only (gap #13). Shift amounts outside `0..64` are a runtime error
     /// (Rust would otherwise panic).
-    pub(super) fn bitwise(&mut self, op: &Op, span: Span) -> Result<(), RuntimeError> {
+    /// `flat` as for [`Vm::arith`].
+    pub(super) fn bitwise(&mut self, op: &Op, flat: bool, span: Span) -> Result<(), RuntimeError> {
         let r = self.pop();
         let l = self.pop();
         let bop = match op {
@@ -1075,7 +1100,7 @@ impl Vm {
                     if matches!(self.heap.get(ha), Obj::Struct { .. } | Obj::Enum { .. })
                         && matches!(self.heap.get(hb), Obj::Struct { .. } | Obj::Enum { .. }) =>
                 {
-                    self.struct_arith(op, l, r, span)?
+                    return self.struct_arith(op, l, r, flat, span);
                 }
                 // Set algebra (gap #3): `|`→union, `&`→intersection, `^`→symmetric-difference on two
                 // sets. (`<< >>` stay int-only and fall through to the error below.) Identical to the
