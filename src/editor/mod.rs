@@ -378,7 +378,6 @@ fn token_at(source: &str, line0: usize, char_col: usize) -> Option<(u32, u32)> {
             | other @ Token::ShlEq
             | other @ Token::ShrEq
             | other @ Token::Arrow
-            | other @ Token::Pipe
             | other @ Token::Question
             | other @ Token::QuestionDot
             | other @ Token::QuestionQuestion
@@ -592,7 +591,6 @@ fn semantic_tokens_inner(source: &str) -> Vec<SemTok> {
             | other @ Token::ShlEq
             | other @ Token::ShrEq
             | other @ Token::Arrow
-            | other @ Token::Pipe
             | other @ Token::Question
             | other @ Token::QuestionDot
             | other @ Token::QuestionQuestion

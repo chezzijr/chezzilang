@@ -221,7 +221,7 @@ Open rows (S1-1, S1-2, S2-8 and S2-1 went to TICKET-249, 250 and 252; see the au
 | S3-1 ✔ | P1 | check and run are exponential in a `recv.name[X](args)` chain: `.map[int](inc)` repeated | 12 links 224 ms, 16 links 3.5 s, 18 links over 10 s; without `[int]` 30 links take 8 ms | rustc: 30 links in 81 ms | fixed by TICKET-269 (debug `chezzi check`, 16 links: 7243 ms -> 27 ms) |
 | S3-3 ✔ | P2 | `t.0[i](5)` on a tuple whose element 0 is a list of functions | `unknown type 'i'` (read as a type argument); `t.0[0](5)` works | Rust, CPython `4` | not filed |
 | S3-4 ✔ | P2 | the generator ban on `spawn`/`defer`/`parallel:`/`wait:` is bypassed inside a `recover:` block in an `assert`; same gap gives a false "`yield` can only appear inside a generator" | check OK; the task outlives the generator | the checker's own rule | not filed |
-| S3-6 | P3 | grammar and parser drift that the conformance test cannot see: `(x) := 5`, `1 \|> f(2,)`, `enum E: A()`, `where T: None` | parser and `docs/reference/grammar.bnf` disagree on accept/reject | — | not filed; the negative literal in a sub-pattern (`(-1.5, -2):`) is in the grammar since 2026-11-03 |
+| S3-6 | P3 | grammar and parser drift that the conformance test cannot see: `(x) := 5`, `enum E: A()`, `where T: None` | parser and `docs/reference/grammar.bnf` disagree on accept/reject | — | not filed; the negative literal in a sub-pattern (`(-1.5, -2):`) is in the grammar since 2026-11-03 |
 
 Facts with several deciders (from the grammar hunter's table):
 

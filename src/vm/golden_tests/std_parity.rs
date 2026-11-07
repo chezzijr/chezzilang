@@ -561,15 +561,6 @@ const PROGRAMS: &[(&str, Result<&str, &str>)] = &[
         "fn main():\n    xs := [1, 2]\n    xs.push(3)\n    xs.push(4)\n    print(xs)\n    print(xs.len())\nmain()",
         Ok("[1, 2, 3, 4]\n4\n"),
     ),
-    // ----- M6: pipe operator -----
-    (
-        "fn inc(n: int) -> int: n + 1\nfn dbl(n: int) -> int: n * 2\nfn main():\n    print(5 |> inc() |> dbl())\nmain()",
-        Ok("12\n"),
-    ),
-    (
-        "fn shout(s: str) -> str: s.upper()\nfn main():\n    print(\"hi\" |> shout())\nmain()",
-        Ok("HI\n"),
-    ),
     // ----- error messages -----
     (
         "print(1 / 0)",
@@ -967,7 +958,7 @@ fn golden_concurrent_jobs_both_engines() {
     );
 }
 
-/// M6 golden: core-type methods + pipe run end-to-end on the VM and byte-match the interp.
+/// M6 golden: core-type methods run end-to-end on the VM and byte-match the interp.
 #[test]
 fn golden_methods_via_run_file() {
     let path = fixture("examples/methods.chz");

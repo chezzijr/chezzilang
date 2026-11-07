@@ -1226,16 +1226,14 @@ pub enum ExprKind {
     /// (`src/desugar/mod.rs`, the `is_variadic` arm).
     ///
     /// That second component is a TABLE KEY component, not decoration. The pack carries the CALL's
-    /// span because it has no source text of its own, and a pipe gives every link of `a |> f() |> g()`
-    /// the LHS primary's span (measured: `[1, 3.0] |> f(2.5) |> g(1, 2.0)` — the literal, the inner
-    /// `Call` and the outer `Call` all report `line 1, col 6`). So `[1, 3.0] |> vari(2.5, 1)` had the
-    /// pack and the user's own inner literal sharing one span-keyed table slot. Two packs in one pipe
-    /// chain aliased the same way.
+    /// span because it has no source text of its own, and every link of a postfix chain shares the
+    /// primary expression's span (`parse_postfix`), so a pack and another node of the same chain can
+    /// share one span-keyed table slot. Two packs in one chain alias the same way.
     ///
     /// The repo's rule for this failure class (`docs/contributing/gaps.md` M24-6, W7-49, W7-43) is **make the
     /// coordinate real, never re-anchor a span** — re-spanning the pack only moves the collision. The
-    /// callee's key span is that real coordinate: it is a distinct source token per link in both a
-    /// postfix and a pipe chain, and it is derived by the SAME `checker::witness_key_span`
+    /// callee's key span is that real coordinate: it is a distinct source token per link of a
+    /// postfix chain, and it is derived by the SAME `checker::witness_key_span`
     /// `WitnessKey`/`CarrierKey` already use, so it inherits their derivation rather than adding one.
     List(Vec<Expr>, Option<Span>),
     /// `(a, b, …)` — a tuple literal (always ≥2 elements).

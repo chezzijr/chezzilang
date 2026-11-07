@@ -707,7 +707,6 @@ fn extra_cells(cells: &mut Vec<Cell>) {
         ms("default_q", SHOW_OPT, "fn f(x: int? = ?5):\n    show(x)\nf()", prints("some 5")),
         ms("default_bang", SHOW_RES, "fn f(x: int!str = !\"e\"):\n    show(x)\nf()", prints("err E")),
         m("interp_arg", "fn t(x: int?) -> str:\n    match x:\n        ?v:\n            return \"some {v + 0}\"\n        None:\n            return \"none\"\nprint(\"{t(5)}\")", prints("some 5")),
-        m("pipe_arg", "fn t(x: int?) -> str:\n    match x:\n        ?v:\n            return \"some {v + 0}\"\n        None:\n            return \"none\"\nprint(5 |> t())", prints("some 5")),
         ms("coalesce_option", SHOW_OPT, "o: int? = 5\nx: int? = o ?? 0\nshow(x)", prints("some 5")),
         ms("coalesce_result", SHOW_RES, "o: int? = 5\nx: int!str = o ?? 0\nshow(x)", prints("ok 5")),
         m("coalesce_none_arm", "fn f(o: int?) -> int?:\n    return o ?? None\nprint(f(None))", r("'??' sides have incompatible types")),

@@ -357,7 +357,6 @@ impl Parser {
             | t @ Token::ShlEq
             | t @ Token::ShrEq
             | t @ Token::Arrow
-            | t @ Token::Pipe
             | t @ Token::Question
             | t @ Token::QuestionDot
             | t @ Token::QuestionQuestion

@@ -170,72 +170,6 @@ impl Parser {
                     },
                     span,
                 },
-                // `lhs |> f(args)` desugars at parse time to `f(lhs, args)` — threading `lhs` as the
-                // first argument. The RHS must be a call, so checker/interp/VM see a plain call and
-                // need no pipe-specific code.
-                InfixOp::Pipe => match rhs.kind {
-                    ExprKind::Call {
-                        callee,
-                        args,
-                        named,
-                        type_args,
-                        bracket,
-                    } => {
-                        if !named.is_empty() {
-                            return Err(self.err(
-                                "named arguments are not supported on the right side of '|>'"
-                                    .to_string(),
-                            ));
-                        }
-                        let mut new_args = Vec::with_capacity(args.len() + 1);
-                        new_args.push(lhs);
-                        new_args.extend(args);
-                        Expr {
-                            id: crate::ast::NodeId::fresh(),
-                            kind: ExprKind::Call {
-                                callee,
-                                args: new_args,
-                                named,
-                                type_args,
-                                bracket,
-                            },
-                            span,
-                        }
-                    }
-                    ExprKind::Int(_)
-                    | ExprKind::Float(_)
-                    | ExprKind::Str(_)
-                    | ExprKind::Interp(_)
-                    | ExprKind::Bytes(_)
-                    | ExprKind::RawStr(_)
-                    | ExprKind::Bool(_)
-                    | ExprKind::NoneLit
-                    | ExprKind::Pass
-                    | ExprKind::Ident(_)
-                    | ExprKind::List(..)
-                    | ExprKind::Tuple(_)
-                    | ExprKind::Map(_)
-                    | ExprKind::Set(_)
-                    | ExprKind::Comprehension { .. }
-                    | ExprKind::Unary { .. }
-                    | ExprKind::Binary { .. }
-                    | ExprKind::Compare { .. }
-                    | ExprKind::Range { .. }
-                    | ExprKind::Field { .. }
-                    | ExprKind::Index { .. }
-                    | ExprKind::Try(_)
-                    | ExprKind::OptChain { .. }
-                    | ExprKind::NullCoalesce { .. }
-                    | ExprKind::Closure { .. }
-                    | ExprKind::Match { .. }
-                    | ExprKind::IfElse { .. }
-                    | ExprKind::Recover(..)
-                    | ExprKind::ElseGuard { .. } => {
-                        return Err(
-                            self.err("right side of '|>' must be a function call".to_string())
-                        );
-                    }
-                },
             };
         }
         self.fold_depth = outer_fold.max(self.fold_depth + chain);
@@ -322,7 +256,6 @@ impl Parser {
             | Token::ShlEq
             | Token::ShrEq
             | Token::Arrow
-            | Token::Pipe
             | Token::QuestionDot
             | Token::QuestionQuestion
             | Token::Amp
@@ -588,7 +521,6 @@ impl Parser {
                 | Token::ShlEq
                 | Token::ShrEq
                 | Token::Arrow
-                | Token::Pipe
                 | Token::QuestionQuestion
                 | Token::Bang
                 | Token::Amp
@@ -1090,7 +1022,6 @@ impl Parser {
             | other @ Token::ShlEq
             | other @ Token::ShrEq
             | other @ Token::Arrow
-            | other @ Token::Pipe
             | other @ Token::Question
             | other @ Token::QuestionDot
             | other @ Token::QuestionQuestion
@@ -1127,11 +1058,10 @@ impl Parser {
     }
 }
 
-/// An infix operator: a normal binary op, the range marker `..`, or the pipe `|>` (M6).
+/// An infix operator: a normal binary op, the range marker `..`, or the coalesce `??`.
 enum InfixOp {
     Bin(BinaryOp),
     Range,
-    Pipe,
     /// Null-coalescing `??` — right-associative carrier. It SURVIVES desugar (W7-43); the checker
     /// lowers it to a `match` via `desugar::lower_carrier_option`, and rejects a non-`Option` lhs.
     Coalesce,
@@ -1161,7 +1091,6 @@ fn token_ends_range(t: &Token) -> bool {
             | Token::Dedent
             | Token::And
             | Token::Or
-            | Token::Pipe
             | Token::Assign
             | Token::EqEq
             | Token::NotEq
@@ -1194,9 +1123,6 @@ fn infix_op(tok: &Token) -> Option<(InfixOp, u8, u8)> {
     // Precedence ladder (loosest → tightest). Bitwise ops follow Python's relative order: comparison
     // is looser than `|` < `^` < `&` < shifts, and shifts are looser than additive (gap #13).
     let (op, l) = match tok {
-        // Pipe `|>` is the lowest-precedence infix op (level 1): the whole expression to its left
-        // is threaded into the call on its right. Left-associative (`a |> f |> g` = `(a|>f)|>g`).
-        Token::Pipe => (Pipe, 1),
         Token::Or => (Bin(Or), 3),
         Token::And => (Bin(And), 5),
         Token::EqEq => (Bin(Eq), 7),

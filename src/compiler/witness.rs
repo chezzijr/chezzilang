@@ -41,7 +41,7 @@ impl Compiler {
     /// The seed a `xs.sum()` site needs, per the checker's [`crate::checker::SumSeedTable`] --
     /// `Some(SumSeed::Float)` for a plain `List[float]`. A MISS, or a recorded `None`, means the plain numeric sum (the pre-fix
     /// lowering), so a stale/absent entry can only under-apply. Keyed on the method-NAME token,
-    /// which is distinct per link of a postfix/pipe chain (the call node's span is not -- see
+    /// which is distinct per link of a postfix chain (the call node's span is not -- see
     /// [`crate::checker::CarrierKey`]).
     pub(super) fn sum_seed(
         &self,

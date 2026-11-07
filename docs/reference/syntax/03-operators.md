@@ -19,7 +19,6 @@ Highest → lowest. Same row = same precedence, left-associative unless noted.
 | 13 | `not` (prefix) | looser than the comparisons, tighter than `and` (Python's grammar) |
 | 14 | `and` | |
 | 15 | `or` | |
-| 16 | `\|>` | pipe (§11), left-assoc |
 
 The relative order follows Python (comparison looser than `..` < `|` < `^` < `&` < shifts).
 `0..1 << 2` is `0..4`; `x in 0..3` and `0..3 == 0..3` need no parentheses.

@@ -13,8 +13,7 @@ use std::fmt;
 /// span ([`crate::checker::witness_key_span`]).
 ///
 /// It is deliberately NOT the call node's span: that span is shared by every link of a chained
-/// postfix expression AND of a pipe chain (`a |> f() |> g()` desugars to nested `Call`s that all
-/// inherit the infix expression's span), so two distinct witness calls would alias onto one slot.
+/// postfix expression, so two distinct witness calls would alias onto one slot.
 /// The callee token — the bare `Ident`, or the member-name token — is a distinct source node per
 /// link, and the checker's record site and the compiler's lookup both derive it the same way.
 pub type WitnessKey = (usize, Span, usize, Span);
@@ -175,7 +174,7 @@ pub type WrapTable = HashMap<(usize, u32), Wrap>;
 
 /// Which `.sum()` call sites sum a `List[float]`, keyed exactly like [`CarrierKey`] (the
 /// method-NAME token — see there for why the call node's span aliases across the links of a
-/// postfix/pipe chain).
+/// postfix chain).
 ///
 /// `Some(SumSeed::Float)` = the compiler must push a `0.0` SEED and pass it as `sum`'s one hidden
 /// argument, so an EMPTY float list sums to `0.0`: an empty list carries no element to read a kind

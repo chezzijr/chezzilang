@@ -120,7 +120,6 @@ fn symbol(tok: &Token) -> &'static str {
         Token::ShlEq => "SHLEQ",
         Token::ShrEq => "SHREQ",
         Token::Arrow => "ARROW",
-        Token::Pipe => "PIPE",
         Token::Amp => "AMP",
         Token::Caret => "CARET",
         Token::BitOr => "BITOR",
@@ -313,7 +312,7 @@ fn grammar_is_valid_bnf() {
 }
 
 /// Every terminal in the grammar is a real token class, and every token class appears in the
-/// grammar (PIPE joined the cascade with the M6 pipe operator).
+/// grammar.
 #[test]
 fn terminals_match_token_enum() {
     let classes = token_classes_from_source();

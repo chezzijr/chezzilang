@@ -312,7 +312,7 @@ A block expression ends at its dedent; the next line is a new statement or arm, 
 token (`(c.bump())`, `[1, 2]`, `-1`, `?g()`, or an arm `?_: v`, `(x, _): v`, `-1: v` after a nested
 `match`).
 
-- A line that starts with a binary operator, `.`, `?.`, `|>`, `,` or an assignment operator there is a
+- A line that starts with a binary operator, `.`, `?.`, `,` or an assignment operator there is a
   parse error.
 - Only an `else` guard may follow a block-valued binding (`x := match n:` + arms, then `else:`).
 - Each match-expression arm ends its line (`1: 10 _: 20` on one line is an error).

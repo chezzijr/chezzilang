@@ -1,3 +1,0 @@
-# rule: pipeExpr
-# expect: right side of '|>' must be a function call
-x := 5 |> 7

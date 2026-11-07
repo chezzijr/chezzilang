@@ -18,8 +18,7 @@
 # powers in the parser (see docs/reference/syntax/ §4); the hand parser realizes the same precedence via
 # Pratt binding powers rather than literal cascade recursion.
 #
-# Terminals = exactly the `Token` enum variants, one class each. PIPE ("|>") drives the pipe
-# operator (see <pipeExpr>, M6).
+# Terminals = exactly the `Token` enum variants, one class each.
 #
 # Because terminals are token classes (not source forms), several lexical spellings collapse to
 # one terminal and need NO production here: FLOAT covers scientific notation (`1e3`, `1.5e-9`,
@@ -601,20 +600,7 @@
 <typeHead> ::= "IDENT" | <postfix> "DOT" <memberName>
 
 # ===== expressions (precedence cascade, loosest -> tightest) =====
-<expr>     ::= <pipeExpr>
-# pipe `|>` (M6) is the loosest operator: it threads its left value as the first argument of the
-# call on its right, so the right side must end in a call. Left-associative. (The hand parser
-# desugars `a |> f(x)` to `f(a, x)` at parse time.)
-# LAYOUT CONTINUATION (lexer, not grammar): a line whose first token is `|>` CONTINUES the previous
-# logical line — the lexer emits no NEWLINE/INDENT/DEDENT for it, so a multi-line chain
-# (`xs\n    |> f()\n    |> g()`) reaches the parser as the single token stream `xs |> f() |> g()`
-# and needs no production of its own. A TRAILING `|>` (line ending in `|>`) is NOT a continuation:
-# it stays a parse error. Only the exact two-char `|>` continues (`|`, `||`, `|=` do not).
-# The offside rule still binds: the `|>` line must be indented at least as deep as the currently
-# open block. A SHALLOWER `|>` line dedents out of that block (and is then a parse error) — it is
-# never absorbed into the body it sits outside of.
-<pipeExpr> ::= <orExpr> | <pipeExpr> "PIPE" <pipeCall>
-<pipeCall> ::= <postfix> "LPAREN" "RPAREN" | <postfix> "LPAREN" <exprList> "RPAREN"
+<expr>     ::= <orExpr>
 <orExpr>   ::= <andExpr> | <orExpr> "OR" <andExpr>
 <andExpr>  ::= <notExpr> | <andExpr> "AND" <notExpr>
 # `not` (gap): sits between `and` and the comparisons, matching Python — `not x in xs` is
@@ -856,7 +842,7 @@
 
 # A call argument list: zero or more positional args, then zero or more named args (`name = expr`).
 # Positional must precede named — `f(y=2, 1)` is rejected by both the grammar and the parser. Used
-# only for ordinary calls; pipe (`|>`) and explicit-type-arg calls take positional <exprList> only.
+# only for ordinary calls; explicit-type-arg calls take positional <exprList> only.
 # An optional trailing comma is permitted after the final argument (`f(1, 2,)`, `f(x=1,)`).
 <argList>       ::= <posArgList>
                   | <namedArgList>

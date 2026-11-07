@@ -312,12 +312,11 @@ fn braces_lex_for_maps() {
 #[test]
 fn two_char_operators() {
     assert_eq!(
-        kinds(":= == -> |>"),
+        kinds(":= == ->"),
         vec![
             Token::Walrus,
             Token::EqEq,
             Token::Arrow,
-            Token::Pipe,
             Token::Newline,
             Token::Eof,
         ]
@@ -1298,121 +1297,6 @@ fn token_lexeme_covers_punctuation_and_keywords() {
     }
 }
 
-// ===== Leading-`|>` line continuation (layout suppression) =====
-
-/// A line whose first token is `|>` continues the previous logical line: no Newline,
-/// no Indent/Dedent for it.
-#[test]
-fn pipe_continuation_suppresses_layout() {
-    let ks = kinds("r := 5\n    |> dbl()\n    |> inc()\nprint(r)\n");
-    assert!(
-        !ks.contains(&Token::Indent) && !ks.contains(&Token::Dedent),
-        "{ks:?}"
-    );
-    assert_eq!(
-        ks.iter().filter(|k| **k == Token::Newline).count(),
-        2,
-        "one Newline closes the chain, one closes `print(r)`: {ks:?}"
-    );
-    // same token stream as the single-line form
-    assert_eq!(ks, kinds("r := 5 |> dbl() |> inc()\nprint(r)\n"));
-}
-
-/// Only the exact two-char `|>` continues — `|`, `||`, `|=` do not.
-#[test]
-fn pipe_continuation_only_for_exact_pipe_arrow() {
-    for lead in ["| 2", "|| 2", "|= 2"] {
-        let ks = kinds(&format!("a := 1\n    {lead}\n"));
-        assert!(
-            ks.contains(&Token::Indent) && ks.contains(&Token::Dedent),
-            "{lead:?} must NOT continue the line: {ks:?}"
-        );
-    }
-}
-
-/// Blank and comment lines interleaved in the chain are skipped by the lookahead.
-#[test]
-fn pipe_continuation_skips_blank_and_comment_lines() {
-    let ks = kinds("r := 5\n\n    # double it\n    |> dbl()\n\n    |> inc()\nprint(r)\n");
-    assert!(
-        !ks.contains(&Token::Indent) && !ks.contains(&Token::Dedent),
-        "{ks:?}"
-    );
-    assert_eq!(ks.iter().filter(|k| **k == Token::Newline).count(), 2);
-}
-
-/// Inside a nested block the indent stack is untouched: the multi-line chain lexes to the
-/// exact same token stream as the one-line chain (so the line after it still dedents).
-#[test]
-fn pipe_continuation_inside_nested_block_keeps_indent_stack() {
-    let multi = "fn f(x: int) -> int:\n    if x > 0:\n        r := x\n            |> dbl()\n            |> inc()\n        return r\n    return 0\n";
-    let single = "fn f(x: int) -> int:\n    if x > 0:\n        r := x |> dbl() |> inc()\n        return r\n    return 0\n";
-    assert_eq!(kinds(multi), kinds(single));
-}
-
-/// Spans still report true source lines across a suppressed region.
-#[test]
-fn pipe_continuation_spans_track_true_lines() {
-    // 1: r := 5 / 2: blank / 3: comment / 4: |> dbl() / 5: |> inc() / 6: print(r)
-    let toks = tokenize("r := 5\n\n    # c\n    |> dbl()\n    |> inc()\nprint(r)\n").unwrap();
-    let line_of = |name: &str| {
-        toks.iter()
-            .find(|t| t.kind == Token::Ident(name.to_string()))
-            .unwrap()
-            .span
-            .line
-    };
-    assert_eq!(line_of("dbl"), 4);
-    assert_eq!(line_of("inc"), 5);
-    assert_eq!(line_of("print"), 6);
-}
-
-/// The offside rule still binds: a `|>` line SHALLOWER than the open block closes that block
-/// (Dedent) instead of being absorbed into it — otherwise a column-0 `|>` after a function
-/// body would silently rewrite that body's last statement.
-#[test]
-fn pipe_continuation_respects_the_indent_floor() {
-    // col-0 `|>` under an indented body: must dedent out, not continue `return 1`.
-    let ks = kinds("fn f() -> int:\n    return 1\n|> dbl()\n");
-    assert!(
-        ks.contains(&Token::Indent) && ks.contains(&Token::Dedent),
-        "a col-0 `|>` must close the block: {ks:?}"
-    );
-    // equal-indent `|>` inside a body IS a continuation (nothing to close)
-    let ks = kinds("fn f() -> int:\n    r := 1\n    |> dbl()\n    return r\n");
-    assert_eq!(
-        ks.iter().filter(|k| **k == Token::Indent).count(),
-        1,
-        "only the body's Indent: {ks:?}"
-    );
-    // tabs never indent (scan_indentation rejects them) → not a continuation either
-    assert!(tokenize("fn f() -> int:\n    r := 1\n\t|> dbl()\n").is_err());
-}
-
-/// Forward-progress tripwire: pathological input must terminate at Eof, never spin — and the
-/// memoized lookahead must keep it LINEAR (this file lexed in ~9s before the memo landed).
-#[test]
-fn pipe_continuation_pathological_terminates() {
-    let mut src = String::from("r := 5\n");
-    src.push_str(&"\n".repeat(200_000));
-    src.push_str("    |> dbl()\n");
-    let toks = tokenize(&src).unwrap();
-    assert_eq!(toks.last().map(|t| &t.kind), Some(&Token::Eof));
-
-    // the expensive variant: long comment lines (re-walked in full by an un-memoized scan)
-    let mut src = String::from("r := 5\n");
-    for _ in 0..50_000 {
-        src.push_str("    # filler comment line here\n");
-    }
-    src.push_str("    |> dbl()\n");
-    let toks = tokenize(&src).unwrap();
-    assert_eq!(toks.last().map(|t| &t.kind), Some(&Token::Eof));
-
-    // a file ending in a bare `|>` still lexes (and stays a parse error)
-    let toks = tokenize("r := 5\n    |>\n").unwrap();
-    assert_eq!(toks.last().map(|t| &t.kind), Some(&Token::Eof));
-}
-
 /// `Span` is 12 bytes and that is load-bearing, not incidental — `Proto.lines` holds one per
 /// OPCODE, so its width is the cache footprint of every compiled function, and it sets the
 /// calibrated headroom of `parser::MAX_DEPTH`, `parser::MAX_AST_DEPTH` and `vm::VM_STACK_BYTES`.
@@ -2017,7 +1901,6 @@ fn crlf_reads_as_lf_at_every_lexer_site() {
         ("bytes literal", "s := b\"a\nb\"\n"),
         ("hole", "s := f\"{1 +\n2}\"\n"),
         ("brackets", "x := [\n    1,\n\n    2,\n]\n"),
-        ("pipe continuation", "r := 5\n\n    |> dbl()\nprint(r)\n"),
         ("no final newline", "x := 1\ny := 2"),
     ];
     let mut red = Vec::new();
@@ -2056,7 +1939,6 @@ fn a_whitespace_only_line_lexes_like_a_blank_line() {
             ("top level", "x := 1\n@\ny := 2\n"),
             ("before a doc comment", "@\n# a\nfn f():\n    1\n"),
             ("last line, no newline", "x := 1\n@"),
-            ("pipe continuation", "r := 5\n@\n    |> dbl()\nprint(r)\n"),
             (
                 "comment line in a block",
                 "fn main():\n    x := 1\n@# c\n    print(x)\nmain()\n",
@@ -2082,7 +1964,6 @@ fn a_whitespace_only_line_lexes_like_a_blank_line() {
         "fn f():\n\tx := 1\n",
         "fn f():\n    x := 1\n\ty := 2\n",
         "fn f():\n  \tx := 1\n",
-        "fn f():\n    x := 1\n\t|> dbl()\n",
     ] {
         let err = tokenize(src).expect_err(src);
         assert!(

@@ -4,7 +4,7 @@
 source.chz
   → Lexer        (indent-aware: INDENT/DEDENT tokens)
   → Parser       (Pratt expr parsing + recursive-descent stmts) → AST
-  → Desugar      (AST → AST lowering: pipe, comprehensions, defaults, interpolation)
+  → Desugar      (AST → AST lowering: comprehensions, defaults, interpolation)
   → Checker      (local inference; explicit fn sigs; machine-readable errors) → typed AST
   → Bytecode compiler → Stack VM (+ mark-sweep GC)
 ```

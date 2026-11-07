@@ -178,11 +178,10 @@ pub fn ret_coerce_key(
 /// node's span. ONE derivation, shared by the checker's record sites and the compiler's lookups.
 ///
 /// The key is the CALLEE's own token, never the call node's span. A call node's span is shared by
-/// every link of a postfix chain (`parse_postfix` gives each link the primary expression's span) AND
-/// by every link of a pipe chain (`a |> f() |> g()` desugars at parse time to nested `Call`s that all
-/// inherit the whole infix expression's span) — so keying on it aliases two distinct witness calls
-/// onto one slot: the later insert wins and the earlier call silently constructs the WRONG type
-/// under a green `chezzi check`. The callee token is a distinct source node per link in both shapes:
+/// every link of a postfix chain (`parse_postfix` gives each link the primary expression's span) —
+/// so keying on it aliases two distinct witness calls onto one slot: the later insert wins and the
+/// earlier call silently constructs the WRONG type under a green `chezzi check`. The callee token is
+/// a distinct source node per link:
 /// a bare `Ident` (`reset(c)`) keys on the identifier's span, a member callee — instance method
 /// (`h.make(c)`), static method (`Holder.build(c)`), module member (`lib.reset(c)`) — on the
 /// member-name TOKEN (`name_span`). It is a KEY ONLY: diagnostics still anchor on the call span (the

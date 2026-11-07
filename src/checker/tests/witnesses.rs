@@ -883,29 +883,28 @@ fn witness_call_at_an_interpolation_fragment_root_ok() {
 }
 
 // ===== M24 final review — the seven findings the three reviewers filed against the finished branch.
-// Each test below is the compile-time half; the ones whose bug is a WRONG VALUE (the pipe key, the
+// Each test below is the compile-time half; the ones whose bug is a WRONG VALUE (the chained-call key, the
 // shadowed type param) run in `tests/chz/spec/static_witness_test.chz`, which is the only half that
 // can catch them.
 
-/// A — the witness key is the CALLEE TOKEN. `|>` desugars at PARSE time into a plain `Call` that
-/// inherits the whole infix expression's span, so keying on the call NODE aliased every link of
-/// `a |> f() |> g()` onto one table slot. When the two links' bounds differ that green
-/// `chezzi check` becomes a hard runtime fault; when they agree it is a silently wrong value.
+/// A — the witness key is the CALLEE TOKEN, so two witness calls in one expression never share a
+/// table slot. When two calls' bounds differ an aliased key turns a green `chezzi check` into a
+/// hard runtime fault; when they agree it is a silently wrong value.
 #[test]
-fn witness_pipe_chain_links_do_not_alias_ok() {
-    // two DIFFERENT static-carrying protocols in one chain: pre-fix the second link's entry
-    // overwrote the first's, so link 1 dispatched `default` on `Wrap` — which has none — and the
-    // green check became a hard runtime fault.
+fn witness_nested_call_links_do_not_alias_ok() {
+    // two DIFFERENT static-carrying protocols in one nested call: an aliased key would let the
+    // second call's entry overwrite the first's, so call 1 would dispatch `default` on `Wrap` — which has none — and the
+    // green check would become a hard runtime fault.
     entry_ok(&format!(
-        "{FWD_HEAD}protocol Conv:\n    fn conv(x: int) -> Self\nstruct Wrap:\n    v: int\n    fn conv(x: int) -> Wrap:\n        return Wrap(x)\nfn to_wrap[T: Default](x: T) -> Wrap:\n    return Wrap(1)\nfn from_wrap[U: Conv](x: U) -> U:\n    return U.conv(1)\nfn main():\n    print((Counter(1) |> to_wrap() |> from_wrap()).v)\nmain()\n"
+        "{FWD_HEAD}protocol Conv:\n    fn conv(x: int) -> Self\nstruct Wrap:\n    v: int\n    fn conv(x: int) -> Wrap:\n        return Wrap(x)\nfn to_wrap[T: Default](x: T) -> Wrap:\n    return Wrap(1)\nfn from_wrap[U: Conv](x: U) -> U:\n    return U.conv(1)\nfn main():\n    print(from_wrap(to_wrap(Counter(1))).v)\nmain()\n"
     ));
     // the same callee twice — one NAME, two distinct callee TOKENS
     entry_ok(&format!(
-        "{FWD_HEAD}fn main():\n    print((Counter(1) |> reset() |> reset()).n)\nmain()\n"
+        "{FWD_HEAD}fn main():\n    print(reset(reset(Counter(1))).n)\nmain()\n"
     ));
-    // …and a pipe chain that is an interpolation fragment's root
+    // …and a nested call that is an interpolation fragment's root
     entry_ok(&format!(
-        "{FWD_HEAD}fn main():\n    print(\"{{Counter(1) |> reset() |> reset()}}\")\nmain()\n"
+        "{FWD_HEAD}fn main():\n    print(\"{{reset(reset(Counter(1)))}}\")\nmain()\n"
     ));
 }
 

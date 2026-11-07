@@ -1,4 +1,4 @@
-# M6 — core-type methods (str / list) + pipe operator.
+# M6 — core-type methods (str / list).
 
 fn shout(s: str) -> str:
     return s.upper()
@@ -21,7 +21,6 @@ fn main():
     print(xs)
     print(xs.len())
 
-    # pipe: thread the value as the first argument of the call on the right
-    print("hi" |> shout())
+    print(shout("hi"))
 
 main()

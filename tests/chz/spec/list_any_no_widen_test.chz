@@ -82,9 +82,8 @@ test fn alias_of_any_element_keeps_int_element():
 
 type AnyAlias = Any
 
-# --- The synthesized variadic pack has no source text of its own, so it carries the CALL's span --
-# and a pipe gives every link of `a |> f() |> g()` the LHS primary's span. Each test below asserts
-# the piped form equals the form it desugars to.
+# --- The synthesized variadic pack has no source text of its own, so it carries the CALL's span.
+# Two packs in one nested call `g(f(a, ...), ...)` must not share a hint keyed by that span.
 
 fn vari_head_float(xs: List[float], ...rest: Any) -> float:
     return xs[0] / 2
@@ -92,18 +91,14 @@ fn vari_head_float(xs: List[float], ...rest: Any) -> float:
 fn vari_any_tail_float(a: str, ...ys: float) -> str:
     return a + "|{ys}"
 
-test fn piped_variadic_pack_does_not_alias_the_piped_literal():
-    assert ([1.0, 3.0] |> vari_any(2.5, 1)) == vari_any([1.0, 3.0], 2.5, 1)
-    assert ([1.0, 3.0] |> vari_any(2.5, 1)) == "[[1.0, 3.0], 2.5, 1]"
+test fn variadic_pack_does_not_alias_the_first_literal():
+    assert vari_any([1.0, 3.0], 2.5, 1) == "[[1.0, 3.0], 2.5, 1]"
 
-test fn piped_literal_into_a_typed_first_param_takes_floats():
-    assert ([1.0, 3.0] |> vari_head_float(2.5, 1)) == vari_head_float([1.0, 3.0], 2.5, 1)
-    assert ([1.0, 3.0] |> vari_head_float(2.5, 1)) == 0.5
+test fn literal_into_a_typed_first_param_takes_floats():
+    assert vari_head_float([1.0, 3.0], 2.5, 1) == 0.5
 
-test fn two_variadic_packs_in_one_pipe_chain_do_not_alias():
-    piped := [1.0, 3.0] |> vari_any(2.5, 7) |> vari_any_tail_float(1.0, 2.0)
-    assert piped == vari_any_tail_float(vari_any([1.0, 3.0], 2.5, 7), 1.0, 2.0)
-    assert piped == "[[1.0, 3.0], 2.5, 7]|[1.0, 2.0]"
+test fn two_variadic_packs_in_one_nested_call_do_not_alias():
+    assert vari_any_tail_float(vari_any([1.0, 3.0], 2.5, 7), 1.0, 2.0) == "[[1.0, 3.0], 2.5, 7]|[1.0, 2.0]"
 
 test fn list_any_slot_reaches_an_if_arm_literal():
     # An `if`/`match` ARM inherits the expected hint, so a `List[Any]` slot reaches the arm literal
