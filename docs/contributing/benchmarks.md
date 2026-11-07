@@ -240,6 +240,21 @@ in its own worktree and target dir. Budget: +3% per bench. Record:
 2000 tasks that each wait in a `defer` at `--threads=2` (`tests/defer_park_scale.rs`): 5 OS threads
 and 0.47 s, `demotes=0`; before, 2005 threads and 38.3 s.
 
+### Method calls without the `NO_IC` fallback (2026-11-08)
+
+The dead `ic != NO_IC` re-entrant arms of `Vm::do_method_call` are deleted. Release,
+`perf stat -e instructions:u`, median of 5 interleaved single runs, base `bad25748` built in its own
+worktree and target dir.
+
+| bench | change vs base |
+|---|---|
+| `benches/chz/struct.chz` | −0.00% |
+| `benches/chz/poly_method.chz` | +0.01% |
+| `benches/chz/enum.chz` | −0.11% |
+| `benches/chz/hof.chz` | +0.00% |
+| `benches/chz/hook_dispatch.chz` | +0.07% |
+| `benches/chz/defer.chz` | +0.22% |
+
 ### Peak memory vs Go
 
 Peak process RSS, `benches/maxrss.py`, median of 3, 2026-07-25 after the four memory levers

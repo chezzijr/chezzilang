@@ -244,9 +244,7 @@ pub enum Op {
     /// `obj.method(args)` — stack `[recv, arg0, …]`. Resolves a struct method (binds `self`) or a
     /// module member (plain call, no `self`). `ic`: per-call-site method inline-cache id (dense
     /// `0..Program::method_ic_sites`). Every compiler-emitted `CallMethod` gets a real `ic` (including
-    /// the synthetic iterator-protocol `next`/`values` sites), and so does every `DeferMethod` site;
-    /// no production caller passes [`NO_IC`] (only `gc_tests.rs`) — a real `ic` is exactly the
-    /// "flatten-safe, the caller's `run_until` runs the pushed frame" signal.
+    /// the synthetic iterator-protocol `next`/`values` sites), and so does every `DeferMethod` site.
     CallMethod {
         name: String,
         argc: usize,

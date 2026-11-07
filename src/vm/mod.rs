@@ -784,7 +784,7 @@ enum Deferred {
     Method {
         recv: Value,
         name: Arc<str>,
-        /// The `defer` site's own method-IC id ([`NO_IC`] when no compiled site built it).
+        /// The `defer` site's own method-IC id.
         ic: u32,
         args: Vec<Value>,
         span: Span,

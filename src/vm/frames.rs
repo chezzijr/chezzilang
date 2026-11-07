@@ -974,10 +974,9 @@ impl Vm {
         drained: Option<RuntimeError>,
     ) -> Result<(), RuntimeError> {
         let rte = self.unwind_result(rte, drained, false);
-        // This `recover:` caught the fault — discard any trace captured deeper in (it
-        // belongs to a fault that is now handled, the recover-block defers' too: a
-        // `defer xs.map(f)` or `defer it.next()` captures in its own nested loop), so a
-        // later uncaught fault re-captures.
+        // This `recover:` caught the fault: discard any trace captured deeper in (it belongs
+        // to a fault that is now handled, a recover-block `defer`'s fault too), so a later
+        // uncaught fault re-captures.
         self.fault_trace = None;
         self.fault_trace_depth = 0;
         // TICKET-096 — this handler is outside the faulting nursery, so the fault is

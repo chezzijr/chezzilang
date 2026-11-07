@@ -39,32 +39,31 @@ impl Vm {
     /// handle; every method takes the box's guard (its lock, [`Vm::take_update_guard`]) and works
     /// on the live value in this task. The receiver and the arguments are popped by the dispatcher,
     /// so they are rooted on the operand stack ([`Vm::with_method_rooted`]) across the guard's wait
-    /// and the closure call. `flat` (the dispatch loop): `update` / `read` run `f` as a frame
-    /// ([`Vm::box_frame`]) and return `None`, the frame's return pushes the result.
+    /// and the closure call. `update` / `read` run `f` as a frame ([`Vm::box_frame`]) and return
+    /// `None`, the frame's return pushes the result.
     pub(super) fn shared_method(
         &mut self,
         h: GcRef,
         method: &str,
         args: &[Value],
-        flat: bool,
         span: Span,
     ) -> Result<Option<Value>, RuntimeError> {
         let Some(which) = SharedMethod::from_name(method) else {
             return Err(self.err(format!("type Shared has no method '{method}'"), span));
         };
-        if flat && let SharedMethod::Update | SharedMethod::Read = which {
-            self.arity_err(method, args, 1, span)?;
-            let call = if which == SharedMethod::Update {
-                BoxCall::Update
-            } else {
-                BoxCall::Read
-            };
-            return self.box_frame(h, call, args[0], span);
-        }
-        self.with_method_rooted(h, args, |vm| {
-            vm.shared_method_rooted(h, which, method, args, span)
-        })
-        .map(Some)
+        let call = match which {
+            SharedMethod::Update => BoxCall::Update,
+            SharedMethod::Read => BoxCall::Read,
+            SharedMethod::Get | SharedMethod::Set => {
+                return self
+                    .with_method_rooted(h, args, |vm| {
+                        vm.shared_method_rooted(h, which == SharedMethod::Set, args, span)
+                    })
+                    .map(Some);
+            }
+        };
+        self.arity_err(method, args, 1, span)?;
+        self.box_frame(h, call, args[0], span)
     }
 
     /// The box `h`'s lock, for `call`.
@@ -192,44 +191,26 @@ impl Vm {
         self.reentered(|vm| vm.invoke_value(f, vec![cur], span))
     }
 
+    /// `get` (`set == false`) or `set`. Each takes the guard first (the process-global wait-for
+    /// graph), so a same-box re-entry from the box's own closure faults (the length-1 cycle), and a
+    /// cross-box wait cycle faults.
     fn shared_method_rooted(
         &mut self,
         h: GcRef,
-        which: SharedMethod,
-        method: &str,
+        set: bool,
         args: &[Value],
         span: Span,
     ) -> Result<Value, RuntimeError> {
         let core = self.shared_core(h);
-        let lock = &core.lock;
-        // EVERY arm takes the guard first (TICKET-016 / W8-3, the process-global wait-for graph),
-        // so a same-box re-entry from the box's own closure FAULTS (the length-1 cycle) for `get` /
-        // `read` / `set` / `update` alike, and a cross-box wait cycle faults.
-        match which {
-            SharedMethod::Get => {
-                self.arity_err("get", args, 0, span)?;
-                let _guard = self.box_guard(lock, GuardMode::Write, span)?;
-                Ok(core.v.get())
-            }
-            SharedMethod::Set => {
-                self.arity_err("set", args, 1, span)?;
-                let _guard = self.box_guard(lock, GuardMode::Write, span)?;
-                core.v.set(args[0]);
-                Ok(Value::nil())
-            }
-            // `update(f)`: `f`'s result becomes the value; `read(f)` returns it. A fault leaves the
-            // value as `f` left it.
-            SharedMethod::Update | SharedMethod::Read => {
-                self.arity_err(method, args, 1, span)?;
-                let _guard = self.box_guard(lock, GuardMode::Write, span)?;
-                let r = self.box_closure(args[0], core.v.get(), span)?;
-                if which == SharedMethod::Update {
-                    core.v.set(r);
-                    return Ok(Value::nil());
-                }
-                Ok(r)
-            }
+        if set {
+            self.arity_err("set", args, 1, span)?;
+            let _guard = self.box_guard(&core.lock, GuardMode::Write, span)?;
+            core.v.set(args[0]);
+            return Ok(Value::nil());
         }
+        self.arity_err("get", args, 0, span)?;
+        let _guard = self.box_guard(&core.lock, GuardMode::Write, span)?;
+        Ok(core.v.get())
     }
 
     /// `RwShared[T]` methods. M3.3: one value by handle, behind a two-mode guard.
@@ -243,19 +224,17 @@ impl Vm {
     ///   (`already holds the read guard`).
     ///
     /// The receiver and the arguments are popped by the dispatcher, so they are rooted here across
-    /// every user call (`hash`, `eq`, the closure). `flat`: `read(f)` / `write(f)` run `f` as a
-    /// frame, as [`Vm::shared_method`] does.
+    /// every user call (`hash`, `eq`, the closure). `read(f)` / `write(f)` run `f` as a frame, as
+    /// [`Vm::shared_method`] does.
     pub(super) fn rwshared_method(
         &mut self,
         h: GcRef,
         method: &str,
         args: &[Value],
-        flat: bool,
         span: Span,
     ) -> Result<Option<Value>, RuntimeError> {
-        if flat
-            && let Some(which @ (RwSharedMethod::Read | RwSharedMethod::Write)) =
-                RwSharedMethod::from_name(method)
+        if let Some(which @ (RwSharedMethod::Read | RwSharedMethod::Write)) =
+            RwSharedMethod::from_name(method)
         {
             self.arity_err(method, args, 1, span)?;
             let call = if which == RwSharedMethod::Read {
@@ -341,23 +320,13 @@ impl Vm {
                     self.arity_err("get", args, 0, span)?;
                     self.rwshared_read(&core, span, |_, cur| Ok(cur))
                 }
-                RwSharedMethod::Read => {
-                    self.arity_err("read", args, 1, span)?;
-                    self.rwshared_read(&core, span, |vm, cur| vm.box_closure(args[0], cur, span))
+                RwSharedMethod::Read | RwSharedMethod::Write => {
+                    unreachable!("`rwshared_method` runs `{method}` as a frame")
                 }
                 RwSharedMethod::Set => {
                     self.arity_err("set", args, 1, span)?;
                     self.rwshared_mutate(&core, span, |_, _| {
                         core.v.set(args[0]);
-                        Ok(Value::nil())
-                    })
-                }
-                // `write(f)` runs `f` on the live value, exclusive; its result becomes the value.
-                RwSharedMethod::Write => {
-                    self.arity_err("write", args, 1, span)?;
-                    self.rwshared_mutate(&core, span, |vm, cur| {
-                        let r = vm.box_closure(args[0], cur, span)?;
-                        core.v.set(r);
                         Ok(Value::nil())
                     })
                 }

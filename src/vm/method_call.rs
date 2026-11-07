@@ -63,7 +63,6 @@ impl Vm {
     /// dispatch (`reader_method` etc.), leaving those byte-identical. Mirrors the enum-method arm
     /// (`Obj::Enum` in this file): type-erased (no `StructDef`/`tid`), home-globals from `native_home`,
     /// generator-aware (a `yield`-bearing method allocates rather than running).
-    #[allow(clippy::too_many_arguments)] // handle key + method + recv/args + argc + ic + span, like the enum arm
     fn try_native_bodied_method(
         &mut self,
         key: &str,
@@ -71,7 +70,6 @@ impl Vm {
         recv: Value,
         args: &[Value],
         argc: usize,
-        ic: u32,
         span: Span,
     ) -> Result<bool, RuntimeError> {
         let prog = Arc::clone(&self.program);
@@ -92,32 +90,13 @@ impl Vm {
             self.push(g);
             return Ok(true);
         }
-        // Flatten only on the real dispatch-loop path (`ic != NO_IC`); a re-entrant caller passes
-        // `NO_IC` and uses the synchronous `run_proto` path (mirrors the struct/enum arms).
-        if ic != NO_IC {
-            let base = self.stack.len();
-            self.stack.push(recv);
-            self.stack.extend_from_slice(args);
-            self.push_frame_in_place(proto, home, None, base, span)?;
-            return Ok(true);
-        }
-        let mut call_args = Vec::with_capacity(argc + 1);
-        call_args.push(recv);
-        call_args.extend_from_slice(args);
-        let v = self.run_proto(proto, home, None, call_args, true, false, span)?;
-        if self.paused() {
-            return Ok(true);
-        }
-        self.push(v);
+        let base = self.stack.len();
+        self.stack.push(recv);
+        self.stack.extend_from_slice(args);
+        self.push_frame_in_place(proto, home, None, base, span)?;
         Ok(true)
     }
 
-    /// `ic`: the per-call-site method inline-cache id from the `CallMethod` op or a `defer` site
-    /// (`Deferred::Method::ic`; the synchronous hard-halt drain `Vm::run_loaded` runs a pushed frame in
-    /// its own `run_until`). No production caller passes [`NO_IC`] (only `gc_tests.rs`), which takes the
-    /// re-entrant `run_proto` path (never the in-place frame flatten). A real `ic` ⟺ the
-    /// caller is the running dispatch loop (the sole emit path), so a real `ic` is exactly the
-    /// "flatten-safe" signal: the pushed frame is executed by the `run_until` that called us.
     /// TICKET-250 — does the declared type of `v` have `hook`? The checker decided it
     /// (`Checker::hook_method`); this reads `Program::hooks_struct` / `hooks_enum`. `false` for
     /// every value that is not a struct or an enum.
@@ -357,6 +336,10 @@ impl Vm {
         ))
     }
 
+    /// `recv.method(args)` from a running dispatch loop: a `CallMethod` op, or a `defer` record
+    /// (`Deferred::Method`; the synchronous drain `Vm::run_loaded` runs the pushed frame in its own
+    /// `run_until`). A user body is installed as a frame for that loop to run. `ic` is the site's
+    /// method inline-cache id, always a real one.
     pub(super) fn do_method_call(
         &mut self,
         method: &str,
@@ -364,6 +347,10 @@ impl Vm {
         ic: u32,
         span: Span,
     ) -> Result<(), RuntimeError> {
+        debug_assert!(
+            (ic as usize) < self.method_ic.len(),
+            "do_method_call needs a real method IC site, got {ic}"
+        );
         let at = self.stack.len() - argc;
         let args: Vec<Value> = self.stack.split_off(at);
         let recv = self.pop();
@@ -410,42 +397,40 @@ impl Vm {
         // flattens the call: `[recv, args…]` go on the stack and the method frame is installed in place,
         // so the running `run_until` executes the body and its `Return` pushes the result — no re-entrant
         // `run_proto`. A megamorphic-but-bounded site (≤4 distinct receiver types) hits a way for each,
-        // so it never thrashes the monomorphic refill. Only the dispatch loop reaches here (real `ic`);
+        // so it never thrashes the monomorphic refill. Only the dispatch loop reaches here;
         // the arity guard re-runs per hit (cheap) so a hit can never enter a frame with the wrong slot
         // count, and the tid re-compare on every probe bars a wrong body. A `sticky` site (overflowed
         // past 4 types) skips the probe and falls straight through to the slow path.
-        if ic != NO_IC {
-            let site = self.method_ic[ic as usize];
-            if !site.sticky
-                && let Obj::Struct { tid, .. } = self.heap.get(h)
-            {
-                let recv_tid = *tid;
-                let mut hit: Option<MethodIcCell> = None;
-                for way in &site.ways {
-                    if way.tid != TID_NONE && way.tid == recv_tid {
-                        hit = Some(*way);
-                        break;
-                    }
+        let site = self.method_ic[ic as usize];
+        if !site.sticky
+            && let Obj::Struct { tid, .. } = self.heap.get(h)
+        {
+            let recv_tid = *tid;
+            let mut hit: Option<MethodIcCell> = None;
+            for way in &site.ways {
+                if way.tid != TID_NONE && way.tid == recv_tid {
+                    hit = Some(*way);
+                    break;
                 }
-                if let Some(cell) = hit {
-                    let proto = cell.proto;
-                    self.check_proto_arity(proto, argc + 1, span)?;
-                    let home = self.module_obj(cell.module_idx as usize);
-                    // Experimental generators — a generator method allocates rather than running (else its
-                    // `Op::Yield` would poison the host run with no `generator_next` to drive it).
-                    if self.program.protos[proto].is_generator {
-                        let mut gen_args = Vec::with_capacity(argc + 1);
-                        gen_args.push(recv);
-                        gen_args.extend(args);
-                        let g = self.alloc_generator(proto, home, None, gen_args);
-                        self.push(g);
-                        return Ok(());
-                    }
-                    let base = self.stack.len();
-                    self.stack.push(recv);
-                    self.stack.extend(args);
-                    return self.push_frame_in_place(proto, home, None, base, span);
+            }
+            if let Some(cell) = hit {
+                let proto = cell.proto;
+                self.check_proto_arity(proto, argc + 1, span)?;
+                let home = self.module_obj(cell.module_idx as usize);
+                // Experimental generators — a generator method allocates rather than running (else its
+                // `Op::Yield` would poison the host run with no `generator_next` to drive it).
+                if self.program.protos[proto].is_generator {
+                    let mut gen_args = Vec::with_capacity(argc + 1);
+                    gen_args.push(recv);
+                    gen_args.extend(args);
+                    let g = self.alloc_generator(proto, home, None, gen_args);
+                    self.push(g);
+                    return Ok(());
                 }
+                let base = self.stack.len();
+                self.stack.push(recv);
+                self.stack.extend(args);
+                return self.push_frame_in_place(proto, home, None, base, span);
             }
         }
         // TICKET-257: the handles are `Eq` by identity (`Eq` grant rows for `Channel`, `Shared`,
@@ -527,13 +512,8 @@ impl Vm {
                     span,
                 ));
             }
-            // On the dispatch loop the body runs as a frame on this stack, so a wait in it parks.
-            if ic != NO_IC {
-                return self.gen_resume(h, GenThen::Push, span);
-            }
-            let result = self.generator_next(h, span)?;
-            self.push(result);
-            return Ok(());
+            // The body runs as a frame on this stack, so a wait in it parks.
+            return self.gen_resume(h, GenThen::Push, span);
         }
         // UNIFIED NATIVE-HANDLE DISPATCH for every reserved handle (concurrency + io/net). ONE match
         // maps the receiver to its `&'static str` key; a `None` short-circuits straight to the hot
@@ -579,7 +559,7 @@ impl Vm {
             | Obj::Generator(_) => None,
         };
         if let Some(key) = handle_key {
-            if self.try_native_bodied_method(key, method, recv, &args, argc, ic, span)? {
+            if self.try_native_bodied_method(key, method, recv, &args, argc, span)? {
                 return Ok(());
             }
             // Native op body per handle — identical to the retired per-arm dispatch, tails included.
@@ -588,9 +568,9 @@ impl Vm {
                 // A box closure on the dispatch loop is a frame: its return pushes the result.
                 "Shared" | "RwShared" => {
                     let r = if key == "Shared" {
-                        self.shared_method(h, method, &args, ic != NO_IC, span)?
+                        self.shared_method(h, method, &args, span)?
                     } else {
-                        self.rwshared_method(h, method, &args, ic != NO_IC, span)?
+                        self.rwshared_method(h, method, &args, span)?
                     };
                     match r {
                         Some(v) => v,
@@ -711,8 +691,7 @@ impl Vm {
             | Obj::Generator(_) => None,
         };
         if let Some(container) = container {
-            // A list HOF runs its loop here: on the dispatch loop (a real `ic`) each callback is
-            // a frame, so a wait in it parks; a `NO_IC` caller runs it nested.
+            // A list HOF runs its loop here: each callback is a frame, so a wait in it parks.
             // A list method's name is parsed once, here; `core_method_as` reads the parse.
             let list = if let Obj::List(_) = self.heap.get(h) {
                 ListMethod::from_name(method)
@@ -721,11 +700,11 @@ impl Vm {
             };
             if let Some(m) = list {
                 if let Some(kind) = HofKind::of(m) {
-                    return self.list_hof(h, kind, args, ic != NO_IC, span);
+                    return self.list_hof(h, kind, args, true, span);
                 }
                 // So does a sort or a min / max whose comparator may be user code.
                 if let Some(c) = CmpMethod::of(m)
-                    && self.list_compare_method(h, c, &args, ic != NO_IC, span)?
+                    && self.list_compare_method(h, c, &args, true, span)?
                 {
                     return Ok(());
                 }
@@ -752,21 +731,11 @@ impl Vm {
                 )
             })?;
             let member = self.read_slot(h, idx, span)?;
-            // W7-8 — a module member can now be a BODIED Chezzi fn (`std.fs`'s `PathLike`
-            // wrappers), not only an `Obj::Native`. `do_call` FLATTENS such a callee (installs the
-            // frame for the *running* `run_until` to execute), which is only correct on the real
-            // dispatch-loop path (a synchronous hard-halt drain runs it in `Vm::run_loaded`'s own
-            // loop). A `NO_IC` caller (tests only) has no loop to hand the frame to — it must use the
-            // synchronous `invoke_value`, exactly like the struct/enum arms below. Before this the
-            // arm was unconditional and safe only because every module member was a native.
-            if ic != NO_IC {
-                self.stack.push(member);
-                self.stack.extend(args);
-                return self.do_call(argc, span);
-            }
-            let v = self.invoke_value(member, args, span)?;
-            self.push(v);
-            return Ok(());
+            // A member can be a bodied Chezzi fn (`std.fs`'s `PathLike` wrappers): `do_call`
+            // installs it as a frame for the running loop.
+            self.stack.push(member);
+            self.stack.extend(args);
+            return self.do_call(argc, span);
         }
         match self.heap.get(h).clone() {
             Obj::Module(_) => unreachable!("a module receiver returned above"),
@@ -789,9 +758,8 @@ impl Vm {
                 if let Some(proto) = resolved {
                     let home = self.module_obj(def_module_idx);
                     self.check_proto_arity(proto, argc + 1, span)?;
-                    // Experimental generators — a generator method allocates rather than running (else
-                    // its `Op::Yield` would poison the host run). Covers both the IC-flatten and the
-                    // re-entrant `run_proto` paths below; never IC-cached (it returns, not push-frame).
+                    // A generator method allocates rather than running (else its `Op::Yield` would
+                    // poison the host run); never IC-cached (it returns, not push-frame).
                     if self.program.protos[proto].is_generator {
                         let mut gen_args = Vec::with_capacity(argc + 1);
                         gen_args.push(recv);
@@ -800,12 +768,11 @@ impl Vm {
                         self.push(g);
                         return Ok(());
                     }
-                    // M19 N-way poly — fill the next free way so the next call at this site hits the fast
-                    // path above (only for the dispatch-loop path: a real `ic`, a registered layout
-                    // `tid`). When all ways are occupied AND this `tid` is new, latch `sticky` so the
-                    // site stops probing the (full) ways and goes straight here, mirroring the binop
-                    // quickening's one-way `Q_GENERIC` deopt — a megamorphic site never thrashes.
-                    if ic != NO_IC && tid != TID_NONE {
+                    // Fill the next free way so the next call at this site hits the fast path above
+                    // (a registered layout `tid` only). When all ways are occupied AND this `tid` is
+                    // new, latch `sticky` so the site stops probing the (full) ways and goes straight
+                    // here — a megamorphic site never thrashes.
+                    if tid != TID_NONE {
                         let site = &mut self.method_ic[ic as usize];
                         if !site.sticky {
                             let cell = MethodIcCell {
@@ -821,23 +788,12 @@ impl Vm {
                                 site.sticky = true;
                             }
                         }
-                        // Flatten: install the frame in place and let the running `run_until` execute it
-                        // (mirrors the IC fast path + the `Op::Call` flatten). The re-entrant callers
-                        // pass NO_IC and so keep the synchronous `run_proto` path below.
-                        let base = self.stack.len();
-                        self.stack.push(recv);
-                        self.stack.extend(args);
-                        return self.push_frame_in_place(proto, home, None, base, span);
                     }
-                    let mut call_args = Vec::with_capacity(argc + 1);
-                    call_args.push(recv);
-                    call_args.extend(args);
-                    let v = self.run_proto(proto, home, None, call_args, true, false, span)?;
-                    if self.paused() {
-                        return Ok(()); // B1/D3: the method parked on a blocking `recv` or yielded.
-                    }
-                    self.push(v);
-                    return Ok(());
+                    // Install the frame in place; the running `run_until` executes it.
+                    let base = self.stack.len();
+                    self.stack.push(recv);
+                    self.stack.extend(args);
+                    return self.push_frame_in_place(proto, home, None, base, span);
                 }
                 // No method named `method`: fall back to a function-typed *field* — `recv.f(args)`
                 // where `f` holds a function value (the checker verified `f: fn(...) -> ...`).
@@ -908,23 +864,10 @@ impl Vm {
                         self.push(g);
                         return Ok(());
                     }
-                    // Flatten only on the real dispatch-loop path (`ic != NO_IC`); re-entrant callers
-                    // pass `NO_IC` and use the synchronous `run_proto` path (mirrors the struct arm).
-                    if ic != NO_IC {
-                        let base = self.stack.len();
-                        self.stack.push(recv);
-                        self.stack.extend(args);
-                        return self.push_frame_in_place(proto, home, None, base, span);
-                    }
-                    let mut call_args = Vec::with_capacity(argc + 1);
-                    call_args.push(recv);
-                    call_args.extend(args);
-                    let v = self.run_proto(proto, home, None, call_args, true, false, span)?;
-                    if self.paused() {
-                        return Ok(());
-                    }
-                    self.push(v);
-                    return Ok(());
+                    let base = self.stack.len();
+                    self.stack.push(recv);
+                    self.stack.extend(args);
+                    return self.push_frame_in_place(proto, home, None, base, span);
                 }
                 // D1 (W6-3's rule, applied to the one dispatch arm that lacked it) — the checker
                 // grants `Eq` intrinsically to an `enum`, and `Option`/`Result` ARE `Obj::Enum` at

@@ -155,8 +155,8 @@ its `FiberCtx` across a park. A task that holds a guard is not preempted at the 
 guard's waiters wait in place, so a yielded holder would cost each of them a demote budget); a
 blocking wait still parks it.
 
-**What still re-enters.** A push is legal only from the dispatch loop (`flat`, the `ic != NO_IC`
-rule). A hook reached from a nested container walk (`==`/`hash`/`str`/`<` inside a list, tuple, map
+**What still re-enters.** A push is legal only from the dispatch loop (`flat`: every method call
+op reaches it there). A hook reached from a nested container walk (`==`/`hash`/`str`/`<` inside a list, tuple, map
 or set), a map/set probe, `unique`/`dedup`, set algebra, a tuple or list `sort_by_key` key,
 `drain_iterable` (`T.from_iter(x)` where `x` has an `iter` hook), a `json.decode` default thunk and
 an FFI callback keep `Vm::reentered`: the fiber demotes, and `main` there is unjudged (`gaps.md`

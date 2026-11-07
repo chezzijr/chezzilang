@@ -2183,7 +2183,8 @@ C := BIG.iter()"
     /// `c.next()` on the shared cursor `c`.
     fn step(w: &mut Vm, c: GcRef) -> Result<(), RuntimeError> {
         w.push(Value::obj(c));
-        w.do_method_call("next", 0, NO_IC, Span::RUNTIME)?;
+        // An `Obj::Iter` receiver never reads its site; 0 is a real one (the prelude has calls).
+        w.do_method_call("next", 0, 0, Span::RUNTIME)?;
         w.pop();
         Ok(())
     }
@@ -2444,7 +2445,8 @@ C := BIG.iter()"
     }
     fn step(w: &mut Vm, c: GcRef) -> Result<(), RuntimeError> {
         w.push(Value::obj(c));
-        w.do_method_call("next", 0, NO_IC, Span::RUNTIME)?;
+        // An `Obj::Iter` receiver never reads its site; 0 is a real one (the prelude has calls).
+        w.do_method_call("next", 0, 0, Span::RUNTIME)?;
         w.pop();
         Ok(())
     }

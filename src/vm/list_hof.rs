@@ -254,8 +254,8 @@ impl Vm {
     /// `position`, and the key pass of `sort_by_key` / `min_by` / `max_by`) on the list `src_h`.
     /// Leaves the result on the stack, or (`flat`) the next callback's frame, whose return runs
     /// the loop on ([`RetAction::Hof`]), so a wait in the callback parks like any call. `flat` is
-    /// true only on the dispatch loop (`do_method_call` with a real `ic`); a synchronous caller
-    /// runs every callback nested.
+    /// true from `do_method_call` (the dispatch loop); a synchronous caller (`core_method`) passes
+    /// false and runs every callback nested.
     ///
     /// SNAPSHOT semantics: iteration walks a copy of the receiver's elements taken at call time, so
     /// a callback that MUTATES the receiver (e.g. `xs.pop()`/`xs.push(..)`) does NOT perturb the
