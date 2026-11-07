@@ -768,7 +768,11 @@ impl Vm {
             }
             // A fiber the verdict cut while it waited in a `defer` ([`SchedCore::cut_parked`]) ends
             // that wait with the verdict's fault here, before its rewound op re-runs. A fiber that
-            // parked mid fault-unwind resumes that unwind instead (its family is done now).
+            // parked mid fault-unwind resumes that unwind instead (its family is done now). Inside a
+            // `defer` only an `Escape` park happens (a fault unwind there runs at the drain's level,
+            // so `Unwind::parks` is false), and the verdict cuts it only when
+            // `cut_aborting_families` finds no stuck member, which no tried shape reaches
+            // (2026-11-07: a member stuck in its own `defer` or in a nested join is always cut).
             if self.join_suspend.is_none()
                 && self.fault_park.is_none()
                 && let Some(how) = verdict_cut
