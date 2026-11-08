@@ -65,8 +65,8 @@ fn judge_run_check_is_warning_free() {
 }
 
 /// The committed samples must actually RUN, not merely type-check: this exercises the glob,
-/// the `list_dir` slug scan, the subprocess and the verdict logic. `--samples-only` keeps it
-/// bounded and deterministic on a machine that has run `python3 judge/generate.py`.
+/// the `list_dir` slug scan, the subprocess and the verdict logic. `--samples-only` reads only
+/// the committed `judge/problems/*/samples`, so it needs no network and no g++.
 #[test]
 fn judge_samples_pass() {
     let n = committed_sample_count();

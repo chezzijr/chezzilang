@@ -214,7 +214,11 @@ fn main():
     if problems.len() == 0:
         print("no problems found under judge/problems/ or judge/lc/")
         os.exit(2)
-    _ := sh_ok("mkdir -p judge/vendor/got")
+    # One output file per harness run, so two runs in one checkout never share it.
+    gotfile := (process.cmd("mktemp") ?? "").trim()
+    if gotfile == "":
+        print("cannot create a temp file (mktemp)")
+        os.exit(2)
 
     total_cases := 0
     total_fail := 0
@@ -233,7 +237,6 @@ fn main():
             if pr.expected_dir != "":
                 name := stem.split("/")[stem.split("/").len() - 1]
                 expfile = "{pr.expected_dir}/{name}.out"
-            gotfile := "judge/vendor/got/{pr.slug}.out"
             v := judge_case(chezzi, timeout_s, pr.sol, infile, expfile, pr.checker, gotfile)
             # A missing .out is a data gap, not a solution failure: warn, do not count it.
             if v.tag == "NOEXP":
@@ -253,6 +256,7 @@ fn main():
         else:
             print("FAIL  {pr.slug}  ({prob_fail}/{n} case(s) failed)")
 
+    _ := fs.remove_file(gotfile)
     print("")
     print("done: {total_cases} case(s), {total_fail} failure(s), {skipped} problem(s) skipped")
     if total_fail > 0:
