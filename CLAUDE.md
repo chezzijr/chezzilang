@@ -25,7 +25,7 @@ Claude implements directly. Ship working, tested code each session.
   another copy, clause or veto next to the failing site in a family that already has sibling fixes.
   A new "Mirrors the checker's …" / "keep in sync with …" comment, or a drift test with an exemption,
   is a red flag. Family fixes land with one test that enumerates the whole grid. Why and where:
-  `docs/contributing/lessons.md` §1, `docs/history/bug-hunts/w16.md`.
+  `docs/contributing/lessons.md` §1.
 
 ## Workflow per milestone
 

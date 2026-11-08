@@ -272,8 +272,8 @@ pub enum BaselineOutcome {
 }
 
 /// Unseeded reps at the swept worker count used to establish a target's baseline. One rep
-/// undercounts: an exit code that only occasionally flakes (a load-sensitive wall-clock margin,
-/// `docs/history/bug-hunts/` class) can agree on a single sample and read as stable. This governs the
+/// undercounts: an exit code that only occasionally flakes (a load-sensitive wall-clock margin)
+/// can agree on a single sample and read as stable. This governs the
 /// rc/panic/hang baseline only — output byte-exactness is decided from a sampled-disagreement check
 /// over the same reps (`check_output`), because that class of divergence can be arbitrarily rare
 /// unseeded (measured 0/40 for `parallel_cross_nursery_ok.chz`) yet still real.

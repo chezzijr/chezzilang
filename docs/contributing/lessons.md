@@ -2,8 +2,7 @@
 
 Rules for people who work on the compiler and runtime, distilled from the project's working memory
 (2026-06 to 2026-10). **Read the section for the area you touch before you touch it**: most of these
-mistakes shipped fully green the first time. Each rule has one line on the incident behind it. The
-full incident text is in [`history/bug-hunts/lessons-incidents.md`](../history/bug-hunts/lessons-incidents.md).
+mistakes shipped fully green the first time. Each rule has one line on the incident behind it.
 Live bug rows are in [`gaps.md`](gaps.md); the hunt strategy is in [`bug-discovery.md`](bug-discovery.md).
 
 ## 1. Design north star
@@ -29,8 +28,7 @@ Live bug rows are in [`gaps.md`](gaps.md); the hunt strategy is in [`bug-discove
   out of scope.
 - **Derive, don't mirror. Each fact has exactly one owner; everything else reads it.** Wave 16 traced
   5 P0 and 7 P1 to facts decided in two or more places; 34 of 51 earlier fixes were point patches whose
-  families all came back, and the fixes that held all deleted code
-  ([`w16.md`](../history/bug-hunts/w16.md)).
+  families all came back, and the fixes that held all deleted code.
   - Before you fix a bug in a family that already has a sibling fix, ask **"which duplicate does this
     delete, or which single source does it add?"** A clause at the repro site is at best a documented
     interim, and only with the owner's agreement.
@@ -55,19 +53,18 @@ Live bug rows are in [`gaps.md`](gaps.md); the hunt strategy is in [`bug-discove
      denylist, a veto list that grows per shape.
   3. **Draw the grid the fact spans** (operations × contexts, binders × name kinds, kinds × positions,
      handle kinds × identity operations). Mark the broken cells. Probe a few unreported cells.
-  4. **Count the history:** how many past tickets or rows patched this class (`git log -S`,
-     [`history/bug-hunts/`](../history/README.md#bug-hunts)). Three or more means the fix is
+  4. **Count the history:** how many past tickets or rows patched this class (`git log -S`). Three or more means the fix is
      structural.
   5. **Name the wrong assumption**, usually "the same AST gives the same answer" or a leftover from an
      earlier design (one heap, one engine, top-level-only declarations).
   6. **Design the single source and the deletion:** the owner, the readers, the copies to delete, the
      whole-grid test. Write it down and get the owner's decision on any language change before you file.
 - **Derive the grid's axes from every CONSUMER of the fact, never from the repros.** Three wave-16
-  structural fixes were wrong just outside their grids ([`w17.md`](../history/bug-hunts/w17.md)). Grep
+  structural fixes were wrong just outside their grids (wave 17). Grep
   every crossing route, every syntactic position a name can occupy, every receiver kind, and make
   each one an axis.
 - **A single source must reach every boundary its fact crosses.** Add the boundary axis: same module
-  vs another module, value vs call, first stage vs retry ([`w18.md`](../history/bug-hunts/w18.md);
+  vs another module, value vs call, first stage vs retry (wave 18;
   TICKET-196 exported the record as `ModuleSig::members`).
 - **A fact pushed for one cause and polled for another is two deciders** (TICKET-188). Derive both
   from one wake set, including the deadlock verdict's registry.
@@ -179,7 +176,7 @@ check-OK-then-broken program, and a JIT would trust the static type.
   all-parked by design). Restrict the verdict to the shape you can prove and decline the rest. Derive
   "can this waiter still be satisfied?" from the waiter itself (its arms, deadline, context) in one
   registry of blocked waiters, not from a veto list. The same holds for "may I block here?": one
-  context, one `block_on` ([`w16.md`](../history/bug-hunts/w16.md) Family 2). Fence it with a looping
+  context, one `block_on` (wave 16, Family 2). Fence it with a looping
   test, mutation-check that the test fails on the buggy predicate, and audit the party set for
   self-reference. **A verdict that is right 85% of the time on one program is not a verdict.**
 - **A readiness question counts only the OTHER side's entries** (TICKET-185). Each readiness helper
@@ -191,7 +188,7 @@ check-OK-then-broken program, and a JIT would trust the static type.
   sort or a remove replaces, retires, and only the stop-the-world sweep frees it. A `Value` slot
   stores with Release and loads with Acquire. An op on a live object writes atomic slots, never a
   `&mut` over the object. A new container op or object kind obeys all three, plus a grid in the
-  race gates; a missed rule is UB. (Until M3.5 the rule here was the airlock's runtime guard.)
+  race gates; a missed rule is UB.
 - **Freshness is a property of the value graph, not of the operand's root AST kind** (TICKET-240). One
   recursive decider (`Checker::fresh_shape`, `checker/fresh.rs`), read by the write-to-a-temporary
   check (TICKET-254). Before you add a root shape, ask what the rule says one level down. Trap: a map

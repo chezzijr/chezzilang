@@ -1,16 +1,15 @@
 # Chezzi — Benchmarks (vs CPython)
 
-This page holds the current numbers and the rules to measure them. Every dated measurement is in
-[`docs/history/benchmarks/`](../history/benchmarks/), one file per month. The harness is
+This page holds the current numbers and the rules to measure them. Older dated measurements are in
+git (`git log -- docs/history`). The harness is
 [`benches/`](../../benches) (see [`benches/README.md`](../../benches/README.md)). The optimization
 backlog that these numbers justify is in [`roadmap.md §4`](../design/roadmap.md) (roadmap **M19**).
 
 ## Where new entries go
 
-Put each new perf record in `docs/history/benchmarks/<YYYY-MM>.md` for the month of the measurement.
-Add it at the top of that file (newest first). Start a new month file when the month has none.
-Use the heading form `## TICKET-NNN — <what changed> (YYYY-MM-DD)`. Update the tables on this page
-only when the record changes a current number or a bottleneck below.
+Put each new perf record in this file, in the section of the bench it measures. Give the date, the
+base commit and the command. Replace an older figure of the same bench; git keeps it. Put a one-line
+summary of the delta in the month's dated progress entry.
 
 ## Run the benches
 
@@ -40,7 +39,7 @@ The other files in `benches/chz/` have no CPython twin, so you time them by hand
 
 ### Measurement rules
 
-These rules come from mistakes recorded in the history files.
+These rules come from past measurement mistakes.
 
 1. Measure release binaries only. The VM is only fast when optimized.
 2. Build the base binary into its own `CARGO_TARGET_DIR`. Call both binaries by absolute path.
@@ -60,8 +59,7 @@ These rules come from mistakes recorded in the history files.
 ### Wall time per bench
 
 Release binary, `hyperfine -N --warmup 2 --runs 7`, 2026-10-08 (base `1ca43817` + TICKET-227),
-load average about 4, wall ms mean ± σ. Source: [2026-10](../history/benchmarks/2026-10.md),
-"TICKET-227".
+load average about 4, wall ms mean ± σ (TICKET-227).
 
 | bench | what it stresses | ms |
 |---|---|---|
@@ -91,8 +89,7 @@ the shell `time` keyword, 7 runs, load average about 3 (`hyperfine` was not inst
 
 ### Ratio to CPython
 
-The last sweep with a CPython column ran on 2026-08-14 (§2c1 "eager `spawn` start", source:
-[2026-08](../history/benchmarks/2026-08.md)). Lower is better.
+The last sweep with a CPython column ran on 2026-08-14 (§2c1 "eager `spawn` start"). Lower is better.
 
 | bench | Chezzi ms | CPython ms | Chezzi ÷ CPython |
 |---|---:|---:|---:|
@@ -207,7 +204,6 @@ one-time derivation (~15k) and the prelude `int`/`float` slots.
 Plan `2026-11-07-frame-reentry` (Tasks 2-6: hooks, HOF callbacks, sorts, box closures and
 generators run as frames with a `RetAction`). Release, `perf stat -e instructions:u`, median of 5,
 after Task 6, base `97012a20` built in its own worktree and target dir. Budget: +3% per bench.
-Record: [2026-11](../history/benchmarks/2026-11.md) "Callbacks as frames".
 
 | bench | change vs base |
 |---|---|
@@ -225,8 +221,7 @@ Record: [2026-11](../history/benchmarks/2026-11.md) "Callbacks as frames".
 
 Plan `2026-11-07-defer-drain-frames`: a `defer` drain is a trampoline frame (`src/vm/defer_drain.rs`).
 Release, `perf stat -e instructions:u`, median of 5 interleaved single runs, base `fb8edf37` built
-in its own worktree and target dir. Budget: +3% per bench. Record:
-[2026-11](../history/benchmarks/2026-11.md) "`defer` drain as frames".
+in its own worktree and target dir. Budget: +3% per bench.
 
 | bench | change vs base |
 |---|---|
@@ -277,8 +272,7 @@ own `Executor`: `demotes=0`, base 100.
 
 ### Peak memory vs Go
 
-Peak process RSS, `benches/maxrss.py`, median of 3, 2026-07-25 after the four memory levers
-(source: [2026-07](../history/benchmarks/2026-07.md), "Memory baseline").
+Peak process RSS, `benches/maxrss.py`, median of 3, 2026-07-25 after the four memory levers.
 
 | bench | Go MB | Chezzi MB | Chezzi ÷ Go |
 |---|---:|---:|---:|
@@ -297,7 +291,7 @@ the operand and frame stacks, so it under-measures.
 
 ### GC share of run time
 
-Release, median of 3, 2026-09-28 at `8b1d2331` (source: [2026-09](../history/benchmarks/2026-09.md)).
+Release, median of 3, 2026-09-28 at `8b1d2331`.
 
 | bench | GC share | collections |
 |---|---:|---:|
@@ -354,8 +348,8 @@ GC is 0% on `fib`, `loop` and `primes`, and scalars are unboxed.
 
 | cost | size | record |
 |---|---|---|
-| `xs += ys` on a `List` builds a new list (`x OP= v` is `x = x OP v`) | 20000 appends: 0.67 s vs 0.008 s for `push` | [2026-10](../history/benchmarks/2026-10.md) "TICKET-258" |
-| iterating a `Range` value (not the literal `a..b` loop) | about 3.3× the literal loop | [2026-10](../history/benchmarks/2026-10.md) "TICKET-253" |
-| T=1 channel hand-off through the runner gate | at most 1.3× (ping-pong), 1.05× (`primes_parallel`) | [2026-10](../history/benchmarks/2026-10.md) "TICKET-205" |
-| one OS drainer thread per nursery | a loop of 20 000 single-task nurseries +26% | [2026-08](../history/benchmarks/2026-08.md) "§2c1" |
-| `std.cancel` on a deep `derive()` chain (build + cancel) | superlinear in depth | [2026-08](../history/benchmarks/2026-08.md) "`std.cancel`" |
+| `xs += ys` on a `List` builds a new list (`x OP= v` is `x = x OP v`) | 20000 appends: 0.67 s vs 0.008 s for `push` | 2026-10 "TICKET-258" |
+| iterating a `Range` value (not the literal `a..b` loop) | about 3.3× the literal loop | 2026-10 "TICKET-253" |
+| T=1 channel hand-off through the runner gate | at most 1.3× (ping-pong), 1.05× (`primes_parallel`) | 2026-10 "TICKET-205" |
+| one OS drainer thread per nursery | a loop of 20 000 single-task nurseries +26% | 2026-08 "§2c1" |
+| `std.cancel` on a deep `derive()` chain (build + cancel) | superlinear in depth | 2026-08 "`std.cancel`" |

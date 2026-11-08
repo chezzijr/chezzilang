@@ -1,5 +1,5 @@
 //! TICKET-194 (W18 Family A2): an op is cut by a halt only where it is about to WAIT, or at a loop
-//! back-edge (owner decision 1, `docs/history/bug-hunts/w18.md`). An op that does not wait -- a send with
+//! back-edge (owner decision). An op that does not wait -- a send with
 //! room, a recv with a value ready, a `try_*` op, a free update guard, an operator or protocol hook,
 //! a generator resume -- always completes, so a job that returned never loses its result. Go and
 //! CPython keep a finished job's result the same way.

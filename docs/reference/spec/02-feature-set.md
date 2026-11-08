@@ -195,8 +195,7 @@ an `Executor` job's captures are the parent's values, by handle. A module global
 copy (M3.1). Two tasks that write one value without a join, a `Channel` or a box (`Shared[T]`)
 between them race, and a race is the program's bug. See `syntax.md` "Closure capture".
 
-**A task's write lands on the parent's value** (Go; the old copy rule is history,
-[ADR D4](../../design/adr-d4-airlock.md)): a captured local, a captured container, a spawn argument
+**A task's write lands on the parent's value** (Go; [`01-model.md`](../concurrency/01-model.md)): a captured local, a captured container, a spawn argument
 and a spawned receiver are the parent's own, so the write is seen after the join, as in Go. No
 compile-time error or run-time fault guards it.
 

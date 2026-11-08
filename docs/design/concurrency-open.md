@@ -1,7 +1,6 @@
 # Concurrency — open items
 
-Known limits and deferred work in the concurrency runtime that no ticket closes yet. The shipped
-history of each item is in [`concurrency-roadmap.md`](../history/designs/concurrency-roadmap.md); the
+Known limits and deferred work in the concurrency runtime that no ticket closes yet. The
 open-row ledger is [`gaps.md`](../contributing/gaps.md). User-facing rules:
 [`docs/reference/concurrency/`](../reference/concurrency/01-model.md).
 
@@ -15,17 +14,11 @@ open-row ledger is [`gaps.md`](../contributing/gaps.md). User-facing rules:
 | `Shared.update` hold-and-wait | A closure that waits on something only another user of the same box can give deadlocks. | Won't-fix by design (Elixir `Agent` rule: keep the closure short). |
 | Restart / supervision for `Executor` | An `Executor` runs and reaps tasks; it does not restart them. | Out of scope. |
 
-## Owner decisions, built (2026-10-22)
-
-| Item | Decision | Ancestor |
-|---|---|---|
-| `Executor` | Built (TICKET-289). One `ex.submit(f) -> Task[T]`; `t.get() -> T!` is the ONLY place a job fault or a cancel appears (a job returning `T!E` gives `(T!E)!`). `shutdown()` stops new submits and waits for every job; it never raises a job fault, and neither does the run end. An unused `Task` gets the unused-result warning (`check_discarded`), like an unused `T!`. A submit after `shutdown()` or `cancel()` returns a Task whose `get()` gives `!"submit on a shut-down Executor"`. `t.cancel()` cancels one job, `ex.cancel()` every job (replaces `shutdown_now()`); neither waits. Cancel is automatic at the job's next wait or loop point, `defer`s run. A job fault cancels no sibling. `submit_result` and `task.submit_task` go away (owner, 2026-10-22, replaces the dropped-Task rule) | Python `Future`, Java `Future`, tokio `JoinHandle`; asyncio/Trio/tokio automatic cancel |
-
 ## Owner decisions, not yet built (2026-10-22)
 
 | Item | Decision | Ancestor |
 |---|---|---|
-| Custom heap | No user heap or arena API: `Shared[MyStruct]` gives a custom write interface over one value of the run's heap. Since M3.3 (branch `exp/go-shared-heap`) `RwShared.read` runs on the live value with no copy; add `Frozen[T]` (build once, all tasks read in place, no lock) only when a benchmark shows the read guard's cost | Erlang `persistent_term`, Rust `Arc` |
+| Custom heap | No user heap or arena API: `Shared[MyStruct]` gives a custom write interface over one value of the run's heap. `RwShared.read` runs on the live value with no copy; add `Frozen[T]` (build once, all tasks read in place, no lock) only when a benchmark shows the read guard's cost | Erlang `persistent_term`, Rust `Arc` |
 
 ## Open, would be fixed if a program needs it
 

@@ -2,9 +2,8 @@
 
 How the M:N engine implements the user-facing rules in
 [`docs/reference/concurrency/`](../reference/concurrency/01-model.md). Read this before you change the
-scheduler, the deadlock verdict, the width gate or `wait:`. The text came from the old
-`docs/reference/concurrency.md` and keeps its ticket references, so you can find the commit and test
-that own each rule.
+scheduler, the deadlock verdict, the width gate or `wait:`. Each rule names its ticket, so
+`git log --grep TICKET-NNN` finds the commit and test that own it.
 
 ## Runner claims
 
@@ -208,8 +207,7 @@ in-place wait, deadlock verdict), the re-run poll settles on it (no spin), and t
 
 **Send-arm inside a native callback (TICKET-185).** A send-arm that cannot move its value, reached
 *inside a native callback* (a `Shared.update` closure, a list-HOF), DEMOTES and blocks on its offer,
-as Go blocks — like a plain full `send` there. (Before TICKET-185 both faulted: the demote loop could
-not block a sender.)
+as Go blocks — like a plain full `send` there.
 
 **Timer arm — timed-park, not inline-sleep.** A live `timer(ms)` arm is handled differently per
 *waiter*. A waiter with no worker loop under it — the INLINE body of an outermost `parallel:` builder

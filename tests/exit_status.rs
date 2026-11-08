@@ -1262,7 +1262,7 @@ test fn hof_spins():
 
 /// Defect A — a nursery OWNER (the module top level) is now a cancel participant in its own scope:
 /// a `recover:` installed INSIDE the faulting nursery's body does not catch the cancel, and the
-/// program aborts exactly once at rc=1 (`docs/reference/spec/`, `docs/history/designs/concurrency-b3.md:235`).
+/// program aborts exactly once at rc=1 (`docs/reference/spec/`).
 #[test]
 fn module_top_level_fault_is_delivered_twice_and_truncates_after_recover() {
     let t = TmpDir::new();

@@ -3,8 +3,7 @@
 **Status: proposal, not started** (stored/cross-thread callbacks, the opaque-handle "userdata" value,
 and the package registry). The shipped FFI surface is in
 [`spec.md`](../reference/spec/01-overview.md) "Native FFI" and the `extern "lib":` chapter of the syntax
-reference. The earlier version of this file, with the design notes of the slices that shipped, is
-kept verbatim in [`history/designs/ffi-and-packaging-full.md`](../history/designs/ffi-and-packaging-full.md).
+reference.
 
 ## TL;DR
 

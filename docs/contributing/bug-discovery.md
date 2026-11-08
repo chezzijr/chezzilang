@@ -3,8 +3,7 @@
 This page says how we find correctness bugs in the implementation before large work such as the
 Cranelift JIT. The harnesses themselves (panic-fuzz, CPython differential, DSA judge, seeded scheduler)
 are in [`bug-discovery-harnesses.md`](bug-discovery-harnesses.md). Live status is in
-[`PROGRESS.md`](../../PROGRESS.md). Earlier incident write-ups are in
-[`history/bug-hunts/bug-discovery-records.md`](../history/bug-hunts/bug-discovery-records.md).
+[`PROGRESS.md`](../../PROGRESS.md).
 
 ## Why this exists
 
@@ -160,8 +159,7 @@ Use this list as the "what am I hunting" checklist:
 4. **Root-cause pass before any fix.** Group the confirmed findings by the fact they share. For each
    group, find every place that decides that fact, the grid it spans, the broken cells, and how many
    past tickets patched the same class. Method: [`lessons.md` §1](lessons.md). Worked example:
-   [`history/bug-hunts/w16.md`](../history/bug-hunts/w16.md) (12 P0/P1 findings -> 5 families; 34 of 51
-   earlier fixes were point patches). Show the write-up to the owner before you file.
+   wave 16 (12 P0/P1 findings -> 5 families; 34 of 51 earlier fixes were point patches). Show the write-up to the owner before you file.
 5. **File one structural ticket per family**: delete the duplicated decision, add the single source,
    land one whole-grid test. The pipeline's planning stages reject a point patch in a systemic family.
    Fix directly only an isolated defect with no sibling copies (a one-site arithmetic guard, a stdlib
@@ -213,6 +211,5 @@ systemctl --user stop <name>
 
 Do not start one as a bare background `while` loop. `pkill -9 -f "<pattern>"` kills the processes the
 loop spawns, not the loop, and the loop respawns them. Every later measurement then runs under load
-that nobody intended (gaps row **W15-8**; record in
-[`bug-discovery-records.md`](../history/bug-hunts/bug-discovery-records.md#load-hygiene-the-w15-8-incident)).
+that nobody intended (gaps row **W15-8**).
 `systemd-run --scope` puts the whole tree, loops included, in one cgroup that `systemctl stop` removes.

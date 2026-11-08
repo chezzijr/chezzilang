@@ -1,8 +1,7 @@
 # Chezzi — Bug-Discovery Harnesses
 
 The four mechanical oracles. The strategy, the ranked plan and the manual audit playbook are in
-[`bug-discovery.md`](bug-discovery.md). The long incident write-ups behind several rules below are in
-[`history/bug-hunts/bug-discovery-records.md`](../history/bug-hunts/bug-discovery-records.md).
+[`bug-discovery.md`](bug-discovery.md).
 
 ## Panic-fuzz harness (`src/panicfuzz/`)
 
@@ -88,7 +87,7 @@ Current guards:
 
 A generator that reaches these shapes is still missing, so the corpus axis stays uncertified.
 
-Rules from this axis (records: [depth axes](../history/bug-hunts/bug-discovery-records.md#panic-fuzz-the-depth-axes)):
+Rules from this axis:
 
 1. Crash safety has a post-parse walker depth axis apart from parse-time recursion. Run each recursive
    AST walker on a stack sized for the worst depth the parser accepts.
@@ -307,9 +306,6 @@ A clean-tree sweep (`--seeds 1..17 --threads 1,2,0`, 2026-09-23) exits 0:
 ```
 done: 177 targets, 8496 runs, 0 finding(s), 0 unstable, 11 known
 ```
-
-The history of the false positives that shaped these rules is in the
-[records](../history/bug-hunts/bug-discovery-records.md#seeded-scheduler-oracle-the-harness-false-positive).
 
 **Replay limit at T=1.**
 

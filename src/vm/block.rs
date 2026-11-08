@@ -1191,8 +1191,8 @@ impl Vm {
 
     /// TICKET-194 — THE cancellation check an op makes before it waits. An op calls it only after
     /// its own ready check failed: a send with room, a recv with a value ready, a ready `wait:` arm
-    /// or a free update guard completes and is never cut here (owner decision 1,
-    /// `docs/history/bug-hunts/w18.md`). `native_reentry == 0` gates it, as it gates the park: inside a
+    /// or a free update guard completes and is never cut here (owner decision:
+    /// only a wait or a loop back-edge is a cancellation point). `native_reentry == 0` gates it, as it gates the park: inside a
     /// callback the host stack cannot unwind.
     pub(super) fn wait_halt(&mut self, span: Span) -> Result<(), RuntimeError> {
         if self.native_reentry == 0

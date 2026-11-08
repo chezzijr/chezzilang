@@ -1427,8 +1427,8 @@ pub struct Vm {
 }
 
 /// D3 — a fiber's reduction budget per schedule-in: how many ops it dispatches before yielding its
-/// worker so a queued sibling runs (BEAM's default is 4000; tunable — see `docs/history/designs/concurrency-tier-d.md`
-/// §"Open / deferred"). Large enough that the per-op decrement is negligible, small enough that a
+/// worker so a queued sibling runs (BEAM's default is 4000; tuning it is an open
+/// backlog item). Large enough that the per-op decrement is negligible, small enough that a
 /// CPU-bound fiber relinquishes its worker promptly.
 const CONTEXT_REDS: u32 = 4000;
 

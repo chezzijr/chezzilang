@@ -2,14 +2,11 @@
 
 The owner's rule: the language stays consistent. A special case is a place where one construct, type or
 name gets its own rule instead of the general one. Each special case is a future bug: the next feature is
-added beside it, and the two rules drift apart. Bug-hunt wave 23 found five P0 of this kind
-([`w23.md`](../history/bug-hunts/w23.md)).
+added beside it, and the two rules drift apart. Bug-hunt wave 23 found five P0 of this kind.
 
 This page is the map: the unifying rules, the owner's decisions, and the findings still open. Six agents
 built it on main at `32808a80` from about 4,000 programs; ✔ marks a result the monitor re-ran, and each
-ancestor result comes from a program that was run (CPython 3.14, rustc, go). The full audit text, with
-the evidence directories and the closed findings, is in
-[`history/bug-hunts/special-cases-audit.md`](../history/bug-hunts/special-cases-audit.md).
+ancestor result comes from a program that was run (CPython 3.14, rustc, go). The full audit text is in git.
 
 Nothing here is a ticket unless the "Status" column names one.
 
@@ -92,7 +89,7 @@ These settle rules U5 to U10, U15 and U16. Ancestor output is from programs that
   inclusive=true))` is `[2, 1, 0]`, and a slice selects the positions the range yields.
 - `g[0..2].push([9])` changes a temporary copy that the program drops. It gets one warning (`'push'
   changes a temporary copy; the result is dropped`, TICKET-254) at top level and inside a spawned
-  function alike; the airlock type error is gone (M3.4). `s.get().push(2)` gets no warning: `get()`
+  function alike. `s.get().push(2)` gets no warning: `get()`
   returns the box's live value (M3.3).
 
 **`recover:` (decided 2026-10-12).** The block form (`recover:` followed by an indented block) has no
@@ -107,8 +104,7 @@ is not a value type (`x: None = None` is an error), `None?` is not a type, and s
 ## Open findings by rule
 
 These were measured at audit time. Rows that a landed ticket closed (U5 operator against bound, the
-iteration-source and range tables of U6/U7) are in the
-[audit record](../history/bug-hunts/special-cases-audit.md#iteration-sources-and-ranges-u6-u7).
+iteration-source and range tables of U6/U7) are deleted.
 
 ### Builtin types against protocols (U5, U15, U16)
 
@@ -208,19 +204,19 @@ hoisting, one storage slot per name) are documented.
 
 ### Parser and lexer (U1, U8, U12, U14, U17, U18)
 
-Open rows (S1-1, S1-2, S2-8 and S2-1 went to TICKET-249, 250 and 252; see the audit record):
+Rows (S1-1, S1-2, S2-8 and S2-1 went to TICKET-249, 250 and 252):
 
 | ID | Sev | Finding | Chezzi | Ancestor | Status |
 |---|---|---|---|---|---|
-| S1-5, S2-2 ✔ | P2 | a line break between operands inside a hole | `unexpected end of line in expression` | CPython `6` | not filed |
+| S1-5, S2-2 ✔ | P2 | a line break between operands inside a hole | `unexpected end of line in expression` | CPython `6` | fixed (re-run 2026-11-08, release `5dc9f69c`: `print("{x +⏎ y}")` prints `6`) |
 | S1-3 ✔ | P1 | CRLF file with a blank line inside a block | `unexpected indented block in expression` | CPython runs | fixed by TICKET-271 |
 | S1-4 ✔ | P2 | CRLF inside a string literal keeps `\r` | `"a⏎b".len()` is `4` | CPython `3` | fixed by TICKET-271 |
 | S2-3 ✔ | P2 | postfix `?` lost to maximal munch: `oo(x)??`, `o(x)?..5` | parse error; `oo(x)?? - 1` parses as coalesce | Rust runs both | fixed by TICKET-272 (2026-10-20): `Lexer::question` reads a `?` run by its spacing |
-| S2-4 ✔ | P2 | `return a / b, a % b` | `expected end of line, found ','` | CPython, Go `3 1` | not filed |
+| S2-4 ✔ | P2 | `return a / b, a % b` | `expected end of line, found ','` | CPython, Go `3 1` | fixed (re-run 2026-11-08, release `5dc9f69c`: prints `3 1`) |
 | S2-7 | P3 | 1-tuple type and pattern | parse error; renders `(int)` | Rust `(i64,)` | fixed by TICKET-273 (one comma-list reader, `comma_tail`; one tuple writer, `tuple_tail`) |
 | S3-1 ✔ | P1 | check and run are exponential in a `recv.name[X](args)` chain: `.map[int](inc)` repeated | 12 links 224 ms, 16 links 3.5 s, 18 links over 10 s; without `[int]` 30 links take 8 ms | rustc: 30 links in 81 ms | fixed by TICKET-269 (debug `chezzi check`, 16 links: 7243 ms -> 27 ms) |
-| S3-3 ✔ | P2 | `t.0[i](5)` on a tuple whose element 0 is a list of functions | `unknown type 'i'` (read as a type argument); `t.0[0](5)` works | Rust, CPython `4` | not filed |
-| S3-4 ✔ | P2 | the generator ban on `spawn`/`defer`/`parallel:`/`wait:` is bypassed inside a `recover:` block in an `assert`; same gap gives a false "`yield` can only appear inside a generator" | check OK; the task outlives the generator | the checker's own rule | not filed |
+| S3-3 ✔ | P2 | `t.0[i](5)` on a tuple whose element 0 is a list of functions | `unknown type 'i'` (read as a type argument); `t.0[0](5)` works | Rust, CPython `4` | fixed (re-run 2026-11-08, release `5dc9f69c`: `t.0[i](5)` prints `4`) |
+| S3-4 ✔ | P2 | the generator ban on `spawn`/`defer`/`parallel:`/`wait:` is bypassed inside a `recover:` block in an `assert`; same gap gives a false "`yield` can only appear inside a generator" | check OK; the task outlives the generator | the checker's own rule | open (the `stmt_expr_recover_blocks` row below) |
 | S3-6 | P3 | grammar and parser drift that the conformance test cannot see: `(x) := 5`, `enum E: A()`, `where T: None` | parser and `docs/reference/grammar.bnf` disagree on accept/reject | — | not filed; the negative literal in a sub-pattern (`(-1.5, -2):`) is in the grammar since 2026-11-03 |
 
 Facts with several deciders (from the grammar hunter's table):

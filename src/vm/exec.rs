@@ -354,7 +354,7 @@ impl Vm {
     /// TICKET-194 — THE re-entry bracket: raises `native_reentry` around `f`, with no cancellation
     /// checkpoint. A native that calls user code ONCE (an operator or protocol hook, a generator
     /// resume, `update`/`read`/`write`) enters it here: that call does not wait, so it is not a
-    /// cancellation point (owner decision 1, `docs/history/bug-hunts/w18.md`). The callee's own back-edges
+    /// cancellation point (owner decision: only a wait or a loop back-edge is one). The callee's own back-edges
     /// and waits still cut it. A run-wide halt still lands at the hook's frame push
     /// ([`Vm::call_halt`], TICKET-224).
     pub(super) fn reentered<T>(

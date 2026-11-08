@@ -1,5 +1,3 @@
-> Source: moved verbatim from `docs/reference/concurrency.md` §6h. Open proposal (milestone M25), not implemented.
-
 ## 6h. M25 — killable subprocesses (`std.process` + cancellation) — **SPEC, not yet implemented**
 
 **Problem.** Cancellation in Chezzi is *cooperative* (§6e): a `Token` signals, and the callee polls.

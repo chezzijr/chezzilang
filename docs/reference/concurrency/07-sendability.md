@@ -58,7 +58,7 @@ print(c.n)                   # 1
 Two tasks that write one value without a join, a `Channel` or a box between them race. The race is
 memory-safe ([§2](01-model.md), "Data races"): a wrong value, a missed map hit or an
 out-of-range task fault, never a VM panic. No check error and no run-time fault guards a task's
-write. The old copy rule (D4) is history: [`adr-d4-airlock.md`](../../design/adr-d4-airlock.md).
+write.
 
 ### Generators
 

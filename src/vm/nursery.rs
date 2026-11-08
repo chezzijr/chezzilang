@@ -562,8 +562,8 @@ impl Vm {
         // Cross-nursery flat scheduler — the OUTERMOST nursery (`self.mn.is_none()`) builds the ONE
         // global sched + farms helpers; a NESTED nursery (`self.mn.is_some()`) REUSES it (register a
         // scope, enlist into the same global run queue, run its inline owner scope-scoped). Because the
-        // inline owner drains the GLOBAL queue, it naturally runs cross-nursery siblings — the case-A
-        // fix (`docs/history/designs/cross-nursery-flat-scheduler.md`). Nested owners farm NO helpers (they run inline
+        // inline owner drains the GLOBAL queue, it naturally runs cross-nursery siblings, so a send
+        // in one nursery wakes a receiver in another. Nested owners farm NO helpers (they run inline
         // on the worker thread that called them).
         //
         // A THIRD case: `self.mn.is_none()` (no nested sched installed — the body runs `mn == None`) yet a

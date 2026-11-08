@@ -91,11 +91,7 @@ The full text of every convention, moved out of `CLAUDE.md` (which every agent t
   channel got their gate wrong on the first attempt in exactly this way: W8-2's filed prescription
   ("a discarded carrier is a compile error at top level") was false because the RUNTIME then aborted
   there, and its recommended escape `_ := g()` turned rc=1 into rc=0 — TICKET-038 later reversed the
-  runtime abort itself for exactly that reason, so the warning fires at top level too now; the airlock rule's filed
-  "locals only, `is_local_capture` draws exactly this line" would not have warned on its own filed
-  repro, because at module top level the binding is scope 0 (the gate then took scope 0 in; M3.1
-  made a module global the run's one copy, so a task write to it is legal, and M3.4 deleted the
-  rule with the rest of D4 layer A). Two
+  runtime abort itself for exactly that reason, so the warning fires at top level too now. Two
   corollaries: derive the gate from an **exhaustive** enumeration of the compiler seam that decides it
   (W8-2's is the eight `FnComp::new` sites), and when unsure **decline** — an under-warn is a ceiling
   you can pin with a test, an over-warn teaches users to ignore the channel.
@@ -111,5 +107,5 @@ The full text of every convention, moved out of `CLAUDE.md` (which every agent t
   `docs/contributing/bug-discovery.md`. Corollary for any
   heuristic verdict (deadlock detection, resource caps, inference fallbacks): when unsure it must
   **decline** (hang / stay silent / ask), never emit a confident wrong answer — a missing answer is
-  recoverable, a wrong one teaches distrust of every answer. Worked example + measured Go/CPython
-  table: `docs/history/bug-hunts/w07.md` **W7-12**.
+  recoverable, a wrong one teaches distrust of every answer. Worked example: gaps row **W7-12**
+  (`git log -S W7-12`).

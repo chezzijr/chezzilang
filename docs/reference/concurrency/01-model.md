@@ -9,10 +9,7 @@ per operation, so the single-threaded fast path pays no lock.
 
 The engine is a real OS-thread M:N work-stealing scheduler with reduction-counting preemption, a
 dirty/blocking pool, and an epoll/kqueue netpoller behind non-blocking `std.net`. Every function body
-and the module top level is an implicit nursery, so a bare `spawn` is legal anywhere. Design records:
-[`concurrency-tier-d.md`](../../history/designs/concurrency-tier-d.md),
-[`concurrency-b3.md`](../../history/designs/concurrency-b3.md) and
-[`concurrency-roadmap.md`](../../history/designs/concurrency-roadmap.md). Scheduler internals:
+and the module top level is an implicit nursery, so a bare `spawn` is legal anywhere. Scheduler internals:
 [`docs/design/concurrency-runtime.md`](../../design/concurrency-runtime.md).
 
 Chapters:
@@ -46,12 +43,11 @@ Chapters:
 
 ## 2. The memory model: one heap, Go's rules
 
-Until 2026-10, each task had its own heap, and a value that crossed a task boundary was deep-copied
-([ADR D4](../../design/adr-d4-airlock.md), now superseded). The shared heap replaced that model with
-Go's (M1 to M3, 2026-10). The old reason to reject Go was the cost of
+Until 2026-10, each task had its own heap, and a value that crossed a task boundary was deep-copied.
+The shared heap replaced that model with Go's (M1 to M3, 2026-10). The old reason to reject Go was the cost of
 `Rc`→`Arc` on every value. That reason did not hold: a `Value` is one word with no reference count,
-so a shared heap needed atomic slots and a stop-the-world collector, not a new value model. The study
-and the plan: [`go-shared-heap.md`](../../design/go-shared-heap.md).
+so a shared heap needed atomic slots and a stop-the-world collector, not a new value model. The Go facts
+and the open work: [`go-shared-heap.md`](../../design/go-shared-heap.md).
 
 ### Memory picture: one heap per run, channel between
 
@@ -179,7 +175,7 @@ two tasks write concurrently, use `Shared[T]` / `RwShared[T]` / `Atomic[T]`
 
 **The trade:** a send, a spawn argument and a box store cost one word whatever the value's size,
 and a race is your bug, as in Go. Go finds a race with `go run -race`; Chezzi has no race detector
-(design phase 6 in [`go-shared-heap.md`](../../design/go-shared-heap.md#6-experiment-plan)).
+(race detection in [`go-shared-heap.md`](../../design/go-shared-heap.md#3-open-work)).
 
 ---
 

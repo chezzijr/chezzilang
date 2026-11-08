@@ -1,12 +1,10 @@
 # Design — generics on Rust's model, and `T?` / `T!E` without Rust's names
 
 **Status: accepted, implemented.** R1-R2 in TICKET-222, R3/R3b in TICKET-229, R4 in TICKET-226, R5 in
-TICKET-225 (narrowed by TICKET-238), D1 in TICKET-231, D2-D3 in TICKET-227, D4-D6 in TICKET-228. The
-full draft with its bug table and the per-step implementation notes is kept verbatim in
-[`history/designs/generics-and-carriers-full.md`](../history/designs/generics-and-carriers-full.md).
+TICKET-225 (narrowed by TICKET-238), D1 in TICKET-231, D2-D3 in TICKET-227, D4-D6 in TICKET-228. This file
+keeps the rules and the decision log; the user-facing text is in the reference chapters.
 
-**Why.** Sweeps #5 and #6 ([`w20.md`](../history/bug-hunts/w20.md),
-[`w21.md`](../history/bug-hunts/w21.md)) found 2 P0 generic/path bugs each. Each came from one fact
+**Why.** Sweeps #5 and #6 found 2 P0 generic/path bugs each. Each came from one fact
 decided in several places. This design fixes the architecture once and settles the surface of
 optional and error values.
 
@@ -60,23 +58,6 @@ evaluator covers all pure ops.
 - Lifetimes and the `::<>` syntax: not adopted from Rust.
 - A separate resolver pre-pass for R1: it needs a second scope model; Rust also resolves
   type-relative paths during type checking.
-
-### Grid tests that gate Part 1
-
-1. **Path grid:** type-arg shape {`int`, `List[int]`, `Map[str, int]`, `(int, str)`,
-   `fn(int) -> int`, `lib.T`, `lib.Bx[int]`, `int?`} x head {local generic, imported, `lib.f`,
-   `a.b.f`, `json.decode`, `math.abs`, `Bx[..].static`, `Bx[..].inst`, `E[..].Payload`,
-   `E[..].Nullary`, `T.m`, prelude variants, imported variants} x position {call, let, typed let, HOF
-   arg, `(h[X])(..)`, `Head[X].m(..)`, `==`, spawn target, `spawn:` capture, default, guard}.
-   Variant grid: `tests/carrier_enum_grid.rs`.
-2. **Fn-value grid** (`tests/chz/spec/fn_value_grid_test.chz`): kind {plain, method path, variant,
-   `T.m`, `json.decode[T]`, closure, native, builtin, extern} x consumer {call, spawn callee, spawn
-   arg, submit, submit_result, channel round trip, `==` (same site, two sites, two modules), repr,
-   snapshot}, plus a completeness test that fails when a new callable kind lacks a consumer arm.
-3. **Join grid:** join {if, elif, match, `??`, list, map, set, `==`} x order x sibling {concrete fn,
-   another unpinned generic (must reject)}.
-4. **Constant grid:** every slot of the assignability funnel x constant {literal, folded expression
-   (`1 << 8`, `3e38 + 3e38`)} x every width.
 
 ---
 

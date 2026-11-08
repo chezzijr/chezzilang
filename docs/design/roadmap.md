@@ -2,13 +2,8 @@
 
 > **Status:** open ideas only. Nothing here is committed work.
 > [`PROGRESS.md`](../../PROGRESS.md) is the source of truth for what is scheduled and done.
-> The sections that shipped (`defer`, concurrency, the oracle-layer rebuild, eager `Executor` and
-> `spawn`, the scripting features, witness-passing generics, the M20 test runner, the native-registry
-> `Kind`, and the landed M19 perf levers) are kept verbatim in
-> [`history/designs/future-shipped.md`](../history/designs/future-shipped.md) (§1-§3) and
-> [`history/designs/future-shipped-2.md`](../history/designs/future-shipped-2.md) (§3a1-§4).
-> Section numbers below match the old `future.md` numbers, so old `future.md §N` references still find
-> their topic.
+> Shipped sections are deleted; git keeps them. Section numbers below match the old `future.md`
+> numbers, so old `future.md §N` references still find their topic.
 
 | § | topic | state |
 |---|---|---|
@@ -61,8 +56,6 @@ measured rate. The open rows are in [`gaps.md`](../contributing/gaps.md) (W15-10
 
 Step 0 counts `live = 1 + Σ ExecutorCore::outstanding`. A party registers a `PartyWait` while it is
 blocked. `Vm::join_eager_jobs` registers `PartyWait::Join`, so `main` inside `shutdown()` is visible.
-The design record and the incident history are in
-[`future-shipped.md`](../history/designs/future-shipped.md) §2c and §2d.
 
 ### The proposal: a wait-for graph
 
@@ -130,8 +123,7 @@ subset stuck while the rest of the program runs. Go cannot report that.
    was deleted for this bug). A sound version needs a reachability walk from every non-blocked
    party's roots.
 2. **Unify the blocked-party registry with the scheduler's parties** (nursery fibers and demoted
-   workers, which step 0 left out). Overlaps
-   [`cross-nursery-flat-scheduler.md`](../history/designs/cross-nursery-flat-scheduler.md).
+   workers, which step 0 left out). Overlaps the cross-nursery flat-scheduler fix.
 3. **AND-OR knot detection** over that registry, with every veto kept, run only on suspicion. This
    adds partial-deadlock reports only.
 4. **Retire the `netio.rs` native-callback fault arm**, if a callback can ever block.
@@ -195,8 +187,7 @@ reference docs.
 ## 4. Optimizations: open levers
 
 Live numbers are in [`benchmarks.md`](../contributing/benchmarks.md) (reproduce with
-`benches/run.chz`). The landed M19 levers and their measured deltas are in
-[`future-shipped-2.md`](../history/designs/future-shipped-2.md) §4.
+`benches/run.chz`). The landed M19 levers are listed in [`PROGRESS.md`](../../PROGRESS.md).
 
 **Discipline for every lever:** a failing-then-green correctness test, the suite green at both worker
 counts, a measurement on `benches/run.chz`, and the delta recorded in `benchmarks.md`.
@@ -232,8 +223,7 @@ counts, a measurement on `benches/run.chz`, and the delta recorded in `benchmark
 
 ### Leads
 
-- **Debug-build M:N stall when the pool covers every free core** (from W12-23, see
-  [`history/bug-hunts/w12.md`](../history/bug-hunts/w12.md)). The 10k-fiber D3 program on the debug
+- **Debug-build M:N stall when the pool covers every free core** (from W12-23). The 10k-fiber D3 program on the debug
   CLI finishes in 0.3 s at `CHEZZI_THREADS=8` and 1.0 s at 24, but runs past 120 s at 27/28 (= nproc)
   while other cargo builds share the box. The release binary takes 0.17 s at 28 beside 20 CPU hogs.
   Under a 4-core `CPUQuota` with 28 hogs the debug CLI did not stall (11.6-13.6 s), so the trigger is

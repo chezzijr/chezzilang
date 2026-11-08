@@ -4,8 +4,7 @@
 //! agree; nothing enforced it, because a stale number fails no assertion. This is that assertion.
 //!
 //! The table in `docs/contributing/gaps.md` is the source of truth: one `| **W<wave>-n** |` row per OPEN row (a
-//! closed row is struck as `| ~~**W<wave>-n**~~ |` and stops matching, and a closed row now lives in
-//! `docs/history/bug-hunts/closed-rows.md`). The filter was `| **W8-` until 2026-09-20, when the ledger split left it
+//! closed row is deleted from the table; git keeps it). The filter was `| **W8-` until 2026-09-20, when the ledger split left it
 //! holding open rows from W8 through W14; a wave-scoped filter would have counted 2 of 11. The two prose counters —
 //! `docs/contributing/gaps.md`'s section header and `PROGRESS.md`'s ledger paragraph — must equal it.
 

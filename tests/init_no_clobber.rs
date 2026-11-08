@@ -77,12 +77,4 @@ fn docs_state_that_init_never_overwrites() {
         syntax.contains("It never overwrites a file that is already there."),
         "docs/reference/syntax/13-testing-and-entry.md should state that init never overwrites a file that is already there"
     );
-
-    // Closed rows moved to `docs/history/bug-hunts/closed-rows.md` on 2026-09-20 when `docs/contributing/gaps.md` became a
-    // short open-row ledger; W8-24 is struck there, verbatim.
-    let gaps = std::fs::read_to_string(root.join("docs/history/bug-hunts/closed-rows.md")).unwrap();
-    assert!(
-        gaps.contains("| ~~**W8-24**~~ |"),
-        "docs/history/bug-hunts/closed-rows.md should mark W8-24 as closed"
-    );
 }

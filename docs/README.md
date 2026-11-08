@@ -41,10 +41,9 @@ Start with the [syntax reference](reference/syntax/01-lexical-and-literals.md). 
 | [value-structs.md](design/value-structs.md) | Proposal, not started; §9 explicit value/ref structs is the owner-preferred route |
 | [packed-storage.md](design/packed-storage.md) | Proposal, not started |
 | [ffi-and-packaging.md](design/ffi-and-packaging.md) | Proposal, not started |
-| [adr-d4-airlock.md](design/adr-d4-airlock.md) | Superseded 2026-10-29 by the shared heap (merged to `main` 2026-10-31) |
 | [generics-and-carriers.md](design/generics-and-carriers.md) | Accepted and implemented |
 | [go-shared-heap.md](design/go-shared-heap.md) | Done: M1 to M5, merged to `main` 2026-10-31 |
 
 ## History
 
-[history/](history/README.md) keeps records of finished work: the dated progress log, bug-hunt waves, benchmark entries and shipped designs. These files are not maintained.
+[progress/2026-11.md](history/progress/2026-11.md) is this month's dated log of finished work, newest first. Older records are in git: `git log -- docs/history`.

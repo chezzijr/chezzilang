@@ -1,6 +1,5 @@
 //! The docs are many small files that link to each other, and a move or a split breaks a link
-//! without failing any build. This test is the guard for the live docs (everything but
-//! `docs/history/`, which keeps its records as they were written):
+//! without failing any build. This test is the guard for the docs:
 //!
 //! 1. every relative markdown link resolves to a file, and its `#anchor` to a heading in that file;
 //! 2. no live doc grows past `MAX_LINES`, so each file stays small enough to read;
@@ -12,7 +11,7 @@ use std::path::{Path, PathBuf};
 
 const MAX_LINES: usize = 600;
 
-/// The root docs plus every `.md` under `docs/` except `docs/history/`.
+/// The root docs plus every `.md` under `docs/`.
 fn live_docs() -> Vec<PathBuf> {
     let mut out: Vec<PathBuf> = ["README.md", "PROGRESS.md", "CLAUDE.md"]
         .iter()
@@ -27,9 +26,7 @@ fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
     for entry in fs::read_dir(dir).unwrap_or_else(|e| panic!("read_dir {}: {e}", dir.display())) {
         let path = entry.unwrap().path();
         if path.is_dir() {
-            if path != Path::new("docs/history") {
-                walk(&path, out);
-            }
+            walk(&path, out);
         } else if path.extension().is_some_and(|x| x == "md") {
             out.push(path);
         }

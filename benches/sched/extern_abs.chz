@@ -1,5 +1,5 @@
 # 1e5 short `extern` C calls in one spawned task: the per-call cost of a watched call
-# (`WaitSpec::Extern`). A demote on each call made this 4.7x slower (docs/history/benchmarks/2026-10.md).
+# (`WaitSpec::Extern`). A demote on each call made this 4.7x slower.
 extern "libc":
     fn labs(x: int) -> int
 

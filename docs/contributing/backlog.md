@@ -1,8 +1,7 @@
 # Chezzi — Design and Ergonomics Backlog
 
 Open limitations found while writing real programs: missing surface and deferred scope. Live BUG rows
-are in [`gaps.md`](gaps.md). Closed backlog entries, the old "verified working" list and the resolved
-log are in [`history/bug-hunts/backlog-closed.md`](../history/bug-hunts/backlog-closed.md). Speculative
+are in [`gaps.md`](gaps.md). Closed entries are in git. Speculative
 tracks are in [`roadmap.md`](../design/roadmap.md); perf numbers are in [`benchmarks.md`](benchmarks.md).
 
 Legend: 🔴 blocks apps · 🟡 friction · ⚪ latent (unreachable) · 🟢 works.
@@ -71,10 +70,8 @@ The ranked list is in [`roadmap.md` §4](../design/roadmap.md); current numbers 
   callbacks, `load_*`/`store_*`, `alloc`/`free`. Still deferred: `str` struct fields, stored or
   cross-thread callbacks, a Rust `Box<dyn Any>` userdata handle, a custom user-named deallocator.
   Design: [`ffi-and-packaging.md` §1b](../design/ffi-and-packaging.md).
-- **Graceful shutdown of accept loops**, plus a per-connection handler -> acceptor signal channel
-  (`docs/history/designs/concurrency-tier-d.md`).
-- **Reduction-constant tuning** (D3): choose `CONTEXT_REDS` and per-op vs per-back-edge accounting
-  (`docs/history/designs/concurrency-tier-d.md`).
+- **Graceful shutdown of accept loops**, plus a per-connection handler -> acceptor signal channel.
+- **Reduction-constant tuning** (D3): choose `CONTEXT_REDS` and per-op vs per-back-edge accounting.
 
 ## By-design non-goals (revisit only if it bites)
 
