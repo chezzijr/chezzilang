@@ -1,0 +1,48 @@
+# Library Checker unionfind: disjoint-set union with path halving and union by size.
+import std.io
+
+# Whitespace-separated tokens of all of stdin.
+fn read_tokens() -> List[str]:
+    toks: List[str] = []
+    for t in io.read_all().replace("\n", " ").replace("\t", " ").split(" "):
+        if t != "":
+            toks.push(t)
+    return toks
+
+fn int_at(toks: List[str], i: int) -> int:
+    return toks[i].trim().to_int() ?? panic("input is not an int: {toks[i]}")
+
+fn find(parent: List[int], x: int) -> int:
+    v := x
+    while parent[v] != v:
+        parent[v] = parent[parent[v]]
+        v = parent[v]
+    return v
+
+fn main():
+    toks := read_tokens()
+    n := int_at(toks, 0)
+    q := int_at(toks, 1)
+    parent: List[int] = []
+    size: List[int] = []
+    for i in 0..n:
+        parent.push(i)
+        size.push(1)
+    out: List[str] = []
+    for k in 0..q:
+        t := int_at(toks, 2 + 3 * k)
+        a := find(parent, int_at(toks, 3 + 3 * k))
+        b := find(parent, int_at(toks, 4 + 3 * k))
+        if t == 0:
+            if a != b:
+                if size[a] < size[b]:
+                    a, b = b, a
+                parent[b] = a
+                size[a] += size[b]
+        elif a == b:
+            out.push("1")
+        else:
+            out.push("0")
+    io.print("\n".join(out))
+
+main()

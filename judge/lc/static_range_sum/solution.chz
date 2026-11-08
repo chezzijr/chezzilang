@@ -1,0 +1,30 @@
+# Library Checker static_range_sum: prefix sums, sum of a[l..r).
+import std.io
+
+# Whitespace-separated tokens of all of stdin.
+fn read_tokens() -> List[str]:
+    toks: List[str] = []
+    for t in io.read_all().replace("\n", " ").replace("\t", " ").split(" "):
+        if t != "":
+            toks.push(t)
+    return toks
+
+fn int_at(toks: List[str], i: int) -> int:
+    return toks[i].trim().to_int() ?? panic("input is not an int: {toks[i]}")
+
+fn main():
+    toks := read_tokens()
+    n := int_at(toks, 0)
+    q := int_at(toks, 1)
+    pre: List[int] = [0]
+    for i in 0..n:
+        pre.push(pre[i] + int_at(toks, 2 + i))
+    out: List[str] = []
+    base := 2 + n
+    for k in 0..q:
+        l := int_at(toks, base + 2 * k)
+        r := int_at(toks, base + 2 * k + 1)
+        out.push("{pre[r] - pre[l]}")
+    io.print("\n".join(out))
+
+main()

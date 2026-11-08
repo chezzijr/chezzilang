@@ -34,7 +34,7 @@ The remedy has two parts:
 | Grammar conformance | `docs/reference/grammar.bnf`, `src/conformance.rs`, `tests/corpus/`, `cargo test conformance` | parser drift from the grammar (syntax only) |
 | Panic-fuzz | `src/panicfuzz/`, `tests/panicfuzz.rs`, `src/bin/panicfuzz.rs` | a Rust panic or signal crash in `chezzi check` |
 | CPython differential | `src/difftest/`, `tests/difftest.rs`, `src/bin/difffuzz.rs` | stdout that differs from CPython on generated programs |
-| DSA known-answer judge | `judge/`, `tests/judge.rs` | wrong answers on hand-written CSES solutions |
+| DSA known-answer judge | `judge/`, `tests/judge.rs` | wrong answers on Library Checker and CSES problems |
 | Seeded scheduler | `src/schedfuzz/`, `src/vm/sched_seed.rs`, `src/bin/schedfuzz.rs` | hangs, panics, exit-code or output changes under explored schedules |
 | Adversarial review | `/kit:review` (prosecute, defend, judge) | defects in a known change (not a discovery tool) |
 

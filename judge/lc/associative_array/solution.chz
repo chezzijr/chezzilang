@@ -1,0 +1,31 @@
+# Library Checker associative_array: "0 k v" sets a[k] = v, "1 k" prints a[k] (0 when unset).
+import std.io
+
+# Whitespace-separated tokens of all of stdin.
+fn read_tokens() -> List[str]:
+    toks: List[str] = []
+    for t in io.read_all().replace("\n", " ").replace("\t", " ").split(" "):
+        if t != "":
+            toks.push(t)
+    return toks
+
+fn int_at(toks: List[str], i: int) -> int:
+    return toks[i].trim().to_int() ?? panic("input is not an int: {toks[i]}")
+
+fn main():
+    toks := read_tokens()
+    q := int_at(toks, 0)
+    a: Map[int, int] = Map()
+    out: List[str] = []
+    pos := 1
+    for _ in 0..q:
+        key := int_at(toks, pos + 1)
+        if int_at(toks, pos) == 0:
+            a[key] = int_at(toks, pos + 2)
+            pos += 3
+        else:
+            out.push("{a.get(key) ?? 0}")
+            pos += 2
+    io.print("\n".join(out))
+
+main()

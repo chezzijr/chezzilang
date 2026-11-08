@@ -1,0 +1,10 @@
+import std.io
+
+fn main():
+    line := io.read_line() ?? ""
+    parts := line.split(" ")
+    a := parts[0].trim().to_int() ?? panic("input is not an int")
+    b := parts[1].trim().to_int() ?? panic("input is not an int")
+    io.print("{a + b}")
+
+main()

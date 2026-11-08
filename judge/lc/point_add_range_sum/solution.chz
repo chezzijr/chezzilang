@@ -1,0 +1,51 @@
+# Library Checker point_add_range_sum: Fenwick tree (binary indexed tree).
+import std.io
+
+# Whitespace-separated tokens of all of stdin.
+fn read_tokens() -> List[str]:
+    toks: List[str] = []
+    for t in io.read_all().replace("\n", " ").replace("\t", " ").split(" "):
+        if t != "":
+            toks.push(t)
+    return toks
+
+fn int_at(toks: List[str], i: int) -> int:
+    return toks[i].trim().to_int() ?? panic("input is not an int: {toks[i]}")
+
+fn add(tree: List[int], p: int, x: int):
+    i := p + 1
+    while i < tree.len():
+        tree[i] += x
+        i += i & -i
+
+# Sum of a[0..p).
+fn prefix(tree: List[int], p: int) -> int:
+    s := 0
+    i := p
+    while i > 0:
+        s += tree[i]
+        i -= i & -i
+    return s
+
+fn main():
+    toks := read_tokens()
+    n := int_at(toks, 0)
+    q := int_at(toks, 1)
+    tree: List[int] = []
+    for _ in 0..n + 1:
+        tree.push(0)
+    for i in 0..n:
+        add(tree, i, int_at(toks, 2 + i))
+    out: List[str] = []
+    pos := 2 + n
+    for _ in 0..q:
+        a := int_at(toks, pos + 1)
+        b := int_at(toks, pos + 2)
+        if int_at(toks, pos) == 0:
+            add(tree, a, b)
+        else:
+            out.push("{prefix(tree, b) - prefix(tree, a)}")
+        pos += 3
+    io.print("\n".join(out))
+
+main()

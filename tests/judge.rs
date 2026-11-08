@@ -1,5 +1,5 @@
 //! Gate over the `judge/` known-answer oracle: `judge/run.chz` must type-check against the
-//! current `std.fs` surface, or the oracle silently bit-rots with nothing to notice (TICKET-047).
+//! current `std.fs` surface, or the oracle silently bit-rots with nothing to notice.
 
 use std::process::Command;
 
@@ -108,19 +108,14 @@ fn judge_harness_honours_chezzi_bin() {
     );
 }
 
-/// The full sweep, off the default `cargo test` path (40.9 s for 318 cases on a release
-/// binary, and far slower on a debug one). Run `python3 judge/generate.py` first, then
-/// `cargo test --release --test judge -- --ignored`. Mirrors
-/// `tests/difftest.rs::fuzz_full_heavy`.
+/// The full sweep: the committed samples plus every `judge/lc/<problem>` solution against its
+/// Library Checker cases and checker. Off the default `cargo test` path: the first run clones the
+/// pinned Library Checker commit into `judge/vendor/` and builds the cases with g++. Run
+/// `cargo test --release --test judge -- --ignored`.
 #[test]
 #[ignore]
 fn judge_full_sweep_heavy() {
-    let data = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("judge/data");
-    assert!(
-        data.is_dir(),
-        "judge/data/ is missing - run: python3 judge/generate.py"
-    );
-    let (ok, stdout, stderr) = judge(&["run", "judge/run.chz"]);
+    let (ok, stdout, stderr) = judge(&["run", "judge/run.chz", "--timeout", "30"]);
     assert!(
         ok && stdout.contains("0 failure(s), 0 problem(s) skipped"),
         "full judge sweep did not pass clean:\n{stdout}\n{stderr}"

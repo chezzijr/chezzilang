@@ -224,40 +224,20 @@ Real algorithms live at those edges. The judge runs hand-written competitive-pro
 (deep recursion, big-int boundaries, heavy `List`/`Map`/`Set` churn, grids, slicing) against known
 answers, so its oracle depends on neither the VM nor CPython.
 
-- **Source of truth:** the CSES Problem Set. Each `judge/problems/<slug>/solution.chz` reads stdin
-  (`std.io.read_line`). It is vetted once against the published answer; a later divergence is a
-  candidate regression.
-- **Test cases:** committed public samples in `judge/problems/<slug>/samples/*.in`/`.out`, plus
-  generated or official cases in `judge/data/<slug>/` (gitignored). Official CSES hidden data is the
-  authors' IP; drop it into `judge/data/` by hand if you have it. `judge/fetch_problem.py <url>`
-  scaffolds a problem from its public statement and samples.
+- **Library Checker** (`judge/lc/<problem>/solution.chz`): about 250 data-structure and algorithm
+  problems from [library-checker-problems](https://github.com/yosupo06/library-checker-problems),
+  pinned to one commit. The harness clones it into `judge/vendor/` (gitignored), builds each
+  problem's random and edge cases with its `generate.py` (g++), and judges each answer with the
+  problem's own checker. The correct answers come from its C++ reference solution.
+- **CSES samples** (`judge/problems/<slug>/`): 12 hand-written solutions with their committed public
+  samples, judged by token compare. This is the fast cargo gate.
 - **The harness is a Chezzi program** (`judge/run.chz`). It runs each case with
   `sh -c "timeout N chezzi run solution.chz < case.in"` (`std.process` cannot pipe stdin yet), so a
-  hang (`TIME`), crash or host panic (`PANIC`) stays isolated. It compares output with whitespace
-  normalized (CSES checkers ignore whitespace).
+  hang (`TIME`), crash or host panic (`PANIC`) stays isolated.
 
-**Generated oracle (no download).** Each problem ships `gen.py` (random input within the stated range)
-and `reference.py` (an independent Python solution: a brute force for small inputs plus a fast path
-for stress inputs). `judge/generate.py` feeds the same input to both and writes `judge/data/<slug>/`.
-The reference uses a different algorithm from the solution (union-find vs flood fill, enumeration vs
-DP), so an agreeing pair cannot hide a shared bug. 12 problems (11 CSES + 1 Codeforces), 318 committed
-and generated cases, all clean.
-
-```sh
-cargo build --release
-python3 judge/generate.py [--count N]                      # synthesize in-domain cases (no download)
-./target/release/chezzi run judge/run.chz                  # all problems (samples + generated cases)
-./target/release/chezzi run judge/run.chz weird_algorithm  # one problem
-./target/release/chezzi run judge/run.chz --samples-only    # committed samples only (the cargo gate)
-python3 judge/fetch_problem.py <url> [slug]                # scaffold a new problem from its statement
-```
-
-`tests/judge.rs` gates the harness on every `cargo test` (type check + the committed samples).
-
-Verdicts: `PASS`; `WRONG` (prints the first differing line); `FAULT` (Chezzi runtime error + exit
-code); `PANIC` (Rust host panic, a Chezzi bug for certain); `TIME` (timeout). A problem with no cases
-is skipped, never failed. For a non-`PASS` verdict on a vetted solution: minimize the failing `.in`,
-then land a failing-then-green test before the fix.
+How to run it, add a problem and read the verdicts: [`judge/README.md`](../../judge/README.md).
+`tests/judge.rs` runs the samples on every `cargo test`; `cargo test --release --test judge --
+--ignored` runs the full sweep.
 
 ## Seeded scheduler oracle (`src/schedfuzz/`)
 

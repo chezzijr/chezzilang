@@ -1,0 +1,66 @@
+# Library Checker shortest_path: Dijkstra with a binary heap on a directed graph, then the path.
+import std.io
+import std.collections as col
+
+# Whitespace-separated tokens of all of stdin.
+fn read_tokens() -> List[str]:
+    toks: List[str] = []
+    for t in io.read_all().replace("\n", " ").replace("\t", " ").split(" "):
+        if t != "":
+            toks.push(t)
+    return toks
+
+fn int_at(toks: List[str], i: int) -> int:
+    return toks[i].trim().to_int() ?? panic("input is not an int: {toks[i]}")
+
+fn main():
+    toks := read_tokens()
+    n := int_at(toks, 0)
+    m := int_at(toks, 1)
+    s := int_at(toks, 2)
+    t := int_at(toks, 3)
+    adj: List[List[(int, int)]] = []
+    for _ in 0..n:
+        adj.push([])
+    for e in 0..m:
+        a := int_at(toks, 4 + 3 * e)
+        b := int_at(toks, 5 + 3 * e)
+        c := int_at(toks, 6 + 3 * e)
+        adj[a].push((b, c))
+    inf := -1
+    dist: List[int] = []
+    prev: List[int] = []
+    for _ in 0..n:
+        dist.push(inf)
+        prev.push(-1)
+    dist[s] = 0
+    h := col.Heap([], fn(x: (int, int), y: (int, int)) -> bool: x.0 < y.0)
+    h.push((0, s))
+    while true:
+        match h.pop():
+            ?top:
+                d, u := top
+                if d != dist[u]:
+                    continue
+                for edge in adj[u]:
+                    v, c := edge
+                    nd := d + c
+                    if dist[v] == inf or nd < dist[v]:
+                        dist[v] = nd
+                        prev[v] = u
+                        h.push((nd, v))
+            None: break
+    if dist[t] == inf:
+        io.print("-1")
+        return
+    path: List[int] = [t]
+    while path[path.len() - 1] != s:
+        path.push(prev[path[path.len() - 1]])
+    out: List[str] = ["{dist[t]} {path.len() - 1}"]
+    i := path.len() - 1
+    while i > 0:
+        out.push("{path[i]} {path[i - 1]}")
+        i -= 1
+    io.print("\n".join(out))
+
+main()

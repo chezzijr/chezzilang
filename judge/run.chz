@@ -1,30 +1,35 @@
-# judge/run.chz — DSA known-answer bug-finding harness (CSES-backed), written in Chezzi itself.
+# judge/run.chz: DSA known-answer harness, written in Chezzi.
 #
-# Runs each hand-written solution under judge/problems/<slug>/solution.chz against its test cases —
-# the committed public samples (judge/problems/<slug>/samples/*.in/.out) AND the gitignored full
-# downloaded suite (judge/data/<slug>/*.in/.out) — diffing the solution's stdout (whitespace-
-# normalized) against the expected output. A mismatch on a *vetted* solution is a candidate Chezzi
-# bug → triage. Writing the harness in Chezzi dogfoods the language: the judge is itself bug-bait, and
-# it mirrors the benches/run.chz pattern (a .chz driver shelling out via std.process).
+# Two problem roots:
+#   judge/problems/<slug>/  a hand-written solution + committed samples (samples/N.in, N.out),
+#                           judged by token compare. `--samples-only` runs these alone (the cargo gate).
+#   judge/lc/<problem>/     a solution to a Library Checker problem
+#                           (github.com/yosupo06/library-checker-problems, pinned below). The harness
+#                           clones the repo into judge/vendor/ (gitignored), builds the cases with its
+#                           generate.py (needs g++ and python3), and judges each answer with the
+#                           problem's own checker.
 #
-# Each solution runs in a SUBPROCESS via `sh -c "timeout N chezzi run solution.chz < case.in"`, so a
-# solution that infinite-loops (TIME), hard-crashes, or panics the host (PANIC) is isolated and caught
-# instead of taking down the harness — exactly the failure modes we hunt. (std.process has no stdin
-# piping yet, so the `< case.in` shell redirection feeds the case input.)
+# Each solution runs in a subprocess (`timeout N chezzi run solution.chz < case.in`), so a loop (TIME),
+# a runtime error (FAULT) or a host panic (PANIC) is caught instead of ending the harness.
 #
 # Usage (from the repo root, after `cargo build --release`):
-#   ./target/release/chezzi run judge/run.chz                   # all problems
-#   ./target/release/chezzi run judge/run.chz <slug>            # one problem
-#   ./target/release/chezzi run judge/run.chz --samples-only    # committed samples only (the cargo gate)
-# Exits non-zero if any case fails. `CHEZZI_BIN` overrides the binary under test.
+#   ./target/release/chezzi run judge/run.chz                  # every problem in both roots
+#   ./target/release/chezzi run judge/run.chz unionfind        # one problem
+#   ./target/release/chezzi run judge/run.chz --samples-only   # judge/problems samples only
+#   ./target/release/chezzi run judge/run.chz --timeout 30     # per-case limit in seconds (default 10)
+# Exits 1 if any case fails. `CHEZZI_BIN` overrides the binary under test.
 
 import std.io
 import std.fs
 import std.process
 import std.os
 
+LC_URL := "https://github.com/yosupo06/library-checker-problems"
+LC_PIN := "73876f1cbcf082d2b22722924b924d3d65a2f00e"
+LC_ROOT := "judge/vendor/library-checker-problems"
+
 struct Verdict:
-    tag: str       # PASS | WRONG | FAULT | PANIC | TIME | NOEXP | SPAWN
+    tag: str       # PASS | WRONG | FAULT | PANIC | TIME | CHECK | NOEXP | SPAWN
     detail: str    # human hint for a failure (empty for PASS)
 
 # CSES's default checker compares the *token sequence*, ignoring ALL whitespace (spaces, tabs, and
@@ -73,32 +78,36 @@ fn first_line(s: str) -> str:
         return ls[0]
     return ""
 
-# All `.in` case paths for a slug: committed samples first, then the generated/downloaded suite
-# (skipped when `samples_only`, so the cargo gate sees exactly the committed cases).
-# `fs.glob` hands back `List[path.Path]` (W7-8), and every consumer below - the shell command
-# string, `strip_suffix`, the printed verdict - is `str`, so each entry is rendered once here
-# with the lossy, never-faulting `Path.str()`.
-fn case_inputs(slug: str, samples_only: bool) -> List[str]:
-    ins: List[str] = []
-    pats := ["judge/problems/{slug}/samples/*.in"]
-    if not samples_only:
-        pats.push("judge/data/{slug}/*.in")
-    for pat in pats:
-        match fs.glob(pat):
-            ?paths:
-                for p in paths:
-                    ins.push(p.str())
-            !e:    ins.extend([])
-    return ins
+fn glob_strs(pat: str) -> List[str]:
+    out: List[str] = []
+    match fs.glob(pat):
+        ?paths:
+            for p in paths:
+                out.push(p.str())
+        !e:    out.extend([])
+    return out
 
-# Run one case; return its verdict.
-fn judge_case(chezzi: str, timeout_s: int, sol: str, infile: str) -> Verdict:
-    expfile := infile.strip_suffix(".in") + ".out"
+# The names of the subdirectories of `dir` that hold `file`.
+fn dirs_with(dir: str, file: str) -> List[str]:
+    out: List[str] = []
+    match fs.list_dir(dir):
+        ?names:
+            for entry in names:
+                name := entry.str()
+                if fs.is_file("{dir}/{name}/{file}"):
+                    out.push(name)
+        !e:    out.extend([])
+    return out
+
+# Run one case; return its verdict. `checker` empty: token compare against `expfile`.
+# Otherwise the Library Checker convention: `checker <in> <got> <expected>`, exit 0 = AC,
+# 3 = the checker itself failed, any other code = wrong answer.
+fn judge_case(chezzi: str, timeout_s: int, sol: str, infile: str, expfile: str, checker: str, gotfile: str) -> Verdict:
     expected := ""
     match io.read_file(expfile):
         ?t:  expected = t
-        !e: return Verdict("NOEXP", "no .out for {infile}")
-    cmd := "timeout {timeout_s} {chezzi} run {sol} < {infile}"
+        !e: return Verdict("NOEXP", "no expected output {expfile}")
+    cmd := "timeout {timeout_s} {chezzi} run {sol} < {infile} > {gotfile}"
     match process.run(cmd):
         ?r:
             if r.code == 124:
@@ -107,26 +116,78 @@ fn judge_case(chezzi: str, timeout_s: int, sol: str, infile: str) -> Verdict:
                 return Verdict("PANIC", first_line(r.stderr))
             if r.code != 0:
                 return Verdict("FAULT", "exit {r.code}: {first_line(r.stderr)}")
-            if " ".join(tokens(r.stdout)) == " ".join(tokens(expected)):
-                return Verdict("PASS", "")
-            return Verdict("WRONG", first_diff(norm_lines(r.stdout), norm_lines(expected)))
         !e:
             return Verdict("SPAWN", e.message())
+    if checker != "":
+        match process.run("{checker} {infile} {gotfile} {expfile}"):
+            ?c:
+                if c.code == 0:
+                    return Verdict("PASS", "")
+                if c.code == 3:
+                    return Verdict("CHECK", first_line(c.stderr))
+                return Verdict("WRONG", first_line(c.stderr))
+            !e:
+                return Verdict("SPAWN", e.message())
+    got := io.read_file(gotfile) ?? ""
+    if " ".join(tokens(got)) == " ".join(tokens(expected)):
+        return Verdict("PASS", "")
+    return Verdict("WRONG", first_diff(norm_lines(got), norm_lines(expected)))
 
-fn find_problems(only: str) -> List[str]:
-    out: List[str] = []
-    match fs.list_dir("judge/problems"):
-        ?names:
-            for entry in names:
-                # `fs.list_dir` hands back `List[path.Path]`; the slug is compared and
-                # interpolated as `str`, so render it once here.
-                name := entry.str()
-                if only != "" and name != only:
-                    continue
-                if fs.is_file("judge/problems/{name}/solution.chz"):
-                    out.push(name)
+# A problem to judge: its solution, its cases, and the checker (empty for token compare).
+struct Problem:
+    slug: str
+    sol: str
+    inputs: List[str]
+    expected_dir: str   # "" = the .out sits next to the .in
+    checker: str
+
+fn sh_ok(cmd: str) -> bool:
+    match process.run(cmd):
+        ?r:
+            if r.code != 0:
+                print("command failed (exit {r.code}): {cmd}")
+                print(r.stderr)
+            return r.code == 0
         !e:
-            print("cannot read judge/problems/ ({e}) — run from the repo root")
+            print("cannot run: {cmd} ({e})")
+            return false
+
+# Clone the pinned Library Checker commit once.
+fn lc_fetch() -> bool:
+    if fs.is_dir(LC_ROOT):
+        return true
+    print("fetching Library Checker {LC_PIN} into {LC_ROOT}")
+    return sh_ok("mkdir -p {LC_ROOT} && cd {LC_ROOT} && git init -q && git fetch -q --depth 1 {LC_URL} {LC_PIN} && git checkout -q FETCH_HEAD")
+
+# Build the cases of one Library Checker problem. generate.py skips the build when the cases are newer
+# than the sources. The reference solutions recurse deeply, so the stack limit is lifted.
+fn lc_problem(slug: str) -> Problem?:
+    cats := dirs_with(LC_ROOT, "{slug}/info.toml")
+    if cats.len() != 1:
+        print("no Library Checker problem named {slug}")
+        return None
+    dir := "{LC_ROOT}/{cats[0]}/{slug}"
+    if not sh_ok("cd {LC_ROOT} && ulimit -s unlimited && python3 generate.py -p {slug} > /dev/null 2>&1"):
+        return None
+    ins := glob_strs("{dir}/in/*.in")
+    return Problem(slug, "judge/lc/{slug}/solution.chz", ins, "{dir}/out", "{dir}/checker")
+
+fn find_problems(only: str, samples_only: bool) -> List[Problem]:
+    out: List[Problem] = []
+    for slug in dirs_with("judge/problems", "solution.chz"):
+        if only == "" or slug == only:
+            sol := "judge/problems/{slug}/solution.chz"
+            out.push(Problem(slug, sol, glob_strs("judge/problems/{slug}/samples/*.in"), "", ""))
+    if samples_only:
+        return out
+    for slug in dirs_with("judge/lc", "solution.chz"):
+        if only != "" and slug != only:
+            continue
+        if not lc_fetch():
+            os.exit(2)
+        match lc_problem(slug):
+            ?p: out.push(p)
+            None: os.exit(2)
     return out
 
 fn main():
@@ -136,51 +197,61 @@ fn main():
     timeout_s := 10
     only := ""
     samples_only := false
-    for a in os.args():
+    args := os.args()
+    i := 0
+    while i < args.len():
+        a := args[i]
         if a == "--samples-only":
             samples_only = true
+        elif a == "--timeout" and i + 1 < args.len():
+            i += 1
+            timeout_s = args[i].to_int() ?? panic("--timeout takes whole seconds")
         else:
             only = a
+        i += 1
 
-    problems := find_problems(only)
+    problems := find_problems(only, samples_only)
     if problems.len() == 0:
-        print("no problems found under judge/problems/")
+        print("no problems found under judge/problems/ or judge/lc/")
         os.exit(2)
+    _ := sh_ok("mkdir -p judge/vendor/got")
 
     total_cases := 0
     total_fail := 0
     skipped := 0
 
-    for slug in problems:
-        sol := "judge/problems/{slug}/solution.chz"
-        inputs := case_inputs(slug, samples_only)
-        if inputs.len() == 0:
+    for pr in problems:
+        if pr.inputs.len() == 0:
             skipped += 1
-            print("SKIP  {slug}  (no cases — commit samples/ or run: python3 judge/generate.py {slug})")
+            print("SKIP  {pr.slug}  (no cases)")
             continue
 
         prob_fail := 0
-        for infile in inputs:
-            v := judge_case(chezzi, timeout_s, sol, infile)
-            # A missing/unpaired .out is a data-fetch gap, not a solution failure → warn and skip,
-            # never count it toward the failure tally / exit code.
+        for infile in pr.inputs:
+            stem := infile.strip_suffix(".in")
+            expfile := stem + ".out"
+            if pr.expected_dir != "":
+                name := stem.split("/")[stem.split("/").len() - 1]
+                expfile = "{pr.expected_dir}/{name}.out"
+            gotfile := "judge/vendor/got/{pr.slug}.out"
+            v := judge_case(chezzi, timeout_s, pr.sol, infile, expfile, pr.checker, gotfile)
+            # A missing .out is a data gap, not a solution failure: warn, do not count it.
             if v.tag == "NOEXP":
-                print(" WARN  {slug}  {infile}  ({v.detail} — skipped)")
+                print(" WARN  {pr.slug}  {infile}  ({v.detail}, skipped)")
                 continue
             total_cases += 1
             if v.tag != "PASS":
                 prob_fail += 1
                 total_fail += 1
                 tag := v.tag.pad_left(5, " ")
-                print("{tag}  {slug}  {infile}")
+                print("{tag}  {pr.slug}  {infile}")
                 print("      {v.detail}")
 
+        n := pr.inputs.len()
         if prob_fail == 0:
-            n := inputs.len()
-            print("PASS  {slug}  ({n} case(s))")
+            print("PASS  {pr.slug}  ({n} case(s))")
         else:
-            n := inputs.len()
-            print("FAIL  {slug}  ({prob_fail}/{n} case(s) failed)")
+            print("FAIL  {pr.slug}  ({prob_fail}/{n} case(s) failed)")
 
     print("")
     print("done: {total_cases} case(s), {total_fail} failure(s), {skipped} problem(s) skipped")

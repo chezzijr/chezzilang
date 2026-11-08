@@ -105,6 +105,9 @@ workspace crates, the blocking-point table (`block::wait_steps`) and the boundar
     select2's heap check.
 12. **`Set.map` / `Set.filter`:** later.
 13. **Bug-hunt sweeps** resume after the refactor. They count toward the JIT entry rule below.
+14. **`fs.glob` matches a wildcard only in the last path part** (`src/native/fs.rs` `glob`):
+    `fs.glob("judge/problems/*/meta.toml")` returns `[]`. Go `filepath.Glob` and Python
+    `glob.glob` both match it, and `05-native-system.md` promises the Go dialect.
 
 Standing owner decision (2026-11-02): `benches/sched/extern_abs` may run slower than base (5-14%
 measured, accepted for that cell only); every other bench cell keeps the 10% gate.
