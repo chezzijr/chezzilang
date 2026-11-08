@@ -81,8 +81,8 @@ fn stat(p: PathLike) -> FileInfo!:
 fn walk(p: PathLike) -> List[path.Path]!:
     return _wrap_many(_walk(p.as_path()))
 
-# glob matches the Go `filepath.Match` dialect (`*`, `?`, `[abc]`, `[a-z]`, `[^abc]`) in the FINAL
-# component only — no recursive `**`, no brace expansion, no escape character. `[` is a
+# glob is Go `filepath.Glob`: the `filepath.Match` dialect (`*`, `?`, `[abc]`, `[a-z]`, `[^abc]`) in
+# ANY component (`a/*/b.txt`) — no recursive `**`, no brace expansion, no escape character. `[` is a
 # metacharacter; a malformed `[...]` class is an error carrying "bad pattern", never a silent `?[]`.
 # The pattern is matched over raw BYTES, so an ASCII pattern still matches a non-UTF-8 filename. `?`
 # and a class's single character consume one Unicode SCALAR wherever the name is valid UTF-8 (Go

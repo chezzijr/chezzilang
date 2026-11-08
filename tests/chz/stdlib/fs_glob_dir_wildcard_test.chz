@@ -1,0 +1,77 @@
+# tests/chz/stdlib/fs_glob_dir_wildcard_test.chz — `fs.glob` matches a wildcard in ANY path part.
+#
+# `fs.glob("judge/problems/*/meta.toml")` returned `[]`: only the last part was matched. Every
+# expected list below is Go 1.26 `filepath.Glob` output on this same tree (run 2026-11-09):
+#   D/a/x.txt  D/a/y.c  D/a-b/x.txt  D/b/x.txt  D/c (file)  D/c.txt  D/d/e/x.txt
+# Go orders results directory by directory, so `D/a/x.txt` comes before `D/a-b/x.txt`.
+
+import std.fs
+import std.os
+import std.path
+
+fn ok_nil(r: None!, what: str):
+    match r:
+        ?_: pass
+        !e: assert false, what + ": " + e.message()
+
+fn fixture(name: str) -> str:
+    d := os.temp_dir().str() + "/chz_globdir_" + name + "_{os.getpid()}"
+    for sub in ["", "/a", "/a-b", "/b", "/d", "/d/e"]:
+        ok_nil(fs.mkdir(d + sub), "mkdir " + sub)
+    for f in ["/a/x.txt", "/a/y.c", "/a-b/x.txt", "/b/x.txt", "/c", "/c.txt", "/d/e/x.txt"]:
+        ok_nil(fs.atomic_write(d + f, "x"), "write " + f)
+    return d
+
+fn cleanup(d: str):
+    for f in ["/a/x.txt", "/a/y.c", "/a-b/x.txt", "/b/x.txt", "/c", "/c.txt", "/d/e/x.txt"]:
+        _ := fs.remove_file(d + f)
+    for sub in ["/d/e", "/d", "/b", "/a-b", "/a", ""]:
+        _ := fs.remove_dir(d + sub)
+
+# The matches with the fixture prefix `d` cut off, so the expected lists stay readable.
+fn rel(d: str, pattern: str) -> List[str]:
+    out: List[str] = []
+    match fs.glob(d + pattern):
+        ?hits:
+            for h in hits:
+                out.push(h.str().strip_prefix(d))
+        !e: assert false, pattern + " must not error: " + e.message()
+    return out
+
+test fn glob_matches_a_wildcard_in_a_directory_part():
+    d := fixture("dir")
+    defer cleanup(d)
+    assert rel(d, "/*/x.txt") == ["/a/x.txt", "/a-b/x.txt", "/b/x.txt"], "{rel(d, "/*/x.txt")}"
+    assert rel(d, "/*/*.txt") == ["/a/x.txt", "/a-b/x.txt", "/b/x.txt"], "{rel(d, "/*/*.txt")}"
+    assert rel(d, "/*/e/x.txt") == ["/d/e/x.txt"], "{rel(d, "/*/e/x.txt")}"
+    assert rel(d, "/?/x.txt") == ["/a/x.txt", "/b/x.txt"], "{rel(d, "/?/x.txt")}"
+    assert rel(d, "/[ab]/x.txt") == ["/a/x.txt", "/b/x.txt"], "{rel(d, "/[ab]/x.txt")}"
+    # A file matched by a directory part is skipped, not an error.
+    assert rel(d, "/c*/*") == [], "{rel(d, "/c*/*")}"
+    assert rel(d, "/*/") == [], "{rel(d, "/*/")}"
+
+test fn glob_without_a_wildcard_returns_the_path_when_it_exists():
+    d := fixture("lit")
+    defer cleanup(d)
+    assert rel(d, "/a/") == ["/a/"], "{rel(d, "/a/")}"
+    assert rel(d, "/a/..") == ["/a/.."], "{rel(d, "/a/..")}"
+    assert rel(d, "/a/x.txt") == ["/a/x.txt"], "{rel(d, "/a/x.txt")}"
+    assert rel(d, "/a/nope") == [], "{rel(d, "/a/nope")}"
+
+test fn glob_checks_every_part_of_the_pattern():
+    for p in ["nope_globdir/[/x.txt", "nope_globdir/[a/b]x", "[/*"]:
+        match fs.glob(p):
+            ?m: assert false, p + " must be a bad pattern, got {m}"
+            !e: assert "bad pattern" in e.message(), p + ": " + e.message()
+
+# Each wildcard directory part is one level of recursion. Go 1.27 stops at 10000 levels with
+# `syntax error in pattern` (CVE-2022-30632): 9999 parts give `[]`, 10000 give the error. Before
+# the limit, 1000000 parts overflowed the native stack and aborted the process.
+test fn glob_limits_wildcard_directory_depth_as_go():
+    match fs.glob("nope_globdir/" + "*/".repeat(9999) + "x"):
+        ?m: assert m == [], "{m}"
+        !e: assert false, "9999 parts must not error: " + e.message()
+    for n in [10000, 1000000]:
+        match fs.glob("nope_globdir/" + "*/".repeat(n) + "x"):
+            ?m: assert false, "{n} parts must be a bad pattern, got {m}"
+            !e: assert "bad pattern" in e.message(), "{n} parts: the error must say bad pattern"

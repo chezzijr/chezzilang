@@ -20,12 +20,21 @@ bytes**, so a filename that is not valid UTF-8 round-trips (`fs.exists(fs.list_d
 
 - `list_dir(p) -> List[Path]!`: entry names, sorted by raw bytes.
 - `exists(p) -> bool` · `is_file(p) -> bool` · `is_dir(p) -> bool` · `size(p) -> int!`.
-- `glob(pattern) -> List[Path]!`: the Go `filepath.Match` dialect.
-  - `*` (any run), `?` (single char), and POSIX character classes `[abc]`/`[a-z]`/`[^abc]`, all in the
-    **final** path component only. No recursive `**`, no brace expansion, no escape character.
+- `glob(pattern) -> List[Path]!`: Go `filepath.Glob`, with the `filepath.Match` dialect.
+  - `*` (any run), `?` (single char), and POSIX character classes `[abc]`/`[a-z]`/`[^abc]`, in **any**
+    path component: `fs.glob("a/*/b.txt")` matches `a/x/b.txt`. No recursive `**`, no brace
+    expansion, no escape character.
+  - Results go directory by directory, each directory's names sorted by bytes: `a/x` comes before
+    `a-b/x` (Go). A directory part that matches a file is skipped.
+  - A pattern with no wildcard returns itself when the path exists: `glob("a/")` is `["a/"]`,
+    `glob("a/..")` is `["a/.."]` (Go and CPython 3.14.7).
+  - The directory prefix you wrote is kept byte-exact: `glob("./*.txt")` gives `./x.txt`. CPython
+    keeps it the same way; Go cleans it to `x.txt`.
   - `[` is a **metacharacter**: it opens a class.
-  - A malformed `[...]` class is an `!e` carrying `"bad pattern"`, checked **before** the directory is
-    read, so the result never depends on whether the directory exists.
+  - A malformed `[...]` class in any component is an `!e` carrying `"bad pattern"`, checked **before**
+    any directory is read, so the result never depends on whether the directory exists.
+  - A pattern with 10000 or more wildcard directory parts is also `!e` `"bad pattern"` (Go's
+    CVE-2022-30632 limit: 9999 parts match, 10000 are `syntax error in pattern`).
   - A directory that does not exist, cannot be read, or is not a directory (after the pattern passed
     its check) yields `?([])`, not `!e`. Go 1.26.6 `filepath.Glob` returns `[] err=<None>` for all
     three ("Glob ignores file system errors such as I/O errors reading directories"), and CPython 3.14.7

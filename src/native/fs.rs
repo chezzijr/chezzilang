@@ -3,7 +3,8 @@
 //! `list_dir` returns entry names (not full paths), sorted for determinism. `exists`/`is_file`/
 //! `is_dir` are booleans; `size` returns the byte length as a `Result[int]`. `glob` is the Go
 //! `filepath.Match` dialect — `*` (any run), `?` (single char), `[abc]`/`[a-z]`/`[^abc]` character
-//! classes — in the **final** path component only: no `**`, no brace expansion, no escape character.
+//! classes — in any path component (`a/*/b.txt`), as Go `filepath.Glob`: no `**`, no brace expansion,
+//! no escape character.
 //! A malformed `[...]` class is an `Err` carrying "bad pattern", not a silent `Ok([])`.
 //!
 //! Mutations (each `Result[nil]`, recoverable fault on error): `mkdir` (recursive, idempotent),
@@ -277,47 +278,91 @@ fn glob(h: &mut dyn Host) -> Result<NativeRet, HostError> {
     // directory prefix must be byte-exact or the fix would be undone one layer up.
     let pattern = h.arg_bytes(0)?;
     let shown_pat = String::from_utf8_lossy(&pattern).into_owned(); // human-facing text only
-    // Split into the directory to scan and the wildcard for the final component.
-    let (dir, pat): (&[u8], &[u8]) = match pattern.iter().rposition(|&b| b == b'/') {
-        Some(i) => (&pattern[..i], &pattern[i + 1..]),
-        None => (b".", &pattern[..]),
-    };
     // W8-33 — a bad pattern is wrong regardless of whether the directory exists; `Ok([])` must never
-    // again mean "your pattern was not understood".
-    if let Err(msg) = check_pattern(pat) {
-        return Ok(NativeRet::Err(format!("{shown_pat}: {msg}")));
+    // again mean "your pattern was not understood". Every part is checked, not only the last one
+    // (Go 1.26 `Glob("nope/[/x")` is `syntax error in pattern`).
+    for part in pattern.split(|&b| b == b'/') {
+        if let Err(msg) = check_pattern(part) {
+            return Ok(NativeRet::Err(format!("{shown_pat}: {msg}")));
+        }
     }
-    let scan: &[u8] = if dir.is_empty() { b"/" } else { dir };
-    // Go `filepath.Glob` ignores I/O errors reading directories (measured Go 1.26.6:
-    // `Glob("nope/*")`, `Glob("noperm/*")` and `Glob("plain.txt/*")` all give `[] err=<nil>`), and
-    // its `readDirNames` discards the per-entry `Readdirnames` error the same way. `check_pattern`
-    // above still runs first (DEC-012): only these two I/O arms change.
-    let rd = match std::fs::read_dir(bytes_path(scan)) {
-        Ok(rd) => rd,
-        Err(_) => return Ok(NativeRet::Ok(Box::new(NativeRet::List(Vec::new())))),
+    let Some(hits) = glob_paths(&pattern, 0) else {
+        return Ok(NativeRet::Err(format!(
+            "{shown_pat}: bad pattern: {GLOB_DEPTH_LIMIT} or more wildcard directory parts"
+        )));
     };
-    let has_slash = pattern.contains(&b'/');
+    let items = hits.into_iter().map(NativeRet::Bytes).collect();
+    Ok(NativeRet::Ok(Box::new(NativeRet::List(items))))
+}
+
+/// How deep [`glob_paths`] may recurse: one level per wildcard directory part. Go 1.27
+/// `pathSeparatorsLimit` (CVE-2022-30632): 9999 parts match, 10000 are `ErrBadPattern`. Without it
+/// a pattern of 1000000 `*/` parts overflowed the native stack and aborted the process.
+const GLOB_DEPTH_LIMIT: usize = 10000;
+
+/// Does `part` hold a wildcard? (No escape character, so `\` is literal.)
+fn has_meta(part: &[u8]) -> bool {
+    part.iter().any(|&b| matches!(b, b'*' | b'?' | b'['))
+}
+
+/// Go `filepath.Glob` over a pattern already checked by [`check_pattern`]. A pattern with no
+/// wildcard is returned as written when it exists (Go `Lstat`: `"a/"` and `"a/.."` match). Else the
+/// directory part is expanded first, recursively when it holds a wildcard itself, and the last part
+/// is matched inside each directory found. Results go directory by directory, each one's names
+/// sorted by bytes (Go: `a/x` before `a-b/x`). The caller's directory prefix is kept byte-exact.
+/// `None` when the recursion reaches [`GLOB_DEPTH_LIMIT`].
+fn glob_paths(pattern: &[u8], depth: usize) -> Option<Vec<Vec<u8>>> {
+    if depth == GLOB_DEPTH_LIMIT {
+        return None;
+    }
+    if !has_meta(pattern) {
+        return Some(match std::fs::symlink_metadata(bytes_path(pattern)) {
+            Ok(_) => vec![pattern.to_vec()],
+            Err(_) => Vec::new(),
+        });
+    }
+    let (dir, pat): (Option<&[u8]>, &[u8]) = match pattern.iter().rposition(|&b| b == b'/') {
+        Some(i) => (Some(&pattern[..i]), &pattern[i + 1..]),
+        None => (None, pattern),
+    };
+    let dirs: Vec<Vec<u8>> = match dir {
+        Some(d) if has_meta(d) => glob_paths(d, depth + 1)?,
+        Some(d) => vec![d.to_vec()],
+        None => vec![Vec::new()],
+    };
     let mut hits: Vec<Vec<u8>> = Vec::new();
-    for entry in rd {
-        let name = match entry {
-            Ok(e) => path_bytes(Path::new(&e.file_name())),
-            Err(_) => continue,
+    for d in dirs {
+        let scan: &[u8] = match dir {
+            None => b".",
+            Some(_) if d.is_empty() => b"/",
+            Some(_) => &d,
         };
-        if wildcard_match(pat, &name) {
+        // Go `filepath.Glob` ignores I/O errors reading directories (measured Go 1.26.6:
+        // `Glob("nope/*")`, `Glob("noperm/*")` and `Glob("plain.txt/*")` all give `[] err=<nil>`),
+        // and its `readDirNames` discards the per-entry `Readdirnames` error the same way.
+        let Ok(rd) = std::fs::read_dir(bytes_path(scan)) else {
+            continue;
+        };
+        let mut names: Vec<Vec<u8>> = rd
+            .filter_map(|e| e.ok())
+            .map(|e| path_bytes(Path::new(&e.file_name())))
+            .filter(|name| wildcard_match(pat, name))
+            .collect();
+        names.sort();
+        for name in names {
             // Re-attach the directory prefix the caller wrote, so results are usable paths.
-            if has_slash {
-                let mut full = dir.to_vec();
-                full.push(b'/');
-                full.extend_from_slice(&name);
-                hits.push(full);
-            } else {
-                hits.push(name);
+            match dir {
+                None => hits.push(name),
+                Some(_) => {
+                    let mut full = d.clone();
+                    full.push(b'/');
+                    full.extend_from_slice(&name);
+                    hits.push(full);
+                }
             }
         }
     }
-    hits.sort();
-    let items = hits.into_iter().map(NativeRet::Bytes).collect();
-    Ok(NativeRet::Ok(Box::new(NativeRet::List(items))))
+    Some(hits)
 }
 
 /// Raw OS bytes → an owned `PathBuf` (byte-exact on unix, lossy elsewhere). The `&[u8]` twin of
