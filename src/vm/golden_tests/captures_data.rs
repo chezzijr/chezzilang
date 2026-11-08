@@ -9,7 +9,7 @@ use super::*;
 /// A struct used as a map key but MISSING `hash()` is a checker error — but `run_capture` bypasses
 /// the checker, so the runtime must error consistently (not panic).
 #[test]
-fn parity_map_struct_key_missing_hash_errors() {
+fn map_struct_key_missing_hash_errors() {
     let src = "\
 struct P:
     x: int
@@ -28,7 +28,7 @@ main()";
 /// with the SAME message the removed `AsInt` produced. The checker is bypassed by `run_capture`,
 /// so this exercises the relocated runtime validation.
 #[test]
-fn parity_list_non_int_index_still_errors() {
+fn list_non_int_index_still_errors() {
     let src = "xs := [1, 2, 3]\nprint(xs[\"a\"])\n";
     assert_eq!(
         vm_outcome(src).unwrap_err(),
@@ -59,7 +59,7 @@ fn parity_list_non_int_index_still_errors() {
 }
 
 #[test]
-fn parity_map_gc_stress_heap_keys_and_values() {
+fn map_gc_stress_heap_keys_and_values() {
     // Keys AND values are heap strings; build many maps so collection runs mid-stream and the
     // `Heap::children` tracing of BOTH keys and values is exercised (a use-after-free if either
     // is untraced). The keys()/values() lists also hold heap children.
@@ -79,29 +79,29 @@ fn parity_map_gc_stress_heap_keys_and_values() {
 // ===== gap #8: tuples + multi-return + destructuring =====
 
 #[test]
-fn parity_tuple_literal_display() {
+fn tuple_literal_display() {
     assert_golden_out("t := (1, 2)\nprint(t)\n", "(1, 2)\n");
 }
 
 #[test]
-fn parity_tuple_element_access() {
+fn tuple_element_access() {
     assert_golden_out("t := (3, 4)\nprint(t.0)\nprint(t.1)\n", "3\n4\n");
 }
 
 #[test]
-fn parity_tuple_element_out_of_range_errors() {
+fn tuple_element_out_of_range_errors() {
     // The checker would catch `.2` statically, but `t` here is built so the runtime bounds
     // check fires with a clear message.
     assert_golden_out("t := (1, 2)\nprint(t.0)\nprint(t.1)\n", "1\n2\n");
 }
 
 #[test]
-fn parity_destructure_local() {
+fn destructure_local() {
     assert_golden_out("a, b := (1, 2)\nprint(a)\nprint(b)\n", "1\n2\n");
 }
 
 #[test]
-fn parity_tuple_equality() {
+fn tuple_equality() {
     assert_golden_out(
         "print((1, 2) == (1, 2))\nprint((1, 2) == (1, 3))\n",
         "true\nfalse\n",
@@ -109,13 +109,13 @@ fn parity_tuple_equality() {
 }
 
 #[test]
-fn parity_multi_return_destructured_at_call_site() {
+fn multi_return_destructured_at_call_site() {
     let src = "fn pair() -> (int, int):\n    return (3, 4)\nfn main():\n    a, b := pair()\n    print(a + b)\nmain()\n";
     assert_golden_out(src, "7\n");
 }
 
 #[test]
-fn parity_tuple_heap_elements_gc_stress() {
+fn tuple_heap_elements_gc_stress() {
     // A tuple of heap values (a string + a list). Under GC stress a collection happens between
     // building the tuple and reading it back — proving `Heap::children` traces tuple elements.
     let src = "t := (\"hi\", [1, 2, 3])\nprint(t.0)\nprint(t.1)\n";
@@ -192,11 +192,11 @@ fn slice_survives_gc_stress() {
 // Characterization net: these pin observable behavior of positional captures. -----
 
 /// Closure-capture golden: `examples/closure_capture.chz` (one var, several vars, nested
-/// capture, a shared mutable box, HOF callbacks, and a hot-loop capture read) byte-identical on
-/// the VM, the `--parallel` engine, and its `.expected`. This is the oracle for M19 lever #3
+/// capture, a shared mutable box, HOF callbacks, and a hot-loop capture read) byte-identical
+/// against its `.expected`. This is the oracle for M19 lever #3
 /// (positional captures, HashMap → Vec<Value> by compile-time slot).
 #[test]
-fn golden_closure_capture_chz_matches_expected_and_interp() {
+fn golden_closure_capture_chz_matches_expected() {
     let src = include_str!("../../../examples/closure_capture.chz");
     let expected = include_str!("../../../examples/closure_capture.expected");
     let vm_out = run_capture(src).expect("vm run");
@@ -210,7 +210,7 @@ fn golden_closure_capture_chz_matches_expected_and_interp() {
 /// It runs through the real module graph via `run_file` (a temp entry), not
 /// `run_capture`/`compile_module_standalone`.
 #[test]
-fn golden_closure_capture_scopes_chz_matches_expected_and_interp() {
+fn golden_closure_capture_scopes_chz_matches_expected() {
     let src = include_str!("../../../examples/closure_capture_scopes.chz");
     let expected = include_str!("../../../examples/closure_capture_scopes.expected");
     let dir = std::env::temp_dir().join(format!("chezzi_vm_cap_scopes_{}", std::process::id()));
@@ -1041,7 +1041,6 @@ fn bytes_crosses_channel() {
     // Must byte-match on both a plain run and under `--parallel`.
     assert_golden_out(src, "b'\\x01\\x02'\n");
     assert_eq!(run_capture(src).expect("vm"), "b'\\x01\\x02'\n");
-    assert_eq!(run_capture(src).expect("parallel"), "b'\\x01\\x02'\n");
 }
 
 // ===== bytearray type (mutable sibling of bytes) =====
@@ -1193,7 +1192,7 @@ fn bytearray_crosses_channel_deep_copy() {
 // ===== Iterable[T] / `.iter()` cursor =====
 
 #[test]
-fn iter_next_idempotent_both_engines() {
+fn iter_next_idempotent() {
     // next() yields Some(10), Some(20), then None forever (idempotent past exhaustion).
     let src = "fn main():\n    it := [10, 20].iter()\n    print(it.next())\n    print(it.next())\n    print(it.next())\n    print(it.next())\nmain()\n";
     assert_golden_out(src, "10\n20\nNone\nNone\n");
@@ -1240,7 +1239,7 @@ fn iter_self_on_iterator_value() {
 }
 
 #[test]
-fn list_of_cursor_roundtrip_both_engines() {
+fn list_of_cursor_roundtrip() {
     assert_golden_out(
         "fn main():\n    print(List.from_iter([5, 6, 7].iter()))\nmain()\n",
         "[5, 6, 7]\n",
@@ -1403,13 +1402,11 @@ fn for_over_fresh_temp_cursor_full() {
 }
 
 #[test]
-fn cursor_crosses_spawn_three_engine_parity() {
+fn cursor_crosses_spawn_runs() {
     // A cursor IS sendable: it crosses a spawn/channel by handle, like a `list`, so the receiver
     // drives the sender's cursor and gets `Some(1)`.
-    // This must hold byte-identically under the M:N `--parallel` engine.
     // (Regression guard: an earlier cut gated the cursor non-sendable like a generator, which
-    // panicked the spawned worker on the VM while the since-removed interp engine succeeded — a
-    // parity divergence.)
+    // panicked the spawned worker.)
     let src = concat!(
         "import Iterator from std.iter\n",
         "fn main():\n",
@@ -1420,9 +1417,8 @@ fn cursor_crosses_spawn_three_engine_parity() {
         "    print(it.next())\n",
         "main()\n"
     );
-    assert_golden_out(src, "1\n");
     assert_eq!(
-        run_capture(src).expect("--parallel"),
+        run_capture(src).expect("program should run"),
         "1\n",
         "cursor crosses a spawn by handle"
     );
@@ -1430,7 +1426,7 @@ fn cursor_crosses_spawn_three_engine_parity() {
 
 #[test]
 fn generator_iter_returns_self_vm() {
-    // VM-only (interp has no generators): a generator's iter() returns self and drives.
+    // A generator's iter() returns self and drives.
     let src = concat!(
         "fn gen() -> Iterator[int]:\n",
         "    yield 1\n",
@@ -1450,11 +1446,11 @@ fn generator_iter_returns_self_vm() {
 /// An all-int literal collection stays `List[int]`, so `xs[0] / 2` is int division (`0`).
 #[test]
 fn widen_all_int_literal_collection_stays_int() {
-    widen_three_engines("xs := [1, 2, 3]\nprint(xs[0] / 2)\n", "0\n");
+    assert_runs_to("xs := [1, 2, 3]\nprint(xs[0] / 2)\n", "0\n");
 }
 
 /// Regression-pin: mixed int/float COMPARISONS promote by runtime tag (`src/vm/arith.rs`).
 #[test]
 fn widen_mixed_comparisons_pinned() {
-    widen_three_engines("print(1 < 2.3)\nprint(1 == 2.3)\n", "true\nfalse\n");
+    assert_runs_to("print(1 < 2.3)\nprint(1 == 2.3)\n", "true\nfalse\n");
 }

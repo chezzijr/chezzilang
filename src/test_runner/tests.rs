@@ -2153,7 +2153,7 @@ fn recover_does_not_catch_over_memory_via_native_reentry() {
 }
 
 #[test]
-fn over_memory_buckets_across_spawn_on_both_engines() {
+fn over_memory_buckets_across_spawn() {
     // A runaway alloc inside a `spawn`ed task must bucket OverMemory. The task runs on a worker
     // VM over the run's one heap, so the cap must reach the worker and the over-memory
     // marker must cross the worker→parent fault boundary.
@@ -2174,7 +2174,7 @@ fn over_memory_buckets_across_spawn_on_both_engines() {
 }
 
 #[test]
-fn over_memory_concurrent_under_cap_passes_on_both_engines() {
+fn over_memory_concurrent_under_cap_passes() {
     // The cap's guaranteed envelope on the low side: a CONCURRENT test whose tasks together stay
     // well under a generous cap must PASS — no false trip. (M1.7: the cap is run-wide, so the
     // aggregate over the cap trips: `max_heap_caps_the_run_not_each_task`.)

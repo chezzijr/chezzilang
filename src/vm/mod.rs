@@ -621,8 +621,7 @@ struct CallFrame {
     /// `nurseries.len()` at frame entry (mirrors [`Handler::nursery_len`]). A `?`/return that escapes
     /// a `parallel:` body in this frame jumps past the `JoinNursery` that would pop the nursery;
     /// `do_return` truncates `nurseries` back to this length so the stale nursery (and its GC-rooted
-    /// pending-task args) is reclaimed instead of leaking to program exit — matching the interp's
-    /// unconditional `exec_parallel` pop.
+    /// pending-task args) is reclaimed instead of leaking to program exit.
     nursery_len: usize,
     /// M-C: this frame's proto opened an implicit nursery at body entry (it contains a bare `spawn`).
     /// On exit, `do_return` JOINS that nursery (runs its tasks) rather than cancelling it; any *inner*
@@ -1066,8 +1065,7 @@ pub struct Vm {
     /// the current frame's `deferred.len()` captured when each nursery was entered (`EnterNursery`),
     /// i.e. the defer floor of that `parallel:` body. A recover-scoped `?` escaping a `parallel:`
     /// must run the body's defers (those at `deferred[floor..]`) BEFORE reclaiming the nursery and
-    /// only THEN run the recover block's own defers — matching the interp, whose `exec_parallel`
-    /// reports after the body's `exec_scoped_block` has already drained its defers.
+    /// only THEN run the recover block's own defers.
     nursery_defer_floors: Vec<usize>,
     /// TICKET-048 — parallel to [`Vm::nurseries`] (same length, pushed and popped in lockstep): the
     /// source span of the construct that OPENED each nursery — the `parallel:` keyword, or the first

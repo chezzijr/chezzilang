@@ -490,8 +490,8 @@ impl Checker {
                 // The declare policy records each name's decl-site hover (`i` in `for i in …`).
                 self.declare_target_leaves(&bindings, iter.span);
                 for (name, _, _) in &bindings {
-                    // Loop vars are rebound each iteration → immutable; reassigning one diverges
-                    // across engines, so the checker forbids it (see `check_assign`).
+                    // Loop vars are rebound each iteration → immutable; reassigning one is
+                    // rejected, so the checker forbids it (see `check_assign`).
                     self.mark_loop_var(name);
                 }
                 self.loop_depth += 1;

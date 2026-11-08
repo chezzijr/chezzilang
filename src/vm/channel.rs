@@ -21,7 +21,7 @@ impl Vm {
         } else {
             // Wake any demoted OS thread blocked on this core's condvar (in-callback recv).
             core.wake_all();
-            // Cooperative engine: re-add every sibling fiber parked on this channel's `recv`.
+            // No scheduler: re-add every sibling fiber parked on this channel's `recv`.
             self.wake_on_send(h);
         }
     }

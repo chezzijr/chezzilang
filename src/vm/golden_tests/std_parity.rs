@@ -15,7 +15,7 @@ fn assert_lines_multiset(out: &str, want: &[&str]) {
 }
 
 #[test]
-fn parity_std_io_print() {
+fn std_io_print() {
     assert_eq!(
         golden_entry("import std.io\nfn main():\n    io.print(\"hello\")\nmain()"),
         "hello\n"
@@ -23,22 +23,20 @@ fn parity_std_io_print() {
 }
 
 #[test]
-fn parity_std_io_read_write_file() {
+fn std_io_read_write_file() {
     let t = TmpDir::new();
     let data = t.0.join("data.txt").display().to_string();
     let src = format!(
         "import std.io\nfn main():\n    match io.write_file(\"{data}\", \"hello\\nworld\"):\n        ?_: io.print(\"wrote\")\n        !e: io.print(e)\n    match io.read_file(\"{data}\"):\n        ?s: io.print(s)\n        !e: io.print(e)\nmain()"
     );
     let entry = t.write("main.chz", &src);
-    let (io_out, _ie, ir, _) = run_file(&entry);
     let (vo, _ve, vr, _) = run_file(&entry);
-    assert!(ir.is_ok() && vr.is_ok(), "interp={ir:?} vm={vr:?}");
-    assert_eq!(io_out, vo);
-    assert_eq!(io_out, "wrote\nhello\nworld\n");
+    assert!(vr.is_ok(), "{vr:?}");
+    assert_eq!(vo, "wrote\nhello\nworld\n");
 }
 
 #[test]
-fn parity_std_io_read_missing_file_errs() {
+fn std_io_read_missing_file_errs() {
     // The error text comes from the same `std::fs` call, so it matches; we only
     // assert the Err branch is taken (deterministic regardless of OS message).
     let src = "import std.io\nfn main():\n    match io.read_file(\"/no/such/chezzi/path/xyz\"):\n        ?s: io.print(s)\n        !e: io.print(\"err\")\nmain()";
@@ -54,7 +52,7 @@ fn read_file_caps_oversized_input() {
 }
 
 #[test]
-fn parity_std_io_read_line_consumes_injected_stdin() {
+fn std_io_read_line_consumes_injected_stdin() {
     use crate::native::{HostConfig, Stdin};
     let src = "import std.io\nfn main():\n    match io.read_line():\n        ?l: io.print(\"got {l}\")\n        None: io.print(\"eof\")\n    match io.read_line():\n        ?l: io.print(l)\n        None: io.print(\"eof\")\nmain()";
     let out = golden_entry_cfg(src, || HostConfig {
@@ -70,7 +68,7 @@ fn parity_std_io_read_line_consumes_injected_stdin() {
 /// assert. Also pins `read_all` is NOT `Kind::Blocking` (an offloaded call would hit `OffloadHost`'s
 /// stdio `unreachable!`).
 #[test]
-fn parity_std_io_read_all_drains_injected_stdin() {
+fn std_io_read_all_drains_injected_stdin() {
     use crate::native::{HostConfig, Stdin};
     let src = "import std.io\nfn main():\n    io.print(io.read_all())\nmain()";
     let out = golden_entry_cfg(src, || HostConfig {
@@ -86,7 +84,7 @@ fn parity_std_io_read_all_drains_injected_stdin() {
 /// line1 chars… — so "aé" reads as 'a', 'é' (a 2-byte scalar returned WHOLE), then '\n', then `None`.
 /// Single entry task ⇒ deterministic exact assert.
 #[test]
-fn parity_std_io_read_char_yields_scalars_then_eof() {
+fn std_io_read_char_yields_scalars_then_eof() {
     use crate::native::{HostConfig, Stdin};
     let src = "import std.io\nfn main():\n    while true:\n        match io.read_char():\n            ?c: io.print(\"[{c}]\")\n            None:\n                io.print(\"done\")\n                break\nmain()";
     let out = golden_entry_cfg(src, || HostConfig {
@@ -102,7 +100,7 @@ fn parity_std_io_read_char_yields_scalars_then_eof() {
 /// `out`. Also pins that neither fn is `Kind::Blocking` (an offloaded call
 /// would hit `OffloadHost`'s stdio `unreachable!`).
 #[test]
-fn parity_std_io_input_prompt_then_line_and_flush_is_a_noop() {
+fn std_io_input_prompt_then_line_and_flush_is_a_noop() {
     use crate::native::{HostConfig, Stdin};
     let src = "import std.io\nfn main():\n    io.flush()\n    match io.input(\"p: \"):\n        ?l: io.print(\"got {l}\")\n        None: io.print(\"eof\")\nmain()";
     let out = golden_entry_cfg(src, || HostConfig {
@@ -121,7 +119,7 @@ fn parity_std_io_input_prompt_then_line_and_flush_is_a_noop() {
 /// Do NOT "fix" this back to an exact-stdout `assert_eq!`; that is a designed flake. A false EOF
 /// would add an `eof` line; a duplicated line would repeat a `got` line. Both change the multiset.
 #[test]
-fn parity_spawned_tasks_share_stdin_exactly_once() {
+fn spawned_tasks_share_stdin_exactly_once() {
     use crate::native::{HostConfig, Stdin};
     let src = "import std.io\nfn t():\n    match io.read_line():\n        ?v: io.print(\"got {v}\")\n        None: io.print(\"eof\")\nfn main():\n    parallel:\n        spawn: t()\n        spawn: t()\n    t()\nmain()";
     let out = golden_entry_cfg_lines(src, || HostConfig {
@@ -134,7 +132,7 @@ fn parity_spawned_tasks_share_stdin_exactly_once() {
 /// Same shared-stdin contract at the OTHER task-entry family: `Executor.submit` (the M:N pool
 /// drain). An invariant enforced at one seam is not enforced.
 #[test]
-fn parity_executor_tasks_share_stdin_exactly_once() {
+fn executor_tasks_share_stdin_exactly_once() {
     use crate::native::{HostConfig, Stdin};
     let src = "import std.io\nimport Executor from std.concurrency\nfn t():\n    match io.read_line():\n        ?v: io.print(\"got {v}\")\n        None: io.print(\"eof\")\nfn main():\n    e := Executor()\n    e.submit(t)\n    e.submit(t)\n    e.shutdown()\n    t()\nmain()";
     let out = golden_entry_cfg_lines(src, || HostConfig {
@@ -145,7 +143,7 @@ fn parity_executor_tasks_share_stdin_exactly_once() {
 }
 
 #[test]
-fn parity_std_io_eprint_goes_to_stderr_not_stdout() {
+fn std_io_eprint_goes_to_stderr_not_stdout() {
     let src = "import std.io\nfn main():\n    io.eprint(\"to stderr\")\n    io.print(\"to stdout\")\nmain()";
     // stdout has only the print line, stderr has only the eprint line.
     assert_eq!(golden_entry(src), "to stdout\n");
@@ -158,7 +156,7 @@ fn parity_std_io_eprint_goes_to_stderr_not_stdout() {
 }
 
 #[test]
-fn parity_std_log_defaults_to_stderr() {
+fn std_log_defaults_to_stderr() {
     // std.log: default min level INFO → debug() dropped, info/warn land on STDERR (not stdout),
     // formatted "LEVEL message" in order.
     let src = "import std.log\nfn main():\n    lg := log.new()\n    lg.info(\"served\")\n    lg.debug(\"noisy\")\n    lg.warn(\"careful\")\nmain()";
@@ -172,7 +170,7 @@ fn parity_std_log_defaults_to_stderr() {
 }
 
 #[test]
-fn parity_std_os_args_and_env() {
+fn std_os_args_and_env() {
     use crate::native::HostConfig;
     let src = "import std.io\nimport std.os\nfn main():\n    for a in os.args():\n        io.print(a)\n    match os.env(\"CHEZZI_TEST_VAR\"):\n        ?v: io.print(v)\n        None: io.print(\"no var\")\nmain()";
     let out = golden_entry_cfg(src, || HostConfig {
@@ -188,7 +186,7 @@ fn parity_std_os_args_and_env() {
 }
 
 #[test]
-fn parity_std_os_env_missing_is_none() {
+fn std_os_env_missing_is_none() {
     use crate::native::HostConfig;
     let src = "import std.io\nimport std.os\nfn main():\n    match os.env(\"DEFINITELY_UNSET_XYZ\"):\n        ?v: io.print(v)\n        None: io.print(\"none\")\nmain()";
     let out = golden_entry_cfg(src, HostConfig::default);
@@ -196,7 +194,7 @@ fn parity_std_os_env_missing_is_none() {
 }
 
 #[test]
-fn parity_std_os_getcwd_ok() {
+fn std_os_getcwd_ok() {
     let src = "import std.io\nimport std.os\nfn main():\n    match os.getcwd():\n        ?p: io.print(\"ok\")\n        !e: io.print(\"err\")\nmain()";
     assert_eq!(golden_entry(src), "ok\n");
 }
@@ -297,7 +295,7 @@ main()";
 /// Bug 3 — a module-qualified generic fn (`geo.empty_list[int]()`) type-checks AND runs
 /// (type args are erased, so this exercises the checker fix end-to-end).
 #[test]
-fn parity_qualified_generic_fn_turbofish() {
+fn qualified_generic_fn_turbofish() {
     let geo = ("geo.chz", "fn empty_list[T]() -> List[T]:\n    return []\n");
     let main = (
         "main.chz",
@@ -310,7 +308,7 @@ fn parity_qualified_generic_fn_turbofish() {
 /// it is legal and runs (the rebind gate must not fire on a name the import no longer
 /// owns).
 #[test]
-fn parity_from_import_then_module_scope_redeclare() {
+fn from_import_then_module_scope_redeclare() {
     let st = ("st.chz", "COUNT := 0\n");
     let main = (
         "main.chz",
@@ -323,7 +321,7 @@ fn parity_from_import_then_module_scope_redeclare() {
 /// bind the reserved name `str` — the global `str()` ctor and the qualified module fn both work in
 /// the SAME module.
 #[test]
-fn parity_import_std_string_and_str_ctor() {
+fn import_std_string_and_str_ctor() {
     let src = "import std.string
 fn main():
     print(\"5\")
@@ -332,7 +330,7 @@ fn main():
 }
 
 #[test]
-fn parity_std_str_pure_chezzi_with_mixed_native_import() {
+fn std_str_pure_chezzi_with_mixed_native_import() {
     // std.string is a real Chezzi file (crate/std/string.chz); std.io is native — both in one program.
     let src = "import std.io\nimport std.string as text\nfn main():\n    io.print(text.repeat(\"ab\", 3))\n    io.print(text.reverse(\"hello\"))\n    io.print(text.pad_left(\"7\", 3, \"0\"))\n    if text.is_empty(\"\"):\n        io.print(\"empty\")\n    for line in text.split_lines(\"a\\nb\\nc\"):\n        io.print(line)\nmain()";
     assert_eq!(golden_entry(src), "ababab\nolleh\n007\nempty\na\nb\nc\n");
@@ -342,7 +340,7 @@ fn parity_std_str_pure_chezzi_with_mixed_native_import() {
 /// same never-shrinks rule, and the same truncated-cycle rule for a multi-char fill (it used to
 /// overshoot `width`). Codepoints, not bytes — a non-ASCII fill char counts as 1.
 #[test]
-fn parity_std_str_pad_left_matches_native_method() {
+fn std_str_pad_left_matches_native_method() {
     for (args, want) in [
         (r#""a", 4, "xy""#, "xyxa"),
         (r#""ab", 7, "xyz""#, "xyzxyab"),
@@ -370,7 +368,7 @@ fn parity_std_str_pad_left_matches_native_method() {
 /// fault — with the same message as the native method —, EAGERLY: a `width` the
 /// receiver already satisfies does not excuse it.
 #[test]
-fn parity_std_str_pad_left_empty_fill_faults() {
+fn std_str_pad_left_empty_fill_faults() {
     for args in [r#""a", 5, """#, r#""abc", 1, """#] {
         let src = format!(
             "import std.string as text\nfn main():\n    print(text.pad_left({args}))\nmain()"
@@ -630,7 +628,7 @@ const PROGRAMS: &[(&str, Result<&str, &str>)] = &[
         "enum Signal:\n    Err(int)\n    Quiet\nfn f() -> int:\n    x := (!5)?\n    return x\nf()",
         Ok(""),
     ), // f() -> int is not a carrier type: no runtime check, no W8-2 warning either
-    // unhandled top-level error INSIDE a top-level block (interp: call_depth 0, VM: is_toplevel)
+    // unhandled top-level error INSIDE a top-level block (VM: is_toplevel)
     (
         "fn bad() -> int!:\n    return !\"boom\"\nif true:\n    bad()\nprint(\"after\")",
         Ok("after\n"),
@@ -646,7 +644,7 @@ const PROGRAMS: &[(&str, Result<&str, &str>)] = &[
 ];
 
 #[test]
-fn parity_full_suite_vm_vs_interp() {
+fn programs_table_matches_expected() {
     for (src, expect) in PROGRAMS {
         match expect {
             Ok(want) => assert_eq!(
@@ -665,7 +663,7 @@ fn parity_full_suite_vm_vs_interp() {
 // (2026-07-18 bug-hunt: `?` in a nil entry fn used to swallow the error; the fix lets the entry be
 // `-> T!` and use `?`, and this surfaces a returned Err.)
 #[test]
-fn manifest_entrypoint_err_surfaced_both_engines() {
+fn manifest_entrypoint_err_surfaced() {
     let dir = TmpDir::new();
     let entry = dir.write("main.chz", "fn main() -> int!:\n    return !\"boom\"\n");
     let (_out, _err, outcome, _rc) = crate::vm::run_file_entry(&entry, "main");
@@ -690,7 +688,7 @@ fn manifest_entrypoint_err_surfaced_both_engines() {
 
 // GUARD: an entry fn returning `Ok(..)` runs clean (rc=0) — the surfacing gate is Err/None only.
 #[test]
-fn manifest_entrypoint_ok_runs_clean_both_engines() {
+fn manifest_entrypoint_ok_runs_clean() {
     let dir = TmpDir::new();
     let entry = dir.write(
         "main.chz",
@@ -705,7 +703,7 @@ fn manifest_entrypoint_ok_runs_clean_both_engines() {
 }
 
 #[test]
-fn parity_index_assign() {
+fn index_assign() {
     assert_golden_out(
         "xs := [1, 2, 3]\nxs[1] = 9\nxs[0] += 4\nxs[2] -= 1\nprint(xs)\n",
         "[5, 9, 2]\n",
@@ -713,7 +711,7 @@ fn parity_index_assign() {
 }
 
 #[test]
-fn parity_index_assign_out_of_bounds() {
+fn index_assign_out_of_bounds() {
     assert_eq!(
         vm_outcome("xs := [1, 2, 3]\nxs[9] = 0\nprint(xs)\n").unwrap_err(),
         "runtime error (line 2, col 1): index 9 out of bounds (len 3)"
@@ -721,7 +719,7 @@ fn parity_index_assign_out_of_bounds() {
 }
 
 #[test]
-fn parity_compound_index_oob_vs_rhs_error_order() {
+fn compound_index_oob_vs_rhs_error_order() {
     // Compound `xs[i] += rhs` on an out-of-bounds `i` where `rhs` ALSO errors: the bounds-check
     // error must win. The VM reads the target (bounds-check) before `rhs`.
     assert_eq!(
@@ -731,7 +729,7 @@ fn parity_compound_index_oob_vs_rhs_error_order() {
 }
 
 #[test]
-fn parity_compound_index_oob_skips_rhs_side_effect() {
+fn compound_index_oob_skips_rhs_side_effect() {
     // On an out-of-bounds compound assign, the rhs side effect must not run.
     let src = "fn side() -> int:\n    print(\"rhs ran\")\n    return 0\nxs := [1, 2, 3]\nxs[5] += side()\nprint(\"after\")\n";
     assert_eq!(
@@ -742,19 +740,18 @@ fn parity_compound_index_oob_skips_rhs_side_effect() {
 }
 
 #[test]
-fn parity_field_assign() {
+fn field_assign() {
     assert_golden_out(
         "struct P:\n    x: int\n    y: int\np := P(1, 2)\np.x = 9\np.y += 3\nprint(p.x)\nprint(p.y)\n",
         "9\n5\n",
     );
 }
 
-// NOTE: method_type_params / param_protocol / method_default_args were parity-only; they are
-// now full golden tests (`golden_*_chz_matches_expected_and_interp` above), which assert exact
-// output against a literal golden, so the weaker `parity_*` file tests were removed.
+// NOTE: method_type_params / param_protocol / method_default_args are full golden tests
+// (`golden_*_chz_matches_expected`), which assert exact output against a literal golden.
 
 #[test]
-fn parity_hof_param() {
+fn hof_param() {
     let src = "fn apply(f: fn(int) -> int, v: int) -> int:\n    return f(v)\ninc := fn(x: int) -> int: x + 1\nprint(apply(inc, 4))\n";
     assert_golden_out(src, "5\n");
     assert_eq!(vm_outcome(src).unwrap(), "5\n");
@@ -763,7 +760,7 @@ fn parity_hof_param() {
 /// Integer `sum()` must use checked arithmetic and raise the SAME recoverable
 /// "integer overflow in Add" runtime error as `+`, not silently wrap.
 #[test]
-fn parity_list_sum_overflow() {
+fn list_sum_overflow() {
     let src = "print([9223372036854775807, 1].sum())\n";
     assert_eq!(
         vm_outcome(src).unwrap_err(),
@@ -780,7 +777,7 @@ fn parity_list_sum_overflow() {
 /// A list containing any float takes the float path — would-overflow ints must NOT fault
 /// (guards against the int checked_add being hoisted above any_float).
 #[test]
-fn parity_list_sum_mixed_float() {
+fn list_sum_mixed_float() {
     let src = "print([9223372036854775807.0, 1.0, 0.0].sum())\n";
     assert_golden_out(src, "9.223372036854776e+18\n");
 }
@@ -793,7 +790,7 @@ fn parity_list_sum_mixed_float() {
 // collection actually happens mid-iteration — if rooting is wrong they crash with a dangling ref.
 
 #[test]
-fn parity_list_map_to_str_gc_stress() {
+fn list_map_to_str_gc_stress() {
     // Each element maps to a freshly-allocated string (heap), so collection mid-map matters.
     let src =
         "xs := [1,2,3]\nys := xs.map(fn(x: int) -> str: \"n{x}\")\nfor y in ys:\n    print(y)\n";
@@ -808,7 +805,7 @@ fn parity_list_map_to_str_gc_stress() {
 }
 
 #[test]
-fn parity_list_map_to_nested_list_gc_stress() {
+fn list_map_to_nested_list_gc_stress() {
     // Maps each element to a nested list (heap); the result list holds heap children.
     let src = "xs := [1,2,3]\nys := xs.map(fn(x: int) -> List[int]: [x, x])\nprint(ys[1][0])\n";
     assert_golden_out(src, "2\n");
@@ -821,7 +818,7 @@ fn parity_list_map_to_nested_list_gc_stress() {
 }
 
 #[test]
-fn parity_list_filter_gc_stress() {
+fn list_filter_gc_stress() {
     // Filter over string elements; kept elements are heap objects pushed into the result.
     let src = "xs := [\"a\",\"bb\",\"ccc\",\"d\"]\nys := xs.filter(fn(x: str) -> bool: x.len() > 1)\nprint(ys.len())\nprint(ys[0])\n";
     assert_golden_out(src, "2\nbb\n");
@@ -835,7 +832,7 @@ fn parity_list_filter_gc_stress() {
 }
 
 #[test]
-fn parity_list_fold_str_acc_gc_stress() {
+fn list_fold_str_acc_gc_stress() {
     // Fold building a string accumulator (heap) — each step allocates a new acc string, so the
     // rooted accumulator slot must survive the next element's closure call.
     let src = "xs := [\"a\",\"b\",\"c\"]\ns := xs.fold(\"\", fn(a: str, x: str) -> str: a + x)\nprint(s)\n";
@@ -849,7 +846,7 @@ fn parity_list_fold_str_acc_gc_stress() {
 }
 
 #[test]
-fn parity_list_sort_by_str_gc_stress() {
+fn list_sort_by_str_gc_stress() {
     // Sort heap-string elements by length; the comparator re-enters the VM and a collection can
     // fire mid-sort. The source list must stay rooted (we permute indices, not raw Values).
     let src = "xs := [\"ccc\",\"a\",\"dd\",\"b\"]\nxs.sort_by(fn(a: str, b: str) -> int: a.len() - b.len())\nfor x in xs:\n    print(x)\n";
@@ -864,7 +861,7 @@ fn parity_list_sort_by_str_gc_stress() {
 }
 
 #[test]
-fn parity_list_sort_by_nested_list_gc_stress() {
+fn list_sort_by_nested_list_gc_stress() {
     // Elements are nested lists (heap); sort by first element. Exercises rooting of heap children
     // across comparator calls under stress.
     let src = "xs := [[3,0],[1,0],[2,0]]\nxs.sort_by(fn(a: List[int], b: List[int]) -> int: a[0] - b[0])\nprint(xs[0][0])\nprint(xs[2][0])\n";
@@ -878,7 +875,7 @@ fn parity_list_sort_by_nested_list_gc_stress() {
 }
 
 #[test]
-fn parity_map_closure_free_generic_call() {
+fn map_closure_free_generic_call() {
     // Bug D: `xs.map(fn(x): ident(x))` where `ident[T](x: T) -> T` type-checks to List[int] (the
     // closure-return loop-back recovers `map`'s `U` from the nested free generic call). Runtime is
     // generic-erased, so it prints `2`.
@@ -888,7 +885,7 @@ fn parity_map_closure_free_generic_call() {
 }
 
 #[test]
-fn parity_fold_closure_free_generic_call() {
+fn fold_closure_free_generic_call() {
     // Bug D (adversarial-review fix): `xs.fold(0, fn(acc, x): ident(x))` where `ident[T](x: T) -> T`
     // type-checks (fold's `U` pinned `int` by `init`, closure body re-inferred `int`). The reducer
     // returns the last element via identity → `s = 3`, `print(s + 1)` = `4`. Generic-erased runtime.
@@ -898,7 +895,7 @@ fn parity_fold_closure_free_generic_call() {
 }
 
 #[test]
-fn parity_free_fn_hof_map() {
+fn free_fn_hof_map() {
     // Bug D free-fn analog: `mymap([1,2,3], fn(x): x*2)` where `mymap[U](..., fn(int)->U) -> List[U]`
     // type-checks to List[int] (the closure-return loop-back now runs on the free-fn path too). Runtime
     // is generic-erased, so it prints `3` (ys=[2,4,6], ys[0]+1).
@@ -908,7 +905,7 @@ fn parity_free_fn_hof_map() {
 }
 
 #[test]
-fn parity_free_fn_hof_apply_sibling() {
+fn free_fn_hof_apply_sibling() {
     // `apply[A,B](f: fn(A)->B, a: A) -> B` with `apply(fn(x): x*2, 5)`: A pinned int by the sibling
     // value arg, B (return-only) recovered from the closure body → int, so `y + 1` = 11.
     let src = "fn apply[A, B](f: fn(A) -> B, a: A) -> B:\n    return f(a)\nfn main():\n    y := apply(fn(x): x * 2, 5)\n    print(y + 1)\nmain()\n";
@@ -917,7 +914,7 @@ fn parity_free_fn_hof_apply_sibling() {
 }
 
 #[test]
-fn parity_free_fn_hof_sibling_closure_param() {
+fn free_fn_hof_sibling_closure_param() {
     // adversarial-review bug 1: `pair[T](f: fn()->T, g: fn(T)->int) -> int` with
     // `pair(fn(): 5, fn(x): x + 1)`. `T` is recovered from the FIRST closure's concrete return (int)
     // before the un-inferable-param probe runs, so the SECOND closure's `x: T` param is not rejected.
@@ -942,7 +939,7 @@ fn golden_hello_via_run_file() {
 /// collections, cancel, timer, and crossings). It is deterministic by construction, so it is two
 /// tests at once: the 49 self-checks must all PASS, and the output must byte-match `.expected`.
 #[test]
-fn golden_concurrent_jobs_both_engines() {
+fn golden_concurrent_jobs() {
     let path = fixture("examples/concurrent_jobs.chz");
     let expected = std::fs::read_to_string(fixture("examples/concurrent_jobs.expected")).unwrap();
     let (out, _err, res, _) = run_file(&path);
@@ -954,7 +951,7 @@ fn golden_concurrent_jobs_both_engines() {
     );
 }
 
-/// M6 golden: core-type methods run end-to-end on the VM and byte-match the interp.
+/// M6 golden: core-type methods run end-to-end on the VM and byte-match `.expected`.
 #[test]
 fn golden_methods_via_run_file() {
     let path = fixture("examples/methods.chz");
@@ -964,7 +961,7 @@ fn golden_methods_via_run_file() {
     assert_eq!(out, expected);
 }
 
-/// Golden: in-place index & field assignment run end-to-end on the VM and byte-match the interp.
+/// Golden: in-place index & field assignment run end-to-end on the VM and byte-match `.expected`.
 #[test]
 fn golden_mutate_via_run_file() {
     let path = fixture("examples/mutate.chz");
@@ -1214,7 +1211,7 @@ fn golden_csv_via_run_file() {
 
 /// `Channel.trip()` — the manual level-trigger latch (behind `std.cancel`'s `done()`). Tripping
 /// makes the channel permanently ready (`recv`/`try_recv` yield `true`, fanning out). Deterministic
-/// on every engine → a golden test.
+/// on every run → a golden test.
 #[test]
 fn golden_channel_trip_via_run_file() {
     let path = fixture("examples/channel_trip.chz");

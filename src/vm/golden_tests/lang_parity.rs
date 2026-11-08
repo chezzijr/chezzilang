@@ -702,7 +702,7 @@ fn match_variant_regression_parity() {
 }
 
 #[test]
-fn parity_std_math() {
+fn std_math() {
     let src = "\
 import std.math
 fn main():
@@ -721,37 +721,37 @@ main()";
 }
 
 #[test]
-fn parity_std_math_sqrt_negative_is_nan() {
+fn std_math_sqrt_negative_is_nan() {
     // math.sqrt of a negative is IEEE NaN — never faults, identical.
     let src = "import std.math\nfn main():\n    print(math.sqrt(0.0 - 1.0))\nmain()";
     assert_eq!(golden_entry(src), "NaN\n");
 }
 
 #[test]
-fn parity_float_ieee_div_mod() {
+fn float_ieee_div_mod() {
     // Float division/modulo by zero is total IEEE-754: inf / NaN, never a fault.
     let src = "fn main():\n    print(1.0 / 0.0)\n    print(-1.0 / 0.0)\n    print(0.0 / 0.0)\n    print(5.0 % 0.0)\nmain()";
     assert_eq!(golden_entry(src), "inf\n-inf\nNaN\nNaN\n");
 }
 
 #[test]
-fn parity_int_div_by_zero_still_faults() {
+fn int_div_by_zero_still_faults() {
     // INTEGER division by zero still faults — caught + printed identically.
     let src = "fn run() -> int!:\n    r := recover:\n        1 / 0\n    match r:\n        ?v: return ?v\n        !e: print(e.message())\n    return ?0\nfn main():\n    _ := run()\nmain()";
     assert_eq!(golden_entry(src), "division by zero\n");
 }
 
 #[test]
-fn parity_large_int_equality_is_exact() {
-    // Two distinct i64 values above 2^53 must NOT compare equal (Python parity). Previously both
-    // engines compared ints via `as_f64`, so 2^62+1 and 2^62+2 (both round to 2^62 in f64) wrongly
+fn large_int_equality_is_exact() {
+    // Two distinct i64 values above 2^53 must NOT compare equal (Python parity). Previously ints
+    // were compared via `as_f64`, so 2^62+1 and 2^62+2 (both round to 2^62 in f64) wrongly
     // compared EQUAL. Cross-type `1 == 1.0` must STILL be true (int/float interop preserved).
     let src = "fn main():\n    a := 4611686018427387905\n    b := 4611686018427387906\n    print(a == b)\n    print(a != b)\n    print(a == a)\n    print(1 == 1.0)\n    print(2 == 3)\nmain()";
     assert_golden_out(src, "false\ntrue\ntrue\ntrue\nfalse\n");
 }
 
 #[test]
-fn parity_large_int_map_keys_distinct() {
+fn large_int_map_keys_distinct() {
     // Two distinct large ints are distinct map keys (they were collapsed to one when eq was f64).
     // `1` and `1.0` still collapse to a single key (cross-type numeric key equality preserved).
     let src = "fn main():\n    m := {4611686018427387905: 1, 4611686018427387906: 2}\n    print(m.len())\n    n := {1: 10, 1.0: 20}\n    print(n.len())\nmain()";
@@ -784,14 +784,14 @@ fn recover_tail_if_heterogeneous_branches_run_parity() {
 }
 
 #[test]
-fn parity_std_math_predicates() {
+fn std_math_predicates() {
     // is_nan / is_inf / is_finite — float predicates returning bool, identical.
     let src = "import std.math\nfn main():\n    print(math.is_nan(0.0 / 0.0))\n    print(math.is_inf(1.0 / 0.0))\n    print(math.is_finite(1.0))\n    print(math.is_finite(1.0 / 0.0))\nmain()";
     assert_eq!(golden_entry(src), "true\ntrue\ntrue\nfalse\n");
 }
 
 #[test]
-fn parity_nan_ordered_compare_is_false() {
+fn nan_ordered_compare_is_false() {
     // Ordered comparisons (`< <= > >=`) involving NaN are ALWAYS false — never a
     // fault — matching IEEE-754 / Python / Rust. Equality is untouched (`nan == nan` → false,
     // `nan != nan` → true). Normal float compares still work (regression guard).
@@ -803,13 +803,13 @@ fn parity_nan_ordered_compare_is_false() {
 }
 
 #[test]
-fn parity_sort_by_key_nan_float_key_deterministic() {
+fn sort_by_key_nan_float_key_deterministic() {
     // `sort_by_key` with a float key that can be NaN sorts deterministically (total order, NaN to
     // one end) instead of faulting — consistent with `sort()`. The SIGN of `0.0/0.0` (hence
     // whether NaN ranks at the front or back) is platform-dependent (negative on x86 SSE2,
     // possibly positive elsewhere), so we do NOT bake an absolute position into a golden — that
     // would be a non-portable test. `assert_golden_out` proves the real guarantees portably: the sort
-    // never faults and VM↔interp agree byte-identically on whatever order this machine produces.
+    // never faults and puts the NaNs at one end.
     let src = "fn main():\n    xs := [1.0, 0.0 / 0.0, 2.0, 0.0 / 0.0, 0.5]\n    xs.sort_by_key(fn(x: float) -> float: x)\n    for v in xs:\n        print(v)\nmain()";
     assert_golden_out(src, "NaN\nNaN\n0.5\n1.0\n2.0\n");
 }
@@ -829,7 +829,7 @@ fn sort_and_sort_by_key_keep_signed_zeros_in_input_order() {
 }
 
 #[test]
-fn parity_sort_by_key_normal_key_unchanged() {
+fn sort_by_key_normal_key_unchanged() {
     // Behavior-preserving guard: non-NaN float keys and int keys sort exactly as before — Part B
     // touches only the NaN float-key path.
     let fsrc = "fn main():\n    xs := [3.0, 1.0, 2.0]\n    xs.sort_by_key(fn(x: float) -> float: x)\n    for v in xs:\n        print(v)\nmain()";
@@ -862,22 +862,16 @@ fn math_abs_min_overflow_is_recoverable() {
 }
 
 #[test]
-fn exit_threads_code_through_both_engines() {
+fn exit_threads_code_through() {
     // `std.os.exit(code)` halts the program with that exit code: output before
     // the call is preserved, the statement after it never runs, and the run is not an error.
     let src = "import std.os\nfn main():\n    print(\"before\")\n    os.exit(3)\n    print(\"after\")\nmain()";
     let t = TmpDir::new();
     let entry = t.write("main.chz", src);
-    let (io, _ie, ir, ic) = run_file(&entry);
     let (vo, _ve, vr, vc) = run_file(&entry);
-    assert_eq!(io, "before\n", "interp stdout");
-    assert_eq!(vo, "before\n", "vm stdout");
-    assert_eq!(ic, Some(3), "interp exit code");
-    assert_eq!(vc, Some(3), "vm exit code");
-    assert!(
-        ir.is_ok() && vr.is_ok(),
-        "exit is not a runtime error: interp={ir:?} vm={vr:?}"
-    );
+    assert_eq!(vo, "before\n", "stdout");
+    assert_eq!(vc, Some(3), "exit code");
+    assert!(vr.is_ok(), "exit is not a runtime error: {vr:?}");
 }
 
 #[test]
@@ -887,16 +881,10 @@ fn defer_top_level_skipped_by_os_exit() {
     let src = "import std.os\nfn log(s: str):\n    print(s)\ndefer log(\"cleanup\")\nprint(\"before\")\nos.exit(2)\nprint(\"after\")\n";
     let t = TmpDir::new();
     let entry = t.write("main.chz", src);
-    let (io, _ie, ir, ic) = run_file(&entry);
     let (vo, _ve, vr, vc) = run_file(&entry);
-    assert_eq!(io, "before\n", "interp: cleanup defer skipped by os.exit");
-    assert_eq!(vo, "before\n", "vm: cleanup defer skipped by os.exit");
-    assert_eq!(ic, Some(2), "interp exit code");
-    assert_eq!(vc, Some(2), "vm exit code");
-    assert!(
-        ir.is_ok() && vr.is_ok(),
-        "exit is not a runtime error: interp={ir:?} vm={vr:?}"
-    );
+    assert_eq!(vo, "before\n", "cleanup defer skipped by os.exit");
+    assert_eq!(vc, Some(2), "exit code");
+    assert!(vr.is_ok(), "exit is not a runtime error: {vr:?}");
 }
 
 #[test]
@@ -909,14 +897,9 @@ fn exit_negative_code_masks_to_255() {
         let src = format!("import std.os\nfn main():\n    os.exit({code})\nmain()");
         let t = TmpDir::new();
         let entry = t.write("main.chz", &src);
-        let (_io, _ie, ir, ic) = run_file(&entry);
         let (_vo, _ve, vr, vc) = run_file(&entry);
-        assert_eq!(ic, Some(want), "M:N exit code for os.exit({code})");
-        assert_eq!(vc, Some(want), "serial exit code for os.exit({code})");
-        assert!(
-            ir.is_ok() && vr.is_ok(),
-            "exit is a clean halt, not an error"
-        );
+        assert_eq!(vc, Some(want), "exit code for os.exit({code})");
+        assert!(vr.is_ok(), "exit is a clean halt, not an error");
     }
 }
 

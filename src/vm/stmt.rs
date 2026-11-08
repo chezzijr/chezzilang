@@ -127,10 +127,9 @@ impl Vm {
     ///
     /// `report_escaped` — a genuine fault or a B3.4 cancel (TICKET-135, W14-39), but not `std.os.exit`, cancels
     /// each discarded frame's escaped nurseries (its implicit nursery + any inner `parallel:` the
-    /// fault unwound past) BEFORE that frame's `defer`s run — matching the interp oracle, which
-    /// reports in `exec_parallel` / `leave_implicit_nursery` as the body unwinds and only then runs
-    /// `finish_frame`'s defers. The MODULE top-level nursery is preserved (it joins only on a clean
-    /// run to program end; an uncaught top-level fault leaves it silent, as in the interp).
+    /// fault unwound past) BEFORE that frame's `defer`s run: each nursery reports as the body
+    /// unwinds, and only then do the frame's defers run. The MODULE top-level nursery is preserved
+    /// (it joins only on a clean run to program end; an uncaught top-level fault leaves it silent).
     pub(super) fn unwind_deferred(
         &mut self,
         target_frame_len: usize,
@@ -244,7 +243,7 @@ impl Vm {
 
     /// The nurseries an unwind of frame `fi` reports as escaped, before the frame's `defer`s: those
     /// above this count (innermost-first, so inner `parallel:` levels report before the frame's
-    /// implicit one — the interp's order). The module nursery is kept.
+    /// implicit one). The module nursery is kept.
     pub(super) fn escaped_floor(&self, fi: usize) -> usize {
         let f = &self.frames[fi];
         let floor = if f.is_toplevel && f.has_implicit_nursery {
@@ -371,16 +370,14 @@ impl Vm {
             // TASK B — a recover-scoped `?` jumps past the `JoinNursery` of any `parallel:`
             // opened inside the recover block: cancel its tasks HERE
             // (before the handler binds its result and execution continues), so a recover-caught
-            // `?` reports IDENTICALLY-AND-AS-EARLY as an uncaught one — matching the interp,
-            // whose `exec_parallel` reports during the `?` unwind, before the recover's value is
-            // produced. Without this the nursery lingered until the whole frame returned (the
-            // report then trailed `print("recovered")`, an interp/VM divergence).
+            // `?` reports IDENTICALLY-AND-AS-EARLY as an uncaught one: during the `?` unwind,
+            // before the recover's value is produced. Without this the nursery lingered until the
+            // whole frame returned (the report then trailed `print("recovered")`).
             //
-            // ORDERING (matches the interp oracle): the escaped `parallel:` BODY's own defers
-            // must run BEFORE the nursery reclaim, and the recover block's defers AFTER it —
-            // because in the interp the body is its own `exec_scoped_block` whose defers drain
-            // as the `?` unwinds out of the body, and only then does `exec_parallel` report;
-            // the recover block's defers run later, at the recover boundary. So: drain the
+            // ORDERING: the escaped `parallel:` BODY's own defers must run BEFORE the nursery
+            // reclaim, and the recover block's defers AFTER it — the body's defers drain as the
+            // `?` unwinds out of the body, and only then does the nursery report; the recover
+            // block's defers run later, at the recover boundary. So: drain the
             // body defers down to the outermost escaped nursery's floor, report, then drain the
             // remaining (recover-block) defers down to the handler's install-time floor. A body
             // defer fault is held and superseded by any later recover-block defer fault.
@@ -402,8 +399,7 @@ impl Vm {
             );
         }
         // A `?` at the top level (no enclosing function) is an unhandled error → exit. Use
-        // the `?` op's own `span` so the reported location matches the interp (which threads
-        // the `?`'s `expr.span` through its propagation marker).
+        // the `?` op's own `span` so the report names the `?`'s location.
         if self.frames.last().unwrap().is_toplevel {
             return Err(self.top_level_error(v, span).unwrap_or_else(|| {
                 self.err(format!("unhandled error: {}", self.display(v)), span)

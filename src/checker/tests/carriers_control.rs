@@ -1102,8 +1102,7 @@ fn print_value_not_usable_as_bool_condition() {
     // Bug 5: a `print` value in a bool-required position must be a TYPE ERROR (it is a function, not
     // bool) — it must NOT be silently accepted. Typing `print` as `Ty::Unknown` (an earlier attempt
     // at variadic value-form print) let `if p:` slip through the checker, and then the VM ran the
-    // then-branch (an `Obj::Builtin` is truthy) while the interp faulted `expected bool, found
-    // function` — a VM≠interp parity break. `print` now types as a `Ty::Func`, which
+    // then-branch (an `Obj::Builtin` is truthy). `print` now types as a `Ty::Func`, which
     // (like the other three) `expect_bool` rejects. `if print:` (the bare form) is rejected too.
     rejects(
         "fn main():\n    p := print\n    if p:\n        print(\"t\")\nmain()\n",

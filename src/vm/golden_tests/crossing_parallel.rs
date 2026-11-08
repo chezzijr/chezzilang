@@ -928,20 +928,12 @@ fn defer_top_level_runs_on_unhandled_error() {
     let src = "fn log(s: str):\n    print(s)\nfn boom() -> int!:\n    return !\"nope\"\ndefer log(\"cleanup\")\nprint(\"before\")\nx := boom()?\nprint(\"after\")\n";
     let t = TmpDir::new();
     let entry = t.write("main.chz", src);
-    let (io, _ie, ir, _ic) = run_file(&entry);
     let (vo, _ve, vr, _vc) = run_file(&entry);
     assert_eq!(
-        io, "before\ncleanup\n",
-        "interp: top-level defer runs on unhandled error"
-    );
-    assert_eq!(
         vo, "before\ncleanup\n",
-        "vm: top-level defer runs on unhandled error"
+        "top-level defer runs on unhandled error"
     );
-    assert!(
-        ir.is_err() && vr.is_err(),
-        "unhandled `?` is an error: interp={ir:?} vm={vr:?}"
-    );
+    assert!(vr.is_err(), "unhandled `?` is an error: {vr:?}");
 }
 
 #[test]
@@ -950,12 +942,9 @@ fn exit_is_not_caught_by_recover() {
     let src = "import std.os\nfn main():\n    x := recover:\n        os.exit(7)\n    print(\"unreachable\")\nmain()";
     let t = TmpDir::new();
     let entry = t.write("main.chz", src);
-    let (io, _ie, _ir, ic) = run_file(&entry);
     let (vo, _ve, _vr, vc) = run_file(&entry);
-    assert_eq!(io, "", "interp: nothing after the recover runs");
-    assert_eq!(vo, "", "vm: nothing after the recover runs");
-    assert_eq!(ic, Some(7), "interp exit code");
-    assert_eq!(vc, Some(7), "vm exit code");
+    assert_eq!(vo, "", "nothing after the recover runs");
+    assert_eq!(vc, Some(7), "exit code");
 }
 
 #[test]
@@ -969,22 +958,17 @@ fn exit_in_spawned_child_aborts_siblings() {
     let src = "import std.os\nfn a():\n    print(\"a\")\n    os.exit(3)\nfn b():\n    print(\"b\")\nfn main():\n    parallel:\n        spawn a()\n        spawn b()\n    print(\"after\")\nmain()\n";
     let t = TmpDir::new();
     let entry = t.write("main.chz", src);
-    let (io, _ie, ir, ic) = run_file(&entry);
     let (vo, _ve, vr, vc) = run_file(&entry);
     assert!(
-        vo.contains('a') && io.contains('a'),
-        "the exiting child's output flushes: got {vo:?} / {io:?}"
+        vo.contains('a'),
+        "the exiting child's output flushes: got {vo:?}"
     );
     assert!(
-        !io.contains("after") && !vo.contains("after"),
-        "the post-parallel statement never runs after os.exit: mn={io:?} serial={vo:?}"
+        !vo.contains("after"),
+        "the post-parallel statement never runs after os.exit: {vo:?}"
     );
-    assert_eq!(vc, Some(3), "serial exit code");
-    assert_eq!(ic, Some(3), "M:N exit code");
-    assert!(
-        ir.is_ok() && vr.is_ok(),
-        "os.exit is a clean halt, not an error: mn={ir:?} serial={vr:?}"
-    );
+    assert_eq!(vc, Some(3), "exit code");
+    assert!(vr.is_ok(), "os.exit is a clean halt, not an error: {vr:?}");
 }
 
 /// B3.4: a child `std.os.exit(code)` on the `--parallel` OS-thread pool is a clean hard-halt,
@@ -1039,9 +1023,9 @@ fn parallel_os_exit_aborts_recv_blocked_sibling() {
 
 /// gaps.md B5 — cross-nursery child→parent wake parity: a `send` from a nested (eager) `parallel:`
 /// nursery must wake a receiver parked in the OUTER nursery. Uncontended 1-send / 1-recv, so a plain
-/// run must match `.expected`. Pre-fix M:N false-faulted `deadlock` while the since-removed serial
-/// engine printed "receiver got 1". Runs the M:N leg under a watchdog (10 rounds) so a lost-wakeup
-/// regression fails loud rather than hanging.
+/// run must match `.expected`. Pre-fix it false-faulted `deadlock` (the right output is
+/// "receiver got 1"). Then 10 more rounds run under a watchdog (repeated on purpose) so a
+/// lost-wakeup regression fails loud rather than hanging.
 #[test]
 fn parallel_cross_nursery_nested_send_to_outer_recv_parity() {
     let src =
@@ -1054,19 +1038,18 @@ fn parallel_cross_nursery_nested_send_to_outer_recv_parity() {
     let (so, _se, sr, _) = run_file(&entry);
     assert!(sr.is_ok(), "baseline run faulted: {sr:?}");
     assert_eq!(so, expected, "baseline output != expected");
-    // M:N leg under a watchdog, several rounds to shake a flaky lost wakeup.
+    // Repeated rounds under a watchdog, to shake a flaky lost wakeup.
     for _ in 0..10 {
         let (mo, _me, mr, _) = run_parallel_watchdog(src);
         assert!(
             mr.is_ok(),
-            "M:N faulted (spurious cross-nursery deadlock / lost wakeup): {mr:?}"
+            "faulted (spurious cross-nursery deadlock / lost wakeup): {mr:?}"
         );
-        assert_eq!(mo, expected, "M:N stdout != expected");
+        assert_eq!(mo, expected, "watchdog-round stdout != expected");
     }
 }
 
-/// B3.5 — the since-removed cooperative engine's `fibers_all_blocked_is_deadlock` golden, ported to
-/// `--parallel`: two tasks each block on a distinct empty channel with no producer. Under threads
+/// B3.5 — two tasks each block on a distinct empty channel with no producer. Under threads
 /// B3.5's nursery-local detector must fault it too rather than hang on the condvars.
 #[test]
 fn parallel_all_blocked_deadlock_faults() {

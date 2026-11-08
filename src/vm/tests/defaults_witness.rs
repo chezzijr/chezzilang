@@ -7,7 +7,7 @@ use super::*;
 //
 // RUST, not `tests/chz/`: the subject is a proto's CAPTURE LIST, which is bytecode internals no
 // `assert` can see. The behavioural half (the witness still WORKS wherever it is genuinely used) is
-// `tests/chz/spec/static_witness_test.chz` and the both-engines runner below.
+// `tests/chz/spec/static_witness_test.chz` and the runner below.
 
 /// The `capture_names` of every proto named `proto`, in compile order.
 fn capture_names_of(src: &str, proto: &str) -> Vec<Vec<String>> {
@@ -169,10 +169,8 @@ fn m24_2_a_parameter_shadowing_a_user_module_keeps_the_witness() {
         panic!("program must type-check, got: {errs:?}");
     }
     let (vo, _ve, vr, _vc) = run_file(&entry);
-    let (_io, _ie, ir, _ic) = run_file(&entry);
     let _ = std::fs::remove_dir_all(&dir);
     assert!(vr.is_ok(), "VM faulted: {vr:?}");
-    assert!(ir.is_ok(), "M:N engine faulted: {ir:?}");
     assert_eq!(vo, "14\n", "VM output");
 }
 
@@ -306,10 +304,8 @@ print(probe())
         panic!("program must type-check, got: {errs:?}");
     }
     let (vo, _ve, vr, _vc) = run_file(&entry);
-    let (_io, _ie, ir, _ic) = run_file(&entry);
     let _ = std::fs::remove_dir_all(&dir);
     assert!(vr.is_ok(), "VM faulted: {vr:?}");
-    assert!(ir.is_ok(), "M:N engine faulted: {ir:?}");
     assert_eq!(
         vo, "709\n201\n",
         "probe() is g(b=1, a=2) = h2(a=2, b=1) = 201; 102 means lib's permutation was applied"
@@ -443,13 +439,11 @@ print(probe())
         panic!("program must type-check, got: {errs:?}");
     }
     let (vo, _ve, vr, _vc) = run_file(&entry);
-    let (_io, _ie, ir, _ic) = run_file(&entry);
     let _ = std::fs::remove_dir_all(&dir);
     assert!(
         vr.is_ok(),
         "VM faulted (lib's Counter witness on main's Other call): {vr:?}"
     );
-    assert!(ir.is_ok(), "M:N engine faulted: {ir:?}");
     assert_eq!(
         vo, "7\noth\n",
         "f() witnesses Counter; probe() witnesses Other — a shared key builds Counter twice"
@@ -509,10 +503,8 @@ print(probe())
         panic!("program must type-check, got: {errs:?}");
     }
     let (vo, _ve, vr, _vc) = run_file(&entry);
-    let (_io, _ie, ir, _ic) = run_file(&entry);
     let _ = std::fs::remove_dir_all(&dir);
     assert!(vr.is_ok(), "VM faulted: {vr:?}");
-    assert!(ir.is_ok(), "M:N engine faulted: {ir:?}");
     assert_eq!(
         vo, "709\n709\n",
         "the default is `g(a=7, b=9)` in lib, where `g` is `h`; probe's local `ba` is irrelevant"
@@ -553,10 +545,8 @@ fn a_cross_module_default_resolves_in_its_definer_not_the_caller() {
         panic!("program must type-check, got: {errs:?}");
     }
     let (vo, _ve, vr, _vc) = run_file(&entry);
-    let (_io, _ie, ir, _ic) = run_file(&entry);
     let _ = std::fs::remove_dir_all(&dir);
     assert!(vr.is_ok(), "VM faulted: {vr:?}");
-    assert!(ir.is_ok(), "M:N engine faulted: {ir:?}");
     assert_eq!(
         vo, "7\n99\n",
         "the default reads g's K (7), not the caller's (99); the caller's own K is untouched"
@@ -611,10 +601,8 @@ fn a_cross_module_default_may_call_the_definers_own_function() {
         panic!("program must type-check, got: {errs:?}");
     }
     let (vo, _ve, vr, _vc) = run_file(&entry);
-    let (_io, _ie, ir, _ic) = run_file(&entry);
     let _ = std::fs::remove_dir_all(&dir);
     assert!(vr.is_ok(), "VM faulted: {vr:?}");
-    assert!(ir.is_ok(), "M:N engine faulted: {ir:?}");
     assert_eq!(
         vo, "3\n8\n",
         "the definer's own fn runs; an explicit arg bypasses it"
@@ -646,10 +634,8 @@ fn a_cross_module_default_may_call_through_the_definers_import() {
         panic!("program must type-check, got: {errs:?}");
     }
     let (vo, _ve, vr, _vc) = run_file(&entry);
-    let (_io, _ie, ir, _ic) = run_file(&entry);
     let _ = std::fs::remove_dir_all(&dir);
     assert!(vr.is_ok(), "VM faulted: {vr:?}");
-    assert!(ir.is_ok(), "M:N engine faulted: {ir:?}");
     assert_eq!(
         vo, "3\n",
         "the default resolves g's own import, not main's namespace"
@@ -678,10 +664,8 @@ fn a_cross_module_default_may_call_through_the_definers_std_import() {
         panic!("program must type-check, got: {errs:?}");
     }
     let (vo, _ve, vr, _vc) = run_file(&entry);
-    let (_io, _ie, ir, _ic) = run_file(&entry);
     let _ = std::fs::remove_dir_all(&dir);
     assert!(vr.is_ok(), "VM faulted: {vr:?}");
-    assert!(ir.is_ok(), "M:N engine faulted: {ir:?}");
     assert_eq!(vo, "4.0\n1.5\n", "std.math resolves in g, not in main");
 }
 
@@ -713,10 +697,8 @@ fn a_default_from_a_transitive_dependency_resolves_in_its_definer() {
         panic!("program must type-check, got: {errs:?}");
     }
     let (vo, _ve, vr, _vc) = run_file(&entry);
-    let (_io, _ie, ir, _ic) = run_file(&entry);
     let _ = std::fs::remove_dir_all(&dir);
     assert!(vr.is_ok(), "VM faulted: {vr:?}");
-    assert!(ir.is_ok(), "M:N engine faulted: {ir:?}");
     assert_eq!(vo, "13\n", "deep's own dv() is 3, plus S.n = 10");
 }
 
@@ -768,10 +750,8 @@ fn a_default_in_a_diamonds_shared_base_is_the_same_in_either_import_order() {
             panic!("[{tag}] program must type-check, got: {errs:?}");
         }
         let (vo, _ve, vr, _vc) = run_file(&entry);
-        let (_io, _ie, ir, _ic) = run_file(&entry);
         let _ = std::fs::remove_dir_all(&dir);
         assert!(vr.is_ok(), "[{tag}] VM faulted: {vr:?}");
-        assert!(ir.is_ok(), "[{tag}] M:N engine faulted: {ir:?}");
         assert_eq!(
             vo, "13\n23\n900\n",
             "[{tag}] base's K (3) reaches both call sites; main's K is untouched"
@@ -975,10 +955,8 @@ fn a_generic_host_self_default_resolves_in_its_definer() {
         panic!("must type-check, got: {errs:?}");
     }
     let (vo, _e, vr, _c) = run_file(&entry);
-    let (_io, _e2, ir, _c2) = run_file(&entry);
     let _ = std::fs::remove_dir_all(&dir);
     assert!(vr.is_ok(), "VM faulted: {vr:?}");
-    assert!(ir.is_ok(), "M:N engine faulted: {ir:?}");
     assert_eq!(
         vo, "definer\n0\n",
         "the generic-host `Self` default must resolve in its DEFINER, not the caller"
@@ -1149,10 +1127,8 @@ fn a_method_default_from_an_imported_module_case(tag: &str, entry_src: &str) {
         panic!("program must type-check, got: {errs:?}");
     }
     let (vo, _ve, vr, _vc) = run_file(&entry);
-    let (_io, _ie, ir, _ic) = run_file(&entry);
     let _ = std::fs::remove_dir_all(&dir);
     assert!(vr.is_ok(), "VM faulted: {vr:?}");
-    assert!(ir.is_ok(), "M:N engine faulted: {ir:?}");
     assert_eq!(vo, "11\n", "[{tag}] a's own av() is 1, not z's 500");
 }
 
@@ -1288,10 +1264,8 @@ fn a_cross_module_default_is_evaluated_per_call_in_the_definers_module() {
         panic!("program must type-check, got: {errs:?}");
     }
     let (vo, _ve, vr, _vc) = run_file(&entry);
-    let (_io, _ie, ir, _ic) = run_file(&entry);
     let _ = std::fs::remove_dir_all(&dir);
     assert!(vr.is_ok(), "VM faulted: {vr:?}");
-    assert!(ir.is_ok(), "M:N engine faulted: {ir:?}");
     assert_eq!(
         vo, "1\n2\n2\n100\n",
         "two omitting calls bump g's own counter twice; main's same-named global is untouched"
@@ -1305,25 +1279,19 @@ fn a_cross_module_default_is_evaluated_per_call_in_the_definers_module() {
 /// must run clean with empty stdout —
 /// byte-identical. Proves "runs clean, no panic" against a literal golden.
 #[test]
-fn entry_is_always_linked_stub_runs_clean_three_engine() {
+fn entry_is_always_linked_stub_runs_clean() {
     let manifest = crate::native::std_embed::checkout_root();
     let entry = manifest.join("std").join("prelude.chz");
-    let cfg = crate::native::HostConfig::default;
-    let (vo, _ve, vr, _vc) = run_file_with(&entry, cfg());
-    let (_po, _pe, pr, _pc) = run_file_with(&entry, cfg());
-    let (io, _ie, ir, _ic) = run_file(&entry);
+    let (vo, _ve, vr, _vc) = run_file(&entry);
     assert!(vr.is_ok(), "VM faulted on prelude.chz: {vr:?}");
-    assert!(pr.is_ok(), "--parallel faulted on prelude.chz: {pr:?}");
-    assert!(ir.is_ok(), "interp faulted on prelude.chz: {ir:?}");
     assert_eq!(vo, "", "VM stdout not empty on prelude.chz");
-    assert_eq!(vo, io, "VM vs interp divergence on prelude.chz");
 }
 
 /// Task 4 — `import std.concurrency` then construct + use ALL FOUR runtime concurrency ctors must
 /// RUN end-to-end byte-identically. Exercises the native EMPTY-members module-object alloc + the
 /// opcode-dispatched ctors (the import gate is checker-only, so runtime is unchanged).
 #[test]
-fn concurrency_whole_module_runs_both_engines() {
+fn concurrency_whole_module_runs() {
     let dir = std::env::temp_dir().join(format!("chezzi_vm_conc_whole_{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let entry = dir.join("main.chz");
@@ -1333,10 +1301,8 @@ fn concurrency_whole_module_runs_both_engines() {
         )
         .unwrap();
     let (vo, _ve, vr, _vc) = run_file(&entry);
-    let (_io, _ie, ir, _ic) = run_file(&entry);
     let _ = std::fs::remove_dir_all(&dir);
     assert!(vr.is_ok(), "VM faulted: {vr:?}");
-    assert!(ir.is_ok(), "interp faulted: {ir:?}");
     let expected = "5\n1\n2\n";
     assert_eq!(vo, expected, "VM output");
 }
@@ -1346,7 +1312,7 @@ fn concurrency_whole_module_runs_both_engines() {
 /// the engine `bind_import` would fault `module 'std.concurrency' has no member 'Shared'` without
 /// the runtime skip. The ctor is resolved by the compiler name→opcode dispatch, not a bound member.
 #[test]
-fn concurrency_from_import_runs_both_engines() {
+fn concurrency_from_import_runs() {
     let dir = std::env::temp_dir().join(format!("chezzi_vm_conc_from_{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let entry = dir.join("main.chz");
@@ -1356,13 +1322,8 @@ fn concurrency_from_import_runs_both_engines() {
     )
     .unwrap();
     let (vo, _ve, vr, _vc) = run_file(&entry);
-    let (_io, _ie, ir, _ic) = run_file(&entry);
     let _ = std::fs::remove_dir_all(&dir);
     assert!(vr.is_ok(), "VM faulted (bind_import skip missing?): {vr:?}");
-    assert!(
-        ir.is_ok(),
-        "interp faulted (bind_import skip missing?): {ir:?}"
-    );
     assert_eq!(vo, "0\n", "VM output");
 }
 
@@ -1374,7 +1335,7 @@ fn concurrency_from_import_runs_both_engines() {
 /// replacement) is exercised at check time; the `use_*` fns are checked though never
 /// called (no live I/O — the method resolution is a front-end concern).
 #[test]
-fn net_from_import_runs_both_engines() {
+fn net_from_import_runs() {
     for src in [
         "import Socket from std.net\nfn use_sock(s: Socket) -> int!:\n    a := s.read(64)?\n    n := s.write(a)?\n    s.close()\n    return ?n\nfn main():\n    print(1)\nmain()\n",
         "import Listener, Socket from std.net\nfn use_sock(s: Socket) -> int!:\n    a := s.read(64, 100)?\n    n := s.write(a, 100)?\n    s.close()\n    return ?n\nfn use_listener(l: Listener) -> str!:\n    c := l.accept()?\n    ad := l.addr()?\n    c.close()\n    l.close()\n    return ?ad\nfn main():\n    print(1)\nmain()\n",
@@ -1384,13 +1345,8 @@ fn net_from_import_runs_both_engines() {
         let entry = dir.join("main.chz");
         std::fs::write(&entry, src).unwrap();
         let (vo, _ve, vr, _vc) = run_file(&entry);
-        let (_io, _ie, ir, _ic) = run_file(&entry);
         let _ = std::fs::remove_dir_all(&dir);
         assert!(vr.is_ok(), "VM faulted (bind_import skip missing?): {vr:?}");
-        assert!(
-            ir.is_ok(),
-            "interp faulted (bind_import skip missing?): {ir:?}"
-        );
         assert_eq!(vo, "1\n", "VM output");
     }
 }
@@ -1399,7 +1355,7 @@ fn net_from_import_runs_both_engines() {
 /// must RUN end-to-end byte-identically. The import gate is checker-only, so the opcode-dispatched `timer` runtime is unchanged;
 /// the timer fires after 50ms and `recv()` yields `true`.
 #[test]
-fn timer_whole_module_runs_both_engines() {
+fn timer_whole_module_runs() {
     let dir = std::env::temp_dir().join(format!("chezzi_vm_timer_whole_{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let entry = dir.join("main.chz");
@@ -1409,10 +1365,8 @@ fn timer_whole_module_runs_both_engines() {
     )
     .unwrap();
     let (vo, _ve, vr, _vc) = run_file(&entry);
-    let (_io, _ie, ir, _ic) = run_file(&entry);
     let _ = std::fs::remove_dir_all(&dir);
     assert!(vr.is_ok(), "VM faulted: {vr:?}");
-    assert!(ir.is_ok(), "interp faulted: {ir:?}");
     assert_eq!(vo, "true\n", "VM output");
 }
 
@@ -1420,7 +1374,7 @@ fn timer_whole_module_runs_both_engines() {
 /// backed with NO runtime module-member value, so the from-import type-checks green but would fault `module 'std.time' has no member 'timer'` WITHOUT the timer-specific `bind_import`
 /// skip. The call resolves via the compiler name→opcode dispatch, not a bound member.
 #[test]
-fn timer_from_import_runs_both_engines() {
+fn timer_from_import_runs() {
     let dir = std::env::temp_dir().join(format!("chezzi_vm_timer_from_{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let entry = dir.join("main.chz");
@@ -1430,13 +1384,8 @@ fn timer_from_import_runs_both_engines() {
     )
     .unwrap();
     let (vo, _ve, vr, _vc) = run_file(&entry);
-    let (_io, _ie, ir, _ic) = run_file(&entry);
     let _ = std::fs::remove_dir_all(&dir);
     assert!(vr.is_ok(), "VM faulted (bind_import skip missing?): {vr:?}");
-    assert!(
-        ir.is_ok(),
-        "interp faulted (bind_import skip missing?): {ir:?}"
-    );
     assert_eq!(vo, "true\n", "VM output");
 }
 
@@ -1465,20 +1414,10 @@ fn extern_qualified_return_struct_runs() {
     )
     .unwrap();
     let (vm_out, _e, vm_res, _) = run_file(&entry);
-    let (_io, _ie, ir, _) = run_file(&entry);
-    let (_par_out, _pe, par_res, _) = run_file_with(&entry, crate::native::HostConfig::default());
     let _ = std::fs::remove_dir_all(&dir);
     assert!(
         vm_res.is_ok(),
         "VM faulted on qualified return struct extern: {vm_res:?}"
-    );
-    assert!(
-        ir.is_ok(),
-        "interp faulted on qualified return struct extern: {ir:?}"
-    );
-    assert!(
-        par_res.is_ok(),
-        "parallel engine faulted on qualified return struct extern: {par_res:?}"
     );
     assert_eq!(vm_out, "3\n2\n");
 }
@@ -1506,20 +1445,10 @@ fn extern_qualified_width_alias_param_runs() {
         )
         .unwrap();
     let (vm_out, _e, vm_res, _) = run_file(&entry);
-    let (_io, _ie, ir, _) = run_file(&entry);
-    let (_par_out, _pe, par_res, _) = run_file_with(&entry, crate::native::HostConfig::default());
     let _ = std::fs::remove_dir_all(&dir);
     assert!(
         vm_res.is_ok(),
         "VM faulted/panicked on qualified width-alias param extern: {vm_res:?}"
-    );
-    assert!(
-        ir.is_ok(),
-        "interp faulted on qualified width-alias param extern: {ir:?}"
-    );
-    assert!(
-        par_res.is_ok(),
-        "parallel engine faulted on qualified width-alias param extern: {par_res:?}"
     );
     assert_eq!(vm_out, "7\n");
 }

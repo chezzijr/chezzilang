@@ -74,7 +74,7 @@ fn run(file: &Path, extra: &[&str], std_dir: Option<&Path>) -> (String, String, 
 }
 
 #[test]
-fn bodied_fn_runs_and_matches_across_engines() {
+fn bodied_fn_runs() {
     let t = TmpDir::new();
     let prog = t.write(
         "main.chz",
@@ -123,7 +123,7 @@ fn native_file_can_import_another_module() {
     let mut src = std::fs::read_to_string(&math).unwrap();
     src.push_str(
         "\nimport std.string as s\n\
-         fn parity_word(n: int) -> str:\n\
+         fn word(n: int) -> str:\n\
         \x20   if n % 2 == 0:\n\
         \x20       return s.reverse(\"even\")\n\
         \x20   return s.repeat(\"odd\", 2)\n",
@@ -134,8 +134,8 @@ fn native_file_can_import_another_module() {
     let prog = t.write(
         "main.chz",
         "import std.math\n\
-         print(math.parity_word(4))\n\
-         print(math.parity_word(7))\n\
+         print(math.word(4))\n\
+         print(math.word(7))\n\
          print(math.divmod(9, 2))\n",
     );
     let (mn_out, mn_err, mn_ok) = run(&prog, &[], Some(&stddir.0));

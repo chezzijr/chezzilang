@@ -16,7 +16,7 @@
 # decl. The verb wrappers (put/patch/delete/head) are plain.
 #
 # FIELD ORDER IS LOAD-BEARING: `Response`'s field order is positional across the remaining hand-built
-# runtime layout copies (compiler `Compiler::new`, interp finalize, `native/request.rs` response_ret,
+# runtime layout copies (compiler `Compiler::new`, `native/request.rs` response_ret,
 # and seed_stdlib_structs), drift-guarded by a checker test. Do not reorder without updating all copies.
 
 native struct Response:

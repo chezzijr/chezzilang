@@ -669,8 +669,8 @@ impl Compiler {
                 child.captured_names = captured_names;
                 // M-C: a `defer:` block is its own function body (it runs as a closure in its own
                 // frame at frame exit) — a bare `spawn` inside it binds to the block's own implicit
-                // nursery, joined when the deferred block returns. Mirrors `compile_spawn`'s block arm
-                // (and the interp's `run_block_task`, which gates deferred blocks the same way).
+                // nursery, joined when the deferred block returns. Mirrors `compile_spawn`'s block
+                // arm.
                 let implicit = block_has_bare_spawn(body);
                 if implicit {
                     child.has_implicit_nursery = true;

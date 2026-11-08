@@ -368,8 +368,9 @@ impl Checker {
         // PROBE the candidate closure bodies before firing. A still-unbound param in an unannotated
         // closure slot is a *potential* deadlock, but only a GENUINE one when the body actually
         // constrains that param (e.g. `a < b` — ordering on an unconstrained `Ty::Param` is
-        // rejected). A harmless body (`print(x)`, a constant) imposes no constraint, type-checks on
-        // every engine, and ran on `main`; firing there would reject previously-valid code. The
+        // rejected). A harmless body (`print(x)`, a constant) imposes no constraint, type-checks,
+        // and
+        // ran on `main`; firing there would reject previously-valid code. The
         // discriminator: check the candidate bodies twice — once leaving the params as the unbound
         // `Ty::Param` (the current `sub`), once with them bound to `Unknown`. Fire ONLY when the
         // unbound form errors AND the `Unknown` form is clean. That isolates a true "needs `T`"

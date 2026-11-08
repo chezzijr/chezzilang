@@ -20,8 +20,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 static ATOMIC_SEQ: AtomicU64 = AtomicU64::new(0);
 
 /// Serializes the golden tests that drive `examples/fs_mutations.chz`, which all write the single
-/// fixed scratch dir `examples/.fs_scratch`. Held across a whole round-trip so the concurrent VM and
-/// interp goldens can't interleave their mkdir/remove on the shared dir (test-runner parallelism).
+/// fixed scratch dir `examples/.fs_scratch`. Held across a whole round-trip so concurrent goldens
+/// can't interleave their mkdir/remove on the shared dir (test-runner parallelism).
 #[cfg(any(test, feature = "test-api"))]
 pub static FS_SCRATCH_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 

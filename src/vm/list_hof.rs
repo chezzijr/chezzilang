@@ -1120,7 +1120,7 @@ impl Vm {
         Ok(Value::obj(self.heap.alloc(Obj::List(out))))
     }
 
-    /// An `int` method-argument, with a uniform type error matching the interp.
+    /// An `int` method-argument, with a uniform type error.
     pub(super) fn int_arg(&self, method: &str, v: &Value, span: Span) -> Result<i64, RuntimeError> {
         match self.int_val(*v) {
             Some(n) => Ok(n),

@@ -742,7 +742,7 @@ fn intrinsic_grants_all_have_vm_arms() {
 /// checker now accepts, identically. Both ancestors print 1: CPython `m.G()` where
 /// `G = _one`, Go `pkg.G()` where `var G = one`.
 #[test]
-fn module_global_fn_value_call_runs_both_engines() {
+fn module_global_fn_value_call_runs() {
     let dir = std::env::temp_dir().join(format!("chezzi_vm_w721_{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join("k.chz"), "fn one() -> int:\n    return 1\n").unwrap();
@@ -754,10 +754,8 @@ fn module_global_fn_value_call_runs_both_engines() {
     )
     .unwrap();
     let (vm_out, _e, vm_res, _) = run_file(&entry);
-    let (_par_out, _pe, par_res, _) = run_file_with(&entry, crate::native::HostConfig::default());
     let _ = std::fs::remove_dir_all(&dir);
-    assert!(vm_res.is_ok(), "serial faulted: {vm_res:?}");
-    assert!(par_res.is_ok(), "M:N faulted: {par_res:?}");
+    assert!(vm_res.is_ok(), "faulted: {vm_res:?}");
     assert_eq!(vm_out, "1\n1\n");
 }
 
@@ -775,7 +773,7 @@ fn module_global_fn_value_call_runs_both_engines() {
 /// combined `Type[T].m[U]` (an `Index` OVER the `Field`, which the old guard never even saw), and a
 /// generic `T` reached through its `$w:T` witness. The module-qualified heads are the test below.
 #[test]
-fn a_static_method_head_is_a_spawn_or_defer_target_runs_both_engines() {
+fn a_static_method_head_is_a_spawn_or_defer_target_runs() {
     let holder = "struct Holder:\n    v: int\n    fn build(old: int) -> int:\n        print(old)\n        return old\n";
     let srcs = [
         // bare struct static
@@ -821,7 +819,7 @@ fn a_static_method_head_is_a_spawn_or_defer_target_runs_both_engines() {
 /// (which used to fault with `module 'lib' has no member 'Holder'`), and the qualified turbofish.
 /// All three now emit exactly the `Op::CallStatic` their eager spelling emits.
 #[test]
-fn module_reached_static_heads_are_defer_targets_both_engines() {
+fn module_reached_static_heads_are_defer_targets() {
     let dir = std::env::temp_dir().join(format!("chezzi_vm_m245b_{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(
@@ -838,10 +836,7 @@ fn module_reached_static_heads_are_defer_targets_both_engines() {
         let entry = dir.join(format!("main{i}.chz"));
         std::fs::write(&entry, src).unwrap();
         let (vm_out, _e, vm_res, _) = run_file(&entry);
-        let (_par_out, _pe, par_res, _) =
-            run_file_with(&entry, crate::native::HostConfig::default());
         assert!(vm_res.is_ok(), "VM faulted on {src}: {vm_res:?}");
-        assert!(par_res.is_ok(), "M:N faulted on {src}: {par_res:?}");
         assert_eq!(vm_out, "body\n3\n", "VM output on: {src}");
     }
     let _ = std::fs::remove_dir_all(&dir);
@@ -855,7 +850,7 @@ fn module_reached_static_heads_are_defer_targets_both_engines() {
 /// concrete types, so a wrong witness cannot pass by coincidence. (`spawn lib.f(..)` stays refused
 /// by the unrelated non-sendable-module-receiver rule.)
 #[test]
-fn cross_module_witness_defer_target_runs_both_engines() {
+fn cross_module_witness_defer_target_runs() {
     let dir = std::env::temp_dir().join(format!("chezzi_vm_m245_{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(
@@ -870,10 +865,8 @@ fn cross_module_witness_defer_target_runs_both_engines() {
     )
     .unwrap();
     let (vm_out, _e, vm_res, _) = run_file(&entry);
-    let (_par_out, _pe, par_res, _) = run_file_with(&entry, crate::native::HostConfig::default());
     let _ = std::fs::remove_dir_all(&dir);
-    assert!(vm_res.is_ok(), "serial faulted: {vm_res:?}");
-    assert!(par_res.is_ok(), "M:N faulted: {par_res:?}");
+    assert!(vm_res.is_ok(), "faulted: {vm_res:?}");
     // body first (Go's ordering), then LIFO — each deferral constructing ITS OWN caller-side type
     assert_eq!(vm_out, "body\nTag(s='none')\nCounter(n=7)\n");
 }

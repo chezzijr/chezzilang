@@ -258,8 +258,8 @@ main()?
 /// exit code sat on the job's isolated worker `Vm` until a join `main` could never reach, and the run
 /// hung forever (rc=124 under `timeout`) — so the watchdog above IS the assertion.
 ///
-/// Needs real worker threads (the since-removed cooperative engine refused the socket op outright — W7-40's documented engine difference) and so
-/// already exits 3 today by a different route. An ephemeral port (`:0`), never a fixed one — CI collides.
+/// Needs real worker threads, and so already exits 3 today by a different route. An ephemeral port
+/// (`:0`), never a fixed one — CI collides.
 #[test]
 fn eager_job_os_exit_terminates_a_socket_blocked_main() {
     let t = TmpDir::new();

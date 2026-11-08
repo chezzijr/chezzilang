@@ -396,7 +396,7 @@ impl Vm {
         args: &[Value],
         span: Span,
     ) -> Result<Value, RuntimeError> {
-        // A str argument's owned text, with a uniform type error matching the interp.
+        // A str argument's owned text, with a uniform type error.
         let str_arg = |vm: &Vm, i: usize| -> Result<String, RuntimeError> {
             match args[i].as_obj().map(|ah| vm.heap.get(ah)) {
                 Some(Obj::Str(a)) => Ok(a.to_string()),
@@ -582,7 +582,7 @@ impl Vm {
                     }
                     // gap #1 (minimal subset): receiver methods forwarding to the `std.string` free
                     // fns. Pure native Rust, byte-identical to the std.string codepoint-loop oracle
-                    // (see std/string.chz) and to the interp arms.
+                    // (see std/string.chz).
                     StrMethod::Replace => {
                         self.arity_err("replace", args, 2, span)?;
                         let old = str_arg(self, 0)?;

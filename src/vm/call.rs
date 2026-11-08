@@ -735,7 +735,7 @@ impl Vm {
     }
 
     /// Return from the current frame. `propagated` true ⇒ the value came from `?` (no observable
-    /// difference here; the caller treats it as the function's result, exactly like the interp).
+    /// difference here; the caller treats it as the function's result).
     ///
     /// Deferred calls (`defer`) run LIFO first, while the frame is still live so the GC keeps their
     /// values — and the return value — rooted. A fault in a deferred call supersedes the frame's
@@ -814,8 +814,8 @@ impl Vm {
         // Reclaim any `parallel:` nursery this frame opened but whose `JoinNursery` was skipped by a
         // `?`/return escape (no-op on the normal fall-through path — `JoinNursery` already popped it,
         // so `nurseries.len() == frame.nursery_len`; also a no-op when the implicit nursery above was
-        // just joined). Mirrors the `recover:` catch path and the interp's unconditional
-        // `exec_parallel` pop; a nested frame keeps the parent's nursery (it captured the parent depth
+        // just joined). Mirrors the `recover:` catch path; a nested frame keeps the parent's
+        // nursery (it captured the parent depth
         // at entry). TASK B: route through `drain_escaped_nursery` so the unstarted tasks are
         // cancelled-and-reported (not silently dropped). NB: within-frame `break`/`continue` out of a
         // `parallel:` no longer rely on this — the compiler emits a `ReclaimNursery` before their

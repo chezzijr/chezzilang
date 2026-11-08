@@ -17,12 +17,12 @@ fn print_defaults_come_from_the_prelude_declaration() {
 #[test]
 fn int_div_truncates() {
     assert_eq!(run("print(7 / 2)"), "3\n");
-    assert_eq!(run("print(-7 / 2)"), "-3\n"); // Rust trunc-toward-zero, matching interp
+    assert_eq!(run("print(-7 / 2)"), "-3\n"); // Rust trunc-toward-zero
 }
 
 #[test]
 fn int_overflow_is_error_not_wrap() {
-    // A wrapping VM would print a negative number; we must error like the interpreter.
+    // A wrapping VM would print a negative number; we must error instead.
     assert!(run_err("print(9223372036854775807 + 1)").contains("integer overflow in Add"));
 }
 
@@ -699,7 +699,7 @@ fn index_compound_assign() {
 
 #[test]
 fn compound_assign_all_ops_all_targets_parity() {
-    // Every compound op across ident / index / field / map-key targets; VM == interp == --parallel.
+    // Every compound op across ident / index / field / map-key targets, against a literal golden.
     let src = "\
 struct P:
     f: int
@@ -737,7 +737,7 @@ main()";
 
 #[test]
 fn membership_in_runtime_parity() {
-    // list / set / map-key / substring, true + false; VM == interp == --parallel.
+    // list / set / map-key / substring, true + false, against a literal golden.
     let src = "\
 fn main():
     print(2 in [1, 2, 3])
@@ -761,7 +761,7 @@ main()";
 #[test]
 fn tuple_swap_runtime_parity() {
     // vars, list elements (same indices appear on both sides → proves RHS-first eval),
-    // and struct fields; VM == interp == --parallel.
+    // and struct fields, against a literal golden.
     let src = "\
 struct P:
     x: int
@@ -971,7 +971,7 @@ main()";
 
 // ----- or-patterns + nested nullary -----
 
-/// A literal or-pattern (`1 | 2 | 3`) routes any alternative to the body; the interp agrees.
+/// A literal or-pattern (`1 | 2 | 3`) routes any alternative to the body.
 #[test]
 fn vm_or_pattern_literals() {
     let src = "fn f(n: int) -> str:\n    return match n:\n        1 | 2 | 3: \"low\"\n        _: \"high\"\nprint(f(2))\nprint(f(5))\n";
@@ -979,7 +979,7 @@ fn vm_or_pattern_literals() {
     assert_eq!(out, "low\nhigh\n");
 }
 
-/// A 3-variant enum or-pattern is exhaustive and matches each alternative; the interp agrees.
+/// A 3-variant enum or-pattern is exhaustive and matches each alternative.
 #[test]
 fn vm_or_pattern_enum_variants() {
     let src = "enum Color:\n    Red\n    Green\n    Blue\nfn name(c: Color) -> str:\n    return match c:\n        Color.Red | Color.Green | Color.Blue: \"primary\"\nprint(name(Color.Green))\nprint(name(Color.Blue))\n";
@@ -1003,7 +1003,7 @@ fn vm_or_pattern_with_guard() {
     assert_eq!(out, "two\nother\n");
 }
 
-/// A nested nullary variant (`Some(None)`) is a refutable variant match; the interp agrees.
+/// A nested nullary variant (`Some(None)`) is a refutable variant match.
 #[test]
 fn vm_nested_nullary_variant() {
     // Nested nullary `None` inside `Some(...)` is a refutable variant match: `Some(None)` matches

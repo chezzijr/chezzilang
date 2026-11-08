@@ -946,7 +946,8 @@ mod tests {
 
     #[test]
     fn python_float_repr_and_e_spec() {
-        // Bare repr (str/print/interp-no-spec/json path) — CPython repr() differential table.
+        // Bare repr (str/print/interpolation-no-spec/json path) — CPython repr() differential
+        // table.
         let repr_cases: &[(f64, &str)] = &[
             (1e16, "1e+16"),
             (1e15, "1000000000000000.0"),

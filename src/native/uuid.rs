@@ -17,7 +17,7 @@
 //!
 //! `v4`/`uuid_seed` are a fast entropy syscall / a pure CPU transform (no blocking I/O) →
 //! [`super::Kind::Inline`] on their registry entry, exactly like `crypto.secure_bytes`; they run
-//! inline on every engine. LIMIT (same as `std.rand`, SEEDED path only — the default path holds no
+//! inline. LIMIT (same as `std.rand`, SEEDED path only — the default path holds no
 //! state): under `--parallel`, CONCURRENT draws from multiple tasks interleave nondeterministically on
 //! the shared global, so an EXACT seeded value is only deterministic for strictly-sequential draws —
 //! the goldens draw sequentially.

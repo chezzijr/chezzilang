@@ -9,7 +9,7 @@ use super::*;
 
 /// `examples/hof.chz` — a function-typed parameter applied to a closure.
 #[test]
-fn golden_hof_chz_matches_expected_and_interp() {
+fn golden_hof_chz_matches_expected() {
     let src = include_str!("../../../examples/hof.chz");
     let expected = include_str!("../../../examples/hof.expected");
     let vm_out = run_capture(src).expect("vm run");
@@ -18,7 +18,7 @@ fn golden_hof_chz_matches_expected_and_interp() {
 
 /// `examples/list_hof.chz` — `map`/`filter`/`fold`, incl. an element-type-changing map.
 #[test]
-fn golden_list_hof_chz_matches_expected_and_interp() {
+fn golden_list_hof_chz_matches_expected() {
     let src = include_str!("../../../examples/list_hof.chz");
     let expected = include_str!("../../../examples/list_hof.expected");
     let vm_out = run_capture(src).expect("vm run");
@@ -27,9 +27,9 @@ fn golden_list_hof_chz_matches_expected_and_interp() {
 
 /// `examples/list_hof_shrink.chz` — map/filter/fold iterate a snapshot, so a callback that
 /// shrinks (or grows) the receiver does not perturb iteration (and never OOB-panics). Locks
-/// VM==interp byte-identical: before the fix the VM panicked here while the interp passed.
+/// byte-identical against its `.expected`: before the fix the VM panicked here.
 #[test]
-fn golden_list_hof_shrink_chz_matches_expected_and_interp() {
+fn golden_list_hof_shrink_chz_matches_expected() {
     let src = include_str!("../../../examples/list_hof_shrink.chz");
     let expected = include_str!("../../../examples/list_hof_shrink.expected");
     let vm_out = run_capture(src).expect("vm run");
@@ -39,7 +39,7 @@ fn golden_list_hof_shrink_chz_matches_expected_and_interp() {
 /// `examples/list_methods.chz` — pop/reverse/contains/index_of/sum + value/iter ergonomics
 /// (min/max/first/last/reversed/insert/remove, unique/dedup/chunk/windows/take_while/drop_while/count/position).
 #[test]
-fn golden_list_methods_chz_matches_expected_and_interp() {
+fn golden_list_methods_chz_matches_expected() {
     let src = include_str!("../../../examples/list_methods.chz");
     let expected = include_str!("../../../examples/list_methods.expected");
     let vm_out = run_capture(src).expect("vm run");
@@ -48,7 +48,7 @@ fn golden_list_methods_chz_matches_expected_and_interp() {
 
 /// `examples/loops.chz` — break/continue across for-range, for-list, and while loops.
 #[test]
-fn golden_loops_chz_matches_expected_and_interp() {
+fn golden_loops_chz_matches_expected() {
     let src = include_str!("../../../examples/loops.chz");
     let expected = include_str!("../../../examples/loops.expected");
     let vm_out = run_capture(src).expect("vm run");
@@ -57,7 +57,7 @@ fn golden_loops_chz_matches_expected_and_interp() {
 
 /// `examples/match_value.chz` — `match` on int/str literals with `_`, stmt + expr forms.
 #[test]
-fn golden_match_value_chz_matches_expected_and_interp() {
+fn golden_match_value_chz_matches_expected() {
     let src = include_str!("../../../examples/match_value.chz");
     let expected = include_str!("../../../examples/match_value.expected");
     let vm_out = run_capture(src).expect("vm run");
@@ -66,7 +66,7 @@ fn golden_match_value_chz_matches_expected_and_interp() {
 
 /// `examples/pair.chz` — tuples, multi-return, destructuring let, `.0`/`.1` access.
 #[test]
-fn golden_pair_chz_matches_expected_and_interp() {
+fn golden_pair_chz_matches_expected() {
     let src = include_str!("../../../examples/pair.chz");
     let expected = include_str!("../../../examples/pair.expected");
     let vm_out = run_capture(src).expect("vm run");
@@ -75,7 +75,7 @@ fn golden_pair_chz_matches_expected_and_interp() {
 
 /// `examples/method_default_args.chz` — default + named args on methods (was parity-only).
 #[test]
-fn golden_method_default_args_chz_matches_expected_and_interp() {
+fn golden_method_default_args_chz_matches_expected() {
     let src = include_str!("../../../examples/method_default_args.chz");
     let expected = include_str!("../../../examples/method_default_args.expected");
     let vm_out = run_capture(src).expect("vm run");
@@ -84,7 +84,7 @@ fn golden_method_default_args_chz_matches_expected_and_interp() {
 
 /// `examples/method_type_params.chz` — a method's own `[U]` inferred per call (was parity-only).
 #[test]
-fn golden_method_type_params_chz_matches_expected_and_interp() {
+fn golden_method_type_params_chz_matches_expected() {
     let src = include_str!("../../../examples/method_type_params.chz");
     let expected = include_str!("../../../examples/method_type_params.expected");
     let vm_out = run_capture(src).expect("vm run");
@@ -93,7 +93,7 @@ fn golden_method_type_params_chz_matches_expected_and_interp() {
 
 /// `examples/param_protocol.chz` — a user-defined parameterized protocol bound (was parity-only).
 #[test]
-fn golden_param_protocol_chz_matches_expected_and_interp() {
+fn golden_param_protocol_chz_matches_expected() {
     let src = include_str!("../../../examples/param_protocol.chz");
     let expected = include_str!("../../../examples/param_protocol.expected");
     let vm_out = run_capture(src).expect("vm run");
@@ -104,7 +104,7 @@ fn golden_param_protocol_chz_matches_expected_and_interp() {
 /// boundaries, empty/nested collection printing, slice clamping, index faults, truthiness,
 /// block-scoped shadowing, closure capture-by-value, defer LIFO, and comprehensions.
 #[test]
-fn golden_edge_cases_chz_matches_expected_and_interp() {
+fn golden_edge_cases_chz_matches_expected() {
     let src = include_str!("../../../examples/edge_cases.chz");
     let expected = include_str!("../../../examples/edge_cases.expected");
     let vm_out = run_capture(src).expect("vm run");
@@ -113,8 +113,7 @@ fn golden_edge_cases_chz_matches_expected_and_interp() {
 
 /// Left-shift overflow is a recoverable fault (`integer overflow in Shl`), matching the
 /// `+ - * / %` checked-arith policy — not a silent wrap to `i64::MIN`. Right shift and every
-/// non-overflowing left shift (incl. negative operands that round-trip) stay byte-identical,
-/// and the VM stays in lock-step with the interpreter.
+/// non-overflowing left shift (incl. negative operands that round-trip) stay byte-identical.
 #[test]
 fn shift_left_overflow_is_recoverable_fault() {
     // overflow → recoverable fault with the shared arith-overflow message (a bound left operand: a
@@ -126,12 +125,10 @@ fn shift_left_overflow_is_recoverable_fault() {
     ] {
         let vm = run_capture(src).expect_err("vm: shift overflow should fault");
         assert_eq!(vm.message, "integer overflow in Shl");
-        let it = run_capture(src).expect_err("interp: shift overflow");
-        assert_eq!(it.message, "integer overflow in Shl");
     }
 
     // non-overflowing shifts (incl. `-1 << 63 == i64::MIN` which round-trips, `>>` which
-    // never overflows) must NOT fault and must agree across engines
+    // never overflows) must NOT fault
     for (src, want) in [
         ("print((0 - 1) << 63)", "-9223372036854775808\n"),
         ("print(1 << 62)", "4611686018427387904\n"),
@@ -141,7 +138,6 @@ fn shift_left_overflow_is_recoverable_fault() {
     ] {
         let vm = run_capture(src).expect("vm: non-overflowing shift");
         assert_eq!(vm, want, "vm mismatch for `{src}`");
-        assert_eq!(run_capture(src).expect("interp"), want);
     }
 }
 
@@ -161,22 +157,15 @@ fn pad_left_empty_fill_is_recoverable_fault() {
     ] {
         assert_eq!(
             run_capture(src)
-                .expect_err("serial: empty fill should fault")
+                .expect_err("empty fill should fault")
                 .message,
             MSG,
-            "serial mismatch for `{src}`"
-        );
-        assert_eq!(
-            run_capture(src)
-                .expect_err("M:N: empty fill should fault")
-                .message,
-            MSG,
-            "M:N mismatch for `{src}`"
+            "mismatch for `{src}`"
         );
     }
 
     // (The `std.string` free fn's identical fault needs the module-graph runner — it is asserted in
-    // `golden_tests::parity_std_str_pad_left_empty_fill_faults`.)
+    // `golden_tests::std_str_pad_left_empty_fill_faults`.)
 
     // The fault is CATCHABLE by `recover:` (a recoverable fault, not a host panic).
     let rec = "fn main():\n\
@@ -187,8 +176,7 @@ fn pad_left_empty_fill_is_recoverable_fault() {
                \x20       !e: print(\"caught {e.message()}\")\n\
                main()\n";
     let want = format!("caught {MSG}\n");
-    assert_eq!(run_capture(rec).expect("serial: recover"), want);
-    assert_eq!(run_capture(rec).expect("M:N: recover"), want);
+    assert_eq!(run_capture(rec).expect("recover"), want);
 }
 
 /// A multi-character `fill` is a repeating cycle TRUNCATED to fit: the result is EXACTLY `width`
@@ -213,7 +201,7 @@ fn pad_left_multi_char_fill_is_exactly_width() {
     }
 
     // (The `std.string` free fn is a byte-identical alias — asserted in
-    // `golden_tests::parity_std_str_pad_left_matches_native_method`.)
+    // `golden_tests::std_str_pad_left_matches_native_method`.)
 }
 
 /// Padding counts CODEPOINTS, not bytes — a non-ASCII fill char counts as 1 and no mid-char slice
@@ -244,18 +232,9 @@ fn pad_left_huge_width_is_recoverable_fault() {
         r#"print("a".pad_left(100000000000000000, "x"))"#,
     ] {
         assert_eq!(
-            run_capture(src)
-                .expect_err("serial: huge pad should fault")
-                .message,
+            run_capture(src).expect_err("huge pad should fault").message,
             "string pad capacity overflow",
-            "serial mismatch for `{src}`"
-        );
-        assert_eq!(
-            run_capture(src)
-                .expect_err("M:N: huge pad should fault")
-                .message,
-            "string pad capacity overflow",
-            "M:N mismatch for `{src}`"
+            "mismatch for `{src}`"
         );
     }
 }
@@ -269,16 +248,12 @@ fn str_repeat_capacity_overflow_is_recoverable_fault() {
     let src = r#"print("ab".repeat(9223372036854775807))"#;
     let vm = run_capture(src).expect_err("vm: repeat overflow should fault");
     assert_eq!(vm.message, "string repeat capacity overflow");
-    let it = run_capture(src).expect_err("interp: repeat overflow should fault");
-    assert_eq!(it.message, "string repeat capacity overflow");
 
     // Huge-but-representable count: passes the `isize::MAX` byte guard but the allocation is
     // infeasible. Before the `try_reserve_exact` guard this ABORTED the process (SIGABRT).
     let huge = r#"print("ab".repeat(100000000000000000))"#;
     let vm = run_capture(huge).expect_err("vm: huge repeat should fault");
     assert_eq!(vm.message, "string repeat capacity overflow");
-    let it = run_capture(huge).expect_err("interp: huge repeat should fault");
-    assert_eq!(it.message, "string repeat capacity overflow");
 
     // Empty receiver with a huge count: `total == 0` passes BOTH the byte guard and
     // `try_reserve_exact`, so the result must be "" produced INSTANTLY. A naive
@@ -287,17 +262,15 @@ fn str_repeat_capacity_overflow_is_recoverable_fault() {
     // returns if no hang occurred.
     let empty_huge = r#"print("".repeat(100000000000000000))"#;
     assert_eq!(run_capture(empty_huge).expect("vm"), "\n");
-    assert_eq!(run_capture(empty_huge).expect("interp"), "\n");
 
-    // Sane repeats are unaffected and agree across engines.
+    // Sane repeats are unaffected.
     let ok = r#"print("ab".repeat(3))"#;
     assert_eq!(run_capture(ok).expect("vm"), "ababab\n");
-    assert_eq!(run_capture(ok).expect("interp"), "ababab\n");
 }
 
 /// Collection operators (gap #3): list `+` (concat) / `*` (repeat) and set `| & - ^`
 /// (union/intersection/difference/symmetric-difference). Value-correctness on the VM; the
-/// golden parity test below proves VM==interp. Set print preserves insertion order (mine-then-
+/// golden test below pins the printed form. Set print preserves insertion order (mine-then-
 /// other for union; mine-filtered for intersection/difference; mine-not-in-other then
 /// other-not-in-mine for symmetric-difference).
 #[test]
@@ -355,11 +328,6 @@ fn collection_compound_assign_eval_correct() {
             want,
             "vm mismatch for `{src}`"
         );
-        assert_eq!(
-            run_capture(src).expect("interp"),
-            want,
-            "interp mismatch for `{src}`"
-        );
     }
 }
 
@@ -370,8 +338,6 @@ fn list_repeat_capacity_overflow_is_recoverable_fault() {
     let src = "print([0].repeat(9223372036854775807))";
     let vm = run_capture(src).expect_err("vm: list repeat overflow should fault");
     assert_eq!(vm.message, "list repeat capacity overflow");
-    let it = run_capture(src).expect_err("interp: list repeat overflow");
-    assert_eq!(it.message, "list repeat capacity overflow");
 
     // Huge-but-representable count: passes the `isize::MAX` byte guard (1e17 * 16B = 1.6e18 <
     // isize::MAX ≈ 9.2e18) but the allocation itself is infeasible. Before the
@@ -379,8 +345,6 @@ fn list_repeat_capacity_overflow_is_recoverable_fault() {
     let huge = "print([0].repeat(100000000000000000))";
     let vm = run_capture(huge).expect_err("vm: huge list repeat should fault");
     assert_eq!(vm.message, "list repeat capacity overflow");
-    let it = run_capture(huge).expect_err("interp: huge list repeat");
-    assert_eq!(it.message, "list repeat capacity overflow");
 
     // Boundary: small repeats still work.
     assert_eq!(
@@ -392,7 +356,7 @@ fn list_repeat_capacity_overflow_is_recoverable_fault() {
 /// `examples/evaluator.chz` — a full tokenizer + recursive-descent parser + AST evaluator with
 /// `Result`/`?` error paths (bad char, unbalanced parens, trailing input, divide-by-zero).
 #[test]
-fn golden_evaluator_chz_matches_expected_and_interp() {
+fn golden_evaluator_chz_matches_expected() {
     let src = include_str!("../../../examples/evaluator.chz");
     let expected = include_str!("../../../examples/evaluator.expected");
     let vm_out = run_capture(src).expect("vm run");
@@ -402,7 +366,7 @@ fn golden_evaluator_chz_matches_expected_and_interp() {
 /// `examples/ledger.chz` — account ledger: a map of mutable structs, overdraft `Result`s, a
 /// `defer` closing line, `sort_by` ranking, and guarded comprehensions.
 #[test]
-fn golden_ledger_chz_matches_expected_and_interp() {
+fn golden_ledger_chz_matches_expected() {
     let src = include_str!("../../../examples/ledger.chz");
     let expected = include_str!("../../../examples/ledger.expected");
     let vm_out = run_capture(src).expect("vm run");
@@ -410,19 +374,19 @@ fn golden_ledger_chz_matches_expected_and_interp() {
 }
 
 /// M1 (tier-1) golden: `examples/string_iter.chz` (chars + iterable strings) byte-identical
-/// on the VM, the interpreter, and its `.expected`.
+/// against its `.expected`.
 #[test]
-fn golden_string_iter_chz_matches_expected_and_interp() {
+fn golden_string_iter_chz_matches_expected() {
     let src = include_str!("../../../examples/string_iter.chz");
     let expected = include_str!("../../../examples/string_iter.expected");
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected);
 }
 
-/// Default + named arguments on free functions: `examples/default_args.chz` byte-identical on
-/// the VM, the interpreter, and its `.expected`.
+/// Default + named arguments on free functions: `examples/default_args.chz` byte-identical against
+/// its `.expected`.
 #[test]
-fn golden_default_args_chz_matches_expected_and_interp() {
+fn golden_default_args_chz_matches_expected() {
     let src = include_str!("../../../examples/default_args.chz");
     let expected = include_str!("../../../examples/default_args.expected");
     let vm_out = run_capture(src).expect("vm run");
@@ -430,9 +394,9 @@ fn golden_default_args_chz_matches_expected_and_interp() {
 }
 
 /// Default + named arguments on struct constructors: `examples/named_struct.chz` byte-identical
-/// on the VM, the interpreter, and its `.expected`.
+/// against its `.expected`.
 #[test]
-fn golden_named_struct_chz_matches_expected_and_interp() {
+fn golden_named_struct_chz_matches_expected() {
     let src = include_str!("../../../examples/named_struct.chz");
     let expected = include_str!("../../../examples/named_struct.expected");
     let vm_out = run_capture(src).expect("vm run");
@@ -441,7 +405,7 @@ fn golden_named_struct_chz_matches_expected_and_interp() {
 
 /// Gap #5 golden: `examples/map.chz` is byte-identical to its `.expected`.
 #[test]
-fn golden_map_chz_matches_expected_and_interp() {
+fn golden_map_chz_matches_expected() {
     let src = include_str!("../../../examples/map.chz");
     let expected = include_str!("../../../examples/map.expected");
     let vm_out = run_capture(src).expect("vm run");
@@ -449,9 +413,9 @@ fn golden_map_chz_matches_expected_and_interp() {
 }
 
 /// M10-G1 golden: `examples/stringable.chz` (the `Stringable` protocol — `str(self)` dispatch
-/// from print/str()/interpolation, nested too) byte-identical on the VM, interp, and `.expected`.
+/// from print/str()/interpolation, nested too) byte-identical against its `.expected`.
 #[test]
-fn golden_stringable_chz_matches_expected_and_interp() {
+fn golden_stringable_chz_matches_expected() {
     let src = include_str!("../../../examples/stringable.chz");
     let expected = include_str!("../../../examples/stringable.expected");
     let vm_out = run_capture(src).expect("vm run");
@@ -459,19 +423,19 @@ fn golden_stringable_chz_matches_expected_and_interp() {
 }
 
 /// M10-G3 golden: `examples/operators.chz` (operator overloading via `Add`/`Sub`/`Mul` + the
-/// multi-bound `T: Add + Mul`) byte-identical on the VM, interp, and `.expected`.
+/// multi-bound `T: Add + Mul`) byte-identical against its `.expected`.
 #[test]
-fn golden_operators_chz_matches_expected_and_interp() {
+fn golden_operators_chz_matches_expected() {
     let src = include_str!("../../../examples/operators.chz");
     let expected = include_str!("../../../examples/operators.expected");
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected);
 }
 
-/// M10-G3 golden: `examples/type_alias.chz` (transparent type aliases) byte-identical on the
-/// VM, interp, and `.expected`.
+/// M10-G3 golden: `examples/type_alias.chz` (transparent type aliases) byte-identical against its
+/// `.expected`.
 #[test]
-fn golden_type_alias_chz_matches_expected_and_interp() {
+fn golden_type_alias_chz_matches_expected() {
     let src = include_str!("../../../examples/type_alias.chz");
     let expected = include_str!("../../../examples/type_alias.expected");
     let vm_out = run_capture(src).expect("vm run");
@@ -479,36 +443,37 @@ fn golden_type_alias_chz_matches_expected_and_interp() {
 }
 
 /// G1 golden: `examples/generics.chz` (generics + structural `Comparable`) is byte-identical
-/// on the VM, the interpreter, and its `.expected`.
+/// against its `.expected`.
 #[test]
-fn golden_generics_chz_matches_expected_and_interp() {
+fn golden_generics_chz_matches_expected() {
     let src = include_str!("../../../examples/generics.chz");
     let expected = include_str!("../../../examples/generics.expected");
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected);
 }
 
-/// G2 golden: generic structs are byte-identical on the VM, interpreter, and `.expected`.
+/// G2 golden: generic structs are byte-identical against its `.expected`.
 #[test]
-fn golden_generic_structs_chz_matches_expected_and_interp() {
+fn golden_generic_structs_chz_matches_expected() {
     let src = include_str!("../../../examples/generic_structs.chz");
     let expected = include_str!("../../../examples/generic_structs.expected");
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected);
 }
 
-/// Tier-2 golden: generic enums (Tree[T] / Either[A, B]) — byte-identical VM, interp, expected.
+/// Tier-2 golden: generic enums (Tree[T] / Either[A, B]) — byte-identical against `.expected`.
 #[test]
-fn golden_generic_enum_chz_matches_expected_and_interp() {
+fn golden_generic_enum_chz_matches_expected() {
     let src = include_str!("../../../examples/generic_enum.chz");
     let expected = include_str!("../../../examples/generic_enum.expected");
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected);
 }
 
-/// Golden: real hash-table map/set with Hashable struct keys — byte-identical VM, interp, expected.
+/// Golden: real hash-table map/set with Hashable struct keys — byte-identical against
+/// `.expected`.
 #[test]
-fn golden_hashmap_keys_chz_matches_expected_and_interp() {
+fn golden_hashmap_keys_chz_matches_expected() {
     let src = include_str!("../../../examples/hashmap_keys.chz");
     let expected = include_str!("../../../examples/hashmap_keys.expected");
     let vm_out = run_capture(src).expect("vm run");
@@ -516,9 +481,9 @@ fn golden_hashmap_keys_chz_matches_expected_and_interp() {
 }
 
 /// Tech-debt golden: `examples/explicit_type_args.chz` (explicit call-site type arguments on a
-/// generic fn / struct / enum-variant constructor) byte-identical VM, interp, and `.expected`.
+/// generic fn / struct / enum-variant constructor) byte-identical against `.expected`.
 #[test]
-fn golden_explicit_type_args_chz_matches_expected_and_interp() {
+fn golden_explicit_type_args_chz_matches_expected() {
     let src = include_str!("../../../examples/explicit_type_args.chz");
     let expected = include_str!("../../../examples/explicit_type_args.expected");
     let vm_out = run_capture(src).expect("vm run");
@@ -528,10 +493,10 @@ fn golden_explicit_type_args_chz_matches_expected_and_interp() {
 /// Type-side declaration-site turbofish (PART 1): `examples/turbofish_type_args.chz` exercises
 /// `Box[int].Has(5)`, nullary `Box[int].Empty`, the 2-param `Pair[int, str].Both(…)` multi-arg
 /// carrier, and a generic static `Box[int].empty()`. The change is purely in the checker's
-/// resolution + the value's inferred type args (runtime is type-erased), so VM, interp, and the
-/// `--parallel` engine must be byte-identical to `.expected`. Also asserts it type-checks clean.
+/// resolution + the value's inferred type args (runtime is type-erased), so the output
+/// must be byte-identical to `.expected`. Also asserts it type-checks clean.
 #[test]
-fn golden_turbofish_type_args_chz_matches_expected_and_interp() {
+fn golden_turbofish_type_args_chz_matches_expected() {
     let src = include_str!("../../../examples/turbofish_type_args.chz");
     let expected = include_str!("../../../examples/turbofish_type_args.expected");
     // The full type-checker accepts the program (the golden run path skips checking).
@@ -550,10 +515,10 @@ fn golden_turbofish_type_args_chz_matches_expected_and_interp() {
 /// instance method with multi type-arg + multi value-arg turbofish (`p.first[int, str](…)`),
 /// AND the regression guard `arr[i].handlers[k](x)` / `arr[0].handlers[0](y)` (a fn-valued field
 /// on an INDEXED receiver must stay ordinary index-then-call, not a member-turbofish). The change
-/// is checker resolution + type-erased dispatch, so VM, interp, and `--parallel` must be
+/// is checker resolution + type-erased dispatch, so the output must be
 /// byte-identical to `.expected`. Also asserts it type-checks clean.
 #[test]
-fn golden_turbofish_member_args_chz_matches_expected_and_interp() {
+fn golden_turbofish_member_args_chz_matches_expected() {
     let src = include_str!("../../../examples/turbofish_member_args.chz");
     let expected = include_str!("../../../examples/turbofish_member_args.expected");
     let module = parser::parse(lexer::tokenize(src).expect("lex")).expect("parse");
@@ -566,9 +531,9 @@ fn golden_turbofish_member_args_chz_matches_expected_and_interp() {
 }
 
 /// Tech-debt golden: `examples/set_eq.chz` (order-independent set equality incl. nested in a
-/// struct/list) byte-identical on the VM, the interpreter, and its `.expected`.
+/// struct/list) byte-identical against its `.expected`.
 #[test]
-fn golden_set_eq_chz_matches_expected_and_interp() {
+fn golden_set_eq_chz_matches_expected() {
     let src = include_str!("../../../examples/set_eq.chz");
     let expected = include_str!("../../../examples/set_eq.expected");
     let vm_out = run_capture(src).expect("vm run");
@@ -576,10 +541,10 @@ fn golden_set_eq_chz_matches_expected_and_interp() {
 }
 
 /// Golden: `examples/map_eq.chz` — map equality is order-independent (same key→value pairs
-/// regardless of insertion order), incl. nested in a struct/list, byte-identical on the VM, the
-/// interpreter, and its `.expected`. Pins the fix that made map `==` consistent with set `==`.
+/// regardless of insertion order), incl. nested in a struct/list, byte-identical against its
+/// `.expected`. Pins the fix that made map `==` consistent with set `==`.
 #[test]
-fn golden_map_eq_chz_matches_expected_and_interp() {
+fn golden_map_eq_chz_matches_expected() {
     let src = include_str!("../../../examples/map_eq.chz");
     let expected = include_str!("../../../examples/map_eq.expected");
     let vm_out = run_capture(src).expect("vm run");
@@ -588,10 +553,9 @@ fn golden_map_eq_chz_matches_expected_and_interp() {
 
 /// Golden: `examples/cycle_guard.chz` — a cyclic data structure makes `print`/`==` a recoverable
 /// `RuntimeError` (depth-guarded) instead of an uncatchable host stack overflow, and a
-/// deep-but-acyclic structure still renders fine. Byte-identical on the VM, the interpreter, and
-/// its `.expected`.
+/// deep-but-acyclic structure still renders fine. Byte-identical against its `.expected`.
 #[test]
-fn golden_cycle_guard_chz_matches_expected_and_interp() {
+fn golden_cycle_guard_chz_matches_expected() {
     let src = include_str!("../../../examples/cycle_guard.chz");
     let expected = include_str!("../../../examples/cycle_guard.expected");
     let vm_out = run_capture(src).expect("vm run");
@@ -602,7 +566,7 @@ fn golden_cycle_guard_chz_matches_expected_and_interp() {
 /// walk of the cycle, no depth cap. The spawned task reads `a.val == 1` (prints `got 1`) and the
 /// recover returns `done`.
 #[test]
-fn crossing_cyclic_struct_crosses_both_engines() {
+fn crossing_cyclic_struct_crosses() {
     let src = "\
 struct Node:
     val: int
@@ -673,7 +637,7 @@ main()
 /// closure by handle (M3.4; the deleted wire form back-referenced the knot), so the recursive fn
 /// computes correctly — `fact(5) == 120`.
 #[test]
-fn crossing_recursive_local_fn_round_trips_both_engines() {
+fn crossing_recursive_local_fn_round_trips() {
     let src = "\
 fn main():
     fn fact(n: int) -> int:
@@ -1267,20 +1231,14 @@ main()
     )
     .unwrap();
     let (vm_out, _e, vm_res, _) = run_file(&entry);
-    let (par_out, _pe, par_res, _) = run_file_with(&entry, crate::native::HostConfig::default());
     // Under GC stress the cell is reached only through the module globals of `k` and `l`.
     let (stress_out, _se, stress_res, _) = run_file_stress(&entry);
     let _ = std::fs::remove_dir_all(&dir);
-    assert!(vm_res.is_ok(), "serial faulted: {vm_res:?}");
-    assert!(par_res.is_ok(), "M:N faulted: {par_res:?}");
+    assert!(vm_res.is_ok(), "faulted: {vm_res:?}");
     assert!(stress_res.is_ok(), "gc-stress faulted: {stress_res:?}");
     assert_eq!(
         vm_out, "2\n",
         "cross-module sibling closures split their cell"
-    );
-    assert_eq!(
-        par_out, "2\n",
-        "cross-module sibling closures split their cell (M:N)"
     );
     assert_eq!(stress_out, "2\n", "a module global's cell is not GC-rooted");
 }
@@ -1324,14 +1282,11 @@ main()
     )
     .unwrap();
     let (vm_out, _e, vm_res, _) = run_file(&entry);
-    let (par_out, _pe, par_res, _) = run_file_with(&entry, crate::native::HostConfig::default());
     let (stress_out, _se, stress_res, _) = run_file_stress(&entry);
     let _ = std::fs::remove_dir_all(&dir);
-    assert!(vm_res.is_ok(), "serial faulted: {vm_res:?}");
-    assert!(par_res.is_ok(), "M:N faulted: {par_res:?}");
+    assert!(vm_res.is_ok(), "faulted: {vm_res:?}");
     assert!(stress_res.is_ok(), "gc-stress faulted: {stress_res:?}");
     assert_eq!(vm_out, "3\n", "a handle-bearing cell split its binding");
-    assert_eq!(par_out, "3\n", "…and on M:N");
     assert_eq!(stress_out, "3\n", "…and under GC stress");
 }
 
@@ -1370,25 +1325,16 @@ main()
     )
     .unwrap();
     let (vm_out, _e, vm_res, _) = run_file(&entry);
-    let (par_out, _pe, par_res, _) = run_file_with(&entry, crate::native::HostConfig::default());
     let _ = std::fs::remove_dir_all(&dir);
-    assert!(
-        vm_res.is_ok(),
-        "serial faulted (depth cap is back?): {vm_res:?}"
-    );
-    assert!(
-        par_res.is_ok(),
-        "M:N faulted (depth cap is back?): {par_res:?}"
-    );
+    assert!(vm_res.is_ok(), "faulted (depth cap is back?): {vm_res:?}");
     assert_eq!(vm_out, "41\n");
-    assert_eq!(par_out, "41\n");
 }
 
 /// W7-4c — a task's captured `gg` (a crossing copy of the binding as of its spawn) and the module
 /// global `I` that wrote the binding before that spawn agree on its VALUE: CPython measures `1`.
 /// M3.1: the global is the run's one closure, and the capture is copied after `I()` ran.
 #[test]
-fn crossing_shared_cell_takes_the_spawn_time_value_on_both_engines() {
+fn crossing_shared_cell_takes_the_spawn_time_value() {
     let dir = std::env::temp_dir().join(format!("chezzi_vm_w74c_val_{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let entry = dir.join("main.chz");
@@ -1422,21 +1368,14 @@ go()
     )
     .unwrap();
     let (vm_out, _e, vm_res, _) = run_file(&entry);
-    let (par_out, _pe, par_res, _) = run_file_with(&entry, crate::native::HostConfig::default());
     let _ = std::fs::remove_dir_all(&dir);
-    assert!(vm_res.is_ok(), "serial faulted: {vm_res:?}");
-    assert!(par_res.is_ok(), "M:N faulted: {par_res:?}");
-    assert_eq!(
-        vm_out, "1\n",
-        "serial kept the STALE cached-snapshot cell value"
-    );
-    assert_eq!(par_out, "1\n");
+    assert!(vm_res.is_ok(), "faulted: {vm_res:?}");
+    assert_eq!(vm_out, "1\n", "the task kept a STALE cell value");
 }
 
 /// W7-4a — a DISCARDED speculative wire attempt once forged a `Backref` (wire form deleted, M3.5). Found by adversarial
-/// review, and it was a live host PANIC, not a theoretical one: `main.chz` below aborted the M:N task
-/// with `CellLoad on a non-handle value` (the since-removed cooperative engine printed `7`, which is
-/// how the wire path was identified as the culprit).
+/// review, and it was a live host PANIC, not a theoretical one: `main.chz` below aborted the task
+/// with `CellLoad on a non-handle value`.
 ///
 /// Mechanism: `H := (k, k.C.get)` embeds a module, so the tuple fails `to_snap`'s `!has_handle()`
 /// fast lane — but the attempt ALREADY marked `k.C.get`'s cell as emitted, and that cell's id was
@@ -1484,15 +1423,12 @@ main()
     )
     .unwrap();
     let (vm_out, _e, vm_res, _) = run_file(&entry);
-    let (par_out, _pe, par_res, _) = run_file_with(&entry, crate::native::HostConfig::default());
     let _ = std::fs::remove_dir_all(&dir);
-    assert!(vm_res.is_ok(), "serial faulted: {vm_res:?}");
     assert!(
-        par_res.is_ok(),
-        "M:N faulted — a discarded attempt forged a Backref: {par_res:?}"
+        vm_res.is_ok(),
+        "faulted — a discarded attempt forged a Backref: {vm_res:?}"
     );
     assert_eq!(vm_out, "7\n");
-    assert_eq!(par_out, "7\n", "serial and M:N diverged");
 }
 
 /// Control (regression lock, rc=0) — the SAME recursive `fn` HOISTED to module scope IS sendable: it
@@ -1573,10 +1509,8 @@ fn golden_crossing_cycle_chz_matches_expected() {
 }
 
 /// Tech-debt: a `set` nested inside a struct / list must compare unordered
-/// (top-level set `==` already did). Previously the since-removed interp engine's derived
-/// `SetData::eq` was
-/// order-sensitive, so `W(Set([1,2,3])) == W(Set([3,2,1]))` was `true` on the VM but `false` on
-/// the interp.
+/// (top-level set `==` already did). A derived, order-sensitive `SetData::eq` would print `false`
+/// for `W(Set([1,2,3])) == W(Set([3,2,1]))`.
 #[test]
 fn nested_set_equality_parity() {
     let src = "\
@@ -1721,7 +1655,7 @@ fn primitive_str_method_on_vm() {
 /// Gap #11 golden: `examples/sort_by.chz` (custom comparators, stable order, tuple-field sort)
 /// is byte-identical on the VM against its `.expected`.
 #[test]
-fn golden_sort_by_chz_matches_expected_and_interp() {
+fn golden_sort_by_chz_matches_expected() {
     let src = include_str!("../../../examples/sort_by.chz");
     let expected = include_str!("../../../examples/sort_by.expected");
     let vm_out = run_capture(src).expect("vm run");
@@ -1732,7 +1666,7 @@ fn golden_sort_by_chz_matches_expected_and_interp() {
 /// (frames live in the heap `frames` `Vec`, not via a per-call `run_until` recursion), so it runs
 /// to completion on a stack far below the production 256 MiB `VM_STACK_BYTES`. Before flattening,
 /// the VM recursed ~25 KiB of host stack per call and overflowed a 1 MiB stack (an uncatchable
-/// abort). Depth stays well under `MAX_CALL_DEPTH` (10_000). Parity: same value on the interpreter.
+/// abort). Depth stays well under `MAX_CALL_DEPTH` (10_000).
 #[test]
 fn deep_plain_recursion_runs_on_small_host_stack() {
     let src = "\
@@ -1752,7 +1686,7 @@ print(sum_to(5000))
 /// raw-pointer) across the native-reentry paths that re-enter `run_until`: HOF callbacks
 /// (`map`/`fold` closures), an operator-overload `compare` (`<` on a struct), and a
 /// `defer` unwinding through a recursive call. If the raw pointer ever dangled across a
-/// re-entry or resume, VM output would diverge from the interpreter.
+/// re-entry or resume, the output would drift from the literal golden.
 #[test]
 fn native_reentry_hof_compare_defer_parity() {
     let src = "\
@@ -1783,9 +1717,9 @@ print(rec(3))
 }
 
 /// Gap #10 golden: `examples/cipher.chz` (ord/chr — ROT13 + manual digit parsing) is
-/// byte-identical on the VM, the interpreter, and its `.expected`.
+/// byte-identical against its `.expected`.
 #[test]
-fn golden_cipher_chz_matches_expected_and_interp() {
+fn golden_cipher_chz_matches_expected() {
     let src = include_str!("../../../examples/cipher.chz");
     let expected = include_str!("../../../examples/cipher.expected");
     let vm_out = run_capture(src).expect("vm run");
@@ -1793,9 +1727,9 @@ fn golden_cipher_chz_matches_expected_and_interp() {
 }
 
 /// Gap #14 (+ #11) golden: `examples/word_freq.chz` iterates a map with `for w, c in counts`
-/// and ranks tuples with `sort_by`. Byte-identical on the VM, the interpreter, and `.expected`.
+/// and ranks tuples with `sort_by`. Byte-identical against its `.expected`.
 #[test]
-fn golden_word_freq_chz_matches_expected_and_interp() {
+fn golden_word_freq_chz_matches_expected() {
     let src = include_str!("../../../examples/word_freq.chz");
     let expected = include_str!("../../../examples/word_freq.expected");
     let vm_out = run_capture(src).expect("vm run");
@@ -1803,9 +1737,9 @@ fn golden_word_freq_chz_matches_expected_and_interp() {
 }
 
 /// Gap #15 golden: `examples/match_nested.chz` (tuple patterns, nested `Some((a, b))`, nested
-/// literals) is byte-identical on the VM, the interpreter, and its `.expected`.
+/// literals) is byte-identical against its `.expected`.
 #[test]
-fn golden_match_nested_chz_matches_expected_and_interp() {
+fn golden_match_nested_chz_matches_expected() {
     let src = include_str!("../../../examples/match_nested.chz");
     let expected = include_str!("../../../examples/match_nested.expected");
     let vm_out = run_capture(src).expect("vm run");
@@ -1814,7 +1748,7 @@ fn golden_match_nested_chz_matches_expected_and_interp() {
 
 /// L2 golden: `examples/match_struct.chz` (struct positional destructuring in `match` — single-arm
 /// exhaustive, literal fields + a whole-value catch-all binding, a generic `Box[int]` field, and a
-/// nested `Line(Point(..), Point(..))`) is byte-identical on both VM engines and its `.expected`.
+/// nested `Line(Point(..), Point(..))`) is byte-identical against its `.expected`.
 #[test]
 fn golden_match_struct_chz_matches_expected_and_parity() {
     let src = include_str!("../../../examples/match_struct.chz");
@@ -1824,9 +1758,9 @@ fn golden_match_struct_chz_matches_expected_and_parity() {
 }
 
 /// Match-guard golden: `examples/match_guard.chz` (`pattern if cond:` arms, expr + stmt forms)
-/// is byte-identical on the VM, the interpreter, and its `.expected`.
+/// is byte-identical against its `.expected`.
 #[test]
-fn golden_match_guard_chz_matches_expected_and_interp() {
+fn golden_match_guard_chz_matches_expected() {
     let src = include_str!("../../../examples/match_guard.chz");
     let expected = include_str!("../../../examples/match_guard.expected");
     let vm_out = run_capture(src).expect("vm run");
@@ -1834,9 +1768,9 @@ fn golden_match_guard_chz_matches_expected_and_interp() {
 }
 
 /// Range-pattern golden: `examples/match_range.chz` (half-open `start..end` int patterns) is
-/// byte-identical on the VM, the interpreter, and its `.expected`.
+/// byte-identical against its `.expected`.
 #[test]
-fn golden_match_range_chz_matches_expected_and_interp() {
+fn golden_match_range_chz_matches_expected() {
     let src = include_str!("../../../examples/match_range.chz");
     let expected = include_str!("../../../examples/match_range.expected");
     let vm_out = run_capture(src).expect("vm run");
@@ -1844,9 +1778,9 @@ fn golden_match_range_chz_matches_expected_and_interp() {
 }
 
 /// Gap #13 golden: `examples/bits.chz` (`& | ^ << >>` — XOR-fold + bitmask) is byte-identical
-/// on the VM, the interpreter, and its `.expected`.
+/// against its `.expected`.
 #[test]
-fn golden_bits_chz_matches_expected_and_interp() {
+fn golden_bits_chz_matches_expected() {
     let src = include_str!("../../../examples/bits.chz");
     let expected = include_str!("../../../examples/bits.expected");
     let vm_out = run_capture(src).expect("vm run");
@@ -1854,9 +1788,9 @@ fn golden_bits_chz_matches_expected_and_interp() {
 }
 
 /// Round-2 probe goldens: recursive data-structure + evaluator programs that surfaced the
-/// round-2 gaps. Byte-identical on the VM, the interpreter, and their `.expected`.
+/// round-2 gaps. Byte-identical against a literal golden, and their `.expected`.
 #[test]
-fn golden_bst_chz_matches_expected_and_interp() {
+fn golden_bst_chz_matches_expected() {
     let src = include_str!("../../../examples/bst.chz");
     let expected = include_str!("../../../examples/bst.expected");
     let vm_out = run_capture(src).expect("vm run");
@@ -1864,7 +1798,7 @@ fn golden_bst_chz_matches_expected_and_interp() {
 }
 
 #[test]
-fn golden_linked_list_chz_matches_expected_and_interp() {
+fn golden_linked_list_chz_matches_expected() {
     let src = include_str!("../../../examples/linked_list.chz");
     let expected = include_str!("../../../examples/linked_list.expected");
     let vm_out = run_capture(src).expect("vm run");
@@ -1872,7 +1806,7 @@ fn golden_linked_list_chz_matches_expected_and_interp() {
 }
 
 #[test]
-fn golden_calc_chz_matches_expected_and_interp() {
+fn golden_calc_chz_matches_expected() {
     let src = include_str!("../../../examples/calc.chz");
     let expected = include_str!("../../../examples/calc.expected");
     let vm_out = run_capture(src).expect("vm run");
@@ -1893,9 +1827,9 @@ fn for_over_struct_iterator_break_lazy() {
     assert_eq!(run(src), "0\n1\n1\n2\n3\n5\n8\n");
 }
 
-/// Golden: the iterator example runs on the VM with exactly the expected output, matching interp.
+/// Golden: the iterator example runs on the VM with exactly the expected output.
 #[test]
-fn golden_iterator_chz_matches_expected_and_interp() {
+fn golden_iterator_chz_matches_expected() {
     let src = include_str!("../../../examples/iterator.chz");
     let expected = include_str!("../../../examples/iterator.expected");
     let vm_out = run_capture(src).expect("vm run");
@@ -2130,42 +2064,42 @@ fn str_hook_nonstr_fallback_is_gc_safe_after_mutating_hook() {
 // must RUN correctly (runtime is generic-erased; the checker fix is what unblocks it).
 
 #[test]
-fn generic_fn_value_map_conv_runs_both_engines() {
+fn generic_fn_value_map_conv_runs() {
     // `.map(conv)` — conv's own T pinned = int from the element type; yields the string list.
     let src = "fn conv[T](x: T) -> str:\n    return \"{x}\"\nprint([1, 2, 3].map(conv))\n";
     assert_mc_parity(src, "['1', '2', '3']\n");
 }
 
 #[test]
-fn generic_fn_value_map_ident_runs_both_engines() {
+fn generic_fn_value_map_ident_runs() {
     // `.map(ident)` — return-only T pinned = int; yields the int list unchanged.
     let src = "fn ident[T](x: T) -> T:\n    return x\nprint([1, 2, 3].map(ident))\n";
     assert_mc_parity(src, "[1, 2, 3]\n");
 }
 
 #[test]
-fn generic_fn_value_fold_add_runs_both_engines() {
+fn generic_fn_value_fold_add_runs() {
     // `.fold(0, add)` — accumulator U pinned by init=int, then add's T pinned from fn(int,int)->int.
     let src = "fn add[T: Add](a: T, b: T) -> T:\n    return a + b\nprint([1, 2, 3].fold(0, add))\n";
     assert_mc_parity(src, "6\n");
 }
 
 #[test]
-fn generic_fn_value_map_closure_still_runs_both_engines() {
+fn generic_fn_value_map_closure_still_runs() {
     // Regression: the unannotated-closure loop-back is untouched — still [2, 4, 6].
     let src = "print([1, 2, 3].map(fn(x): x * 2))\n";
     assert_mc_parity(src, "[2, 4, 6]\n");
 }
 
 #[test]
-fn generic_fn_value_filter_keep_runs_both_engines() {
+fn generic_fn_value_filter_keep_runs() {
     // Regression: a bare generic keep[T] into .filter still runs (concrete fn(int)->bool slot).
     let src = "fn keep[T](x: T) -> bool:\n    return true\nprint([1, 2, 3].filter(keep))\n";
     assert_mc_parity(src, "[1, 2, 3]\n");
 }
 
 #[test]
-fn generic_fn_value_user_hof_and_turbofish_run_both_engines() {
+fn generic_fn_value_user_hof_and_turbofish_run() {
     // Regression: the pre-existing user-HOF pin and the turbofish workaround still run unchanged.
     let src = "fn conv[T](x: T) -> str:\n    return \"{x}\"\nfn mymap(xs: List[int], f: fn(int) -> str) -> List[str]:\n    return xs.map(f)\nprint(mymap([1, 2, 3], conv))\nprint([1, 2, 3].map(conv[int]))\n";
     assert_mc_parity(src, "['1', '2', '3']\n['1', '2', '3']\n");
@@ -2174,7 +2108,7 @@ fn generic_fn_value_user_hof_and_turbofish_run_both_engines() {
 // ── Parameterized protocols in value position (Q1) — goldens ──────────────────────
 
 #[test]
-fn param_protocol_value_arg_runs_both_engines() {
+fn param_protocol_value_arg_runs() {
     // A `Container[int]` parameter accepts a conforming struct; `c.get(0)` dispatches by name and
     // yields the recovered `int`.
     let src = "protocol Container[T]:\n    fn get(self, i: int) -> T\nstruct Bag:\n    items: List[int]\n    fn get(self, i: int) -> int:\n        return self.items[i]\nfn f(c: Container[int]) -> int:\n    return c.get(0) + 1\nfn main():\n    print(f(Bag([41])))\nmain()\n";
@@ -2182,7 +2116,7 @@ fn param_protocol_value_arg_runs_both_engines() {
 }
 
 #[test]
-fn param_protocol_method_return_recovered_runs_both_engines() {
+fn param_protocol_method_return_recovered_runs() {
     // DECISION-2 recovery: `x := c.get(0)` is typed `int` and used in int arithmetic; identical
     // stdout.
     let src = "protocol Container[T]:\n    fn get(self, i: int) -> T\nstruct Bag:\n    fn get(self, i: int) -> int:\n        return 7\nfn f(c: Container[int]) -> int:\n    x := c.get(0)\n    return x * 6\nfn main():\n    print(f(Bag()))\nmain()\n";
@@ -2190,7 +2124,7 @@ fn param_protocol_method_return_recovered_runs_both_engines() {
 }
 
 #[test]
-fn param_protocol_field_and_nesting_run_both_engines() {
+fn param_protocol_field_and_nesting_run() {
     // A `Container[int]` struct field and a `List[Container[int]]` param both witness + erase; the
     // stored values dispatch by name identically.
     let src = "protocol Container[T]:\n    fn get(self, i: int) -> T\nstruct Bag:\n    n: int\n    fn get(self, i: int) -> int:\n        return self.n\nstruct Holder:\n    c: Container[int]\nfn sum2(xs: List[Container[int]]) -> int:\n    return xs[0].get(0) + xs[1].get(0)\nfn main():\n    h := Holder(Bag(10))\n    print(h.c.get(0))\n    print(sum2([Bag(20), Bag(30)]))\nmain()\n";
@@ -2198,7 +2132,7 @@ fn param_protocol_field_and_nesting_run_both_engines() {
 }
 
 #[test]
-fn param_protocol_reassign_accept_runs_both_engines() {
+fn param_protocol_reassign_accept_runs() {
     // DECISION-3 reassignment write-site (accept path): reassigning a different conforming struct into
     // a `Container[int]` local witnesses at the reassign boundary, then dispatches by name identically.
     let src = "protocol Container[T]:\n    fn get(self, i: int) -> T\nstruct A:\n    fn get(self, i: int) -> int:\n        return 1\nstruct B:\n    fn get(self, i: int) -> int:\n        return 2\nfn f(c: Container[int]) -> int:\n    c = B()\n    return c.get(0)\nfn main():\n    print(f(A()))\nmain()\n";
@@ -2206,7 +2140,7 @@ fn param_protocol_reassign_accept_runs_both_engines() {
 }
 
 #[test]
-fn from_witness_runs_two_engine() {
+fn from_witness_runs() {
     // From slice 2 — a static-ctor witness of `[T: From[int]]` type-checks; the bound-check
     // runs at the call site then erases (the trivial body never calls `T.from` — that's slice 3), so
     // the program runs byte-identically.

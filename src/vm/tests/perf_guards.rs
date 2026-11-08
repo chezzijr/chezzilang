@@ -8,7 +8,7 @@ use super::*;
 
 /// `remove` on a true out-of-range index faults byte-identically.
 #[test]
-fn remove_oob_faults_both_engines() {
+fn remove_oob_faults() {
     let src = "xs := [1, 2, 3]\nprint(\"before\")\nxs.remove(9)\n";
     assert_fault_parity(src, "before\n");
     assert_eq!(run_err(src), "index 9 out of bounds (len 3)");
@@ -514,8 +514,8 @@ fn ic_self_field_method() {
 
 #[test]
 fn ic_struct_under_parallel_engine() {
-    // The IC lives on each worker `Vm` too; field-heavy code run on the real-thread engine must
-    // produce the same output as the cooperative engine (the caches are per-Vm, self-verifying).
+    // The IC lives on each worker `Vm` too; field-heavy code run on worker threads must
+    // produce the literal golden (the caches are per-Vm, self-verifying).
     let src = "struct Pt:\n    x: int\n    y: int\n\n    fn sum(self) -> int:\n        return self.x + self.y\n\
                    p := Pt(3, 4)\n\
                    acc := 0\ni := 0\nwhile i < 100:\n    acc = acc + p.sum()\n    p.x = p.x + 1\n    i = i + 1\n\
@@ -764,8 +764,8 @@ fn method_ic_polymorphic_one_site_via_protocol() {
 
 #[test]
 fn method_ic_under_parallel_engine() {
-    // The method IC lives on each worker `Vm`; method-heavy code on the real-thread engine must
-    // match the cooperative engine (caches are per-Vm, tid-guarded, self-verifying).
+    // The method IC lives on each worker `Vm`; method-heavy code on worker threads must
+    // match the literal golden (caches are per-Vm, tid-guarded, self-verifying).
     let src = "struct Pt:\n    x: int\n    y: int\n\n    fn sum(self) -> int:\n        return self.x + self.y\n\
                    p := Pt(3, 4)\nacc := 0\ni := 0\nwhile i < 100:\n    acc = acc + p.sum()\n    p.x = p.x + 1\n    i = i + 1\n\
                    print(acc)\nprint(p.x)\n";
@@ -825,14 +825,7 @@ fn method_ic_uncaught_fault_on_hit_path() {
     let src = "struct Bomb:\n    n: int\n\n    fn blow(self, d: int) -> int:\n        return self.n / d\n\
                    b := Bomb(10)\nprint(b.blow(2))\nprint(b.blow(0))\n";
     let vm_err = run_err(src);
-    let interp_err = match run_capture(src) {
-        Ok(o) => panic!("expected interp error, got {o:?}"),
-        Err(e) => e.message,
-    };
-    assert_eq!(
-        vm_err, interp_err,
-        "VM/interp must agree on the IC-hit-path fault message"
-    );
+    assert_eq!(vm_err, "division by zero", "the IC-hit-path fault message");
     assert!(
         vm_err.contains("zero") || vm_err.contains("division"),
         "got: {vm_err}"
@@ -1147,9 +1140,9 @@ fn vm_nested_set_and_map_comprehension() {
 
 /// A comprehension over a STATEFUL struct iterator must drive `next()` LAZILY — the element/guard
 /// see the iterator's per-step state, exactly like a `for` statement and like the VM's
-/// `compile_for`. The since-removed interp engine eagerly drained the iterator to `None` before
-/// evaluating any element (so `c.n` read the fully-advanced field), diverging from the VM. This
-/// asserts the lazy/interleaved result, for the single-clause AND the nested-clause shape.
+/// `compile_for`. An eager drain of the iterator to `None` before evaluating any element would make
+/// `c.n` read the fully-advanced field. This asserts the lazy/interleaved result, for the
+/// single-clause AND the nested-clause shape.
 #[test]
 fn comprehension_stateful_struct_iterator_lazy_parity() {
     let src = "\
@@ -1283,8 +1276,8 @@ fn guarded_restores_native_reentry_on_panic() {
     // one frame up by `callback_trampoline`'s `catch_unwind` and re-raised as a recoverable error.
     // `guarded` MUST restore `native_reentry` on that unwind — otherwise the counter leaks at +1
     // for the VM's lifetime, and every blocking op gated on `native_reentry == 0` silently
-    // demotes/inlines instead of parking on `--parallel` after a recovered callback panic
-    // (diverging from interp, which has no such counter). A `Drop` guard can't fix this (it would
+    // demotes/inlines instead of parking after a recovered callback panic. A `Drop` guard can't fix
+    // this (it would
     // alias `self` across the re-entry), so `guarded` catches + decrements + resumes the unwind.
     let mut vm = Vm::new(Arc::new(empty_program()));
     assert_eq!(vm.native_reentry, 0);

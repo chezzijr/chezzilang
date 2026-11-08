@@ -646,7 +646,7 @@ fn reader_program_type_checks_clean() {
 
 /// B3 — a fn-LOCAL aggregate mutated inside a spawn: M3.4 (Go model) shares the captured list, so
 /// the task's push lands and the parent reads `4` (Go, a goroutine appends through the captured
-/// slice: `4`). The module-global form is `serial_module_global_method_call_mutation_lands_parity`.
+/// slice: `4`). The module-global form is `module_global_method_call_mutation_lands`.
 #[test]
 fn fn_local_aggregate_mutation_in_task_lands_parity() {
     let src = "fn main():\n    xs := [1, 2, 3]\n    parallel:\n        spawn:\n            xs.push(99)\n    print(xs.len())\nmain()\n";
@@ -657,7 +657,7 @@ fn fn_local_aggregate_mutation_in_task_lands_parity() {
 /// one copy (M3.1): two `counter.bump()` calls, so the parent reads `2`. Go (go1.27.0,
 /// `m31go/rust`): `2`.
 #[test]
-fn serial_module_global_method_call_mutation_lands_parity() {
+fn module_global_method_call_mutation_lands() {
     let out = golden_file_entry(
         &[
             (
@@ -677,7 +677,7 @@ fn serial_module_global_method_call_mutation_lands_parity() {
 /// Task 1 — gaps.md §B3 (D): a task-local alias (`local := xs`) of a module-global aggregate is the
 /// global itself (M3.1), so a push through it lands. Go (go1.27.0, `m31go/rust`): `4`.
 #[test]
-fn serial_module_global_task_local_alias_lands_parity() {
+fn module_global_task_local_alias_lands() {
     let src = "xs := [1, 2, 3]\nfn main():\n    parallel:\n        spawn:\n            local := xs\n            local.push(99)\n    print(xs.len())\nmain()\n";
     let out = golden_entry(src);
     assert_eq!(out, "4\n");
@@ -774,7 +774,7 @@ fn atomic_int_wide_value_returns_parity() {
 /// `.push`, map index-assign, struct field-assign, set `.insert`, bytearray `.extend`, a bare
 /// reassign. Go (go1.27.0, `m31go/rust`): `4 9 9 3 3 1`.
 #[test]
-fn serial_module_global_direct_mutation_forms_land_parity() {
+fn module_global_direct_mutation_forms_land() {
     // list .push
     assert_eq!(
         golden_entry(
@@ -823,7 +823,7 @@ fn serial_module_global_direct_mutation_forms_land_parity() {
 /// where `worker` does `m[1] = 9`) lands in the run's one copy (M3.1). Go (go1.27.0, `m31go/rust`):
 /// `9`.
 #[test]
-fn serial_module_global_spawned_callee_mutation_lands_parity() {
+fn module_global_spawned_callee_mutation_lands() {
     let src = "m := {1: 2}\nfn worker():\n    m[1] = 9\nfn main():\n    parallel:\n        spawn worker()\n    print(m[1])\nmain()\n";
     assert_eq!(golden_entry(src), "9\n");
 }
@@ -831,7 +831,7 @@ fn serial_module_global_spawned_callee_mutation_lands_parity() {
 /// Task 1 — a NESTED spawn (a task that itself opens a `parallel:` nursery and spawns): both writes
 /// land in the run's one `g` (M3.1). Go (go1.27.0, `m31go/rust`): `101`.
 #[test]
-fn nested_serial_spawn_module_global_writes_land_parity() {
+fn nested_spawn_module_global_writes_land() {
     let src = "g := 0\nfn inner():\n    g = g + 100\nfn outer():\n    parallel:\n        spawn inner()\n    g = g + 1\nfn main():\n    parallel:\n        spawn outer()\n    print(g)\nmain()\n";
     assert_eq!(golden_entry(src), "101\n");
 }
@@ -864,7 +864,7 @@ main()
 /// grandchild the write, at every depth (M3.1: one `g` for the run). Go (go1.27.0, `m31go/rust`):
 /// `1`.
 #[test]
-fn nested_serial_spawn_mutation_before_nested_reads_fresh_parity() {
+fn nested_spawn_mutation_before_nested_reads_fresh() {
     let src = "g := 0\nfn worker():\n    g = g + 1\n    parallel:\n        spawn:\n            print(g)\nfn main():\n    parallel:\n        spawn worker()\nmain()\n";
     assert_eq!(golden_entry(src), "1\n");
 }
@@ -995,7 +995,7 @@ print(main().get())
 // ----- 8-byte `Value` (int-favoring pointer-tag): boxing must be invisible to programs -----
 
 #[test]
-fn parity_big_int_crosses_inline_box_boundary() {
+fn big_int_crosses_inline_box_boundary() {
     // 2^62 and above box as `Obj::BigInt`; 2^62-1 and below stay inline. Crossing the boundary must
     // be invisible: arithmetic, equality, and Display all agree, matching byte-for-byte.
     let src = "\
@@ -1017,7 +1017,7 @@ main()";
 }
 
 #[test]
-fn parity_i64_overflow_still_faults_past_boxing() {
+fn i64_overflow_still_faults_past_boxing() {
     // Boxing lifts the INLINE ceiling to ±2^62, NOT the i64 ceiling: an operation whose true result
     // exceeds i64 still faults (overflow semantics unchanged), it does not silently box a wider value.
     let src = "\
@@ -1036,7 +1036,7 @@ main()";
 }
 
 #[test]
-fn parity_boxed_float_canonical_eq() {
+fn boxed_float_canonical_eq() {
     // Two independently-boxed equal floats compare `==` and hash equal (a Set dedups them to one);
     // cross-type `1 == 1.0` still holds. Boxing is per-alloc, so equality MUST compare the f64.
     let src = "\
@@ -1053,7 +1053,7 @@ main()";
 }
 
 #[test]
-fn parity_crossing_bigint_and_float_roundtrip() {
+fn crossing_bigint_and_float_roundtrip() {
     // A boxed big-int and a boxed float reach a task (spawn + Channel) by handle (M3.2, M3.4) and
     // print the same values.
     let src = "\
@@ -1075,7 +1075,7 @@ main()";
 }
 
 #[test]
-fn parity_bin_local_const_wide_literal_on_boxed_local() {
+fn bin_local_const_wide_literal_on_boxed_local() {
     // `BinLocalConst{slot,val}` fuses `[GetLocal, ConstInt(val), binop]` with an UNBOUNDED `val`.
     // When the local is a boxed BigInt the fast inline path misses and the else-branch must
     // reconstruct the folded constant via `make_int` (boxes wide vals), NOT the inline-only
@@ -1091,7 +1091,7 @@ main()";
 }
 
 #[test]
-fn parity_inc_local_wide_delta_on_boxed_local() {
+fn inc_local_wide_delta_on_boxed_local() {
     // `IncLocal{slot,delta}` (the `+=` superinstruction) carries an UNBOUNDED fused `delta`. On a
     // boxed BigInt local the else-branch must push the delta via `make_int`, not the inline-only
     // `Value::int` (which debug-panics / release-corrupts for |delta| > 2^62-1).

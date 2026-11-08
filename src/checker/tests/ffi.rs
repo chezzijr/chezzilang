@@ -1424,7 +1424,7 @@ fn extern_type_alias_param_ok() {
 #[test]
 fn extern_nil_param_rejected() {
     // `nil` is a valid VOID return but NOT a valid parameter (the backend's `ctype_of` has no nil
-    // case, so accepting it as a param would panic every engine on a checked program). A
+    // case, so accepting it as a param would panic the VM on a checked program). A
     // void-returning extern yields a `Nil` value, which would otherwise satisfy a `nil` param.
     rejects(
         "extern \"libc.so.6\":\n    fn f(x: None) -> int\n",

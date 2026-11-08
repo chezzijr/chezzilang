@@ -118,7 +118,7 @@ print(raise(10))
 "#;
 
 #[test]
-fn stored_callback_aborts_loudly_on_both_engines() {
+fn stored_callback_aborts_loudly() {
     {
         let t = TmpDir::new();
         let entry = t.write("main.chz", REPRO);

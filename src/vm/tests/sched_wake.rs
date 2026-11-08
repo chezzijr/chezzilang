@@ -989,11 +989,11 @@ main()
 /// D5 owe #3 (Path A) — the new `std/iter.chz` HOFs (`map`/`filter`/`fold`/`reduce`) are correct
 /// and byte-identical against the golden. `map` to a different return type (`int -> str`)
 /// exercises generic-return inference (`U` is bound solely from the closure, not from `xs`), the
-/// primary risk flagged in the plan — it works without explicit type args. Cooperative (no
-/// `--parallel`): this guards the functional surface; the park behaviour is guarded separately by
+/// primary risk flagged in the plan — it works without explicit type args. This guards the
+/// functional surface; the park behaviour is guarded separately by
 /// `d5_owe3_recv_in_iter_map_callback_parks`.
 #[test]
-fn d5_owe3_iter_hofs_correct_on_both_engines() {
+fn d5_owe3_iter_hofs_correct() {
     let src = "\
 import std.iter
 
@@ -1012,11 +1012,8 @@ main()
     let entry = write_temp_chz("d5_owe3_hofs", src);
     let cfg = crate::native::HostConfig::default;
     let (vo, _ve, vr, _vc) = run_file_with(&entry, cfg());
-    let (io, _ie, ir, _ic) = run_file(&entry);
     let _ = std::fs::remove_file(&entry);
     assert!(vr.is_ok(), "vm run faulted: {vr:?}");
-    assert!(ir.is_ok(), "interp run faulted: {ir:?}");
-    assert_eq!(vo, io, "vm/interp stdout divergence");
     assert_eq!(
         vo,
         "[1, 4, 9, 16, 25]\n[2, 4]\n15\n120\n['n1', 'n2']\n-15\n"
@@ -1933,10 +1930,8 @@ fn extern_in_spawn_parallel_snapshot() {
                    r := ch.recv()\nprint(r)\n";
     let entry = write_temp_chz("ffi_spawn", src);
     let (vm_out, _e, vm_res, _) = run_file(&entry);
-    let (_par_out, _pe, par_res, _) = run_file_with(&entry, crate::native::HostConfig::default());
     let _ = std::fs::remove_file(&entry);
     assert!(vm_res.is_ok(), "VM faulted: {vm_res:?}");
-    assert!(par_res.is_ok(), "parallel engine faulted: {par_res:?}");
     assert_eq!(vm_out, "3.0\n");
 }
 
@@ -1972,15 +1967,10 @@ fn extern_cross_module_alias_runs() {
         )
         .unwrap();
     let (vm_out, _e, vm_res, _) = run_file(&entry);
-    let (_par_out, _pe, par_res, _) = run_file_with(&entry, crate::native::HostConfig::default());
     let _ = std::fs::remove_dir_all(&dir);
     assert!(
         vm_res.is_ok(),
         "VM faulted on cross-module alias extern: {vm_res:?}"
-    );
-    assert!(
-        par_res.is_ok(),
-        "parallel engine faulted on cross-module alias extern: {par_res:?}"
     );
     assert_eq!(vm_out, "5\n");
 }
@@ -2024,7 +2014,7 @@ fn extern_fn_is_an_importable_module_member_runs() {
 /// whole-module `import geo` qualified arms, an `import geo as g` aliased binder, and a
 /// payload-binding `geo.Shape.Circle(r)` arm.
 #[test]
-fn match_module_qualified_variant_three_engine_parity() {
+fn match_module_qualified_variant_runs() {
     let dir = std::env::temp_dir().join(format!("chezzi_vm_mqvp_{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(
@@ -2040,22 +2030,17 @@ fn match_module_qualified_variant_three_engine_parity() {
         .unwrap();
     let cfg = crate::native::HostConfig::default;
     let (vo, _ve, vr, _vc) = run_file_with(&entry, cfg());
-    let (_po, _pe, pr, _pc) = run_file_with(&entry, cfg());
-    let (io, _ie, ir, _ic) = run_file(&entry);
     let _ = std::fs::remove_dir_all(&dir);
     assert!(vr.is_ok(), "VM faulted: {vr:?}");
-    assert!(pr.is_ok(), "--parallel faulted: {pr:?}");
-    assert!(ir.is_ok(), "interp faulted: {ir:?}");
     let expected = "red\ngreen\n16\n9\nG\n";
     assert_eq!(vo, expected, "VM output");
-    assert_eq!(vo, io, "VM vs interp divergence");
 }
 
 /// Bug #1 (L2) — a struct reached via a WHOLE-module import (`import geo`) is destructured with a
 /// QUALIFIED struct pattern `geo.Point(x, y)` (the bare name is not in scope). Must RUN byte-identically
 /// (a checker-superset guard: check_graph is asserted first).
 #[test]
-fn struct_match_qualified_whole_module_runs_both_engines() {
+fn struct_match_qualified_whole_module_runs() {
     let dir = std::env::temp_dir().join(format!("chezzi_vm_sqwm_{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(
@@ -2075,10 +2060,8 @@ fn struct_match_qualified_whole_module_runs_both_engines() {
         panic!("program must type-check, got: {errs:?}");
     }
     let (vo, _ve, vr, _vc) = run_file(&entry);
-    let (_io, _ie, ir, _ic) = run_file(&entry);
     let _ = std::fs::remove_dir_all(&dir);
     assert!(vr.is_ok(), "VM faulted: {vr:?}");
-    assert!(ir.is_ok(), "M:N engine faulted: {ir:?}");
     assert_eq!(vo, "7\n", "VM output");
 }
 
@@ -2090,7 +2073,7 @@ fn struct_match_qualified_whole_module_runs_both_engines() {
 /// generic, an IMPORTED type witnessing a LOCAL generic, and a local generic FORWARDING its own
 /// still-abstract witness into the imported one.
 #[test]
-fn witness_cross_module_runs_both_engines() {
+fn witness_cross_module_runs() {
     let dir = std::env::temp_dir().join(format!("chezzi_vm_xmod_witness_{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(
@@ -2117,10 +2100,8 @@ fn witness_cross_module_runs_both_engines() {
         panic!("program must type-check, got: {errs:?}");
     }
     let (vo, _ve, vr, _vc) = run_file(&entry);
-    let (_io, _ie, ir, _ic) = run_file(&entry);
     let _ = std::fs::remove_dir_all(&dir);
     assert!(vr.is_ok(), "VM faulted: {vr:?}");
-    assert!(ir.is_ok(), "M:N engine faulted: {ir:?}");
     assert_eq!(
         vo, "7\n7\n7\n7\nloc\n7\n7\nloc\nloc\n7\n",
         "VM output (a wrong identity key faults, a wrong witness prints another type)"
@@ -2133,7 +2114,7 @@ fn witness_cross_module_runs_both_engines() {
 /// constant is pushed by the CALLING one, so the two modules' identity keys must agree — a mismatch
 /// only shows up at run time.
 #[test]
-fn witness_member_cross_module_runs_both_engines() {
+fn witness_member_cross_module_runs() {
     let dir = std::env::temp_dir().join(format!("chezzi_vm_xmod_member_w_{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(
@@ -2153,10 +2134,8 @@ fn witness_member_cross_module_runs_both_engines() {
         panic!("program must type-check, got: {errs:?}");
     }
     let (vo, _ve, vr, _vc) = run_file(&entry);
-    let (_io, _ie, ir, _ic) = run_file(&entry);
     let _ = std::fs::remove_dir_all(&dir);
     assert!(vr.is_ok(), "VM faulted: {vr:?}");
-    assert!(ir.is_ok(), "M:N engine faulted: {ir:?}");
     assert_eq!(
         vo, "7\nloc\n7\nloc\n7\nloc\n",
         "VM output (a wrong identity key faults, a wrong witness builds the other type)"

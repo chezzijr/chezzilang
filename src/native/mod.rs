@@ -339,13 +339,13 @@ pub enum NativeArg {
     /// (today only `std.request.request`'s custom headers) can still offload to the dirty pool: the
     /// off-heap host has no `Vm`/heap, so the map is snapshotted into owned `(String, String)` pairs
     /// before the handoff and served back via [`Host::arg_str_map`]. Order is preserved (the engine
-    /// reads `MapData.entries`), so header order is deterministic across engines.
+    /// reads `MapData.entries`), so header order is deterministic.
     Map(Vec<(String, String)>),
     /// An ordered `list[str]`, pre-extracted so a blocking native that reads a list-of-strings arg
     /// (today only `std.process.run_args`'s argv) can still offload to the dirty pool: the off-heap
     /// host has no `Vm`/heap, so the list is snapshotted into owned `String`s before the handoff and
     /// served back via [`Host::arg_str_list`]. Order is preserved (it IS the argv), so the spawned
-    /// process sees the same argument vector across engines.
+    /// process sees the same argument vector.
     List(Vec<String>),
     /// The absent value of a `T?` argument (`request.get`'s `timeout_ms = None`).
     None,

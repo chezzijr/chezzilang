@@ -27,20 +27,10 @@ fn extern_qualified_width_alias_param_collision_runs() {
     )
     .unwrap();
     let (vm_out, _e, vm_res, _) = run_file(&entry);
-    let (_io, _ie, ir, _) = run_file(&entry);
-    let (_par_out, _pe, par_res, _) = run_file_with(&entry, crate::native::HostConfig::default());
     let _ = std::fs::remove_dir_all(&dir);
     assert!(
         vm_res.is_ok(),
         "VM faulted on colliding qualified width-alias extern: {vm_res:?}"
-    );
-    assert!(
-        ir.is_ok(),
-        "interp faulted on colliding qualified width-alias extern: {ir:?}"
-    );
-    assert!(
-        par_res.is_ok(),
-        "parallel engine faulted on colliding qualified width-alias extern: {par_res:?}"
     );
     assert_eq!(
         vm_out, "300\n",
@@ -73,20 +63,10 @@ fn extern_qualified_width_alias_chain_depth2_collision_runs() {
         )
         .unwrap();
     let (vm_out, _e, vm_res, _) = run_file(&entry);
-    let (_io, _ie, ir, _) = run_file(&entry);
-    let (_par_out, _pe, par_res, _) = run_file_with(&entry, crate::native::HostConfig::default());
     let _ = std::fs::remove_dir_all(&dir);
     assert!(
         vm_res.is_ok(),
         "VM faulted on chained qualified width-alias extern: {vm_res:?}"
-    );
-    assert!(
-        ir.is_ok(),
-        "interp faulted on chained qualified width-alias extern: {ir:?}"
-    );
-    assert!(
-        par_res.is_ok(),
-        "parallel engine faulted on chained qualified width-alias extern: {par_res:?}"
     );
     assert_eq!(
         vm_out, "300\n",
@@ -117,20 +97,10 @@ fn extern_qualified_width_alias_chain_depth3_collision_runs() {
         )
         .unwrap();
     let (vm_out, _e, vm_res, _) = run_file(&entry);
-    let (_io, _ie, ir, _) = run_file(&entry);
-    let (_par_out, _pe, par_res, _) = run_file_with(&entry, crate::native::HostConfig::default());
     let _ = std::fs::remove_dir_all(&dir);
     assert!(
         vm_res.is_ok(),
         "VM faulted on depth-3 chained qualified width-alias extern: {vm_res:?}"
-    );
-    assert!(
-        ir.is_ok(),
-        "interp faulted on depth-3 chained qualified width-alias extern: {ir:?}"
-    );
-    assert!(
-        par_res.is_ok(),
-        "parallel engine faulted on depth-3 chained qualified width-alias extern: {par_res:?}"
     );
     assert_eq!(
         vm_out, "300\n",
@@ -230,20 +200,10 @@ fn extern_qualified_width_alias_named_import_hop_collision_runs() {
     )
     .unwrap();
     let (vm_out, _e, vm_res, _) = run_file(&entry);
-    let (_io, _ie, ir, _) = run_file(&entry);
-    let (_par_out, _pe, par_res, _) = run_file_with(&entry, crate::native::HostConfig::default());
     let _ = std::fs::remove_dir_all(&dir);
     assert!(
         vm_res.is_ok(),
         "VM faulted on named-import-hop qualified width-alias extern: {vm_res:?}"
-    );
-    assert!(
-        ir.is_ok(),
-        "interp faulted on named-import-hop qualified width-alias extern: {ir:?}"
-    );
-    assert!(
-        par_res.is_ok(),
-        "parallel engine faulted on named-import-hop qualified width-alias extern: {par_res:?}"
     );
     assert_eq!(
         vm_out, "300\n",
@@ -278,20 +238,10 @@ fn extern_qualified_return_struct_aliased_field_runs() {
         )
         .unwrap();
     let (vm_out, _e, vm_res, _) = run_file(&entry);
-    let (_io, _ie, ir, _) = run_file(&entry);
-    let (_par_out, _pe, par_res, _) = run_file_with(&entry, crate::native::HostConfig::default());
     let _ = std::fs::remove_dir_all(&dir);
     assert!(
         vm_res.is_ok(),
         "VM faulted on qualified return struct with aliased fields: {vm_res:?}"
-    );
-    assert!(
-        ir.is_ok(),
-        "interp faulted on qualified return struct with aliased fields: {ir:?}"
-    );
-    assert!(
-        par_res.is_ok(),
-        "parallel engine faulted on qualified return struct with aliased fields: {par_res:?}"
     );
     assert_eq!(
         vm_out, "3\n2\n",
@@ -345,20 +295,10 @@ fn extern_qualified_width_alias_mixed_chain_collision_runs() {
         )
         .unwrap();
     let (vm_out, _e, vm_res, _) = run_file(&entry);
-    let (_io, _ie, ir, _) = run_file(&entry);
-    let (_par_out, _pe, par_res, _) = run_file_with(&entry, crate::native::HostConfig::default());
     let _ = std::fs::remove_dir_all(&dir);
     assert!(
         vm_res.is_ok(),
         "VM faulted on mixed-chain qualified width-alias extern: {vm_res:?}"
-    );
-    assert!(
-        ir.is_ok(),
-        "interp faulted on mixed-chain qualified width-alias extern: {ir:?}"
-    );
-    assert!(
-        par_res.is_ok(),
-        "parallel engine faulted on mixed-chain qualified width-alias extern: {par_res:?}"
     );
     assert_eq!(
         vm_out, "300\n",

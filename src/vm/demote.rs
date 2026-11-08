@@ -452,8 +452,7 @@ impl Vm {
     /// thread to a replacement worker, so the STARVATION argument above no longer holds — but the
     /// carve-out survives regardless, because widening `accept`/`read`/`write` to block in place would
     /// change what those ops RETURN on a would-block fd (a hang instead of the loud `Err` this arm
-    /// keeps), which is a separate behaviour change TICKET-052 does not make. (The since-removed
-    /// cooperative engine was excluded for the original reason: it ran every fiber on one thread.)
+    /// keeps), which is a separate behaviour change TICKET-052 does not make.
     ///
     /// **`connect` is deliberately admitted even though it is a wait a non-thread-owning party can
     /// reach** (`W7-59`): the starvation argument above is about waiting on a CHEZZI peer fiber,
@@ -495,11 +494,7 @@ impl Vm {
     ///
     /// **That is the ancestor's answer — do not "fix" it in code.** Go behaves the same way: an open
     /// socket is a runnable party, so `all goroutines are asleep` does not fire (measured — `main` in
-    /// `ln.Accept()` plus a goroutine on an empty `chan int`: prints `listening`, hangs, rc=124). The
-    /// since-removed cooperative engine printed `Err('accept would block: …')` and then the full
-    /// `recv on an empty channel: deadlock`, exit 1 — but only because it REFUSED the socket op
-    /// outright, which is what left its channel party alone in the predicate. It was the engine that
-    /// did NOT match the ancestor.
+    /// `ln.Accept()` plus a goroutine on an empty `chan int`: prints `listening`, hangs, rc=124).
     ///
     /// On an M:N worker it is accounted `inflight` (NOT a registered waiter): a socket op is woken by external OS readiness, so
     /// it must VETO the deadlock predicate — exactly the netpoller-park accounting (a lone in-callback

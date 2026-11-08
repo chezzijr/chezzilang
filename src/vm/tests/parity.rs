@@ -15,7 +15,7 @@ fn golden_hello_chz_matches_expected() {
 /// the end → nil) plus `pass` as a no-op inside `if`/`for`/`while`. `pass` compiles to no bytecode,
 /// so this is byte-identical against the golden.
 #[test]
-fn golden_pass_noop_chz_matches_expected_and_interp() {
+fn golden_pass_noop_chz_matches_expected() {
     let src = include_str!("../../../examples/pass_noop.chz");
     let expected = include_str!("../../../examples/pass_noop.expected");
     let vm_out = run_capture(src).expect("vm run");
@@ -27,10 +27,9 @@ fn golden_pass_noop_chz_matches_expected_and_interp() {
 
 /// Empty-protocol golden: `protocol Foo:\n    pass` is an accept-all top type (structural over
 /// zero methods ⇒ every type satisfies it), byte-identical to the reserved `Any` — accepts
-/// int/str/bool/struct params and types a heterogeneous `List[Foo]`. Erased at runtime, so VM ==
-/// interp.
+/// int/str/bool/struct params and types a heterogeneous `List[Foo]`. Erased at runtime.
 #[test]
-fn golden_empty_protocol_chz_matches_expected_and_interp() {
+fn golden_empty_protocol_chz_matches_expected() {
     let src = include_str!("../../../examples/empty_protocol.chz");
     let expected = include_str!("../../../examples/empty_protocol.expected");
     let vm_out = run_capture(src).expect("vm run");
@@ -44,7 +43,7 @@ fn golden_empty_protocol_chz_matches_expected_and_interp() {
 /// two `S()` compare equal, and a distinct empty struct `T()` is not equal (a zero-field struct is
 /// no Set element or Map key without `hash` and `eq`, TICKET-280). Byte-identical against the golden.
 #[test]
-fn golden_empty_struct_chz_matches_expected_and_interp() {
+fn golden_empty_struct_chz_matches_expected() {
     let src = include_str!("../../../examples/empty_struct.chz");
     let expected = include_str!("../../../examples/empty_struct.expected");
     let vm_out = run_capture(src).expect("vm run");
@@ -59,7 +58,7 @@ fn golden_empty_struct_chz_matches_expected_and_interp() {
 /// `List[int]()` is just an empty list), so this is byte-identical against the golden — the
 /// gate for the constructor-turbofish feature.
 #[test]
-fn golden_container_ctor_chz_matches_expected_and_interp() {
+fn golden_container_ctor_chz_matches_expected() {
     let src = include_str!("../../../examples/container_ctor.chz");
     let expected = include_str!("../../../examples/container_ctor.expected");
     let vm_out = run_capture(src).expect("vm run");
@@ -75,7 +74,7 @@ fn golden_container_ctor_chz_matches_expected_and_interp() {
 /// and a struct over a qualified `concurrency.Shared`. These lower to the SAME opcodes as the
 /// bare-after-import names, so output is byte-identical — the gate for the qualified-ctor lowering.
 #[test]
-fn golden_native_qualified_chz_matches_expected_and_interp() {
+fn golden_native_qualified_chz_matches_expected() {
     // Imports (`std.concurrency` / `std.time`) require the module-graph path, so drive `run_file`
     // (not `run_capture`, which skips resolution and never populates `imported_modules`). The
     // output must agree byte-for-byte with `.expected`.
@@ -89,11 +88,6 @@ fn golden_native_qualified_chz_matches_expected_and_interp() {
         vm_out, expected,
         "vm output drifted from native_qualified.expected"
     );
-    let (_ip_out, _e2, ip_res, _) = run_file(&path);
-    ip_res.expect("native_qualified.chz should run on the interp");
-    let (mn_out, _e3, mn_res, _) = run_file_with(&path, crate::native::HostConfig::default());
-    mn_res.expect("native_qualified.chz should run on the M:N engine");
-    assert_eq!(mn_out, expected, "M:N output drifted on native_qualified");
 }
 
 /// `where`-clause generic bounds golden: `examples/where_sort_sum.chz` exercises the file-backed
@@ -101,7 +95,7 @@ fn golden_native_qualified_chz_matches_expected_and_interp() {
 /// `compare` lists and `sum` (`where T: Add`) on int/float lists. A `where` clause lowers to
 /// NOTHING at runtime (checker-only), so output must agree byte-for-byte with `.expected`.
 #[test]
-fn golden_conditional_method_chz_matches_expected_and_interp() {
+fn golden_conditional_method_chz_matches_expected() {
     let base = crate::native::std_embed::checkout_root();
     let path = base.join("examples/conditional_method.chz");
     let expected =
@@ -112,15 +106,10 @@ fn golden_conditional_method_chz_matches_expected_and_interp() {
         vm_out, expected,
         "vm output drifted from conditional_method.expected"
     );
-    let (_ip_out, _e2, ip_res, _) = run_file(&path);
-    ip_res.expect("conditional_method.chz should run on the interp");
-    let (mn_out, _e3, mn_res, _) = run_file_with(&path, crate::native::HostConfig::default());
-    mn_res.expect("conditional_method.chz should run on the M:N engine");
-    assert_eq!(mn_out, expected, "M:N output drifted on conditional_method");
 }
 
 #[test]
-fn golden_where_sort_sum_chz_matches_expected_and_interp() {
+fn golden_where_sort_sum_chz_matches_expected() {
     let base = crate::native::std_embed::checkout_root();
     let path = base.join("examples/where_sort_sum.chz");
     let expected = std::fs::read_to_string(base.join("examples/where_sort_sum.expected")).unwrap();
@@ -130,11 +119,6 @@ fn golden_where_sort_sum_chz_matches_expected_and_interp() {
         vm_out, expected,
         "vm output drifted from where_sort_sum.expected"
     );
-    let (_ip_out, _e2, ip_res, _) = run_file(&path);
-    ip_res.expect("where_sort_sum.chz should run on the interp");
-    let (mn_out, _e3, mn_res, _) = run_file_with(&path, crate::native::HostConfig::default());
-    mn_res.expect("where_sort_sum.chz should run on the M:N engine");
-    assert_eq!(mn_out, expected, "M:N output drifted on where_sort_sum");
 }
 
 /// Variadic-parameter + `Any`-top-type golden: `examples/variadic.chz` exercises a variadic user
@@ -143,18 +127,13 @@ fn golden_where_sort_sum_chz_matches_expected_and_interp() {
 /// synthesized `List` literal), so the call is an ordinary positional call — output
 /// must be byte-identical against the `.expected` golden.
 #[test]
-fn golden_variadic_chz_matches_expected_and_interp() {
+fn golden_variadic_chz_matches_expected() {
     let base = crate::native::std_embed::checkout_root();
     let path = base.join("examples/variadic.chz");
     let expected = std::fs::read_to_string(base.join("examples/variadic.expected")).unwrap();
     let (vm_out, _e1, vm_res, _) = run_file(&path);
     vm_res.expect("variadic.chz should run on the VM");
     assert_eq!(vm_out, expected, "vm output drifted from variadic.expected");
-    let (_ip_out, _e2, ip_res, _) = run_file(&path);
-    ip_res.expect("variadic.chz should run on the interp");
-    let (mn_out, _e3, mn_res, _) = run_file_with(&path, crate::native::HostConfig::default());
-    mn_res.expect("variadic.chz should run on the M:N engine");
-    assert_eq!(mn_out, expected, "M:N output drifted on variadic");
 }
 
 /// Phase-4d file-backed native-module golden: `examples/std_native_4d.chz` exercises the five
@@ -168,7 +147,7 @@ fn golden_variadic_chz_matches_expected_and_interp() {
 /// `TEST_RNG_LOCK` across the whole run (like `golden_rand_via_run_file`) or the parallel harness
 /// interleaves a sibling test's reseed between them and the draw drifts off `65`.
 #[test]
-fn golden_std_native_4d_chz_matches_expected_and_interp() {
+fn golden_std_native_4d_chz_matches_expected() {
     // Serialize against the rand unit tests / rand goldens (shared process-global RNG); see
     // TEST_RNG_LOCK. Hold it across the whole seed→draw run so the parallel harness cannot
     // interleave another test's reseed between this program's rand.seed(1) and rand.int(0,100).
@@ -184,11 +163,6 @@ fn golden_std_native_4d_chz_matches_expected_and_interp() {
         vm_out, expected,
         "vm output drifted from std_native_4d.expected"
     );
-    let (_ip_out, _e2, ip_res, _) = run_file(&path);
-    ip_res.expect("std_native_4d.chz should run on the interp");
-    let (mn_out, _e3, mn_res, _) = run_file_with(&path, crate::native::HostConfig::default());
-    mn_res.expect("std_native_4d.chz should run on the M:N engine");
-    assert_eq!(mn_out, expected, "M:N output drifted on std_native_4d");
 }
 
 /// Phase-4c file-backed native-module golden: `examples/std_native_4c.chz` exercises the migrated
@@ -200,7 +174,7 @@ fn golden_std_native_4d_chz_matches_expected_and_interp() {
 /// UB, so this drives a REAL alloc/store/load round-trip (never printing a nondeterministic pointer
 /// address, only the round-tripped payload) — a stronger guard than a pure-checker test.
 #[test]
-fn golden_std_native_4c_chz_matches_expected_and_interp() {
+fn golden_std_native_4c_chz_matches_expected() {
     let base = crate::native::std_embed::checkout_root();
     let path = base.join("examples/std_native_4c.chz");
     let expected = std::fs::read_to_string(base.join("examples/std_native_4c.expected")).unwrap();
@@ -210,11 +184,6 @@ fn golden_std_native_4c_chz_matches_expected_and_interp() {
         vm_out, expected,
         "vm output drifted from std_native_4c.expected"
     );
-    let (_ip_out, _e2, ip_res, _) = run_file(&path);
-    ip_res.expect("std_native_4c.chz should run on the interp");
-    let (mn_out, _e3, mn_res, _) = run_file_with(&path, crate::native::HostConfig::default());
-    mn_res.expect("std_native_4c.chz should run on the M:N engine");
-    assert_eq!(mn_out, expected, "M:N output drifted on std_native_4c");
 }
 
 /// Phase-5b file-backed native-enum golden: `examples/native_enum_smoke.chz` exercises the reserved
@@ -225,7 +194,7 @@ fn golden_std_native_4c_chz_matches_expected_and_interp() {
 /// against `.expected`. This is the phase-5b behavior-
 /// preservation gate — any drift means the file-backed shape decoupled from the Rust wiring.
 #[test]
-fn golden_native_enum_smoke_chz_matches_expected_and_interp() {
+fn golden_native_enum_smoke_chz_matches_expected() {
     let base = crate::native::std_embed::checkout_root();
     let path = base.join("examples/native_enum_smoke.chz");
     let expected =
@@ -236,11 +205,6 @@ fn golden_native_enum_smoke_chz_matches_expected_and_interp() {
         vm_out, expected,
         "vm output drifted from native_enum_smoke.expected"
     );
-    let (_ip_out, _e2, ip_res, _) = run_file(&path);
-    ip_res.expect("native_enum_smoke.chz should run on the interp");
-    let (mn_out, _e3, mn_res, _) = run_file_with(&path, crate::native::HostConfig::default());
-    mn_res.expect("native_enum_smoke.chz should run on the M:N engine");
-    assert_eq!(mn_out, expected, "M:N output drifted on native_enum_smoke");
 }
 
 /// Qualified-type-as-static-method-receiver golden: `examples/qualified_static/main.chz` imports a
@@ -250,7 +214,7 @@ fn golden_native_enum_smoke_chz_matches_expected_and_interp() {
 /// against `.expected` — the gate for the qualified-static
 /// lowering. Multi-file (sibling import) needs the module-graph path, so drive `run_file`.
 #[test]
-fn golden_qualified_static_chz_matches_expected_and_interp() {
+fn golden_qualified_static_chz_matches_expected() {
     let base = crate::native::std_embed::checkout_root();
     let path = base.join("examples/qualified_static/main.chz");
     let expected =
@@ -261,11 +225,6 @@ fn golden_qualified_static_chz_matches_expected_and_interp() {
         vm_out, expected,
         "vm output drifted from qualified_static/main.expected"
     );
-    let (_ip_out, _e2, ip_res, _) = run_file(&path);
-    ip_res.expect("qualified_static/main.chz should run on the interp");
-    let (mn_out, _e3, mn_res, _) = run_file_with(&path, crate::native::HostConfig::default());
-    mn_res.expect("qualified_static/main.chz should run on the M:N engine");
-    assert_eq!(mn_out, expected, "M:N output drifted on qualified_static");
 }
 
 /// Qualified-FFI-width golden: `examples/ffi_qualified.chz` declares `extern fn abs(ffi.int32) ->
@@ -296,7 +255,7 @@ fn golden_ffi_qualified_chz_via_run_file() {
 /// expression, usable as a value and a `.map` argument. Byte-identical against the
 /// checked-in `.expected`.
 #[test]
-fn golden_inline_fn_chz_matches_expected_and_interp() {
+fn golden_inline_fn_chz_matches_expected() {
     let src = include_str!("../../../examples/inline_fn.chz");
     let expected = include_str!("../../../examples/inline_fn.expected");
     let vm_out = run_capture(src).expect("vm run");
@@ -312,7 +271,7 @@ fn golden_inline_fn_chz_matches_expected_and_interp() {
 /// the compiler lowers it to the SAME positional `Op::Call`, so output is byte-identical against
 /// the golden — the gate for the feature.
 #[test]
-fn golden_keyword_value_chz_matches_expected_and_interp() {
+fn golden_keyword_value_chz_matches_expected() {
     let base = crate::native::std_embed::checkout_root();
     let path = base.join("examples/keyword_value.chz");
     let expected = std::fs::read_to_string(base.join("examples/keyword_value.expected")).unwrap();
@@ -322,11 +281,6 @@ fn golden_keyword_value_chz_matches_expected_and_interp() {
         vm_out, expected,
         "vm output drifted from keyword_value.expected"
     );
-    let (_ip_out, _e2, ip_res, _) = run_file(&path);
-    ip_res.expect("keyword_value.chz should run on the interp");
-    let (mn_out, _e3, mn_res, _) = run_file_with(&path, crate::native::HostConfig::default());
-    mn_res.expect("keyword_value.chz should run on the M:N engine");
-    assert_eq!(mn_out, expected, "M:N output drifted on keyword_value");
 }
 
 /// Cross-module value+keyword parity: `examples/keyword_value_xmod/main.chz` calls an IMPORTED fn
@@ -334,7 +288,7 @@ fn golden_keyword_value_chz_matches_expected_and_interp() {
 /// index, so this locks that module-scoped keying (the extern-sig precedent) resolves correctly
 /// across module boundaries against a literal golden.
 #[test]
-fn golden_keyword_value_xmod_matches_expected_and_interp() {
+fn golden_keyword_value_xmod_matches_expected() {
     let base = crate::native::std_embed::checkout_root();
     let path = base.join("examples/keyword_value_xmod/main.chz");
     let expected =
@@ -342,11 +296,6 @@ fn golden_keyword_value_xmod_matches_expected_and_interp() {
     let (vm_out, _e1, vm_res, _) = run_file(&path);
     vm_res.expect("keyword_value_xmod should run on the VM");
     assert_eq!(vm_out, expected, "vm output drifted on keyword_value_xmod");
-    let (_ip_out, _e2, ip_res, _) = run_file(&path);
-    ip_res.expect("keyword_value_xmod should run on the interp");
-    let (mn_out, _e3, mn_res, _) = run_file_with(&path, crate::native::HostConfig::default());
-    mn_res.expect("keyword_value_xmod should run on the M:N engine");
-    assert_eq!(mn_out, expected, "M:N output drifted on keyword_value_xmod");
 }
 
 /// Cross-module DEFAULT golden (W7-51): `examples/default_xmod/main.chz` omits arguments whose
@@ -357,7 +306,7 @@ fn golden_keyword_value_xmod_matches_expected_and_interp() {
 /// (line 15, col 25): unknown name 'math'` — the clone landed in `main`); CPython's two-module
 /// equivalent prints the same lines this does.
 #[test]
-fn golden_default_xmod_matches_expected_on_all_engines() {
+fn golden_default_xmod_matches_expected() {
     let base = crate::native::std_embed::checkout_root();
     let path = base.join("examples/default_xmod/main.chz");
     let expected =
@@ -365,8 +314,6 @@ fn golden_default_xmod_matches_expected_on_all_engines() {
     let (vm_out, _e1, vm_res, _) = run_file(&path);
     vm_res.expect("default_xmod should run");
     assert_eq!(vm_out, expected, "VM output drifted on default_xmod");
-    let (_mn_out, _e2, mn_res, _) = run_file(&path);
-    mn_res.expect("default_xmod should run on the M:N engine");
 }
 
 /// The protocol golden — the shape the cross-module default fix exists for, and the one the corpus
@@ -377,7 +324,7 @@ fn golden_default_xmod_matches_expected_on_all_engines() {
 /// compile and silently disagree. The checked-in `.expected` is byte-identical to what the
 /// equivalent CPython program prints.
 #[test]
-fn golden_default_protocol_matches_expected_on_all_engines() {
+fn golden_default_protocol_matches_expected() {
     let base = crate::native::std_embed::checkout_root();
     let path = base.join("examples/default_protocol/main.chz");
     let expected =
@@ -385,15 +332,13 @@ fn golden_default_protocol_matches_expected_on_all_engines() {
     let (vm_out, _e1, vm_res, _) = run_file(&path);
     vm_res.expect("default_protocol should run");
     assert_eq!(vm_out, expected, "VM output drifted on default_protocol");
-    let (_mn_out, _e2, mn_res, _) = run_file(&path);
-    mn_res.expect("default_protocol should run on the M:N engine");
 }
 
 /// Chained `elif` in expression position: `examples/expr_else_if.chz` exercises a multi-arm
 /// `if p: a elif q: b else: c` chain (right-associative nesting) selecting each branch.
 /// Byte-identical against the checked-in `.expected`.
 #[test]
-fn golden_expr_else_if_chz_matches_expected_and_interp() {
+fn golden_expr_else_if_chz_matches_expected() {
     let src = include_str!("../../../examples/expr_else_if.chz");
     let expected = include_str!("../../../examples/expr_else_if.expected");
     let vm_out = run_capture(src).expect("vm run");
@@ -403,22 +348,12 @@ fn golden_expr_else_if_chz_matches_expected_and_interp() {
     );
 }
 
-#[test]
-fn golden_hello_chz_matches_interpreter() {
-    // Same source + golden as `golden_hello_chz_matches_expected` above — this test's own only
-    // assertion used to be a self-comparison; reuse the checked-in `.expected` as the real value.
-    let src = include_str!("../../../examples/hello.chz");
-    let expected = include_str!("../../../examples/hello.expected");
-    let vm_out = run_capture(src).expect("vm run");
-    assert_eq!(vm_out, expected);
-}
-
 /// Golden: a user struct/enum method whose name collides with a built-in method name (`add`,
 /// `map`) still gets named/default-arg support when the receiver's struct type is statically
 /// known (typed local / inline ctor / struct-returning fn), while a genuine builtin receiver
-/// (List) routes to the builtin untouched. Byte-identical on the VM, interp, and `.expected`.
+/// (List) routes to the builtin untouched. Byte-identical against its `.expected`.
 #[test]
-fn golden_builtin_named_method_chz_matches_expected_and_interp() {
+fn golden_builtin_named_method_chz_matches_expected() {
     let src = include_str!("../../../examples/builtin_named_method.chz");
     let expected = include_str!("../../../examples/builtin_named_method.expected");
     let vm_out = run_capture(src).expect("vm run");
@@ -429,10 +364,9 @@ fn golden_builtin_named_method_chz_matches_expected_and_interp() {
 }
 
 /// M22 golden: operator protocols (`div`/`mod`/`neg`), protocol embedding (super-protocols), and
-/// the builtin `Arithmetic` bundle — byte-identical on the VM, interp, the M:N parallel engine,
-/// and the checked-in `.expected`.
+/// the builtin `Arithmetic` bundle — byte-identical against its `.expected`.
 #[test]
-fn golden_arithmetic_protocol_chz_matches_expected_and_interp() {
+fn golden_arithmetic_protocol_chz_matches_expected() {
     let src = include_str!("../../../examples/arithmetic_protocol.chz");
     let expected = include_str!("../../../examples/arithmetic_protocol.expected");
     let vm_out = run_capture(src).expect("vm run");
@@ -444,10 +378,10 @@ fn golden_arithmetic_protocol_chz_matches_expected_and_interp() {
 
 /// Generic operator-overload golden: `examples/generic_operator_overload.chz` — a generic struct
 /// `Box[T]` and generic enum `Numeral[T]` whose `add`/`neg`/`compare` methods overload `+`/`-`/`<`,
-/// satisfy `Add`/`Comparable`, and flow into `twice[T: Add]`. Byte-identical on the VM, the M:N
-/// parallel engine, and the checked-in `.expected`.
+/// satisfy `Add`/`Comparable`, and flow into `twice[T: Add]`. Byte-identical against its
+/// `.expected`.
 #[test]
-fn golden_generic_operator_overload_chz_matches_expected_and_interp() {
+fn golden_generic_operator_overload_chz_matches_expected() {
     let src = include_str!("../../../examples/generic_operator_overload.chz");
     let expected = include_str!("../../../examples/generic_operator_overload.expected");
     let vm_out = run_capture(src).expect("vm run");
@@ -458,7 +392,7 @@ fn golden_generic_operator_overload_chz_matches_expected_and_interp() {
 }
 
 /// M22: a struct defining `div`/`mod`/`neg` overloads `/`, `%`, and unary `-`. Runs byte-identical
-/// on the VM and the M:N parallel engine.
+/// against a literal golden.
 #[test]
 fn struct_div_mod_neg_runs() {
     let src = "struct V:\n    n: int\n    fn div(self, other: V) -> V:\n        return V(self.n / other.n)\n    fn mod(self, other: V) -> V:\n        return V(self.n % other.n)\n    fn neg(self) -> V:\n        return V(-self.n)\nfn main():\n    a := V(7)\n    b := V(2)\n    print((a / b).n)\n    print((a % b).n)\n    print((-a).n)\nmain()\n";
@@ -470,10 +404,9 @@ fn struct_div_mod_neg_runs() {
 /// ctor (`Rect.square`), a validating ctor returning `Result` (`Email.parse`), an enum static
 /// ctor returning `Option` (`Color.from_str`) alongside a variant that wins over a static name,
 /// and a generic static via the type-level turbofish (`Box[int].empty()`). Static dispatch pushes
-/// no receiver, so it is behavior-preserving; byte-identical on the VM, interp, and the M:N
-/// parallel engine, plus the checked-in `.expected`.
+/// no receiver, so it is behavior-preserving; byte-identical against its `.expected`.
 #[test]
-fn golden_static_methods_chz_matches_expected_and_interp() {
+fn golden_static_methods_chz_matches_expected() {
     let src = include_str!("../../../examples/static_methods.chz");
     let expected = include_str!("../../../examples/static_methods.expected");
     let vm_out = run_capture(src).expect("vm run");
@@ -489,9 +422,9 @@ fn golden_static_methods_chz_matches_expected_and_interp() {
 /// result; witness FORWARDING (`twice`); a MEMBER's own `[T]` (instance + static); and the witness
 /// reaching an escaping closure, a nested `fn`, a `defer:` block and a `spawn:` block. The witness
 /// is a hidden trailing argument, so nothing is monomorphized and the runtime stays erased —
-/// byte-identical on the M:N engine against the checked-in `.expected`.
+/// byte-identical against the checked-in `.expected`.
 #[test]
-fn golden_static_witness_chz_matches_expected_and_parallel() {
+fn golden_static_witness_chz_matches_expected() {
     let src = include_str!("../../../examples/static_witness.chz");
     let expected = include_str!("../../../examples/static_witness.expected");
     let vm_out = run_capture(src).expect("vm run");
@@ -514,10 +447,10 @@ fn raw_string_as_match_pattern_runs() {
 /// literal braces (`r"{}"` → `{}`, the thing that needed `{{}}` before), literal backslashes
 /// (`r"\d+\s"`), the single-quote + Windows-path form, the triple form embedding quotes+braces
 /// (JSON), and a side-by-side proving a NORMAL string still interpolates (`"{x}"` → 5) while the
-/// raw form keeps `{x}` literal. NO interpolation + NO escapes, so VM and interp emit the same
-/// compile-time literal — byte-identical on the VM, interp, and the checked-in `.expected`.
+/// raw form keeps `{x}` literal. NO interpolation + NO escapes, so each compiles to one literal —
+/// byte-identical against its `.expected`.
 #[test]
-fn golden_raw_string_chz_matches_expected_and_interp() {
+fn golden_raw_string_chz_matches_expected() {
     let src = include_str!("../../../examples/raw_string.chz");
     let expected = include_str!("../../../examples/raw_string.expected");
     let vm_out = run_capture(src).expect("vm run");
@@ -535,7 +468,7 @@ fn golden_raw_string_chz_matches_expected_and_interp() {
 /// constructor. Byte-identical against the checked-in `.expected`: the layout change is
 /// behavior-preserving, so any divergence turns this RED.
 #[test]
-fn golden_struct_layout_chz_matches_expected_and_interp() {
+fn golden_struct_layout_chz_matches_expected() {
     let src = include_str!("../../../examples/struct_layout.chz");
     let expected = include_str!("../../../examples/struct_layout.expected");
     let vm_out = run_capture(src).expect("vm run");
@@ -665,7 +598,7 @@ fn native_result_option_have_fixed_variant_ids() {
 /// M19 lever #2 regression guard — a user enum declaring a variant named `Some` must NOT collapse
 /// native Option identity. A native Option::Some (from `pop()`) and a user `Foo::Some` carry
 /// DISJOINT ids (native VID_SOME=2 stamped directly by `alloc_enum`; user id at 4..), so `==` is
-/// `false` — byte-matching the interp oracle. Before the reserved-id fix the VM printed `true`
+/// `false`. Before the reserved-id fix the VM printed `true`
 /// (user variant shadowed `variants["Some"]`, so native construction stamped the user's id).
 #[test]
 fn user_variant_shadow_does_not_collapse_native_option_equality() {
@@ -679,7 +612,7 @@ fn user_variant_shadow_does_not_collapse_native_option_equality() {
 
 /// Scoped variants — two enums may now reuse a variant name (`Color.Red` / `Light.Red`). Each
 /// qualified constructor and match arm must dispatch to the right enum's variant (distinct dense
-/// `variant_id`s); the interp's `try_bind` enum check must agree with the VM's int compare.
+/// `variant_id`s).
 #[test]
 fn shared_variant_name_dispatches_per_enum() {
     let src = "enum Color:\n    Red\n    Blue\nenum Light:\n    Red\n    Green\nfn cname(c: Color) -> str:\n    return match c:\n        Color.Red: \"c-red\"\n        Color.Blue: \"c-blue\"\nfn lname(l: Light) -> str:\n    return match l:\n        Light.Red: \"l-red\"\n        Light.Green: \"l-green\"\nfn main():\n    print(cname(Color.Red))\n    print(lname(Light.Red))\n    print(cname(Color.Blue))\nmain()\n";
@@ -733,10 +666,10 @@ fn match_arm_dispatches_by_variant_id() {
 /// surface the variant-id change touches — nullary + payload variants, a generic `Option[T]`/
 /// `Result[T,E]`, exhaustive `match`, match-with-binding, a guard, enum `==` (equal /
 /// unequal-by-variant / unequal-by-enum-type), Display + `${}` interpolation, nested enums, and
-/// `Result`/`Option` + the `?` operator. Byte-identical on the VM, interp, the `--parallel`
-/// engine (an enum crosses a `spawn`+`Channel`), and the checked-in `.expected`.
+/// `Result`/`Option` + the `?` operator. Byte-identical against its `.expected` (an enum crosses a
+/// `spawn`+`Channel`).
 #[test]
-fn golden_enum_layout_chz_matches_expected_and_interp() {
+fn golden_enum_layout_chz_matches_expected() {
     let src = include_str!("../../../examples/enum_layout.chz");
     let expected = include_str!("../../../examples/enum_layout.expected");
     let vm_out = run_capture(src).expect("vm run");
@@ -749,7 +682,7 @@ fn golden_enum_layout_chz_matches_expected_and_interp() {
 /// Enum-methods golden: `examples/enum_methods.chz` (a `match self` method, a method returning a
 /// new variant, a generic enum method using `T`, an enum `str(self)` satisfying Stringable, and an
 /// enum satisfying `Add`/`Comparable` through both a generic bound and direct `+`/`<`/`==`)
-/// byte-identical on the VM, the interpreter, the parallel engine, and its `.expected`.
+/// byte-identical against its `.expected`.
 #[test]
 fn enum_with_hash_is_usable_as_map_set_key() {
     // Regression: an enum defining `hash(self) -> int` satisfies Hashable at the CHECKER, so
@@ -765,7 +698,7 @@ fn enum_with_hash_is_usable_as_map_set_key() {
 }
 
 #[test]
-fn golden_enum_methods_chz_matches_expected_and_interp() {
+fn golden_enum_methods_chz_matches_expected() {
     let src = include_str!("../../../examples/enum_methods.chz");
     let expected = include_str!("../../../examples/enum_methods.expected");
     let vm_out = run_capture(src).expect("vm run");
@@ -779,7 +712,7 @@ fn golden_enum_methods_chz_matches_expected_and_interp() {
 /// escapes, single-quote strings incl. interpolation) byte-identical on the VM and
 /// `.expected`. Proves the new lexer forms lex the same (parity by construction).
 #[test]
-fn golden_literals_chz_matches_expected_and_interp() {
+fn golden_literals_chz_matches_expected() {
     let src = include_str!("../../../examples/literals.chz");
     let expected = include_str!("../../../examples/literals.expected");
     let vm_out = run_capture(src).expect("vm run");
@@ -792,7 +725,7 @@ fn golden_literals_chz_matches_expected_and_interp() {
 /// `format_float` path (bare interpolation) and `fmtspec::repr_float` (bare format-spec, no type
 /// char) — now the same `repr_float` helper — and asserts byte-identical against `.expected`.
 #[test]
-fn golden_float_large_integral_matches_expected_and_interp() {
+fn golden_float_large_integral_matches_expected() {
     let src = include_str!("../../../examples/float_large_integral.chz");
     let expected = include_str!("../../../examples/float_large_integral.expected");
     let vm_out = run_capture(src).expect("vm run");
@@ -801,10 +734,10 @@ fn golden_float_large_integral_matches_expected_and_interp() {
 
 /// bytes golden: `examples/bytes.chz` (the full operation table — `b"..."` literal with `\xHH`
 /// escapes, index→int, slice→bytes incl. reverse/step/negative, for-loop→int, len, ==/!=, a map
-/// key, an out-of-range index under `recover:`, and the `b'...'` Display/str()/interp repr)
-/// byte-identical on the VM, the interpreter, and its `.expected` (three-engine parity gate).
+/// key, an out-of-range index under `recover:`, and the `b'...'` Display/str()/interpolation repr)
+/// byte-identical against its `.expected`.
 #[test]
-fn golden_bytes_chz_matches_expected_and_interp() {
+fn golden_bytes_chz_matches_expected() {
     let src = include_str!("../../../examples/bytes.chz");
     let expected = include_str!("../../../examples/bytes.expected");
     let vm_out = run_capture(src).expect("vm run");
@@ -814,10 +747,9 @@ fn golden_bytes_chz_matches_expected_and_interp() {
 /// conversions golden: `examples/conversions.chz` (str.encode()/bytes.decode()/bytearray.decode()
 /// UTF-8 round-trip incl. a multi-byte char, an invalid-UTF-8 decode error, List() over
 /// every for-iterable shape — list/set/str/bytes/bytearray/range/user-iterator — Set() dedup, and
-/// Map() from 2-tuples with a last-wins dup key) byte-identical on the VM, the interpreter, and its
-/// `.expected` (three-engine parity gate).
+/// Map() from 2-tuples with a last-wins dup key) byte-identical against its `.expected`.
 #[test]
-fn golden_conversions_chz_matches_expected_and_interp() {
+fn golden_conversions_chz_matches_expected() {
     let src = include_str!("../../../examples/conversions.chz");
     let expected = include_str!("../../../examples/conversions.expected");
     let vm_out = run_capture(src).expect("vm run");
@@ -825,7 +757,7 @@ fn golden_conversions_chz_matches_expected_and_interp() {
 }
 
 /// encode/decode UTF-8 round-trip (multi-byte char): `str.encode()` then `bytes.decode()` returns
-/// the original string, byte-identical on the VM + interp.
+/// the original string.
 #[test]
 fn encode_decode_roundtrip_multibyte() {
     let src = "fn main():\n    s := \"héllo\"\n    print(s.encode().decode())\n    print(s.encode().decode() == ?s)\nmain()\n";
@@ -852,8 +784,8 @@ fn invalid_utf8_decode_is_an_error() {
     );
 }
 
-/// `List()`/`Set()`/`Map()` over a user `.next()` iterator + dedup + last-wins, byte-identical
-/// VM/interp. The map last-wins on a duplicate key mirrors the `{k: v}` literal.
+/// `List()`/`Set()`/`Map()` over a user `.next()` iterator + dedup + last-wins, against a literal
+/// golden. The map last-wins on a duplicate key mirrors the `{k: v}` literal.
 #[test]
 fn constructors_over_user_iterator_and_dupkey() {
     let src = "struct C:\n    n: int\n    limit: int\n    fn next(self) -> int?:\n        if self.n >= self.limit:\n            return None\n        v := self.n\n        self.n = self.n + 1\n        return ?v\nfn main():\n    print(List.from_iter(C(0, 4)).sum())\n    print(Set.from_iter(C(0, 4)).len())\n    m := Map.from_iter([(1, \"a\"), (1, \"b\")])\n    print(m.len())\n    print(m[1])\nmain()\n";
@@ -865,9 +797,9 @@ fn constructors_over_user_iterator_and_dupkey() {
 /// forms, index read + WRITE, out-of-range write under `recover:`, slice→bytearray incl.
 /// reverse/step, for-loop→int, push/pop/extend, len, ==/cross bytes==bytearray, shared-mutation
 /// through two bindings, the bytes<->bytearray conversion round-trip, and the `bytearray(b'...')`
-/// repr) byte-identical on the VM, the interpreter, and its `.expected` (three-engine parity gate).
+/// repr) byte-identical against its `.expected`.
 #[test]
-fn golden_bytearray_chz_matches_expected_and_interp() {
+fn golden_bytearray_chz_matches_expected() {
     let src = include_str!("../../../examples/bytearray.chz");
     let expected = include_str!("../../../examples/bytearray.expected");
     let vm_out = run_capture(src).expect("vm run");
@@ -876,10 +808,10 @@ fn golden_bytearray_chz_matches_expected_and_interp() {
 
 /// Qualified enum-variant access golden: `examples/enum_qualified.chz` (the dotted `Enum.Variant`
 /// spelling, nullary + payload, in construction AND `match` arms, interleaved with the bare form
-/// and a generic enum) byte-identical on the VM, the interpreter, and its `.expected`. Pins that
+/// and a generic enum) byte-identical against its `.expected`. Pins that
 /// the qualifier is a pure spelling aid resolving to the same variant.
 #[test]
-fn golden_enum_qualified_chz_matches_expected_and_interp() {
+fn golden_enum_qualified_chz_matches_expected() {
     let src = include_str!("../../../examples/enum_qualified.chz");
     let expected = include_str!("../../../examples/enum_qualified.expected");
     let vm_out = run_capture(src).expect("vm run");
@@ -898,11 +830,10 @@ fn qualified_variant_not_shadowed_by_function_parity() {
 
 /// Polymorphic method-IC golden: `examples/poly_method.chz` (a `List[Shape]` walked at one
 /// `.area()` call site across FIVE distinct struct types — four fill the N-way method-call IC,
-/// the fifth overflows it to the sticky-generic slow path) byte-identical on the VM, the
-/// interpreter, and its `.expected`. Pins that the N-way IC is behavior-preserving (the interp,
-/// which has no IC, is the oracle).
+/// the fifth overflows it to the sticky-generic slow path) byte-identical against its `.expected`.
+/// Pins that the N-way IC is behavior-preserving.
 #[test]
-fn golden_poly_method_chz_matches_expected_and_interp() {
+fn golden_poly_method_chz_matches_expected() {
     let src = include_str!("../../../examples/poly_method.chz");
     let expected = include_str!("../../../examples/poly_method.expected");
     let vm_out = run_capture(src).expect("vm run");
@@ -911,10 +842,9 @@ fn golden_poly_method_chz_matches_expected_and_interp() {
 
 /// or-pattern golden: `examples/match_or.chz` (or-patterns with + without bindings, a 3-variant
 /// enum or-pattern that is exhaustive without `_`, a guard on an or-pattern, and nested nullary
-/// variants `Some(None)` / `Ok(Err(e))`) byte-identical on the VM, the interpreter, the
-/// `--parallel` engine, and its `.expected`.
+/// variants `Some(None)` / `Ok(Err(e))`) byte-identical against its `.expected`.
 #[test]
-fn golden_match_or_chz_matches_expected_and_interp() {
+fn golden_match_or_chz_matches_expected() {
     let src = include_str!("../../../examples/match_or.chz");
     let expected = include_str!("../../../examples/match_or.expected");
     let vm_out = run_capture(src).expect("vm run");
@@ -922,10 +852,9 @@ fn golden_match_or_chz_matches_expected_and_interp() {
 }
 
 /// QoL golden: `examples/membership.chz` (the `in` operator across list/set/map-key/substring,
-/// true + false cases) byte-identical on the VM, the interpreter, the `--parallel` engine, and
-/// its `.expected`.
+/// true + false cases) byte-identical against its `.expected`.
 #[test]
-fn golden_membership_chz_matches_expected_and_interp() {
+fn golden_membership_chz_matches_expected() {
     let src = include_str!("../../../examples/membership.chz");
     let expected = include_str!("../../../examples/membership.expected");
     let vm_out = run_capture(src).expect("vm run");
@@ -933,10 +862,9 @@ fn golden_membership_chz_matches_expected_and_interp() {
 }
 
 /// QoL golden: `examples/compound_assign.chz` (the 8 compound-assign ops across var/index/field/
-/// map-value targets) byte-identical on the VM, the interpreter, the `--parallel` engine, and
-/// its `.expected`.
+/// map-value targets) byte-identical against its `.expected`.
 #[test]
-fn golden_compound_assign_chz_matches_expected_and_interp() {
+fn golden_compound_assign_chz_matches_expected() {
     let src = include_str!("../../../examples/compound_assign.chz");
     let expected = include_str!("../../../examples/compound_assign.expected");
     let vm_out = run_capture(src).expect("vm run");
@@ -944,10 +872,10 @@ fn golden_compound_assign_chz_matches_expected_and_interp() {
 }
 
 /// Concurrency demo golden: `examples/demo_spawn.chz` (`spawn` in a `parallel:` nursery, results
-/// collected over a `Channel` and summed — order-independent, so byte-identical on the VM, the
-/// interpreter, the `--parallel` engine, and its `.expected`). Its twin is `demo_executor`.
+/// collected over a `Channel` and summed — order-independent, so byte-identical against its
+/// `.expected`). Its twin is `demo_executor`.
 #[test]
-fn golden_demo_spawn_chz_matches_expected_and_interp() {
+fn golden_demo_spawn_chz_matches_expected() {
     let src = include_str!("../../../examples/demo_spawn.chz");
     let expected = include_str!("../../../examples/demo_spawn.expected");
     let vm_out = run_capture(src).expect("vm run");
@@ -955,10 +883,10 @@ fn golden_demo_spawn_chz_matches_expected_and_interp() {
 }
 
 /// Concurrency demo golden: `examples/demo_executor.chz` (the `Executor` twin of `demo_spawn` —
-/// detached `submit` + `shutdown` drain producing the same summed result). Byte-identical on the
-/// VM, the interpreter, the `--parallel` engine, and its `.expected`.
+/// detached `submit` + `shutdown` drain producing the same summed result). Byte-identical against
+/// its `.expected`.
 #[test]
-fn golden_demo_executor_chz_matches_expected_and_interp() {
+fn golden_demo_executor_chz_matches_expected() {
     let src = include_str!("../../../examples/demo_executor.chz");
     let expected = include_str!("../../../examples/demo_executor.expected");
     let vm_out = run_capture(src).expect("vm run");
@@ -966,10 +894,10 @@ fn golden_demo_executor_chz_matches_expected_and_interp() {
 }
 
 /// QoL golden: `examples/multiline_str.chz` (triple-quoted strings — unescaped quotes, `\n`,
-/// literal newlines, interpolation) byte-identical on the VM, the `--parallel`
-/// engine, and its `.expected`. (Lexer-only feature; parity is by construction.)
+/// literal newlines, interpolation) byte-identical against its `.expected`. (Lexer-only feature;
+/// parity is by construction.)
 #[test]
-fn golden_multiline_str_chz_matches_expected_and_interp() {
+fn golden_multiline_str_chz_matches_expected() {
     let src = include_str!("../../../examples/multiline_str.chz");
     let expected = include_str!("../../../examples/multiline_str.expected");
     let vm_out = run_capture(src).expect("vm run");
@@ -978,10 +906,9 @@ fn golden_multiline_str_chz_matches_expected_and_interp() {
 
 /// QoL golden: `examples/tuple_swap.chz` (multi-target assignment — vars, list elements, struct
 /// fields, three-way rotation, and `a, b = f()` tuple destructuring; RHS-first eval proven by
-/// same-index swaps) byte-identical on the VM, the interpreter, the `--parallel` engine, and its
-/// `.expected`.
+/// same-index swaps) byte-identical against its `.expected`.
 #[test]
-fn golden_tuple_swap_chz_matches_expected_and_interp() {
+fn golden_tuple_swap_chz_matches_expected() {
     let src = include_str!("../../../examples/tuple_swap.chz");
     let expected = include_str!("../../../examples/tuple_swap.expected");
     let vm_out = run_capture(src).expect("vm run");
@@ -989,52 +916,50 @@ fn golden_tuple_swap_chz_matches_expected_and_interp() {
 }
 
 /// M8-M4 golden: `examples/set.chz` (the set type — literals, membership, algebra, iteration)
-/// byte-identical on the VM, the interpreter, and its `.expected`.
+/// byte-identical against its `.expected`.
 #[test]
-fn golden_set_chz_matches_expected_and_interp() {
+fn golden_set_chz_matches_expected() {
     let src = include_str!("../../../examples/set.chz");
     let expected = include_str!("../../../examples/set.expected");
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected);
 }
 
-/// `timer(ms)` golden: a one-shot timeout channel delivers `true`. Byte-identical on the
-/// VM and `.expected` (inline-sleep to the deadline). `--parallel`
+/// `timer(ms)` golden: a one-shot timeout channel delivers `true`, byte-identical against
+/// `.expected` (inline-sleep to the deadline).
 /// §6d golden: `examples/wait_select.chz` (Chezzi's `select` — source-order priority, `else:`,
-/// a `timer` arm, `=` assignment, and a closed, drained arm that is picked with `!RecvError`). Uses only non-blocking arms so
-/// the VM AND `--parallel` are byte-identical (a truly-blocking `wait` is a
-/// VM-only capability tested separately in `vm_wait_blocks_then_wakes_on_second_channel`).
+/// a `timer` arm, `=` assignment, and a closed, drained arm that is picked with `!RecvError`). Uses
+/// only non-blocking arms, so the output is deterministic (a truly-blocking `wait` is tested
+/// separately in `vm_wait_blocks_then_wakes_on_second_channel`).
 #[test]
-fn golden_wait_select_chz_matches_expected_and_interp() {
+fn golden_wait_select_chz_matches_expected() {
     let src = include_str!("../../../examples/wait_select.chz");
     let expected = include_str!("../../../examples/wait_select.expected");
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected);
-    assert_eq!(run_capture(src).expect("parallel"), expected);
 }
 
-/// delivers the same value via the background timer `send` (asserted separately).
+/// The background timer `send` delivers the same value (asserted separately).
 #[test]
-fn golden_timer_chz_matches_expected_and_interp() {
+fn golden_timer_chz_matches_expected() {
     let src = include_str!("../../../examples/timer.chz");
     let expected = include_str!("../../../examples/timer.expected");
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected);
-    assert_eq!(run_capture(src).expect("parallel"), expected);
 }
 
 /// Phase 4e — the selective `import timer from std.time` form still licenses the bare `timer(ms)`
 /// call (opcode-backed, kept via the minimal std.time `native_module_sig` arm) after std.time went
-/// file-backed. Byte-identical on the VM, the interpreter, and the M:N `--parallel` engine.
+/// file-backed.
 #[test]
-fn golden_timer_selective_import_three_engine() {
+fn golden_timer_selective_import() {
     let src = "import timer from std.time\nfn main():\n    print(timer(20).recv())\nmain()\n";
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, "true\n");
-    assert_eq!(run_capture(src).expect("parallel"), "true\n");
 }
 
-/// `timer(ms)` under `--parallel`: a spawned fiber recv-blocks on the timeout channel, PARKS, and
+/// `timer(ms)` in a `parallel:` nursery: a spawned fiber recv-blocks on the timeout channel, PARKS,
+/// and
 /// is woken by the background timer `send` at the deadline — not a false deadlock (the pending
 /// timer is accounted as `inflight`, vetoing the predicate while the lone fiber waits). Proves the
 /// async-delivery path + the deadlock veto + the park/wake on the timer channel's key.
@@ -1045,10 +970,10 @@ fn parallel_timer_wakes_blocked_recv() {
     assert_eq!(run_capture(src).expect("parallel"), "true\n");
 }
 
-/// `Atomic[T]` golden: single-thread load/store/add/sub/exchange/cas sequence, byte-identical on
-/// the VM, the interpreter, and `.expected`.
+/// `Atomic[T]` golden: single-thread load/store/add/sub/exchange/cas sequence, byte-identical
+/// against its `.expected`.
 #[test]
-fn golden_atomic_chz_matches_expected_and_interp() {
+fn golden_atomic_chz_matches_expected() {
     let src = include_str!("../../../examples/atomic.chz");
     let expected = include_str!("../../../examples/atomic.expected");
     let vm_out = run_capture(src).expect("vm run");
@@ -1057,9 +982,9 @@ fn golden_atomic_chz_matches_expected_and_interp() {
 
 /// Multi-line literals golden: `examples/multiline_literals.chz` (newline/indent suppression
 /// inside `[]`/`{}`/`()` + optional trailing commas on list/map/tuple/call/params) byte-identical
-/// on the VM, interp, and `.expected`.
+/// against its `.expected`.
 #[test]
-fn golden_multiline_literals_chz_matches_expected_and_interp() {
+fn golden_multiline_literals_chz_matches_expected() {
     let src = include_str!("../../../examples/multiline_literals.chz");
     let expected = include_str!("../../../examples/multiline_literals.expected");
     let vm_out = run_capture(src).expect("vm run");
@@ -1068,7 +993,7 @@ fn golden_multiline_literals_chz_matches_expected_and_interp() {
 
 /// Format spec: every supported `{expr:spec}` case (align/fill/width/zero-pad/precision/
 /// each type char/percent/sign/string-truncate, plus a bare float and a `:`-inside-index) must
-/// be byte-identical across the VM and `--parallel`.
+/// match a literal golden.
 #[test]
 fn fmt_specs_parity() {
     let src = "\
@@ -1103,8 +1028,7 @@ print(\"fmt={(if b: 1 else: 2):>5}\")
 }
 
 /// A pathological field width is rejected (with the cap message) BEFORE any allocation — the
-/// fix for the prior OOM. Must error identically (it is a compile-time error on
-/// the VM path, a runtime error on the interpreter; the message string is the same).
+/// fix for the prior OOM. It is a compile-time error.
 #[test]
 fn pathological_width_rejected() {
     let src = "x := 1\nprint(\"{x:>100000000}\")\n";
@@ -1113,17 +1037,12 @@ fn pathological_width_rejected() {
         vm_err.to_string().contains("exceeds maximum 4096"),
         "vm: {vm_err}"
     );
-    let interp_err = run_capture(src).expect_err("interp must reject");
-    assert!(
-        interp_err.to_string().contains("exceeds maximum 4096"),
-        "interp: {interp_err}"
-    );
 }
 
-/// Golden: `examples/format_specs.chz` (the full format mini-language) byte-identical on the VM,
-/// the interpreter, `--parallel`, and its `.expected`.
+/// Golden: `examples/format_specs.chz` (the full format mini-language) byte-identical against its
+/// `.expected`.
 #[test]
-fn golden_format_specs_chz_matches_expected_and_interp() {
+fn golden_format_specs_chz_matches_expected() {
     let src = include_str!("../../../examples/format_specs.chz");
     let expected = include_str!("../../../examples/format_specs.expected");
     let vm_out = run_capture(src).expect("vm run");
@@ -1134,7 +1053,7 @@ fn golden_format_specs_chz_matches_expected_and_interp() {
 /// the unchanged 1/2-arg forms, and slicing a `..` range literal with a `::step`) byte-identical
 /// on the VM against `.expected` — the guard for stepped ranges.
 #[test]
-fn golden_range_step_chz_matches_expected_and_interp() {
+fn golden_range_step_chz_matches_expected() {
     let src = include_str!("../../../examples/range_step.chz");
     let expected = include_str!("../../../examples/range_step.expected");
     let vm_out = run_capture(src).expect("vm run");
@@ -1145,7 +1064,7 @@ fn golden_range_step_chz_matches_expected_and_interp() {
 /// runtime str exprs) byte-identical on the VM against `.expected` — the guard for `print`'s
 /// `sep=`/`end=`.
 #[test]
-fn golden_print_kwargs_chz_matches_expected_and_interp() {
+fn golden_print_kwargs_chz_matches_expected() {
     let src = include_str!("../../../examples/print_kwargs.chz");
     let expected = include_str!("../../../examples/print_kwargs.expected");
     let vm_out = run_capture(src).expect("vm run");
@@ -1154,10 +1073,10 @@ fn golden_print_kwargs_chz_matches_expected_and_interp() {
 
 /// First-class universe builtin fn golden: `examples/defer_builtin_value.chz` — `defer print(...)`
 /// as a bare first-class call, plus value-position use (`f := ord`/`chr`, `p := panic` raising
-/// through the value call path). Byte-identical on the VM, the M:N OS-thread engine,
+/// through the value call path). Byte-identical against a literal golden OS-thread engine,
 /// and `.expected`.
 #[test]
-fn golden_defer_builtin_value_chz_matches_expected_and_interp() {
+fn golden_defer_builtin_value_chz_matches_expected() {
     let src = include_str!("../../../examples/defer_builtin_value.chz");
     let expected = include_str!("../../../examples/defer_builtin_value.expected");
     let vm_out = run_capture(src).expect("vm run");
@@ -1166,10 +1085,10 @@ fn golden_defer_builtin_value_chz_matches_expected_and_interp() {
 
 /// Phase 3a golden: `examples/native_prelude.chz` exercises the eight universe builtins now
 /// DECLARED in std/prelude.chz (int/float/str/bytes/bytearray ctors, ord/chr fns, panic in a
-/// recover:) plus synthetic `print` with sep=/end=. Byte-identical on the VM, the M:N
+/// recover:) plus synthetic `print` with sep=/end=. Byte-identical against a literal golden
 /// OS-thread engine, and `.expected` — the migration must change no output.
 #[test]
-fn golden_native_prelude_chz_matches_expected_and_interp() {
+fn golden_native_prelude_chz_matches_expected() {
     let src = include_str!("../../../examples/native_prelude.chz");
     let expected = include_str!("../../../examples/native_prelude.expected");
     let vm_out = run_capture(src).expect("vm run");
@@ -1177,21 +1096,18 @@ fn golden_native_prelude_chz_matches_expected_and_interp() {
 }
 
 /// `panic` AS A VALUE (`p := panic; p("boom")`) raises the recoverable `RuntimeError` through the
-/// value call path — NOT a returned value / NOT silent nil — byte-identical on VM + interp. If the
+/// value call path — NOT a returned value / NOT silent nil. If the
 /// value path returned `Ok`, an uncaught `p(...)` would fall through instead of faulting.
 #[test]
-fn panic_as_value_uncaught_raises_both_engines() {
+fn panic_as_value_uncaught_raises() {
     let src = "fn main():\n    p := panic\n    p(\"boom\")\nmain()\n";
     let vm_err = run_capture(src).expect_err("vm: panic value must fault");
-    let it_err = run_capture(src).expect_err("interp: panic value must fault");
     assert_eq!(vm_err.message, "boom");
-    assert_eq!(it_err.message, "boom");
 }
 
-/// `ord`/`chr` as VALUES (`f := ord`) called back yield the same result as a direct call, VM +
-/// interp identical.
+/// `ord`/`chr` as VALUES (`f := ord`) called back yield the same result as a direct call.
 #[test]
-fn ord_chr_as_value_both_engines() {
+fn ord_chr_as_value() {
     let src =
         "fn main():\n    f := ord\n    g := chr\n    print(f(\"a\"))\n    print(g(66))\nmain()\n";
     let vm_out = run_capture(src).expect("vm run");
@@ -1204,7 +1120,7 @@ fn ord_chr_as_value_both_engines() {
 /// type-checked as the binding but printed `<builtin fn …>` at runtime. Param, global (`:=`), and
 /// loop-var shadows must each resolve to the BINDING, byte-identical against the golden.
 #[test]
-fn user_binding_shadows_firstclass_builtin_both_engines() {
+fn user_binding_shadows_firstclass_builtin() {
     // parameter shadow
     let a = "fn f(ord: int):\n    print(ord)\nf(42)\n";
     assert_eq!(run_capture(a).expect("vm"), "42\n");
@@ -1220,20 +1136,19 @@ fn user_binding_shadows_firstclass_builtin_both_engines() {
 /// Each value-position use emits a fresh `Op::LoadBuiltin` → a distinct `Obj::Builtin` handle, so
 /// the VM's `values_equal_guarded` (which short-circuits only on `ha == hb`) must have a dedicated
 /// `(Obj::Builtin, Obj::Builtin)` name-compare arm; otherwise it falls to the `_ => Ok(false)`
-/// catch-all and returns `false` while the interp (derived `PartialEq` on the name) returns
-/// `true`. Covers bound values, the bare-name compare, a mismatch, and list-element recursion.
+/// catch-all and returns `false` where `true` is right. Covers bound values, the bare-name compare,
+/// a mismatch, and list-element recursion.
 #[test]
-fn builtin_value_equality_both_engines() {
+fn builtin_value_equality() {
     let src = "fn main():\n    f := ord\n    g := ord\n    print(f == g)\n    print(ord == ord)\n    print(chr == ord)\n    print([print] == [print])\nmain()\n";
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, "true\ntrue\nfalse\ntrue\n");
 }
 
 /// Bug 3: all four first-class builtins are SENDABLE — a builtin bound to a local and CAPTURED
-/// into a spawned task reaches the task and runs. Byte-identical
-/// on the VM and the M:N engine.
+/// into a spawned task reaches the task and runs, against a literal golden.
 #[test]
-fn builtin_value_crosses_tasks_both_engines() {
+fn builtin_value_crosses_tasks() {
     let src = "import std.concurrency\nfn main():\n    f := ord\n    p := print\n    parallel:\n        spawn:\n            p(f(\"a\"))\nmain()\n";
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, "97\n");
@@ -1242,12 +1157,11 @@ fn builtin_value_crosses_tasks_both_engines() {
 /// A first-class builtin fn value spawned as a DIRECT CALL callee (`f := print; spawn f(x)`,
 /// distinct from the `spawn:` block form above) must lower + run against a literal golden. The
 /// callee reaches `prepare_worker`'s `PendingCall::Call` arm, which only handled Closure/Func —
-/// a raw `Obj::Builtin` hit the reject `_` on the M:N engine only (`spawn: 'function' is not an
-/// isolable task`) while serial/interp dispatched it fine: a three-engine parity divergence on a
+/// a raw `Obj::Builtin` hit the reject `_` (`spawn: 'function' is not an isolable task`) on a
 /// checker-accepted program. Fixed by `Lowered::Value` (TICKET-226; since M3.4 the task gets the
 /// callable by handle, classified by `Vm::callable`).
 #[test]
-fn spawn_builtin_fn_value_as_call_callee_both_engines() {
+fn spawn_builtin_fn_value_as_call_callee() {
     let src = "import std.concurrency\nfn main():\n    g := print\n    parallel:\n        spawn g(\"from-task\")\nmain()\n";
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, "from-task\n");
@@ -1258,7 +1172,7 @@ fn spawn_builtin_fn_value_as_call_callee_both_engines() {
 /// `SpawnCall`, so the callee is an `Obj::Builtin` crossing the spawn by name.
 /// The checker gate accepts it (parity-perf-0 fix); runtime prints identically.
 #[test]
-fn spawn_bare_builtin_print_both_engines() {
+fn spawn_bare_builtin_print() {
     let src = "fn main():\n    parallel:\n        spawn print(\"hi\")\nmain()\n";
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, "hi\n");
@@ -1280,7 +1194,7 @@ fn print_as_value_arg_rooted_under_gc_stress() {
 /// `assert` golden: `examples/assert.chz` (bare + message forms, all passing) byte-identical on
 /// the VM against `.expected` — the guard for the primitive.
 #[test]
-fn golden_assert_chz_matches_expected_and_interp() {
+fn golden_assert_chz_matches_expected() {
     let src = include_str!("../../../examples/assert.chz");
     let expected = include_str!("../../../examples/assert.expected");
     let vm_out = run_capture(src).expect("vm run");

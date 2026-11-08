@@ -1087,17 +1087,14 @@ main()
 /// → `115 EINPROGRESS`), so this really does reach the would-block gate rather than the synchronous
 /// arm — which is what makes it the pin for `W7-59`. The pre-`W7-59` version asserted only that the
 /// `Err` arm was taken and discarded `e.message()`, so it passed identically before and after the
-/// change and would not have noticed either engine losing its answer.
+/// change and would not have noticed the engine losing its answer.
 ///
 /// The engine must report the kernel's refusal. `W7-59` narrowed the block-in-place gate to
-/// the eager-`Executor` job alone — NOT to the siblings' `Socket` gate, which would have refused
-/// the cooperative engine too, while it existed. The difference is load-bearing: `accept`/`read` wait
-/// on a chezzi peer fiber that can only run on the very thread they would block, so refusing there
-/// prevented
-/// self-starvation (`W7-40` R1); a `connect` handshake is completed by the KERNEL, starves no chezzi
-/// party, and both ancestors block on it (CPython `socket.connect` 0.1 ms, Go `net.Dial` 314 µs from
-/// the main goroutine). So the cooperative engine kept its answer here, and got `demote_block_socket`'s
-/// escapes on the way.
+/// the eager-`Executor` job alone — NOT to the siblings' `Socket` gate. The difference is
+/// load-bearing: `accept`/`read` wait on a chezzi peer fiber that can only run on the very thread
+/// they would block, so refusing there prevented self-starvation (`W7-40` R1); a `connect`
+/// handshake is completed by the KERNEL, starves no chezzi party, and both ancestors block on it
+/// (CPython `socket.connect` 0.1 ms, Go `net.Dial` 314 µs from the main goroutine).
 ///
 /// Guards the bounded-wait property too: a regression to an unbounded wait on a non-completing
 /// handshake surfaces as the watchdog timeout below.

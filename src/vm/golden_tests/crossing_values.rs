@@ -742,7 +742,7 @@ main()";
     assert_golden_out(src, "20\n99\n");
 }
 
-/// Backlog arm (b), the nursery-floor rebase (load-bearing, SERIAL oracle). A generator's `recover:`
+/// Backlog arm (b), the nursery-floor rebase (load-bearing). A generator's `recover:`
 /// handler captures an ABSOLUTE `nursery_len` at `PushHandler` — here `0` (the recover is entered by
 /// the top-level `it.next()`, before any `parallel:`). The generator is then RESUMED at a DEEPER
 /// nursery floor: inside a `parallel:` (nurseries==1) in the parent fiber, alongside a sibling
@@ -754,7 +754,7 @@ main()";
 /// rebases every parked frame/handler `nursery_len` to the resuming driver's floor. The sibling may
 /// already be running on another worker, so a regression is not deterministically reachable here.
 #[test]
-fn generator_crossed_recover_fault_leaves_siblings_intact_serial() {
+fn generator_crossed_recover_fault_leaves_siblings_intact() {
     let src = "\
 fn gen() -> Iterator[int]:
     r := recover:
@@ -1290,14 +1290,14 @@ main()
 /// CPython's `xs = [1, -2.5]`. Nothing widens an int into a float (D3).
 #[test]
 fn widen_any_collection_const_mix_agrees() {
-    widen_three_engines("xs: List[Any] = [1, -2.5]\nprint(xs)\n", "[1, -2.5]\n");
-    widen_three_engines(
+    assert_runs_to("xs: List[Any] = [1, -2.5]\nprint(xs)\n", "[1, -2.5]\n");
+    assert_runs_to(
         "fn show(...xs: Any):\n    print(xs)\nshow(1, 2.0 + 0.5)\n",
         "[1, 2.5]\n",
     );
     // GUARD (the other direction): a TYPED int element is never touched — neither side widens it, so
     // it stays an `Int` under the `Any` element type.
-    widen_three_engines(
+    assert_runs_to(
         "a := 1\nxs: List[Any] = [a, -2.5]\nprint(xs)\n",
         "[1, -2.5]\n",
     );
@@ -1313,12 +1313,12 @@ fn widen_any_collection_const_mix_agrees() {
 /// check-clean program.
 #[test]
 fn float_alias_shadowed_by_type_param_no_coerce() {
-    widen_three_engines(
+    assert_runs_to(
         "type F = float\nfn g[F](x: F) -> F:\n    return x\nr := g(5)\nprint(r)\nprint(r % 2)\nprint(g(\"hi\"))\n",
         "5\n1\nhi\n",
     );
     // generic struct: ctor float-field coercion + method return + a `List[F]` annotated `let`
-    widen_three_engines(
+    assert_runs_to(
         "type F = float\nstruct S[F]:\n    v: F\n\n    fn get(self) -> F:\n        return self.v\n\nprint(S[int](5).get())\nprint(S[str](\"hi\").get())\nfn h[F](x: F) -> List[F]:\n    xs: List[F] = [x]\n    return xs\nprint(h(5))\n",
         "5\nhi\n[5]\n",
     );
@@ -1608,7 +1608,7 @@ main()
 /// `ch.recv()`; `boom` faults. The defer is GUARANTEED registered before the fault, so it
 /// must run (42): a faulting child never ABANDONS a parked sibling — it is cancelled and unwound.
 #[test]
-fn parity_defer_runs_on_parked_sibling_when_sibling_faults() {
+fn defer_runs_on_parked_sibling_when_sibling_faults() {
     let src = "import Shared from std.concurrency\nfn cleanup(s: Shared[int]):\n    s.set(42)\n\
                fn consumer(ch: Channel[int], go: Channel[int], s: Shared[int]):\n    defer cleanup(s)\n    go.send(0)\n    ch.recv()\n\
                fn boom(go: Channel[int]):\n    go.recv()\n    xs := [1]\n    print(xs[9])\n\

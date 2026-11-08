@@ -1108,7 +1108,7 @@ impl Vm {
                 }
                 // Set algebra (gap #3): `|`→union, `&`→intersection, `^`→symmetric-difference on two
                 // sets. (`<< >>` stay int-only and fall through to the error below.) Identical to the
-                // `.union`/`.intersection` methods; `^` has no method form. Mirrors interp.
+                // `.union`/`.intersection` methods; `^` has no method form.
                 (ValueView::Obj(ha), ValueView::Obj(hb))
                     if matches!(op, Op::BitOr | Op::BitAnd | Op::BitXor)
                         && matches!(self.heap.get(ha), Obj::Set(_))

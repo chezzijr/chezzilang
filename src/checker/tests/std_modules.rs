@@ -387,7 +387,7 @@ fn regex_fn_sigs_exact() {
 
 /// DRIFT GUARD — the file-harvested Match StructInfo (fields, in positional order) must byte-match the
 /// remaining hand-built layout copies. Field ORDER is load-bearing (positional across compiler
-/// `Compiler::new`, interp finalize, `native/regex.rs` match_to_ret, and seed_stdlib_structs), so a
+/// `Compiler::new`, `native/regex.rs` match_to_ret, and seed_stdlib_structs), so a
 /// silent drift here would trap at runtime on a field read. Assemble the expected layout once and
 /// compare both the file harvest and seed_stdlib_structs against it.
 #[test]

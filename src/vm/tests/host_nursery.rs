@@ -222,7 +222,7 @@ fn parallel_faulting_task_flushes_partial_output_3engine() {
 /// deadlock detector fires. It must fault with `DEADLOCK_MSG` and emit the three lines.
 /// Looped to catch any scheduler-interleaving flakiness (there must be none — content is fixed).
 #[test]
-fn parallel_nursery_deadlock_flushes_parked_stdout_2engine() {
+fn parallel_nursery_deadlock_flushes_parked_stdout() {
     let src = r#"fn producer(ch: Channel[int]):
     ch.send(1)
 fn consumer(ch: Channel[int]):
@@ -254,7 +254,7 @@ main()
 /// empty channel no sibling can fill → the deadlock detector fires. It must fault with
 /// `DEADLOCK_MSG` and emit the single line. Looped to catch scheduler-interleaving flakiness.
 #[test]
-fn parallel_nursery_deadlock_multiparked_flushes_higher_index_2engine() {
+fn parallel_nursery_deadlock_multiparked_flushes_higher_index() {
     let src = r#"fn silent(ch: Channel[int]):
     x := ch.recv()
 fn printer(ch: Channel[int]):
@@ -369,7 +369,7 @@ fn protocols_5c_3engine_parity() {
 /// that increments a `Shared` counter, and asserts byte-identical output against a literal golden.
 /// Green before AND after the migration.
 #[test]
-fn concurrency_file_backed_three_engine() {
+fn concurrency_file_backed() {
     let src = "import Atomic, Executor, RwShared, Shared from std.concurrency\n\
                    fn bump(s: Shared[int]):\n    s.update(fn(x): x + 1)\n\
                    fn job(id: int):\n    print(\"exec {id}\")\n\
@@ -418,8 +418,8 @@ fn implicit_nursery_nested_functions() {
 }
 
 /// M-C regression (review-panel BUG): a `?` early-return from a body with a bare `spawn` must
-/// surface the USER's `Err(...)`, not the internal `? propagation` sentinel. The interp join loop
-/// previously let the spawned task's `finish_frame` clear the in-flight `?` value.
+/// surface the USER's `Err(...)`, not the internal `? propagation` sentinel. A join loop
+/// once let the spawned task's `finish_frame` clear the in-flight `?` value.
 #[test]
 fn implicit_nursery_try_preserves_error_value() {
     let src = "fn w():\n    print(\"task ran\")\nfn g() -> int!:\n    return !\"boom-value\"\nfn f() -> int!:\n    spawn w()\n    x := g()?\n    return ?x\nfn main():\n    r := recover:\n        f()?\n        99\n    print(\"after: {r}\")\nmain()\n";
@@ -436,7 +436,7 @@ fn implicit_nursery_spawn_in_defer_block() {
 }
 
 /// M-C: a genuine body fault caught by `recover:` cancels the implicit nursery's tasks and the
-/// recover continues — identical to an explicit `parallel:` escape, on all engines.
+/// recover continues — identical to an explicit `parallel:` escape.
 ///
 /// §2c1 — the spawned body is SILENT and no report line is expected. The task starts at its
 /// `spawn` now, so "it did not run" is a race rather than a fact, and the

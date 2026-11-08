@@ -178,7 +178,7 @@ impl Vm {
                 // Boxed scalars render identically to the inline `Int`/`Float`.
                 Obj::BigInt(n) => Ok(n.to_string()),
                 Obj::FloatBox(f) => Ok(format_float(*f)),
-                // Python `bytes` repr `b'...'` — shared with the interp via `slice::bytes_repr`.
+                // Python `bytes` repr `b'...'` — shared via `slice::bytes_repr`.
                 Obj::Bytes(b) => Ok(crate::slice::bytes_repr(b)),
                 // Python `bytearray` repr `bytearray(b'...')` — shared via `slice::bytearray_repr`.
                 Obj::ByteArray(b) => Ok(crate::slice::bytearray_repr(&b.to_vec())),
@@ -316,8 +316,9 @@ impl Vm {
                 )),
                 // Work not yet finished: the jobs submitted and not yet ended.
                 Obj::Executor(core) => Ok(format!("Executor(pending={})", core.outstanding())),
-                // D6: render open/closed without exposing the fd; matches no interp counterpart (net
-                // is VM-only) but mirrors the core handles' structural `Display`.
+                // D6: render open/closed without exposing the fd; mirrors the core handles'
+                // structural
+                // `Display`.
                 Obj::Socket(core) => Ok(format!(
                     "Socket({})",
                     if core.stream.lock().unwrap().is_some() {

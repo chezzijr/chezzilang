@@ -124,7 +124,7 @@ main()
 /// task, which calls a protocol method and prints — byte-identical. (Was checker-
 /// rejected pre-change: `Channel[Drawable]` "must be sendable".)
 #[test]
-fn protocol_value_crosses_channel_three_engine() {
+fn protocol_value_crosses_channel() {
     let src = "protocol Drawable:\n    fn draw(self) -> str\nstruct Sq:\n    s: int\n    fn draw(self) -> str:\n        return \"sq\"\nfn main():\n    ch := Channel[Drawable]()\n    d: Drawable = Sq(1)\n    ch.send(d)\n    parallel:\n        spawn:\n            d2 := ch.recv() else: panic(\"ch closed\")\n            print(d2.draw())\nmain()\n";
     assert_golden_out(src, "sq\n");
 }
@@ -349,9 +349,8 @@ fn synthetic_struct_bare_ctor_on_import_parity() {
 
 /// `Match.start`/`.end` are CODEPOINT offsets, so slicing the subject by them reproduces `.text` on
 /// non-ASCII input too (Chezzi slicing is codepoint-indexed; the regex crate's byte spans are
-/// converted at the native seam). Byte-identical against a literal expectation — the since-removed
-/// cooperative and M:N engines were consistently WRONG together before ("lo"), which is why the old
-/// parity oracle alone never caught this.
+/// converted at the native seam). Byte-identical against a literal expectation (it printed "lo"
+/// before).
 #[test]
 fn regex_offsets_are_codepoint_slicable_parity() {
     let src = "import std.regex\n\
@@ -364,16 +363,11 @@ fn regex_offsets_are_codepoint_slicable_parity() {
                    \x20               print(\"{s[m.start..m.end] == m.text}\")\n\
                    \x20           None: print(\"none\")\n\
                    \x20   !e: print(e)\n";
-    let out = golden_entry(src);
-    assert_eq!(out, "ll\ntrue\n");
     let t = TmpDir::new();
     let path = t.write("main.chz", src);
-    let (mn_out, _e, mn_res, _) = run_file_with(&path, crate::native::HostConfig::default());
-    mn_res.expect("regex codepoint-offset program should run on the M:N engine");
-    assert_eq!(
-        mn_out, out,
-        "M:N diverged from serial on regex codepoint offsets"
-    );
+    let (out, _e, res, _) = run_file(&path);
+    res.expect("regex codepoint-offset program should run");
+    assert_eq!(out, "ll\ntrue\n");
 }
 
 /// Phase 4b — the whole regex SIGNATURE (the `native struct Match` + the 5 `native fn`s) now comes
@@ -386,7 +380,7 @@ fn regex_offsets_are_codepoint_slicable_parity() {
 /// value / fault). The origin=Builtin force in `harvest_native_module` is what keeps that skip
 /// correct.
 #[test]
-fn regex_match_file_backed_three_engine_parity() {
+fn regex_match_file_backed_runs() {
     let src = "import std.regex\n\
                    import Match from std.regex\n\
                    fn describe(m: Match) -> str:\n\
@@ -399,18 +393,11 @@ fn regex_match_file_backed_three_engine_parity() {
                    \x20           ?m: print(describe(m))\n\
                    \x20           None: print(\"none\")\n\
                    \x20   !e: print(e)\n";
-    // Single-file path via `golden_entry`.
-    let out = golden_entry(src);
-    assert_eq!(out, "lit@9-12:g\n12@1-3:\n");
-    // …and the multi-file graph path agrees too (needs the graph path — write a file, drive run_file_*).
     let t = TmpDir::new();
     let path = t.write("main.chz", src);
-    let (mn_out, _e, mn_res, _) = run_file_with(&path, crate::native::HostConfig::default());
-    mn_res.expect("regex Match stub program should run on the M:N engine");
-    assert_eq!(
-        mn_out, out,
-        "graph-path output diverged from single-file path on regex Match stub"
-    );
+    let (out, _e, res, _) = run_file(&path);
+    res.expect("regex Match stub program should run");
+    assert_eq!(out, "lit@9-12:g\n12@1-3:\n");
 }
 
 /// from-import `Response` (the `import Name from module` selective form).
@@ -440,7 +427,7 @@ fn synthetic_procresult_qualified_ctor_parity() {
 /// field reads are exercised at runtime — request.get would need a live server — but the optional
 /// `timeout_ms` arg still TYPECHECKS both ways here, proving the harvested optional-tail sig.)
 #[test]
-fn process_request_file_backed_three_engine_parity() {
+fn process_request_file_backed_runs() {
     let src = "import std.process\n\
                    import std.request\n\
                    import ProcResult from std.process\n\
@@ -453,24 +440,17 @@ fn process_request_file_backed_three_engine_parity() {
                    rp: Response = request.Response(200, \"body\", {\"k\": \"v\"})\n\
                    print(describe_proc(pr))\n\
                    print(describe_resp(rp))\n";
-    // Single-file path via `golden_entry`.
-    let out = golden_entry(src);
-    assert_eq!(out, "out|err|7\n200|body|v\n");
-    // …and the multi-file graph path agrees too.
     let t = TmpDir::new();
     let path = t.write("main.chz", src);
-    let (mn_out, _e, mn_res, _) = run_file_with(&path, crate::native::HostConfig::default());
-    mn_res.expect("process/request ctor program should run on the M:N engine");
-    assert_eq!(
-        mn_out, out,
-        "graph-path output diverged from single-file path on process/request ctors"
-    );
+    let (out, _e, res, _) = run_file(&path);
+    res.expect("process/request ctor program should run");
+    assert_eq!(out, "out|err|7\n200|body|v\n");
 }
 
 /// Phase 4f — the pure TYPE `import ProcResult from std.process` (no runtime module-member value)
 /// must NOT fault (the `bind_import` skip for a pure type).
 #[test]
-fn pure_type_import_no_fault_both_engines() {
+fn pure_type_import_no_fault() {
     let out = golden_entry("import ProcResult from std.process\nprint(1)\n");
     assert_eq!(out, "1\n");
     let out2 = golden_entry("import Response from std.request\nprint(2)\n");
@@ -663,16 +643,9 @@ fn imported_struct_crosses_channel_from_task() {
         }
     }
     let entry = entry.unwrap();
-    let (io, _, ir, _) = run_file(&entry);
-    let (vo, _, vr, _) = run_file(&entry);
-    let (po, _, pr, _) = run_file_with(&entry, crate::native::HostConfig::default());
-    assert!(
-        ir.is_ok() && vr.is_ok() && pr.is_ok(),
-        "a run faulted: i={ir:?} v={vr:?} p={pr:?}"
-    );
-    assert_eq!(io, "7\n");
-    assert_eq!(io, vo, "interp vs vm");
-    assert_eq!(io, po, "interp vs --parallel");
+    let (out, _, res, _) = run_file(&entry);
+    assert!(res.is_ok(), "the run faulted: {res:?}");
+    assert_eq!(out, "7\n");
 }
 
 // ----- ROOT REDESIGN: always-qualified identity key + bare display name -----
@@ -754,7 +727,7 @@ fn decode_nested_struct_field_in_defining_module() {
 
 /// The collision-decode repro must produce `5`.
 #[test]
-fn decode_collision_three_engine() {
+fn decode_collision() {
     let files = [
         ("dep.chz", "struct Point:\n    x: int\n"),
         (
@@ -771,16 +744,9 @@ fn decode_collision_three_engine() {
         }
     }
     let entry = entry.unwrap();
-    let (io, _, ir, _) = run_file(&entry);
-    let (vo, _, vr, _) = run_file(&entry);
-    let (po, _, pr, _) = run_file_with(&entry, crate::native::HostConfig::default());
-    assert!(
-        ir.is_ok() && vr.is_ok() && pr.is_ok(),
-        "a run faulted: i={ir:?} v={vr:?} p={pr:?}"
-    );
-    assert_eq!(io, "5\n");
-    assert_eq!(io, vo, "interp vs vm");
-    assert_eq!(io, po, "interp vs --parallel");
+    let (out, _, res, _) = run_file(&entry);
+    assert!(res.is_ok(), "the run faulted: {res:?}");
+    assert_eq!(out, "5\n");
 }
 
 /// BLOCKER 2/3 — a bare match-pattern enum qualifier (`Color.Red`) whose enum is reachable only
@@ -789,7 +755,7 @@ fn decode_collision_three_engine() {
 /// from `a`; the `Color.Red`/`Color.Blue` arms must resolve against `a::Color`. Looped 50x to
 /// defeat the nondeterminism (one pass could luck-pass); must print `red` every time.
 #[test]
-fn match_arm_scrutinee_driven_three_engine() {
+fn match_arm_scrutinee_driven() {
     let files = [
         ("a.chz", "enum Color:\n    Red\n    Blue\n"),
         ("b.chz", "enum Color:\n    Red\n    Green\n"),
@@ -808,16 +774,9 @@ fn match_arm_scrutinee_driven_three_engine() {
     }
     let entry = entry.unwrap();
     for _ in 0..50 {
-        let (io, _, ir, _) = run_file(&entry);
-        let (vo, _, vr, _) = run_file(&entry);
-        let (po, _, pr, _) = run_file_with(&entry, crate::native::HostConfig::default());
-        assert!(
-            ir.is_ok() && vr.is_ok() && pr.is_ok(),
-            "a run faulted: i={ir:?} v={vr:?} p={pr:?}"
-        );
-        assert_eq!(io, "red\n", "interp output wrong");
-        assert_eq!(io, vo, "interp vs vm");
-        assert_eq!(io, po, "interp vs --parallel");
+        let (out, _, res, _) = run_file(&entry);
+        assert!(res.is_ok(), "the run faulted: {res:?}");
+        assert_eq!(out, "red\n", "output wrong");
     }
 }
 
@@ -826,7 +785,7 @@ fn match_arm_scrutinee_driven_three_engine() {
 /// (which has no `Blue`) and either crashed or matched the wrong arm. The
 /// match-arm key MUST come from the scrutinee's `a::Color`. Looped 50x to defeat nondeterminism.
 #[test]
-fn match_arm_only_in_a_variant_three_engine() {
+fn match_arm_only_in_a_variant() {
     let files = [
         ("a.chz", "enum Color:\n    Red\n    Blue\n"),
         ("b.chz", "enum Color:\n    Red\n    Green\n"),
@@ -845,21 +804,14 @@ fn match_arm_only_in_a_variant_three_engine() {
     }
     let entry = entry.unwrap();
     for _ in 0..50 {
-        let (io, _, ir, _) = run_file(&entry);
-        let (vo, _, vr, _) = run_file(&entry);
-        let (po, _, pr, _) = run_file_with(&entry, crate::native::HostConfig::default());
-        assert!(
-            ir.is_ok() && vr.is_ok() && pr.is_ok(),
-            "a run faulted: i={ir:?} v={vr:?} p={pr:?}"
-        );
-        assert_eq!(io, "blue\n", "interp output wrong");
-        assert_eq!(io, vo, "interp vs vm");
-        assert_eq!(io, po, "interp vs --parallel");
+        let (out, _, res, _) = run_file(&entry);
+        assert!(res.is_ok(), "the run faulted: {res:?}");
+        assert_eq!(out, "blue\n", "output wrong");
     }
 }
 
 /// CROSSING: a colliding struct value sent through a Channel reaches the other side and
-/// prints its BARE name there. Identical on interp, default VM, and `--parallel`.
+/// prints its BARE name there.
 #[test]
 fn collision_struct_sent_across_task() {
     let files = [
@@ -879,16 +831,9 @@ fn collision_struct_sent_across_task() {
         }
     }
     let entry = entry.unwrap();
-    let (io, _, ir, _) = run_file(&entry);
-    let (vo, _, vr, _) = run_file(&entry);
-    let (po, _, pr, _) = run_file_with(&entry, crate::native::HostConfig::default());
-    assert!(
-        ir.is_ok() && vr.is_ok() && pr.is_ok(),
-        "a run faulted: i={ir:?} v={vr:?} p={pr:?}"
-    );
-    assert_eq!(io, "Point(y=9)\n9\n");
-    assert_eq!(io, vo, "interp vs vm");
-    assert_eq!(io, po, "interp vs --parallel");
+    let (out, _, res, _) = run_file(&entry);
+    assert!(res.is_ok(), "the run faulted: {res:?}");
+    assert_eq!(out, "Point(y=9)\n9\n");
 }
 
 // ----- C5 (A2): program-exit auto-drain is skipped on a hard `os.exit` -----
@@ -1018,7 +963,7 @@ match regex.split(",", "a,b,c"):
 }
 
 /// `std.request` against a loopback server (exercises `NativeRet::Map` lowering). The server serves
-/// one canned response for the M:N engine's one connection.
+/// one canned response for the run's one connection.
 #[test]
 fn request_get_parity_against_local_server() {
     use std::io::{Read, Write};
@@ -1126,7 +1071,7 @@ fn request_decodes_a_non_ascii_header_value_latin1() {
 }
 
 /// `std.request` new verbs + custom headers, against a loopback server that records every request's
-/// wire bytes. The M:N run issues a `put` and a header-carrying `request("DELETE", …)`, so the
+/// wire bytes. The run issues a `put` and a header-carrying `request("DELETE", …)`, so the
 /// server accepts twice. Asserts (a) the expected stdout and (b) the right method line + custom
 /// header reached the wire — locking the off-heap `NativeArg::Map` headers path and the verb
 /// wrappers.

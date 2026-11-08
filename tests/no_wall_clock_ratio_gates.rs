@@ -677,8 +677,7 @@ fn no_new_chz_test_sleeps_to_order_two_events() {
 
 /// TICKET-050 named twelve tests it deliberately left on `CLOCK_READING_TESTS` for a follow-up
 /// (TICKET-059) to convert. This pins that follow-up: red while any of the twelve is still listed,
-/// green once each is converted and its name removed. `stack_trace_reports_call_chain` replaces
-/// `stack_trace_reports_call_chain_on_both_engines` here because TICKET-059 step 9 renamed it.
+/// green once each is converted and its name removed.
 const TICKET_050_DEFERRED_TESTS: [&str; 12] = [
     "polymorphic_recursion_is_refused_in_bounded_time_by_growth_detection",
     "polymorphic_recursion_through_a_func_type_argument_is_refused_in_bounded_time",

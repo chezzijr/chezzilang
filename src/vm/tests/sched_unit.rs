@@ -765,9 +765,8 @@ fn a_parked_recv_whose_channel_closed_is_not_judged_stuck() {
 }
 
 /// W7-2 end-to-end (RACY — loop it): a `close()` racing a sibling's `wait:` park must never produce
-/// a spurious `deadlock:` fault. Pre-fix the M:N engine lost the wakeup whenever the `close` landed
-/// inside the poll→park window (the since-removed cooperative engine never did, which is how the
-/// divergence was spotted).
+/// a spurious `deadlock:` fault. Pre-fix the scheduler lost the wakeup whenever the `close` landed
+/// inside the poll→park window.
 ///
 /// PRE-FIX MEASURED (this exact 200-iteration loop, `park_wait` reverted to the pre-fix predicate,
 /// `cargo test --lib -- --test-threads=1`, 12-core box): **43 / 45 / 50 / 56 failures out of 200**

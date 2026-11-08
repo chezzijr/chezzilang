@@ -21,7 +21,7 @@ use super::{Host, HostError, Kind, NativeFn, NativeRet, expect_args};
 use std::sync::{Mutex, OnceLock};
 
 /// A process-wide lock serializing every test that draws from the shared global RNG (the unit tests
-/// here AND the run-file goldens in `vm`/`interp`). The harness runs tests on multiple threads, so
+/// here AND the run-file goldens in `vm`). The harness runs tests on multiple threads, so
 /// two tests that each `seed()`-then-draw would otherwise interleave on the shared global and
 /// diverge — this is the same concurrent-draw limit documented for `--parallel`, surfacing in the
 /// test runner. Hold it across a whole `seed()`-then-draw sequence to keep that sequence atomic.
@@ -291,7 +291,7 @@ mod tests {
     }
 
     /// Reproduces the missing-`TEST_RNG_LOCK` flake in the phase-4d golden
-    /// (`vm::tests::golden_std_native_4d_chz_matches_expected_and_interp`): its
+    /// (`vm::tests::golden_std_native_4d_chz_matches_expected`): its
     /// `examples/std_native_4d.chz` does `rand.seed(1)` then `rand.int(0,100)` as TWO separate native
     /// calls on the shared process-global RNG, expecting `65`. The per-call state mutex makes each
     /// call atomic but NOT the seed→draw SEQUENCE, so a sibling rand test reseeding between them

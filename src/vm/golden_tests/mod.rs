@@ -150,8 +150,8 @@ pub(super) fn vm_run_file_stress(src: &str, cfg: crate::native::HostConfig) -> S
     captured(vm.out)
 }
 
-/// Assert the M:N engine produces `want`.
-fn widen_three_engines(src: &str, want: &str) {
+/// Assert the program prints `want`.
+fn assert_runs_to(src: &str, want: &str) {
     assert_eq!(run_capture(src).expect("program should run"), want);
 }
 

@@ -204,9 +204,9 @@ fn golden_ffi_ptr_chz_via_run_file() {
 /// C struct BY VALUE golden: the `extern "lib":`
 /// block binds `div_t div(int, int)` — a libc fn taking two scalars and returning a small POD
 /// struct BY VALUE — to a Chezzi `struct DivT{quot, rem}`. `div(17, 5) == {3, 2}` (pure, always
-/// present). Byte-matches `.expected`. The `--parallel`/M:N engine is NOT driven here; the returned
-/// `NativeRet::Struct` is a plain heap struct that crosses a spawn by handle like any other, so the
-/// path is exercised, just not by this golden. Runs wherever the `libc`/`libm` aliases resolve;
+/// present). Byte-matches `.expected`. No task is spawned here; the returned
+/// `NativeRet::Struct` is a plain heap struct that crosses a spawn by handle like any other. Runs
+/// wherever the `libc`/`libm` aliases resolve;
 /// otherwise prints a SKIP line naming the reason.
 #[test]
 fn golden_ffi_struct_chz_via_run_file() {
@@ -238,17 +238,6 @@ fn golden_ffi_qsort_chz_via_run_file() {
     let (out, _err, res, _) = run_file(&path);
     assert!(res.is_ok(), "{res:?}");
     assert_eq!(out, expected);
-    // Also exercise the M:N `--parallel` engine: the qsort comparator re-enters the VM as a
-    // libffi callback under worker pinning — the highest-risk callback+alloc composition, and
-    // the one path the single-file golden above does not cover. Keeps the engine
-    // matrix honest (the sibling deref test runs `--parallel` too).
-    let (par_out, _par_err, par_res, _) =
-        run_file_with(&path, crate::native::HostConfig::default());
-    assert!(par_res.is_ok(), "{par_res:?}");
-    assert_eq!(
-        par_out, expected,
-        "M:N --parallel diverged for ffi_qsort.chz"
-    );
 }
 
 /// C-ABI deeper `str` returns golden: `strdup -> owned_str`
@@ -316,8 +305,7 @@ fn golden_stats_app_via_run_file() {
 }
 
 /// G3 golden: `examples/stdlib_cmp.chz` — `import std.cmp`, generic `min`/`max`/`clamp` over
-/// int/float/str/struct, and `list.sort()` over Comparable structs. Byte-matches `.expected`
-/// and stays identical on interp + VM.
+/// int/float/str/struct, and `list.sort()` over Comparable structs. Byte-matches `.expected`.
 #[test]
 fn golden_stdlib_cmp_via_run_file() {
     let path = fixture("examples/stdlib_cmp.chz");
@@ -444,8 +432,7 @@ fn golden_log_demo_via_run_file() {
 }
 
 /// std.string helpers golden: `examples/str_more.chz` — the additive ends_with/index_of/count/
-/// replace/strip_prefix/strip_suffix funcs, end-to-end on the VM, byte-identical to `.expected`
-/// and the interpreter.
+/// replace/strip_prefix/strip_suffix funcs, end-to-end on the VM, byte-identical to `.expected`.
 #[test]
 fn golden_str_more_via_run_file() {
     let path = fixture("examples/str_more.chz");
@@ -458,7 +445,7 @@ fn golden_str_more_via_run_file() {
 /// str receiver-method golden: `examples/str_methods.chz` — the gap #1 forwarder methods
 /// (ends_with/replace/repeat/reverse/pad_left/index_of/count/strip_prefix/strip_suffix/
 /// split_lines/strip) + gap #7 safe parse (to_int/to_float), end-to-end on the VM,
-/// byte-identical to `.expected` and the interpreter.
+/// byte-identical to `.expected`.
 #[test]
 fn golden_str_methods_via_run_file() {
     let path = fixture("examples/str_methods.chz");
@@ -518,7 +505,7 @@ main()
 }
 
 /// std.iter helpers golden: `examples/iter_more.chz` — the additive take/drop/any/all/find/
-/// flatten funcs, end-to-end on the VM, byte-identical to `.expected` and the interpreter.
+/// flatten funcs, end-to-end on the VM, byte-identical to `.expected`.
 #[test]
 fn golden_iter_more_via_run_file() {
     let path = fixture("examples/iter_more.chz");
@@ -663,8 +650,7 @@ fn golden_datetime_via_run_file() {
 /// std.concurrency.collection golden: `examples/concurrent_collection.chz` — the pure-Chezzi
 /// thread-safe `ConcurrentMap`/`ConcurrentCounter` wrappers over `RwShared[Map[...]]`. The program
 /// is DETERMINISTIC by construction (single-write-lock RMW for the counter, each-own-key for the
-/// map), so its output is identical on the VM against `.expected`, and (verified
-/// manually) `--parallel`.
+/// map), so its output is identical against `.expected`.
 #[test]
 fn golden_concurrent_collection_via_run_file() {
     let path = fixture("examples/concurrent_collection.chz");
@@ -689,7 +675,7 @@ fn golden_collections_via_run_file() {
 
 /// M8-M5 golden: `examples/json_decode.chz` — type-directed `json.decode[T]` into struct /
 /// typed map / list / scalar, with Option fields, extra-key tolerance, and an error case.
-/// Byte-identical on interp + VM.
+/// Byte-identical against its `.expected`.
 #[test]
 fn golden_json_decode_via_run_file() {
     let path = fixture("examples/json_decode.chz");
@@ -702,7 +688,8 @@ fn golden_json_decode_via_run_file() {
 /// std.process polish golden: `examples/process_polish.chz` — the structured `run`/`run_args`
 /// forms. Proves (a) a non-zero exit is `Ok(ProcResult)` carrying both streams + code (stdout NOT
 /// discarded), (b) `run_args` runs WITHOUT a shell so `$(...)`/`;`/`&&` are passed literally
-/// (injection-safe), (c) a spawn failure is a catchable `Err`. Byte-identical on the VM + interp.
+/// (injection-safe), (c) a spawn failure is a catchable `Err`. Byte-identical against a literal
+/// golden.
 #[test]
 fn golden_process_polish_via_run_file() {
     let path = fixture("examples/process_polish.chz");
@@ -715,10 +702,10 @@ fn golden_process_polish_via_run_file() {
 /// M8+ golden: `examples/fs_mutations.chz` — the std.fs mutation surface (mkdir/append/rename/
 /// copy/remove_file/remove_dir) as a self-cleaning round-trip. The script writes into the
 /// gitignored `examples/.fs_scratch` and tears it down; the test pre/post-removes the scratch so a
-/// prior crash cannot poison the run, and asserts byte-identical stdout on the VM + interp.
+/// prior crash cannot poison the run, and asserts byte-identical stdout against a literal golden.
 #[test]
 fn golden_fs_mutations_via_run_file() {
-    // Serialize against the interp twin: both write the single fixed examples/.fs_scratch.
+    // Serialize against the other fs golden: both write the single fixed examples/.fs_scratch.
     let _g = crate::native::fs::FS_SCRATCH_LOCK
         .lock()
         .unwrap_or_else(|e| e.into_inner());
@@ -738,7 +725,7 @@ fn golden_fs_mutations_via_run_file() {
 }
 
 /// std.encoding + std.crypto goldens — deterministic str<->str codecs / digests (no entropy), so
-/// they need no lock and are byte-identical on VM + interp + `.expected`.
+/// they need no lock and are byte-identical against a literal golden + `.expected`.
 #[test]
 fn golden_encoding_crypto_via_run_file() {
     for rel in ["examples/encoding.chz", "examples/crypto.chz"] {
@@ -753,9 +740,9 @@ fn golden_encoding_crypto_via_run_file() {
 }
 
 /// std.uuid golden — `examples/uuid_shape.chz` uses `uuid_seed(N)` so the v4() stream is
-/// deterministic and byte-identical on VM + interp. The UUID RNG is a process-global shared by
-/// VM + interp + every test; serialize against the uuid unit tests (see TEST_UUID_LOCK) so a
-/// concurrent seeded draw can't interleave on the global and diverge (the documented `--parallel`
+/// deterministic and byte-identical against a literal golden. The UUID RNG is a process-global
+/// shared by every test; serialize against the uuid unit tests (see TEST_UUID_LOCK) so a
+/// concurrent seeded draw can't interleave on the global and diverge (the documented
 /// concurrent-draw limit, surfacing in the parallel test runner — same as std.rand's golden).
 #[test]
 fn golden_uuid_via_run_file() {
@@ -770,7 +757,7 @@ fn golden_uuid_via_run_file() {
 }
 
 /// Comprehensions golden: `examples/comprehensions.chz` — list/set/map comprehensions, a guard,
-/// and a range source. Byte-matches `.expected` and stays identical on interp + VM.
+/// and a range source. Byte-matches `.expected`.
 #[test]
 fn golden_comprehensions_via_run_file() {
     let path = fixture("examples/comprehensions.chz");
@@ -782,7 +769,7 @@ fn golden_comprehensions_via_run_file() {
 
 /// Nested-clause comprehensions golden: `examples/comprehensions_nested.chz` — 2- and 3-clause
 /// list comps, a guard after a non-final clause, a later clause referencing an earlier variable,
-/// and nested set + map forms. Byte-matches `.expected` and stays identical on interp + VM.
+/// and nested set + map forms. Byte-matches `.expected`.
 #[test]
 fn golden_comprehensions_nested_via_run_file() {
     let path = fixture("examples/comprehensions_nested.chz");
@@ -808,7 +795,7 @@ fn golden_comprehension_iter_state_via_run_file() {
 }
 
 /// Radix-literal golden: `examples/hex.chz` — hex/binary/octal literals feeding bitwise +
-/// arithmetic. Byte-matches `.expected` and stays identical on interp + VM.
+/// arithmetic. Byte-matches `.expected`.
 #[test]
 fn golden_hex_via_run_file() {
     let path = fixture("examples/hex.chz");
@@ -819,7 +806,7 @@ fn golden_hex_via_run_file() {
 }
 
 /// List concat/extend + map merge/update golden: `examples/concat_merge.chz`. New-vs-mutate
-/// semantics + arg-wins-on-key-clash. Byte-matches `.expected`, identical on interp + VM.
+/// semantics + arg-wins-on-key-clash. Byte-matches `.expected`.
 #[test]
 fn golden_concat_merge_via_run_file() {
     let path = fixture("examples/concat_merge.chz");
@@ -842,8 +829,7 @@ fn golden_for_tuple_via_run_file() {
 }
 
 /// Optional chaining + null-coalescing golden: `examples/optchain.chz` — `?.field`, `?.method()`,
-/// `??`, chaining + None short-circuit. Desugared to `match`; byte-matches `.expected`, identical
-/// on interp + VM.
+/// `??`, chaining + None short-circuit. Desugared to `match`; byte-matches `.expected`.
 #[test]
 fn golden_optchain_via_run_file() {
     let path = fixture("examples/optchain.chz");
@@ -1133,9 +1119,10 @@ fn recursion_trace_is_bounded_and_collapsed() {
     );
 }
 
-/// Gap #8: the bounded/collapsed trace must be byte-identical against the golden.
+/// Gap #8: the bounded/collapsed trace of a deep recursion is the same on a second run (a
+/// stability check: the two runs are compared on purpose).
 #[test]
-fn recursion_trace_parity_vm_vs_interp() {
+fn recursion_trace_is_stable_across_runs() {
     let path = deep_recursion_fixture("parity");
     let (_o, _e, res, _) = run_file(&path);
     let e = res.expect_err("deep recursion should fault");
@@ -1145,7 +1132,7 @@ fn recursion_trace_parity_vm_vs_interp() {
     let ip_fmt = format_trace(&ie);
     assert_eq!(
         vm_fmt, ip_fmt,
-        "engines must produce the same bounded/collapsed trace"
+        "two runs must produce the same bounded/collapsed trace"
     );
 }
 
@@ -1163,7 +1150,7 @@ fn synthetic_run_error(message: &str, span: Span, trace: Vec<TraceFrame>) -> Run
 }
 
 /// Gap #8 cap path: a deep chain of DISTINCT-named frames (no collapse possible) is still bounded
-/// by the head/tail cap with a `frames elided` marker, and stays byte-identical across engines.
+/// by the head/tail cap with a `frames elided` marker.
 #[test]
 fn format_trace_caps_distinct_name_chain() {
     let span = Span::RUNTIME;
@@ -1182,16 +1169,6 @@ fn format_trace_caps_distinct_name_chain() {
     assert!(vm_fmt.contains("at f49 (called at"), "tail, got:\n{vm_fmt}");
     // No collapse marker — all names distinct.
     assert!(!vm_fmt.contains("identical frames"), "got:\n{vm_fmt}");
-
-    // Parity: interp renders the identical synthetic trace.
-    let ip_trace: Vec<TraceFrame> = (0..50)
-        .map(|n| TraceFrame {
-            function: format!("f{n}"),
-            span,
-        })
-        .collect();
-    let ip_fmt = format_trace(&synthetic_run_error("boom", span, ip_trace));
-    assert_eq!(vm_fmt, ip_fmt, "engines must agree on the capped trace");
 }
 
 /// Gap #8 cap boundary: with many short same-name runs the collapse emits `× N` markers; the cap
@@ -1229,24 +1206,6 @@ fn format_trace_cap_never_orphans_collapse_marker() {
             );
         }
     }
-    // Parity with interp on the same synthetic trace.
-    let ip_trace: Vec<TraceFrame> = (0..25)
-        .flat_map(|n| {
-            let f = format!("g{n}");
-            [
-                TraceFrame {
-                    function: f.clone(),
-                    span,
-                },
-                TraceFrame { function: f, span },
-            ]
-        })
-        .collect();
-    let ip_fmt = format_trace(&synthetic_run_error("boom", span, ip_trace));
-    assert_eq!(
-        vm_fmt, ip_fmt,
-        "engines must agree on the capped collapsed trace"
-    );
 }
 
 /// A `recover:`-caught fault leaves no stale frames: a *later* uncaught fault's trace shows only
@@ -1272,7 +1231,7 @@ fn recovered_fault_does_not_pollute_later_trace() {
 /// must reflect the DEFERRED fault's chain (deeper, includes the deferred fn) —
 /// not the original body fault's chain.
 #[test]
-fn deferred_fault_trace_supersedes_on_both_engines() {
+fn deferred_fault_trace_supersedes() {
     let src = "fn boom() -> int:\n    return 1 / 0\nfn worker() -> int:\n    defer boom()\n    xs := [1, 2]\n    return xs[9]\nfn main():\n    print(worker())\nmain()\n";
     let dir = std::env::temp_dir().join("chezzi_defer_trace_test");
     std::fs::create_dir_all(&dir).unwrap();
@@ -1287,62 +1246,48 @@ fn deferred_fault_trace_supersedes_on_both_engines() {
         "deferred fault's chain"
     );
     let vm_fmt = format_trace(&e);
+    // Stability check: a second run formats the same deferred-fault trace.
     let (_o2, _e2, ip_res, _) = run_file(&path);
     let ie = ip_res.expect_err("should fault");
     let ip_fmt = format_trace(&ie);
     assert_eq!(
         vm_fmt, ip_fmt,
-        "engines must agree on a deferred-fault trace"
+        "two runs must agree on a deferred-fault trace"
     );
 }
 
 /// gaps.md B4: an uncaught fault thrown from an `Executor.submit(...)` closure must print the SAME
-/// backtrace frames. Previously the cooperative engine drained the submitted task INLINE on the
-/// entry `Vm`, so the task's callee frames survived into `fault_trace` and printed `at boom` /
-/// `at <closure>` / `at main`, while M:N ran each task on an isolated worker `Vm` and discarded that
-/// worker's trace, printing only `at main`. That printed `[main]` — matching a plain
-/// nursery-task panic (also `at main`, the neighbor guard below).
+/// backtrace frames as a plain nursery-task panic (the neighbor guard below).
 ///
 /// TICKET-195 changed all three to the FAULTING party's frames: the job's `[boom, <closure>]`, the
 /// child's `[boom, <spawned task>]`, at a join or at the exit drain alike (Go prints the panicking
 /// goroutine's stack; CPython the job's traceback). TICKET-289 then moved a job's fault into its Task: a
 /// job fault stays in its Task, so the Executor cells below assert a clean run.
 #[test]
-fn executor_task_fault_trace_matches_on_both_engines() {
+fn executor_task_fault_trace_matches() {
     let dir = std::env::temp_dir().join("chezzi_b4_executor_trace");
     std::fs::create_dir_all(&dir).unwrap();
 
     // Executor.submit path (TICKET-289): the job's fault is its Task's outcome. The run does not
-    // fault and `t.get()` gives the message, on both runs.
+    // fault and `t.get()` gives the message.
     let ex_src = "import Executor from std.concurrency\nfn boom():\n    panic(\"kaboom\")\nfn main():\n    ex := Executor()\n    t := ex.submit(fn(): boom())\n    ex.shutdown()\n    match t.get():\n        ?_: print(\"value\")\n        !e: print(\"task {e.message()}\")\nmain()\n";
     let ex_path = dir.join("ex.chz");
     std::fs::write(&ex_path, ex_src).unwrap();
     let (so, _e, se, _) = run_file(&ex_path);
-    let (mo, _e, mn, _) = run_file(&ex_path);
     se.expect("a job fault does not end the run");
-    mn.expect("M:N: a job fault does not end the run");
     assert_eq!(so, "task kaboom\n", "the fault is in the Task");
-    assert_eq!(so, mo, "same output on both runs");
 
     // Neighbor guard: a plain nursery-task panic (non-Executor) prints the child's frames too.
     let nu_src = "fn boom():\n    panic(\"kaboom\")\nfn main():\n    parallel:\n        spawn: boom()\nmain()\n";
     let nu_path = dir.join("nu.chz");
     std::fs::write(&nu_path, nu_src).unwrap();
     let (_o, _e, nse, _) = run_file(&nu_path);
-    let (_o, _e, nmn, _) = run_file(&nu_path);
     let nse = nse.expect_err("nursery should fault");
-    let nmn = nmn.expect_err("M:N nursery should fault");
     let nse_names: Vec<&str> = nse.trace.iter().map(|f| f.function.as_str()).collect();
-    let nmn_names: Vec<&str> = nmn.trace.iter().map(|f| f.function.as_str()).collect();
     assert_eq!(
         nse_names,
         vec!["boom", "<spawned task>"],
         "nursery trace == the child's"
-    );
-    assert_eq!(
-        nmn_names,
-        vec!["boom", "<spawned task>"],
-        "M:N nursery trace == the child's"
     );
 
     // B4 review edge 1 (TICKET-289): IMPLICIT end-of-program drain (no `ex.shutdown()`). The drain
@@ -1351,9 +1296,7 @@ fn executor_task_fault_trace_matches_on_both_engines() {
     let im_path = dir.join("implicit.chz");
     std::fs::write(&im_path, im_src).unwrap();
     let (_o, _e, ise, _) = run_file(&im_path);
-    let (_o, _e, imn, _) = run_file(&im_path);
     ise.expect("the implicit drain raises no job fault");
-    imn.expect("M:N: the implicit drain raises no job fault");
 
     // B4 review edge 2 (TICKET-289): `defer ex.shutdown()` while `main` is unwinding from an outer
     // panic. The dropped job's fault stays in its Task, so `main`'s own fault is the report.
@@ -1361,17 +1304,18 @@ fn executor_task_fault_trace_matches_on_both_engines() {
     let df_path = dir.join("defer_unwind.chz");
     std::fs::write(&df_path, df_src).unwrap();
     let (_o, _e, dse, _) = run_file(&df_path);
-    let (_o, _e, dmn, _) = run_file(&df_path);
     let dse = dse.expect_err("defer-unwind should fault");
-    let dmn = dmn.expect_err("M:N defer-unwind should fault");
     assert_eq!(dse.message, "outer", "main's fault is the report");
-    assert_eq!(dse.message, dmn.message, "defer-unwind same fault message");
-    assert_eq!(dse.span, dmn.span, "defer-unwind same fault location");
+    assert_eq!(
+        (dse.span.line, dse.span.col),
+        (8, 5),
+        "the fault is at main's own `panic`"
+    );
 }
 
 /// Non-constant default golden: `examples/default_expr.chz` — defaults that are arithmetic on
 /// literals, a global times a literal, and a function call (free fns + struct fields). Byte-matches
-/// `.expected`, identical on interp + VM.
+/// `.expected`.
 #[test]
 fn golden_default_expr_via_run_file() {
     let path = fixture("examples/default_expr.chz");
@@ -1383,7 +1327,7 @@ fn golden_default_expr_via_run_file() {
 
 /// Function-typed field call golden: `examples/fn_field.chz` — `recv.f(args)` where `f` is a
 /// `fn`-typed field resolves to field-access-then-call (on `self` and on an external receiver),
-/// not a method. Byte-matches `.expected`, identical on interp + VM.
+/// not a method. Byte-matches `.expected`.
 #[test]
 fn golden_fn_field_via_run_file() {
     let path = fixture("examples/fn_field.chz");
@@ -1395,7 +1339,7 @@ fn golden_fn_field_via_run_file() {
 
 /// `sort_by_key` golden: `examples/sort_by_key.chz` — sort in place by a derived key (int/str
 /// keys, stable, descending-via-negation, and a Comparable *struct* key). Byte-matches
-/// `.expected`, identical on interp + VM.
+/// `.expected`.
 #[test]
 fn golden_sort_by_key_via_run_file() {
     let path = fixture("examples/sort_by_key.chz");
@@ -1408,7 +1352,7 @@ fn golden_sort_by_key_via_run_file() {
 /// `const T` golden: `examples/const_binding.chz` — the immutable binding modifier. A module-global
 /// const, a runtime-initialized const (const ≠ constexpr), reading + aliasing a const, SHALLOW
 /// mutation of a `const` List (name frozen, contents mutable), and a const local. `const` is
-/// compile-time-only (never lowered), so the VM engines are byte-identical by construction.
+/// compile-time-only (never lowered).
 #[test]
 fn golden_const_binding_via_run_file() {
     let path = fixture("examples/const_binding.chz");
@@ -1420,7 +1364,7 @@ fn golden_const_binding_via_run_file() {
 
 /// Tuple destructuring + match-on-tuple + guards golden: `examples/tuple_match.chz` — `a, b :=
 /// fn()`, typed tuple value + `.0`/`.1`, `match` literal/binding/guard arms, `Some((a, b))`.
-/// Coverage for behavior that already worked. Byte-matches `.expected`, identical on interp + VM.
+/// Coverage for behavior that already worked. Byte-matches `.expected`.
 #[test]
 fn golden_tuple_match_via_run_file() {
     let path = fixture("examples/tuple_match.chz");
@@ -1431,26 +1375,20 @@ fn golden_tuple_match_via_run_file() {
 }
 
 /// `std.os.exit(code)` golden: `examples/exit.chz` halts at the negative branch with status 2.
-/// Byte-matches `.expected` and both report the same exit code.
+/// Byte-matches `.expected` and reports exit code 2.
 #[test]
 fn golden_exit_via_run_file() {
     let path = fixture("examples/exit.chz");
     let expected = std::fs::read_to_string(fixture("examples/exit.expected")).unwrap();
     let (vo, _ve, vr, vc) = run_file(&path);
-    let (io, _ie, ir, ic) = run_file(&path);
-    assert!(
-        vr.is_ok() && ir.is_ok(),
-        "exit is a clean halt: vm={vr:?} interp={ir:?}"
-    );
-    assert_eq!(vo, expected, "vm stdout");
-    assert_eq!(io, expected, "interp stdout");
-    assert_eq!(vc, Some(2), "vm exit code");
-    assert_eq!(ic, Some(2), "interp exit code");
+    assert!(vr.is_ok(), "exit is a clean halt: {vr:?}");
+    assert_eq!(vo, expected, "stdout");
+    assert_eq!(vc, Some(2), "exit code");
 }
 
 /// M8-M2 golden: `examples/json_dynamic.chz` — `import std.json`, the pure-Chezzi `Json` enum
 /// parse/stringify round-trip + accessors + unicode escapes + an error case. Byte-matches
-/// `.expected` and stays identical on interp + VM.
+/// `.expected`.
 #[test]
 fn golden_json_dynamic_via_run_file() {
     let path = fixture("examples/json_dynamic.chz");
@@ -1461,8 +1399,7 @@ fn golden_json_dynamic_via_run_file() {
 }
 
 /// M9 golden: `examples/regex_demo.chz` — `import std.regex` (is_match / find with capture
-/// groups / find_all / replace_all / split + a bad-pattern Err). Byte-matches `.expected` and
-/// stays identical on interp + VM.
+/// groups / find_all / replace_all / split + a bad-pattern Err). Byte-matches `.expected`.
 #[test]
 fn golden_regex_demo_via_run_file() {
     let path = fixture("examples/regex_demo.chz");
@@ -1473,7 +1410,7 @@ fn golden_regex_demo_via_run_file() {
 }
 
 /// Golden: `examples/knapsack.chz` fills an int DP table with `cmp.max` (std.cmp generic over
-/// Comparable). Runs on the VM, byte-matches `.expected`, and stays identical to the interp.
+/// Comparable). Runs on the VM, byte-matches `.expected`.
 #[test]
 fn golden_knapsack_via_run_file() {
     let path = fixture("examples/knapsack.chz");
@@ -1552,7 +1489,7 @@ fn multi_file_identical_under_gc_stress() {
 // ----- map / dictionary parity (gap #5) -----
 
 #[test]
-fn parity_map_missing_key_read_errors() {
+fn map_missing_key_read_errors() {
     // A missing key is a runtime error.
     let src = "m := {\"a\": 1}\nprint(m[\"z\"])\n";
     assert_eq!(
@@ -1568,7 +1505,7 @@ fn parity_map_missing_key_read_errors() {
 }
 
 #[test]
-fn parity_map_compound_assign_missing_key_errors() {
+fn map_compound_assign_missing_key_errors() {
     // Compound on a missing key is an error (consistent with read-missing).
     let src = "m := {\"a\": 1}\nm[\"z\"] += 1\n";
     assert_eq!(

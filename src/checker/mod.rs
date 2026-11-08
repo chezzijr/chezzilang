@@ -48,8 +48,8 @@ pub struct ExternCSig {
 }
 
 /// Resolved C signatures for every `extern` fn in a module graph, keyed by `(graph module index,
-/// fn name)` — the SAME index both backends derive (`compile_graph`'s enumerate / interp's
-/// `module_idx_of`). The backends consume these instead of re-resolving alias names themselves, so
+/// fn name)` — the SAME index the compiler derives (`compile_graph`'s enumerate). The backends
+/// consume these instead of re-resolving alias names themselves, so
 /// every alias spelling (local chain, named-import hop, qualified hop, mixed) resolves in its own
 /// module's scope, collision-proof by construction. Produced by [`resolve_extern_signatures`].
 pub type ExternTable = HashMap<(usize, String), ExternCSig>;
@@ -864,8 +864,8 @@ struct Checker {
     pending_key_reject: Option<String>,
     scopes: Vec<HashMap<String, Ty>>,
     /// Per-scope set of names bound as `for`-loop variables. Mirrors `scopes` index-for-index (a
-    /// loop var is immutable — rebound fresh each iteration — so assigning to it is rejected; this
-    /// sidesteps a VM/interp divergence where the VM's counter slot IS the loop var).
+    /// loop var is immutable — rebound fresh each iteration — so assigning to it is rejected: the
+    /// VM's counter slot IS the loop var).
     loop_vars: Vec<std::collections::HashSet<String>>,
     /// TICKET-186 — the one record per module slot of the module being checked
     /// ([`globals::GlobalBinding`]: its declarations, seeded / reached / cycle state). Built by

@@ -68,7 +68,7 @@ fn witness_static_call_accepted_shapes_ok() {
 /// through the import binding that named it (a module bind for `lib.reset(...)`, a `from` bind for
 /// the bare spelling). Both spellings reach the same callee, and both must lower.
 /// (Its RUNNING half — that the threaded key is the OWNING module's identity key — is
-/// `witness_cross_module_runs_both_engines` in `src/vm/tests.rs`.)
+/// `witness_cross_module_runs` in `src/vm/tests.rs`.)
 #[test]
 fn witness_static_call_cross_module_ok() {
     let lib = (
@@ -558,7 +558,7 @@ fn witness_member_as_value_rejected() {
 /// in this frame. (A STATIC-method target — `Holder.build(c)` — is an ordinary target too, by an
 /// unrelated, witness-independent route: those two emit sites record a RECEIVER value and a static
 /// method has none, so M24-5b lowers it through a wrapper proto instead. See
-/// `vm::tests::a_static_method_head_is_a_spawn_or_defer_target_runs_both_engines`.)
+/// `vm::tests::a_static_method_head_is_a_spawn_or_defer_target_runs`.)
 #[test]
 fn witness_member_is_a_spawn_or_defer_target_ok() {
     let head = "protocol Default:\n    fn default() -> Self\nstruct Counter:\n    n: int\n    fn default() -> Counter:\n        return Counter(0)\nstruct Holder:\n    k: int\n    fn make[T: Default](self, old: T) -> T:\n        return T.default()\n    fn build[T: Default](old: T) -> T:\n        return T.default()\nfn sink(c: Counter) -> int:\n    return c.n\n";

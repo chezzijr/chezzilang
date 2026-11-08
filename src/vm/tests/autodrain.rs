@@ -3,24 +3,20 @@
 
 use super::*;
 
-// ----- C5 (A2): program-exit auto-drain (VM parity) -----
+// ----- C5 (A2): program-exit auto-drain -----
 
 #[test]
-fn golden_executor_autodrain_matches_expected_and_interp() {
+fn golden_executor_autodrain_matches_expected() {
     let src = include_str!("../../../examples/executor_autodrain.chz");
     let expected = include_str!("../../../examples/executor_autodrain.expected");
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected);
-    // M:N auto-drains the two jobs on the pool — same lines, order may differ.
-    assert_same_lines(&vm_out, &run_capture(src).expect("M:N run"));
 }
 
 #[test]
 fn executor_autodrain_runs_unshut_at_exit() {
     let src = "import Executor from std.concurrency\nfn j(n: int):\n    print(n)\nfn main():\n    ex := Executor()\n    ex.submit(fn(): j(1))\n    ex.submit(fn(): j(2))\n    print(0)\nmain()\n";
     assert_eq!(run(src), "0\n1\n2\n");
-    // M:N drains the two jobs on the pool, racing `1`/`2`; same multiset (`0` is the parent's).
-    assert_same_lines(&run(src), &run_capture(src).expect("M:N run"));
 }
 
 #[test]
@@ -116,31 +112,21 @@ main()
 fn spawn_first_error_aborts_siblings() {
     // The first task to fault aborts the remaining siblings and propagates out of `parallel:`.
     let src = "fn boom():\n    x := [1]\n    print(x[5])\nfn quiet():\n    print(\"ran\")\nfn main():\n    parallel:\n        spawn boom()\n        spawn quiet()\nmain()\n";
-    let vm = run_err(src);
-    let interp = match run_capture(src) {
-        Ok(o) => panic!("expected error, got {o:?}"),
-        Err(e) => e.message,
-    };
-    assert_eq!(vm, interp, "VM/interp error divergence");
+    assert_eq!(run_err(src), "index 5 out of bounds (len 1)");
 }
 
 #[test]
 fn spawn_composes_with_recover() {
-    // A task fault is catchable by a `recover:` enclosing the nursery (parity-checked).
+    // A task fault is catchable by a `recover:` enclosing the nursery.
     let src = "fn boom():\n    x := [1]\n    print(x[9])\nfn main():\n    r := recover:\n        parallel:\n            spawn boom()\n        0\n    print(\"recovered\")\nmain()\n";
     let vm = run_capture(src).expect("vm run");
     assert_eq!(vm, "recovered\n");
 }
 
-/// Block-scoped defer: assert VM == interp == `expected` for a snippet.
+/// Block-scoped defer: assert a snippet prints `expected`.
 fn assert_defer_scope(src: &str, expected: &str) {
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected, "vm output");
-    assert_eq!(
-        run_capture(src).expect("repeat run"),
-        expected,
-        "interp output"
-    );
 }
 
 /// A `for`-body defer runs at the END of each iteration (block scope), not at function return.
@@ -190,8 +176,8 @@ fn defer_break_continue_drain_loop_body() {
 }
 
 /// `defer:` block form — the body runs top-to-bottom at scope exit, but is LIFO *as a unit*
-/// relative to a surrounding single-call defer. `MakeClosure` + `DeferCall(0)` on the VM;
-/// `Deferred::Block` on the interp. Asserted byte-identical.
+/// relative to a surrounding single-call defer. `MakeClosure` + `DeferCall(0)` on the VM.
+/// Asserted byte-identical.
 #[test]
 fn defer_block_form_runs_in_order_lifo_as_unit() {
     assert_defer_scope(
@@ -296,7 +282,7 @@ fn defer_inner_loop_break_drains_only_inner() {
 /// A defer scope (here an `if`) nested INSIDE a `recover:` block that faults must not leak its
 /// scope marker past the recover boundary: the enclosing loop-body defer still drains at each
 /// iteration's end, not at function return. (Regression: VM leaked `defer_markers` on the recover
-/// catch path, corrupting later `LeaveDeferScope`s and diverging from the interp.)
+/// catch path, corrupting later `LeaveDeferScope`s.)
 #[test]
 fn defer_nested_scope_in_faulting_recover_no_marker_leak() {
     assert_defer_scope(

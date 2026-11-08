@@ -11,7 +11,7 @@
 # NOTHING for a `native fn`/`native struct` — the front-end reads ONLY the signature.
 #
 # FIELD ORDER IS LOAD-BEARING: `ProcResult`'s field order is positional across the remaining hand-built
-# runtime layout copies (compiler `Compiler::new`, interp finalize, `native/process.rs` proc_result_ret,
+# runtime layout copies (compiler `Compiler::new`, `native/process.rs` proc_result_ret,
 # and seed_stdlib_structs), drift-guarded by a checker test. Do not reorder without updating all copies.
 
 native struct ProcResult:

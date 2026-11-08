@@ -21,7 +21,7 @@ fn vm_panic_uncaught_returns_runtime_error() {
     assert_eq!(err.message, "kaboom");
 }
 
-/// `defer`s run during the VM panic unwind, identically to the interp.
+/// `defer`s run during the VM panic unwind.
 #[test]
 fn vm_panic_runs_defers_during_unwind() {
     let src = "fn log(m: str):\n    print(m)\nfn risky():\n    defer log(\"cleanup ran\")\n    panic(\"kaboom\")\nfn main():\n    r := recover:\n        risky()\n    match r:\n        ?v: print(\"ok\")\n        !e: print(\"recovered: {e.message()}\")\nmain()\n";
@@ -32,7 +32,7 @@ fn vm_panic_runs_defers_during_unwind() {
 /// the panic unwind, and the bottom-typed `panic` in if-expression value position. Byte-identical
 /// on the VM against its `.expected`.
 #[test]
-fn golden_panic_chz_matches_expected_and_interp() {
+fn golden_panic_chz_matches_expected() {
     let src = include_str!("../../../examples/panic.chz");
     let expected = include_str!("../../../examples/panic.expected");
     let vm_out = run_capture(src).expect("vm run");
@@ -45,7 +45,7 @@ fn golden_panic_chz_matches_expected_and_interp() {
 /// `recover:` catch, and a fault inside a deferred call. Byte-identical on the VM against
 /// its `.expected`.
 #[test]
-fn golden_defer_chz_matches_expected_and_interp() {
+fn golden_defer_chz_matches_expected() {
     let src = include_str!("../../../examples/defer.chz");
     let expected = include_str!("../../../examples/defer.expected");
     let vm_out = run_capture(src).expect("vm run");
@@ -58,7 +58,7 @@ fn golden_defer_chz_matches_expected_and_interp() {
 /// the parent resuming only after the join. Byte-identical on the VM against the
 /// `.expected` file.
 #[test]
-fn golden_parallel_chz_matches_expected_and_interp() {
+fn golden_parallel_chz_matches_expected() {
     let src = include_str!("../../../examples/parallel.chz");
     let expected = include_str!("../../../examples/parallel.expected");
     let vm_out = run_capture(src).expect("vm run");
@@ -79,7 +79,7 @@ fn parallel_engine_runs_simple_program() {
 /// M-C golden: implicit nurseries — bare `spawn` at function scope joins at the body's
 /// `return`/end; an inner `parallel:` joins earlier at its dedent. Byte-identical against the golden.
 #[test]
-fn golden_implicit_nursery_chz_matches_expected_and_interp() {
+fn golden_implicit_nursery_chz_matches_expected() {
     let src = include_str!("../../../examples/implicit_nursery.chz");
     let expected = include_str!("../../../examples/implicit_nursery.expected");
     let vm_out = run_capture(src).expect("vm run");
@@ -96,21 +96,17 @@ fn golden_parallel_shared_chz_matches_expected() {
     let src = include_str!("../../../examples/parallel_shared.chz");
     let expected = include_str!("../../../examples/parallel_shared.expected");
     assert_eq!(run_capture(src).expect("parallel run"), expected);
-    // Same program without the flag is identical (decision A oracle).
-    assert_eq!(run_capture(src).expect("vm run"), expected);
 }
 
 /// `RwShared[T]` golden: N tasks each `write` a distinct key into one shared `RwShared[map]`
 /// (exclusive write lock; the whole RMW is serialised under `--parallel` so no update is lost),
-/// the nursery joins, then the parent `read`s the whole map back. Order-independent → identical
-/// with and without the M:N `--parallel` flag.
+/// the nursery joins, then the parent `read`s the whole map back. Order-independent, so it
+/// matches `.expected` on every schedule.
 #[test]
 fn golden_rwshared_concurrent_matches_expected() {
     let src = include_str!("../../../examples/rwshared.chz");
     let expected = include_str!("../../../examples/rwshared.expected");
     assert_eq!(run_capture(src).expect("vm run"), expected);
-    assert_eq!(run_capture(src).expect("parallel run"), expected);
-    assert_eq!(run_capture(src).expect("repeat run"), expected);
 }
 
 /// Crossing identity: a `RwShared` mutated from a spawned task is observed by the parent — the
@@ -119,8 +115,6 @@ fn golden_rwshared_concurrent_matches_expected() {
 fn rwshared_mutation_from_spawn_is_observed_by_parent() {
     let src = "import RwShared from std.concurrency\nfn bump(r: RwShared[int]):\n    r.write(fn(x): x + 1)\nfn main():\n    r := RwShared(0)\n    parallel:\n        spawn bump(r)\n    print(r.get())\nmain()\n";
     assert_eq!(run_capture(src).expect("vm run"), "1\n");
-    assert_eq!(run_capture(src).expect("parallel run"), "1\n");
-    assert_eq!(run_capture(src).expect("interp"), "1\n");
 }
 
 /// B3.3-threads golden: the collector task `recv`s before any producer runs, so on the real-thread
@@ -253,8 +247,8 @@ fn vm_wait_real_deadlock_still_reported_parallel() {
     assert!(mn.contains("deadlock"), "{mn}");
 }
 
-/// VM-only (the interp would deadlock): a spawned consumer `wait`s on two empty channels and
-/// blocks (cooperative multi-channel park); a sibling `send` to the SECOND channel wakes it, and
+/// A spawned consumer `wait`s on two empty channels and
+/// blocks (multi-channel park); a sibling `send` to the SECOND channel wakes it, and
 /// the re-poll takes that arm. Exercises the multi-key park + wake on a non-first channel.
 #[test]
 fn vm_wait_blocks_then_wakes_on_second_channel() {
@@ -278,9 +272,9 @@ fn vm_wait_sweeps_other_buckets_after_waking() {
 }
 
 /// A `wait` `=` arm to a Field/Index lvalue (the custom `emit_assign_value_first` stash-and-reload path):
-/// the received value must land in the struct field / list slot, identical to the interp.
+/// the received value must land in the struct field / list slot.
 #[test]
-fn vm_wait_assign_to_field_and_index_matches_interp() {
+fn vm_wait_assign_to_field_and_index() {
     let src = "struct Box:\n    v: int!RecvError\nfn main():\n    ch := Channel[int]()\n    ch.send(7)\n    b := Box(?0)\n    wait:\n        b.v = ch.recv(): print(b.v)\n    xs: List[int!RecvError] = [?0, ?0]\n    ch.send(9)\n    wait:\n        xs[1] = ch.recv(): print(xs[1])\nmain()\n";
     let vm = run(src);
     assert_eq!(vm, "7\n9\n");
@@ -399,7 +393,7 @@ fn vm_wait_mid_window_close_takes_the_closed_arm_over_the_timer_parallel() {
     }
 }
 
-// ----- §6d edge cases: control flow + nesting + spawn inside `wait` arm bodies (VM == interp) -----
+// ----- §6d edge cases: control flow + nesting + spawn inside `wait` arm bodies -----
 
 /// A `wait` arm body that `break`s out of an enclosing loop (compiled via `compile_defer_scoped_arm`,
 /// the same path as a `match` arm). byte-identical against the golden.
@@ -455,9 +449,9 @@ fn vm_wait_arm_bare_spawn() {
 /// §6d regression — a multi-arm `wait` whose arm body references an OUTER local inside a fused
 /// binop (`x + w`): the peephole fuses `GetLocal+GetLocal+Add` → `BinLocalLocal`, shifting the
 /// arm-body indices, so `WaitPoll.arm_targets` must be relocated (else the wake jumps PAST the
-/// bind prologue → VM 65, interp 66). Pins VM == interp on every arm.
+/// bind prologue → 65 instead of 66). Pins the right answer on every arm.
 #[test]
-fn vm_wait_arm_body_outer_local_in_binop_matches_interp() {
+fn vm_wait_arm_body_outer_local_in_binop() {
     let src = "fn pick(a: Channel[int], b: Channel[int], x: int) -> int:\n    wait:\n        v := a.recv():\n            m := v else: panic(\"a closed\")\n            return x + m\n        w := b.recv():\n            n := w else: panic(\"b closed\")\n            return x + n\nfn main():\n    a := Channel[int]()\n    b := Channel[int]()\n    b.send(65)\n    print(pick(a, b, 1))\nmain()\n";
     let vm = run(src);
     assert_eq!(vm, "66\n");
@@ -599,22 +593,15 @@ main()
 }
 
 /// Channel.close() golden: producer sends a run + `close()`s; consumer `for v in ch:` drains then
-/// ends cleanly. VM output == expected (decision A oracle), and the `--parallel`
-/// engine (consumer parks on the empty channel, woken by the producer's send/close) prints the
-/// same total. Pins the headline `for`-over-channel + `try_send`-after-close surface.
+/// ends cleanly (the consumer parks on the empty channel, woken by the producer's send/close).
+/// The output matches `.expected`. Pins the headline `for`-over-channel + `try_send`-after-close
+/// surface.
 #[test]
-fn golden_parallel_channel_close_chz_matches_expected_and_interp() {
+fn golden_parallel_channel_close_chz_matches_expected() {
     let src = include_str!("../../../examples/parallel_channel_close.chz");
     let expected = include_str!("../../../examples/parallel_channel_close.expected");
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected);
-}
-
-#[test]
-fn golden_parallel_channel_close_chz_parallel_engine() {
-    let src = include_str!("../../../examples/parallel_channel_close.chz");
-    let expected = include_str!("../../../examples/parallel_channel_close.expected");
-    assert_eq!(run_capture(src).expect("parallel run"), expected);
 }
 
 #[test]
@@ -639,20 +626,17 @@ main()
 /// B3.6 golden: `Executor` tasks run on the bounded pool. Three submitted closures capture the
 /// result `Channel` (sendable → crosses as a shared `Arc`) and `send` from pool threads; `shutdown`
 /// drains them onto the pool and joins, then main sorts what it gathered → fixed printed order
-/// however threads interleave. Running it without `--parallel` too (decision A oracle: same
-/// output, inline drain) proves the `submit`-by-value / pool-drain change is observationally inert.
+/// however threads interleave.
 #[test]
 fn golden_executor_pool_chz_matches_expected() {
     let src = include_str!("../../../examples/executor_pool.chz");
     let expected = include_str!("../../../examples/executor_pool.expected");
     assert_eq!(run_capture(src).expect("parallel run"), expected);
-    assert_eq!(run_capture(src).expect("vm run"), expected);
 }
 
 /// D1 (historical: lazy module snapshot): a `--parallel` task that calls a sibling free function
 /// which in turn reads a module-level global must resolve both. M3.1: the task reads the run's one
-/// module, so nothing faults in. The plain (no-`--parallel`) run is the equivalence oracle (same
-/// output).
+/// module, so nothing faults in.
 #[test]
 fn parallel_task_resolves_sibling_fn_and_global() {
     let src = "\
@@ -672,7 +656,6 @@ fn main():
 main()
 ";
     assert_eq!(run_capture(src).expect("parallel run"), "203\n");
-    assert_eq!(run_capture(src).expect("vm run"), "203\n");
 }
 
 /// Many trivial `--parallel` spawns, with and without a module-global read in the task body.
@@ -757,13 +740,12 @@ fn str_method_dispatch_does_not_clone_the_receiver() {
 fn executor_submitted_closure_captures_by_value() {
     let src = "import Executor from std.concurrency\nfn main():\n    n := 7\n    ex := Executor()\n    ex.submit(fn(): print(n))\nmain()\n";
     assert_eq!(run_capture(src).expect("vm run"), "7\n");
-    assert_eq!(run_capture(src).expect("parallel run"), "7\n");
 }
 
 /// M3.4: an Executor job holds its submitter's captured list by handle, so it reads the push the
 /// submitter makes before the gate opens (Go `m34go/captures/main.go`: `job_reads_submitter_push 2`).
 #[test]
-fn executor_cooperative_submit_shares_captures_by_handle() {
+fn executor_submit_shares_captures_by_handle() {
     let src = "import Executor from std.concurrency\nfn main():\n    xs := [1]\n    gate := Channel[int](1)\n    ex := Executor()\n    fn job():\n        g := gate.recv() else: panic(\"gate closed\")\n        print(g + xs.len())\n    ex.submit(job)\n    xs.push(2)\n    gate.send(0)\n    ex.shutdown()\nmain()\n";
     assert_eq!(
         run_capture(src).expect("vm run"),
@@ -876,8 +858,7 @@ fn parallel_return_escape_leaves_clean_nursery_stack() {
 /// gap #2, second escape form: an uncaught `?` that propagates out of the frame (no `recover:`
 /// between the `parallel:` and the program top) must also reclaim the skipped nursery via
 /// `do_return`. The whole program faults, but the run-so-far must leave no leaked nursery. TASK B:
-/// the unstarted `noop()` is cancelled-and-reported — one report line is on stdout before the fault
-/// (the since-removed interp engine already dropped it on `?`; the report now emits identically).
+/// the unstarted `noop()` is cancelled-and-reported — the report is silent (§2c1).
 #[test]
 fn parallel_try_escape_leaves_clean_nursery_stack() {
     // `main()?`, not a bare `main()`: a bare top-level drop no longer aborts, so the `?` is
@@ -891,13 +872,10 @@ fn parallel_try_escape_leaves_clean_nursery_stack() {
         nursery_depth, 0,
         "the ?-escaped nursery must be reclaimed, not leaked"
     );
-    // §2c1 — the cancel is SILENT: stdout-so-far is empty, identical across engines.
+    // §2c1 — the cancel is SILENT: stdout-so-far is empty.
     let (vm_so_far, vm_res) = run_program(src);
     assert!(vm_res.is_err());
     assert_eq!(vm_so_far, "", "VM: nothing on stdout before the fault");
-    let (interp_so_far, interp_res) = run_program(src);
-    assert!(interp_res.is_err());
-    assert_eq!(interp_so_far, vm_so_far, "stdout-so-far divergence");
 }
 
 /// gap #2, boundary: a `?` inside a `parallel:` that IS caught by a same-frame `recover:` must
@@ -931,7 +909,7 @@ fn parallel_try_caught_by_recover_leaves_clean_nursery_stack() {
 /// continues — `exec_parallel` reports only after the body's
 /// `exec_scoped_block` has drained its defers. Regression for the do_try report-before-body-defer
 /// divergence (the report previously trailed the parallel-body defer on the VM). Body-defer →
-/// report → recovered, byte-identical on a plain run and under `--parallel`.
+/// report → recovered, against a literal golden.
 #[test]
 fn parallel_recover_scoped_try_orders_report_after_body_defer() {
     let src = "fn noop():\n    0\n\
@@ -939,24 +917,14 @@ fn parallel_recover_scoped_try_orders_report_after_body_defer() {
                    fn boom() -> int!:\n    return !\"x\"\n\
                    fn main():\n    r := recover:\n        parallel:\n            defer pdefer()\n            spawn noop()\n            y := boom()?\n            print(y)\n        0\n    print(\"recovered\")\nmain()\n";
     let expected = "PDEFER\nrecovered\n";
-    let interp_out = run_capture(src).expect("repeat run");
-    assert_eq!(
-        interp_out, expected,
-        "body-defer precedes report precedes recover"
-    );
     let (vm_out, nursery_depth) = run_capture_nursery_len(src);
     let vm_out = vm_out.expect("the ? is caught by recover, so the program completes");
     assert_eq!(
         vm_out, expected,
-        "the parallel-body defer runs before the recover continues"
+        "body-defer precedes report precedes recover"
     );
     assert_eq!(
         nursery_depth, 0,
         "the recover-caught nursery is reclaimed, not leaked"
-    );
-    assert_eq!(
-        run_capture(src).expect("--parallel run"),
-        expected,
-        "--parallel run"
     );
 }

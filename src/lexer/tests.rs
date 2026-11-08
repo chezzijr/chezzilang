@@ -133,7 +133,7 @@ fn triple_double_quote_unescaped_quote() {
 }
 
 #[test]
-fn triple_string_newline_and_interp() {
+fn triple_string_newline_and_interpolation() {
     // `\n` escape is a real newline; a literal newline is preserved; `{x}` is a hole, lexed
     // in place (the text before it keeps its resolved escape).
     let ks = kinds("\"\"\"a\\nb {x}\"\"\"");

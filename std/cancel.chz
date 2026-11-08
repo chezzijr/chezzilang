@@ -3,7 +3,7 @@
 # in CPU loops, race `done()` in a `wait:` for IO loops, and `cancel()` it from anywhere.
 #
 # Written entirely in Chezzi over existing primitives: `Shared[bool]` (the manual-cancel bit),
-# `monotonic()` (the deadline, checked AT POLL TIME so it is deterministic on every engine — no
+# `monotonic()` (the deadline, checked AT POLL TIME so it is deterministic on every run — no
 # background canceller task), and a level-triggered channel for `done()` (`timer(ms)` for a timeout,
 # a `trip()`-able `Channel[bool]` for manual cancel). See docs/reference/concurrency/ §6e.
 #

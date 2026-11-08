@@ -43,7 +43,7 @@ fn parallel_recv_blocks_until_send_wakes_it() {
 
 /// `cap()` reports the bound (`Channel[T](n)` → n) or -1 for unbounded.
 #[test]
-fn bounded_channel_cap_method_both_engines() {
+fn bounded_channel_cap_method() {
     let src = "b := Channel[int](3)\nprint(b.cap())\nu := Channel[int]()\nprint(u.cap())\n";
     let out = run(src);
     assert_eq!(out, "3\n-1\n");
@@ -80,7 +80,7 @@ fn rendezvous_negative_cap_still_faults() {
 /// `try_send` on a FULL bounded channel returns `false` (not true — the old unbounded contract);
 /// after a `recv` frees a slot it returns `true`. Single fiber, so fully deterministic on both.
 #[test]
-fn bounded_channel_try_send_full_returns_false_both_engines() {
+fn bounded_channel_try_send_full_returns_false() {
     let src = "c := Channel[int](1)\n\
                print(c.try_send(1))\n\
                print(c.try_send(2))\n\
@@ -94,7 +94,7 @@ fn bounded_channel_try_send_full_returns_false_both_engines() {
 /// A `send` on a FULL bounded channel with NO possible consumer (top level, no nursery) is a
 /// deadlock fault with a byte-identical message — NOT a silent over-fill.
 #[test]
-fn bounded_channel_full_send_top_level_deadlocks_both_engines() {
+fn bounded_channel_full_send_top_level_deadlocks() {
     let src = "c := Channel[int](1)\nc.send(1)\nc.send(2)\nprint(\"unreached\")\n";
     let e = run_err(src);
     assert!(e.contains("send() on a full channel"), "serial: {e}");
@@ -108,7 +108,7 @@ fn bounded_channel_full_send_top_level_deadlocks_both_engines() {
 /// must name `full send()` so a debugger is not misdirected toward a nonexistent receiver. Parity:
 /// this emits byte-identical text.
 #[test]
-fn bounded_channel_nursery_send_deadlock_names_full_send_both_engines() {
+fn bounded_channel_nursery_send_deadlock_names_full_send() {
     let src = "fn main():\n\
                \x20   c := Channel[int](1)\n\
                \x20   parallel:\n\
@@ -130,7 +130,7 @@ fn bounded_channel_nursery_send_deadlock_names_full_send_both_engines() {
 /// the value sequence — so the output is byte-identical serial vs M:N. Single producer ⇒ no
 /// multi-sender contention nondeterminism.
 #[test]
-fn bounded_channel_fanout_golden_both_engines() {
+fn bounded_channel_fanout_golden() {
     let src = "fn main():\n\
                \x20   c := Channel[int](2)\n\
                \x20   parallel:\n\
@@ -153,7 +153,7 @@ fn bounded_channel_fanout_golden_both_engines() {
 /// nursery until the consumer's `recv` frees the cap-1 slot (the M:N park + receiver-wake path). Single
 /// producer/consumer + consumer-only output ⇒ byte-identical against `.expected`.
 #[test]
-fn golden_wait_send_both_engines() {
+fn golden_wait_send() {
     let src = include_str!("../../../examples/wait_send.chz");
     let expected = include_str!("../../../examples/wait_send.expected");
     let out = run(src);
@@ -179,7 +179,7 @@ fn wait_send_arm_park_wake_stress_parallel() {
                \x20               print(x)\n\
                main()\n";
     let expected: String = (0..12).map(|i| format!("{i}\n")).collect();
-    assert_eq!(run(src), expected); // serial oracle
+    assert_eq!(run(src), expected);
     for trial in 0..40 {
         assert_eq!(
             run_capture(src).expect("M:N run"),
@@ -193,7 +193,7 @@ fn wait_send_arm_park_wake_stress_parallel() {
 /// closed recv arm is selected too, but binds `!RecvError` — even with an `else` present (a closed send arm is always ready, so
 /// `else` never runs). Byte-identical fault.
 #[test]
-fn wait_send_arm_closed_channel_faults_both_engines() {
+fn wait_send_arm_closed_channel_faults() {
     let src = "fn main():\n\
                \x20   c := Channel[int](1)\n\
                \x20   c.close()\n\
@@ -236,7 +236,7 @@ fn wait_send_arm_in_callback_blocks_until_the_deadlock_verdict() {
 
 /// An UNBOUNDED send-arm is always ready → placed first it wins immediately and `else` never runs.
 #[test]
-fn wait_unbounded_send_arm_always_ready_both_engines() {
+fn wait_unbounded_send_arm_always_ready() {
     let src = "fn main():\n\
                \x20   u := Channel[int]()\n\
                \x20   wait:\n\
@@ -252,7 +252,7 @@ fn wait_unbounded_send_arm_always_ready_both_engines() {
 /// send-arm, the earlier recv-arm wins every run; flip the order and the earlier send-arm wins. Never
 /// Go-random. Identical.
 #[test]
-fn wait_send_source_order_first_ready_wins_both_engines() {
+fn wait_send_source_order_first_ready_wins() {
     // recv-arm first, both ready → recv wins (the send never fires: `s` stays empty).
     let recv_first = "fn main():\n\
                \x20   r := Channel[int]()\n\
@@ -283,12 +283,12 @@ fn wait_send_source_order_first_ready_wins_both_engines() {
 
 /// Bugs 1/3 — `try_send` on a bounded channel must be ATOMIC (check-space + enqueue under the same
 /// lock the blocking `send` uses), or two concurrent M:N `try_send`s both see space and both push,
-/// over-filling past `cap`. The invariant `len <= cap` must hold on every engine. Many trials of
+/// over-filling past `cap`. The invariant `len <= cap` must hold on every run. Many trials of
 /// 16 concurrent `try_send`s into a fresh cap-1 channel that no one drains: with the atomic path at
 /// most ONE succeeds per trial, so `len` is never > 1. Buggy (non-atomic) M:N over-fills on ~1-in-5
 /// trials → `over > 0` (reliably RED across 200 trials). Serial is single-thread so it is always 0.
 #[test]
-fn bounded_channel_try_send_atomic_no_overfill_both_engines() {
+fn bounded_channel_try_send_atomic_no_overfill() {
     let src = "fn producer(c: Channel[int]):\n\
                \x20   c.try_send(1)\n\
                fn main():\n\
@@ -354,7 +354,7 @@ fn bounded_channel_inline_builder_full_send_faults_not_hang() {
 /// `pmap` returns results in SUBMISSION order (sort-by-index, never completion order) —
 /// byte-identical serial vs M:N. Uses the real embedded std module, so it also proves discovery.
 #[test]
-fn pmap_submission_order_both_engines() {
+fn pmap_submission_order() {
     let src = "import pmap from std.concurrency.pmap\n\
                fn main():\n\
                \x20   print(pmap([1, 2, 3, 4], fn(x: int) -> int: x * 2))\n\
@@ -364,7 +364,7 @@ fn pmap_submission_order_both_engines() {
 
 /// `pmap_limited` gives the same submission-order result as `pmap` regardless of the in-flight cap.
 #[test]
-fn pmap_limited_matches_pmap_both_engines() {
+fn pmap_limited_matches_pmap() {
     let src = "import pmap_limited from std.concurrency.pmap\n\
                fn main():\n\
                \x20   print(pmap_limited([1, 2, 3, 4, 5, 6, 7, 8], fn(x: int) -> int: x + 100, 2))\n\
@@ -663,7 +663,7 @@ fn a_waiting_body_hands_its_runner_slot_over_in_every_wait() {
 /// `pmap_limited`'s token bucket actually BOUNDS in-flight tasks: an Atomic max-in-flight probe never
 /// exceeds `limit` — the semaphore caps concurrent f-execution.
 #[test]
-fn pmap_limited_bounds_in_flight_both_engines() {
+fn pmap_limited_bounds_in_flight() {
     // A nested named fn (multi-statement) captures the two Atomics by-ref; both cross a spawn as
     // shared handles, so every task sees the one live counter/max pair. `cur` is incremented on entry
     // and decremented on exit, so it never exceeds the number of tasks running `f` at once — which the
@@ -689,7 +689,7 @@ fn pmap_limited_bounds_in_flight_both_engines() {
 /// `Executor.submit` returns a `Task[T]` handle whose `.get()`, awaited in SUBMISSION order, is
 /// byte-identical serial vs M:N (the value is deterministic; only timing varies).
 #[test]
-fn task_submit_get_submission_order_both_engines() {
+fn task_submit_get_submission_order() {
     let src = "import Executor, Task from std.concurrency\n\
                fn work(n: int) -> int:\n\
                \x20   return n * n\n\
@@ -711,7 +711,7 @@ fn task_submit_get_submission_order_both_engines() {
 /// `Task.get()` MEMOIZES: a second `.get()` returns the cached value (it must NOT `recv` the drained
 /// one-shot channel again, which would block forever). `.done()` is true once the result is in hand.
 #[test]
-fn task_get_idempotent_and_done_both_engines() {
+fn task_get_idempotent_and_done() {
     let src = "import Executor from std.concurrency\n\
                fn main():\n\
                \x20   ex := Executor()\n\
@@ -767,7 +767,7 @@ main()
 /// a spawned task sends `Ok`/`Err` over the channel, the parent recvs and matches.
 /// Byte-identical against the golden on the newly-admitted `Channel[Error-existential]` shape.
 #[test]
-fn channel_of_error_existential_ok_err_two_engine_parity() {
+fn channel_of_error_existential_ok_err_runs() {
     let src = "\
 fn worker(ch: Channel[int!]):
     ch.send(?7)
@@ -790,7 +790,6 @@ main()
 ";
     let expected = "ok 7\nerr boom\n";
     assert_eq!(run_capture(src).expect("run"), expected);
-    assert_eq!(run_capture(src).expect("parallel run"), expected);
 }
 
 /// L7 round 3, Test 1 (Option-B regression) — an INFERRED return (no `-> int!`/`-> Result[..]`
@@ -801,7 +800,7 @@ main()
 /// Option B — inference never triggers the sendable-bounded widening (only an explicit `Error`/`int!`
 /// annotation, or a `Channel.send`, does), so it must type-check clean and run byte-identically.
 #[test]
-fn inferred_non_sendable_error_in_task_ok_both_engines() {
+fn inferred_non_sendable_error_in_task_ok() {
     let src = "\
 protocol Odd:
     fn tag(self) -> int
@@ -832,7 +831,6 @@ main()
 ";
     let expected = "1\nx\n";
     assert_eq!(run_capture(src).expect("run"), expected);
-    assert_eq!(run_capture(src).expect("parallel run"), expected);
 }
 
 /// D2b: an M:N fiber carries its own per-task SIDE state too — `out`/`stderr` (Decision-F output

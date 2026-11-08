@@ -2,8 +2,8 @@
 #
 # ALWAYS-LINKED into every program's module graph, but with UNIVERSE semantics: these
 # names are always in scope, NOT an importable module namespace. Each `native fn`/`native ctor` is a
-# body-less signature whose implementation is bound natively (name-keyed `do_builtin` in the VM /
-# `builtins::call` in the interp) — the front-end reads ONLY the signature; the backends compile no
+# body-less signature whose implementation is bound natively (name-keyed `do_builtin` in the VM)
+# — the front-end reads ONLY the signature; the backends compile no
 # bytecode for a native decl (it is never a callable user fn).
 #
 # DYNAMIC-PARAM CONVENTION (native-decl-scoped — Chezzi stays statically typed for user code, this

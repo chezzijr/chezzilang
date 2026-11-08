@@ -520,7 +520,7 @@ fn post(h: &mut dyn Host) -> Result<NativeRet, HostError> {
 }
 
 /// `request(method, url, body, headers, timeout_ms?)` — the general verb + custom-header entry
-/// point. `headers` is a `map[str, str]` read in insertion order (deterministic across engines);
+/// point. `headers` is a `map[str, str]` read in insertion order (deterministic);
 /// the optional trailing `timeout_ms: int` overrides the agent default caps for this call.
 fn request(h: &mut dyn Host) -> Result<NativeRet, HostError> {
     let (method, url, body) = (h.arg_str(0)?, h.arg_str(1)?, h.arg_str(2)?);

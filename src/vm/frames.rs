@@ -759,9 +759,8 @@ impl Vm {
         };
         // A genuine fault (not a B3.4 cancel / `std.os.exit`, both handled above) cancels-and-
         // reports each unwound frame's escaped nurseries — emitted PER FRAME, BEFORE that
-        // frame's `defer`s, matching the interp oracle (whose `exec_parallel` /
-        // `leave_implicit_nursery` report as the body unwinds, then `finish_frame` runs the
-        // defers). `unwind_deferred` does the interleaving; this covers BOTH the uncaught arm
+        // frame's `defer`s (each nursery reports as the body unwinds, then the frame's defers
+        // run). `unwind_deferred` does the interleaving; this covers BOTH the uncaught arm
         // (no handler) and the frames discarded above a catching `recover:`.
         // TICKET-152 (W14-37): a FATAL deadlock drops its frames without running their
         // `defer`s, as Go's all-goroutines-asleep abort does (parked siblings already run

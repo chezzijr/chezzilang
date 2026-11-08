@@ -621,7 +621,7 @@ pub fn module_keys(graph: &ModuleGraph) -> Vec<String> {
         let label = lm.label();
         let count = seen.entry(label.clone()).or_insert(0);
         // First module with this label keeps the bare label; any later duplicate is disambiguated by
-        // its graph index — deterministic because graph order is fixed across all engines.
+        // its graph index — deterministic because graph order is fixed.
         let key = if *count == 0 {
             label
         } else {

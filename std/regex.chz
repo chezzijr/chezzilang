@@ -12,8 +12,8 @@
 # for a `native fn`/`native struct` — the front-end reads ONLY the signature.
 #
 # FIELD ORDER IS LOAD-BEARING: `Match`'s field order is positional across the remaining hand-built
-# runtime layout copies (compiler `Compiler::new`, interp finalize, `native/regex.rs` match_to_ret),
-# drift-guarded by a checker test. Do not reorder without updating all four copies.
+# runtime layout copies (compiler `Compiler::new`, `native/regex.rs` match_to_ret),
+# drift-guarded by a checker test. Do not reorder without updating all three copies.
 
 native struct Match:
     text: str

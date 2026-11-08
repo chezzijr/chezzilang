@@ -38,8 +38,9 @@ fn executor_cancel_is_cooperative_not_preemptive() {
 /// wins anyway the assertion still holds, so it costs coverage in the rare case, never a flake.
 ///
 /// The handshake leg depends on EAGER dispatch: the job must already be running when top-level
-/// `main` reaches `ready.recv()`. Under the lazy queue-at-`submit` model (decision D3, which the
-/// since-removed cooperative engine used) the same program is a genuine deadlock. The second program
+/// `main` reaches `ready.recv()`. Under a lazy queue-at-`submit` model (decision D3) the same
+/// program
+/// is a genuine deadlock. The second program
 /// drops the handshake and pins the same end state without depending on dispatch timing at all.
 ///
 /// Watchdogged because the failure mode of getting this wrong the OTHER way (never waking) is a hang.
@@ -93,8 +94,7 @@ print("done")
 /// have filled must FAULT, not hang. `main` sends only after `shutdown()`, so it is stuck waiting for
 /// the job while the job waits for it — a real deadlock, and the caller's mistake.
 ///
-/// Eager execution (§2c) regressed this from "faults in 0s" to "hangs forever on M:N" (the
-/// since-removed cooperative engine still faulted, which is how it was caught): the `recv` arm
+/// Eager execution (§2c) regressed this from "faults in 0s" to "hangs forever": the `recv` arm
 /// decides by "am I inside a scheduler?", which cannot tell this
 /// program apart from the one above. The fix asks the one question that can — is this executor already
 /// being JOINED, with every job it still owes parked — so the two programs keep their opposite verdicts.
@@ -287,9 +287,8 @@ ex.submit(fn(): print("job got {ch.recv()}"))
 /// while the job is live.
 ///
 /// Depends on EAGER dispatch: under the lazy queue-at-`submit` model (D3) the job cannot run before
-/// `main`'s `recv`, so the program faults there for an unrelated reason. The since-removed
-/// cooperative engine did exactly that, and the divergence was recorded rather than defended — an
-/// engine is never the standard of correctness, the ancestor is.
+/// `main`'s `recv`, so the program faults there for an unrelated reason. The ancestor is
+/// the standard of correctness.
 #[test]
 fn main_recv_completes_when_an_eager_job_sends() {
     let src = r#"
@@ -427,9 +426,8 @@ exA.shutdown()
 /// `spawn: … ch.send(42)` is one handshake away from sending, so the job must still WAIT.
 ///
 /// Caught by review, not by the suite: the first cut armed the predicate at every explicit
-/// `shutdown()`, which made this exact program fault while the since-removed cooperative engine
-/// printed `job got 42` — re-opening, in a new place, precisely the divergence W7-12 exists to close.
-/// `job got 42` is the answer CPython's `ThreadPoolExecutor` gives, and it is what this pins.
+/// `shutdown()`, which made this exact program fault. `job got 42` is the answer CPython's
+/// `ThreadPoolExecutor` gives, and it is what this pins.
 ///
 /// Run through the FILE helpers, not `run_capture`, for one reason: the producer has to be slower
 /// than the verdict's own debounce (2 × `DEMOTE_POLL_BACKOFF`) or the send lands first and the program

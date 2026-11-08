@@ -9,7 +9,7 @@
 #
 # DETERMINISM / PARITY: each task tags its result with the element's index `i` and sends an
 # `_PmapCell(i, f(xs[i]))`; after the nursery joins, the cells are sorted by `idx` and projected to
-# their values. Order comes from the sort, NEVER from which task finished first — so two engines that
+# their values. Order comes from the sort, NEVER from which task finished first — so two runs that
 # complete tasks in different orders still produce the identical `List[U]`.
 #
 # STRUCTURED CONCURRENCY: the `parallel:` lives INSIDE the helper body and joins at its dedent (before

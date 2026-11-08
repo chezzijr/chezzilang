@@ -1,4 +1,4 @@
-//! VM tests: spawn-cancel on `parallel:` escape, cooperative fibers, runner permits.
+//! VM tests: spawn-cancel on `parallel:` escape, fibers, runner permits.
 //! Split out of `src/vm/tests.rs`. `super::*` is the parent module.
 
 use super::*;
@@ -43,10 +43,6 @@ fn parallel_try_escape_cancels_pending_silently() {
     let (vm_so_far, vm_res) = run_program(src);
     assert!(vm_res.is_err());
     assert_eq!(vm_so_far, "", "nothing on stdout before the fault");
-    let (mn_so_far, mn_res) = run_program(src);
-    assert!(mn_res.is_err());
-    assert_eq!(mn_so_far, vm_so_far, "stdout-so-far divergence");
-    assert!(run_capture(src).is_err(), "M:N also faults");
 }
 
 /// §2c1 — the cancel still BITES on a task that HAS started. `side()` parks forever on a channel
@@ -58,11 +54,10 @@ fn an_escaped_nursery_cancels_a_started_task() {
     let src = "fn side(ch: Channel[int]):\n    _ := ch.recv()\n\
                    fn worker() -> int:\n    ch := Channel[int]()\n    parallel:\n        spawn side(ch)\n        return 5\n    99\n\
                    fn main():\n    print(worker())\nmain()\n";
-    assert_eq!(run(src), "5\n", "the escape value wins");
     assert_eq!(
-        run_capture(src).expect("M:N run"),
+        run(src),
         "5\n",
-        "M:N: the started task is cancelled, so the escape still completes"
+        "the started task is cancelled, so the escape still completes and its value wins"
     );
 }
 
@@ -383,15 +378,15 @@ fn parallel_recover_inside_worker_does_not_catch_cancel() {
 /// C2 golden: `Channel[T]` fan-out — workers `send` at the dedent, the parent `recv`s after the
 /// join. The three workers send **concurrently**, so the queued strings arrive in either order (see
 /// `channel.chz`'s own header comment) — the line SET is asserted against `expected`, not the exact
-/// order. The second assertion compares two M:N runs **against each other**, a stability check, not
+/// order. The second assertion compares two runs **against each other**, a stability check, not
 /// an expectation.
 #[test]
-fn golden_channel_chz_matches_expected_and_interp() {
+fn golden_channel_chz_matches_expected() {
     let src = include_str!("../../../examples/channel.chz");
     let expected = include_str!("../../../examples/channel.expected");
     let vm_out = run_capture(src).expect("vm run");
     assert_same_lines(expected, &vm_out);
-    assert_same_lines(&vm_out, &run_capture(src).expect("M:N run"));
+    assert_same_lines(&vm_out, &run_capture(src).expect("second run"));
 }
 
 /// `Atomic[int].add` cross-thread atomicity: N real-OS-thread fibers each `add(1)` one shared
@@ -422,7 +417,7 @@ fn parallel_atomic_cas_increment_is_exact() {
 /// `Atomic[float]` add/sub/exchange/cas must behave identically (covers the
 /// numeric-`T` arm for floats, not just ints).
 #[test]
-fn atomic_float_ops_two_engine_parity() {
+fn atomic_float_ops_runs() {
     let src = "import Atomic from std.concurrency\nfn main():\n    a := Atomic(1.5)\n    print(a.add(2.0))\n    print(a.sub(0.5))\n    print(a.exchange(9.0))\n    print(a.cas(9.0, 4.0))\n    print(a.load())\nmain()\n";
     // Hand-derived from `add`/`sub` returning the NEW value and `exchange` returning the OLD value
     // (the same contract `examples/atomic.chz`/`.expected` already pins): 1.5+2.0=3.5; 3.5-0.5=3.0;
@@ -435,7 +430,7 @@ fn atomic_float_ops_two_engine_parity() {
 /// `cas` on a non-scalar `T` (a list) exercises the VM's lock-held `values_equal` path
 /// — the most distinctive Atomic code path.
 #[test]
-fn atomic_cas_on_list_two_engine_parity() {
+fn atomic_cas_on_list_runs() {
     let src = "import Atomic from std.concurrency\nfn main():\n    a := Atomic([1, 2])\n    print(a.cas([1, 2], [9]))\n    print(a.load())\n    print(a.cas([1, 2], [0]))\n    print(a.load())\nmain()\n";
     // Hand-derived: current [1, 2] == expected [1, 2] (values_equal) -> cas #1 succeeds, swaps to
     // [9]; cas #2 compares the NEW current [9] against expected [1, 2] -> no match -> false, no
@@ -455,9 +450,8 @@ fn timer_zero_delivers_immediately() {
 ///
 /// **The three `got` lines are a SET, not a sequence, and this test used to assert the sequence.**
 /// Three workers `send` into one channel concurrently, so which arrives first is scheduling, not
-/// semantics. The exact `assert_eq!(vm_out, expected)` was sound only while the first `run_capture`
-/// meant the cooperative single-thread engine, which ran the workers in spawn order; with that
-/// engine deleted every run is M:N and the pin became a load-sensitive flake — reproduced at 1 in 4
+/// semantics. An exact `assert_eq!(vm_out, expected)` is a load-sensitive flake — reproduced at 1
+/// in 4
 /// full `cargo test --lib` runs on a clean tree, and never once when the test runs alone. It is the
 /// same defect as the order assertion removed from `tests/executor_reentrant_shutdown.rs`: an
 /// assertion on an order the language explicitly does not guarantee (`concurrency.md` §"Output
@@ -465,13 +459,14 @@ fn timer_zero_delivers_immediately() {
 /// the drain runs after the nursery has joined so exactly three values are queued and the fourth
 /// poll is `None`.
 #[test]
-fn golden_try_recv_chz_matches_expected_and_interp() {
+fn golden_try_recv_chz_matches_expected() {
     let src = include_str!("../../../examples/try_recv.chz");
     let expected = include_str!("../../../examples/try_recv.expected");
     let vm_out = run_capture(src).expect("vm run");
     let stress_out = run_capture_stress(src);
     assert_same_lines(expected, &vm_out);
-    assert_same_lines(&vm_out, &run_capture(src).expect("M:N run"));
+    // Stability check: a second run gives the same line multiset.
+    assert_same_lines(&vm_out, &run_capture(src).expect("second run"));
     assert_same_lines(expected, &stress_out);
     for (label, out) in [
         ("run", &vm_out),
@@ -488,8 +483,7 @@ fn golden_try_recv_chz_matches_expected_and_interp() {
 
 /// B1+B2 golden: blocking `recv`. The consumer is scheduled first, parks on the empty channel, the
 /// scheduler runs the producer, and the consumer resumes to receive. The LINE SET is fixed by the
-/// program's logic; the exact print order is a genuine M:N race between the two fibers' stdout
-/// (unlike the single-threaded cooperative engine this golden was originally pinned against), so
+/// program's logic; the exact print order is a genuine race between the two fibers' stdout, so
 /// compare order-insensitively.
 #[test]
 fn golden_channel_block_chz_matches_expected() {
@@ -507,8 +501,7 @@ fn golden_channel_block_chz_matches_expected() {
 /// faulted `deadlock` (the inner nursery's inline owner drained only its private queue and could
 /// never RUN the outer sibling O). With the M:N flat scheduler (one global `MnSched`, scope-scoped
 /// owner stop) the inline owner's OS thread drains the GLOBAL queue, so it runs O, which unblocks I.
-/// M:N-only (no coop/interp leg — the cooperative flatten is a separate, later commit; case A still
-/// faults deadlock under plain `run`), mirroring `golden_channel_block`. Wrapped in a 30s
+/// Mirrors `golden_channel_block`. Wrapped in a 30s
 /// `recv_timeout` watchdog so a regression fails LOUD instead of hanging CI.
 #[test]
 fn golden_parallel_cross_nursery_circular_chz_matches_expected() {
@@ -548,7 +541,7 @@ fn golden_parallel_cross_nursery_fanout_chz_matches_expected() {
 /// Cross-nursery flat scheduler — an INLINE-BODY `send` (issued on the builder VM, `self.mn ==
 /// None`, sched held only in `mn_enlist_sched`) must wake an enlisted, parked outer sibling. Before
 /// the routing fix this false-faulted `deadlock` under `--parallel` (value queued, receiver never
-/// made runnable) while coop prints "O got 42". M:N-only, 30s watchdog.
+/// made runnable); the right output is "O got 42". 30s watchdog.
 #[test]
 fn golden_parallel_cross_nursery_inline_send_chz_matches_expected() {
     let src = include_str!("../../../examples/parallel_cross_nursery_inline_send.chz");
@@ -589,18 +582,12 @@ fn golden_parallel_cross_nursery_inline_close_chz_matches_expected() {
 /// levels deep (`main`→`top`→`mid`→`inner`), each level a `parallel:` with a sibling `spawn`. The old
 /// "2+ enlisting levels" gate wrongly faulted this; it now RUNS. Order is deterministic by
 /// data-dependency (each nested call joins — flushing its print — before that level's own sibling
-/// runs), so this golden exact-matches AND equals the coop run. Regression guard for the gate removal.
-/// M:N-only, 30s watchdog.
+/// runs), so this golden exact-matches. Regression guard for the gate removal.
+/// 30s watchdog.
 #[test]
 fn golden_parallel_cross_nursery_multilevel_chz_matches_expected() {
     let src = include_str!("../../../examples/parallel_cross_nursery_multilevel.chz");
     let expected = include_str!("../../../examples/parallel_cross_nursery_multilevel.expected");
-    // Independent nesting is three-engine-stable here, so coop must produce the SAME bytes.
-    assert_eq!(
-        run_capture(src).expect("coop run"),
-        expected,
-        "coop diverged from the golden"
-    );
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         let _ = tx.send(run_capture(src));
@@ -613,14 +600,13 @@ fn golden_parallel_cross_nursery_multilevel_chz_matches_expected() {
 
 /// Cross-nursery flat scheduler — independent multi-level nesting (no shared channel): three nested
 /// `parallel:` blocks, each just printing, with sibling `spawn`s at each level. This is ordinary
-/// nesting that does NOT contend a channel, so it must RUN and match the cooperative engine — it
-/// must NOT fault (the old "2+ enlisting levels" gate wrongly rejected it). Data-dependent so the
-/// inner level prints before the enclosing level finishes; order may still interleave under threads,
-/// so we assert the line MULTISET equals coop. M:N-only, 30s watchdog.
+/// nesting that does NOT contend a channel, so it must RUN — it must NOT fault (the old "2+
+/// enlisting levels" gate wrongly rejected it). Data-dependent so the inner level prints before the
+/// enclosing level finishes; order may still interleave under threads, so we assert the line
+/// MULTISET against a literal one. 30s watchdog.
 #[test]
 fn parallel_cross_nursery_independent_3level_runs_all() {
     let src = "fn inner():\n    parallel:\n        spawn:\n            print(\"inner\")\n        spawn:\n            print(\"inner2\")\nfn mid():\n    parallel:\n        spawn:\n            print(\"mid\")\n        inner()\n        spawn:\n            print(\"mid2\")\nfn top():\n    parallel:\n        spawn:\n            print(\"top\")\n        mid()\n        spawn:\n            print(\"top2\")\nfn main():\n    parallel:\n        spawn:\n            print(\"main\")\n        top()\n        spawn:\n            print(\"main2\")\n    print(\"done\")\nmain()\n";
-    let coop = run_capture(src).expect("coop run");
     let s = src.to_string();
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
@@ -628,16 +614,14 @@ fn parallel_cross_nursery_independent_3level_runs_all() {
     });
     match rx.recv_timeout(std::time::Duration::from_secs(30)) {
         Ok(r) => {
-            let par =
-                r.expect("independent multi-level nesting must run under --parallel, not fault");
+            let par = r.expect("independent multi-level nesting must run, not fault");
             let mut a: Vec<&str> = par.lines().collect();
-            let mut b: Vec<&str> = coop.lines().collect();
+            let mut b = vec![
+                "inner", "inner2", "mid", "mid2", "top", "top2", "main", "main2", "done",
+            ];
             a.sort_unstable();
             b.sort_unstable();
-            assert_eq!(
-                a, b,
-                "parallel multiset != coop\nparallel:\n{par}\ncoop:\n{coop}"
-            );
+            assert_eq!(a, b, "line multiset drifted:\n{par}");
         }
         Err(_) => panic!("hung — independent multi-level nesting must complete, not hang"),
     }
@@ -647,11 +631,10 @@ fn parallel_cross_nursery_independent_3level_runs_all() {
 /// be dropped and not panic `index out of bounds` at `join_enlisted_scope` (the old gate faulted it;
 /// removing the gate alone clobbered the held sched). The middle nursery is early-enlisted, then
 /// refilled by a `spawn:` after `inner()`; that late task runs at the join on the HELD sched as a
-/// fresh trailing scope. Must match coop's line multiset (incl. "M2"). M:N-only, 30s watchdog.
+/// fresh trailing scope. Must print the literal line multiset (incl. "M2"). 30s watchdog.
 #[test]
 fn parallel_cross_nursery_late_spawn_into_middle_runs() {
     let src = "fn inner():\n    spawn:\n        print(\"inner\")\nfn mid():\n    parallel:\n        spawn:\n            print(\"M1\")\n        inner()\n        spawn:\n            print(\"M2\")\nfn main():\n    parallel:\n        spawn:\n            print(\"O1\")\n        mid()\n    print(\"done\")\nmain()\n";
-    let coop = run_capture(src).expect("coop run");
     let s = src.to_string();
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
@@ -662,13 +645,10 @@ fn parallel_cross_nursery_late_spawn_into_middle_runs() {
             let par = r.expect("late spawn into middle nursery must run (no panic, no drop)");
             assert!(par.contains("M2"), "late task M2 dropped: {par}");
             let mut a: Vec<&str> = par.lines().collect();
-            let mut b: Vec<&str> = coop.lines().collect();
+            let mut b = vec!["inner", "M1", "M2", "O1", "done"];
             a.sort_unstable();
             b.sort_unstable();
-            assert_eq!(
-                a, b,
-                "parallel multiset != coop\nparallel:\n{par}\ncoop:\n{coop}"
-            );
+            assert_eq!(a, b, "line multiset drifted:\n{par}");
         }
         Err(_) => panic!("hung — late-spawn-into-middle-nursery must complete, not hang/panic"),
     }
@@ -705,15 +685,15 @@ fn parallel_cross_nursery_contended_never_panics() {
 /// `register_scope_seeded` atomicity: a non-atomic register→seed of the late trailing scope opened a
 /// window where a SENTINEL helper could read (scope incomplete, awaiting_builder=false, runnable==0,
 /// outer recv parked) as a false quiesce and spuriously fault the parked receiver. Single sender /
-/// single receiver → no contention → deterministic, so VM (`--parallel`) MUST equal the plain
-/// run. Run many times to shake the race. (Hardening for the auto-task panel's blocker.)
+/// single receiver → no contention → deterministic, so every run MUST match `.expected`. Run
+/// 12 more times on purpose to shake the race. (Hardening for the auto-task panel's blocker.)
 #[test]
-fn parallel_cross_nursery_late_spawn_parked_matches_coop() {
+fn parallel_cross_nursery_late_spawn_parked_never_hangs() {
     let src = include_str!("../../../examples/parallel_cross_nursery_late_spawn_parked.chz");
     let expected =
         include_str!("../../../examples/parallel_cross_nursery_late_spawn_parked.expected");
-    let coop = run(src);
-    assert_eq!(coop, expected, "coop must match expected");
+    let first = run(src);
+    assert_eq!(first, expected, "first run must match expected");
     for _ in 0..12 {
         let (tx, rx) = std::sync::mpsc::channel();
         let s = src.to_string();
@@ -758,24 +738,21 @@ fn parallel_cross_nursery_genuine_nested_deadlock_still_faults() {
 }
 
 /// gaps.md B5 — a `send` from inside a NESTED (child, eager) `parallel:` nursery must wake a receiver
-/// parked on that channel in the OUTER nursery. Uncontended 1-send / 1-recv → deterministic, so serial
-/// (the oracle) == M:N == the golden. Before the child→parent wake-routing fix (`MnSched::parent_wake`)
-/// the DEFAULT M:N engine spuriously faulted `deadlock`: the value landed in the shared `ChannelCore`
+/// parked on that channel in the OUTER nursery. Uncontended 1-send / 1-recv → deterministic, so
+/// every run
+/// matches the golden. Before the child→parent wake-routing fix (`MnSched::parent_wake`)
+/// the run spuriously faulted `deadlock`: the value landed in the shared `ChannelCore`
 /// but the eager child sched's `send_wake` only scanned its OWN park set, so the outer parked receiver
-/// was never made runnable and the parent quiesced to a false deadlock — while serial printed "receiver
-/// got 1". 10 rounds under a 30s watchdog so a lost-wakeup regression fails loud instead of hanging.
+/// was never made runnable and the parent quiesced to a false deadlock (the right output is
+/// "receiver
+/// got 1"). 10 rounds (repeated on purpose) under a 30s watchdog so a lost-wakeup regression fails
+/// loud instead of hanging.
 #[test]
 fn golden_parallel_cross_nursery_nested_send_to_outer_recv_matches_expected() {
     let src =
         include_str!("../../../examples/parallel_cross_nursery_nested_send_to_outer_recv.chz");
     let expected =
         include_str!("../../../examples/parallel_cross_nursery_nested_send_to_outer_recv.expected");
-    // Uncontended single-sender/single-receiver → the serial oracle must produce the SAME bytes.
-    assert_eq!(
-        run_capture(src).expect("coop run"),
-        expected,
-        "coop diverged from the golden"
-    );
     for _ in 0..10 {
         let (tx, rx) = std::sync::mpsc::channel();
         let s = src.to_string();
@@ -823,7 +800,7 @@ fn parallel_cross_nursery_nested_no_send_still_deadlocks() {
 /// gaps.md B5 — a nested (eager) nursery whose grandchild raises a REAL fault (index-out-of-bounds)
 /// while an outer sibling parks on the channel must surface the REAL fault, NOT a spurious `deadlock`
 /// (`reduce_task_slots` ranks Fault > Deadlocked). Guards that the wake-routing patch keeps the real
-/// error winning. Serial oracle reports the same real fault. 30s watchdog.
+/// error winning. 30s watchdog.
 #[test]
 fn parallel_cross_nursery_nested_real_fault_reports_real_error() {
     let src = "import Atomic, AtomicInt, Executor, RwShared, Shared from std.concurrency\nfn main():\n    ready := Channel[int]()\n    parallel:\n        spawn:\n            parallel:\n                spawn:\n                    xs := [1]\n                    ready.send(xs[9])\n        spawn:\n            v := ready.recv()\n            print(\"receiver got {v}\")\nmain()\n";
@@ -941,7 +918,7 @@ fn golden_parallel_deadlock_still_faults() {
     }
 }
 
-// ----- B1 + B2: cooperative fibers + blocking recv (VM engine) -----
+// ----- B1 + B2: fibers + blocking recv -----
 
 /// Ping-pong across two channels exercises many suspend↔resume cycles: each fiber repeatedly
 /// parks on an empty `recv`, the scheduler runs the sibling whose `send` wakes it, and the parked
@@ -983,8 +960,7 @@ fn fibers_all_blocked_is_deadlock() {
 /// state is on the Rust stack, so it cannot PARK in place) now completes via the M:N engine's
 /// DEMOTION path instead — same C5/N6g mechanism as a `defer`red `recv` (`docs/contributing/gaps.md` N6g): a
 /// replacement worker takes over scheduling while this thread blocks synchronously waiting for the
-/// sibling's send. On the (removed) cooperative engine this had no replacement worker to demote to
-/// and faulted `deadlock` instead — a documented, accepted engine-capability difference, not a bug.
+/// sibling's send.
 #[test]
 fn fibers_recv_inside_map_callback_demotes_on_mn() {
     let src = "fn use_map(ch: Channel[int]):\n    xs := [0]\n    ys := xs.map(fn(x): ch.recv())\n    print(ys)\nfn fill(ch: Channel[int]):\n    ch.send(1)\nfn main():\n    ch := Channel[int]()\n    parallel:\n        spawn use_map(ch)\n        spawn fill(ch)\nmain()\n";
@@ -1030,10 +1006,10 @@ fn fibers_nested_parallel() {
     assert_eq!(run(src), "grandchild\nchild after nested\nsibling\n");
 }
 
-/// D0 — the cooperative scheduler must run a large nursery in ~O(N·logN), not O(N²). 50k trivial
+/// D0 — the scheduler must run a large nursery in ~O(N·logN), not O(N²). 50k trivial
 /// fibers pin this with a COUNT, not a clock: the scheduler must not scan (or requeue) the whole run
-/// queue per pick. TICKET-164: the old wall-clock ceiling was vacuous for its own purpose (the
-/// quadratic engine it names took ~2.3 s at 50k, under its 5 s ceiling, and that engine is gone) and
+/// queue per pick. TICKET-164: the old wall-clock ceiling was vacuous for its own purpose (a
+/// quadratic scheduler took ~2.3 s at 50k, under its 5 s ceiling) and
 /// load-sensitive (measured 6.66-52.25 s under concurrent `cargo test` on this box, same test). The
 /// fibers deliberately touch no `Shared` -- that guard's contention under load is a real, separate
 /// finding, covered by its own ticket, not by this one.
@@ -1135,7 +1111,7 @@ print(\"done\")
 
 /// D0 — the `blocked_on` wake path: one consumer parks on a shared channel and is re-woken by each
 /// of many producers' `send`s. Sibling fibers hold DISTINCT `GcRef`s aliasing the same
-/// `Arc<ChannelCore>` (cooperative `spawn` deep-clones the channel), so the wake map must key on
+/// `Arc<ChannelCore>`, so the wake map must key on
 /// the core pointer, not the handle — a `GcRef` key would lose every wakeup and fault `deadlock`.
 #[test]
 fn fibers_many_producers_one_consumer() {
@@ -1179,9 +1155,9 @@ fn fibers_recover_inside_child_is_isolated() {
 }
 
 /// C3 golden: `Shared[T]` cross-task box — three tasks bump one serialised counter. Byte-identical
-/// on the VM, the interpreter, and the `.expected` file.
+/// against its `.expected` file.
 #[test]
-fn golden_shared_chz_matches_expected_and_interp() {
+fn golden_shared_chz_matches_expected() {
     let src = include_str!("../../../examples/shared.chz");
     let expected = include_str!("../../../examples/shared.expected");
     let vm_out = run_capture(src).expect("vm run");
@@ -1189,17 +1165,17 @@ fn golden_shared_chz_matches_expected_and_interp() {
 }
 
 /// C5 golden: the `Executor` escape hatch — submit/shutdown (FIFO drain), `defer ex.shutdown()`,
-/// cancel (discard). Byte-identical on the VM, the interpreter, and the `.expected` file.
+/// cancel (discard). Byte-identical against its `.expected` file.
 #[test]
-fn golden_executor_chz_matches_expected_and_interp() {
+fn golden_executor_chz_matches_expected() {
     let src = include_str!("../../../examples/executor.chz");
     let expected = include_str!("../../../examples/executor.expected");
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected);
 }
 
-// Micro-tests mirroring the interpreter's C2/C3 unit tests (src/interp/mod.rs), to pin the VM's
-// channel/shared/spawn semantics directly (not just via the example goldens).
+// Micro-tests that pin the VM's channel/shared/spawn semantics directly (not just via the example
+// goldens).
 
 #[test]
 fn channel_send_recv_fifo() {
@@ -1285,7 +1261,6 @@ fn vm_rwshared_get_set_read_write_roundtrip() {
     // `get`/`set` (write-lock replace) + `read` (R-poly snapshot) + `write` (write-locked RMW).
     let src = "import RwShared from std.concurrency\nfn main():\n    r := RwShared(10)\n    print(r.get())\n    r.set(20)\n    print(r.read(fn(x): x + 1))\n    r.write(fn(x): x * 2)\n    print(r.get())\nmain()\n";
     assert_eq!(run(src), "10\n21\n40\n");
-    // Byte-identical on the interpreter (the frozen oracle).
 }
 
 #[test]
@@ -1306,9 +1281,6 @@ fn vm_rwshared_get_returns_the_live_value() {
 fn executor_submit_runs_fifo_at_shutdown() {
     let src = "import Executor from std.concurrency\nfn j(n: int):\n    print(n)\nfn main():\n    ex := Executor()\n    ex.submit(fn(): j(1))\n    ex.submit(fn(): j(2))\n    print(0)\n    ex.shutdown()\nmain()\n";
     assert_eq!(run(src), "0\n1\n2\n");
-    // M:N drains the two Executor tasks on the pool, so `1`/`2` can print in either order (`0` is
-    // the parent's, always first). Same multiset — cooperative FIFO order pinned above.
-    assert_same_lines(&run(src), &run_capture(src).expect("M:N run"));
 }
 
 #[test]
