@@ -637,8 +637,7 @@ fn main():
         spawn push_one(s, \"2\")
     print(s.get())
 main()";
-    // The two spawns race for `s`'s lock under the pooled engine (the only engine now `--serial` is
-    // gone), so which of "1"/"2" lands first is NOT guaranteed — measured: 300 stress-mode runs under
+    // The two spawns race for `s`'s lock, so which of "1"/"2" lands first is NOT guaranteed — measured: 300 stress-mode runs under
     // `RUST_TEST_THREADS=4` contention produced BOTH `['0','1','2']` and `['0','2','1']`, so an
     // order-exact comparison here is a real (if rare) flake, not a guaranteed invariant. What IS
     // guaranteed, and what this test is actually for, is that every pushed element survives GC — so

@@ -918,11 +918,8 @@ fn executor_autodrain_skipped_on_os_exit() {
     assert_eq!(code, Some(0));
 }
 
-// ----- Executor.submit hands a job its closure BY HANDLE (previously diverged: serial vs M:N) -----
-// The since-removed cooperative engine used to queue the submitted closure's own heap Handle
-// (captures shared by reference, bypassing the airlock), while M:N wired it by value — the two
-// disagreed. M3.4: every engine path hands the job its captures by handle (the wire form is
-// deleted, M3.5).
+// ----- Executor.submit hands a job its closure BY HANDLE -----
+// The job holds the submitted closure's captures by handle, like any value that crosses tasks.
 
 #[test]
 fn executor_submit_generator_capturing_closure_crosses_by_value() {

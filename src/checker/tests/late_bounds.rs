@@ -308,11 +308,9 @@ fn shared_has_a_read_method() {
     );
 }
 
-/// TICKET-246 (Airlock, fact A4) once put a capture floor on every method whose closure ran in
-/// another heap, so a DIRECT write to a captured local was the D4 error at check time. M3.3: a box
-/// closure (`Shared.update`, `Shared.read`, `RwShared.write`, `RwShared.read`) runs in its caller's
-/// task; M3.4: an Executor job holds its captures by handle. So no method has a floor and every
-/// cell is `ok` (Go: a goroutine and a closure under `mu.Lock()` write their captures). Grid:
+/// A box closure (`Shared.update`, `Shared.read`, `RwShared.write`, `RwShared.read`) runs in its
+/// caller's task, and an Executor job holds its captures by handle. So no method has a capture
+/// floor and every cell is `ok` (Go: a goroutine and a closure under `mu.Lock()` write their captures). Grid:
 /// method x {direct write in a literal closure, direct write in a closure value, write through a
 /// callee, read only, a closure that mutates only its parameter}.
 #[test]

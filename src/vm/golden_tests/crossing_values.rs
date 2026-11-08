@@ -46,7 +46,7 @@ fn generic_fn_value_return_parity() {
 #[test]
 fn generic_fn_name_shadowed_local_index_parity() {
     // Compiler-erase shadow-safety: a fn-local binding that shadows a top-level generic fn name is a
-    // REAL index (not an erased turbofish) on BOTH engines. (The shadow must be a fn-LOCAL — a
+    // REAL index (not an erased turbofish). (The shadow must be a fn-LOCAL — a
     // top-level `ident := …` would collide with `fn ident`, which the checker rejects.)
     assert_golden_out(
         "fn ident[T](x: T) -> T:\n    return x\n\nfn h():\n    ident := [10, 20, 30]\n    print(ident[1])\n\nh()\n",
@@ -55,10 +55,8 @@ fn generic_fn_name_shadowed_local_index_parity() {
 }
 
 // ===== Finding D — free-variable capture (closures/nested-fns capture only referenced names) =====
-// Pre-fix bug: every MakeClosure site captured ALL visible locals via snapshot_entries(), dragging an
-// unused non-sendable sibling (a closure value / live generator) across the spawn airlock → check-OK
-// but run-fault ("spawn: this task value can't cross a worker boundary yet"). Fix: capture only the
-// body's free-variable set. These tests prove the fix AND no under-capture.
+// A closure captures only its body's free-variable set, never every visible local. These tests
+// prove that AND no under-capture.
 
 #[test]
 fn d_repro_unused_sibling_nested_fn_parity() {
@@ -753,11 +751,8 @@ main()";
 /// truncate the LIVE parallel nursery to `0`, cancelling the sibling `spawn` (`out.send(77)`), and
 /// `out.recv()` would then deadlock. A generator provably cannot open a nursery (spawn/parallel are
 /// checker-banned inside one), so its handler's escape-drain must be a no-op — `generator_next`
-/// rebases every parked frame/handler `nursery_len` to the resuming driver's floor. This was
-/// historically serial-only: the drain was deterministic on the since-removed cooperative engine
-/// (the sibling is an unstarted `PendingCall` when the drain would fire); on M:N the sibling may
-/// already be running on another worker, so the bug was not deterministically reachable there —
-/// the shared `generator_next` fix covers both.
+/// rebases every parked frame/handler `nursery_len` to the resuming driver's floor. The sibling may
+/// already be running on another worker, so a regression is not deterministically reachable here.
 #[test]
 fn generator_crossed_recover_fault_leaves_siblings_intact_serial() {
     let src = "\
@@ -1005,8 +1000,7 @@ fn qualified_struct_static_turbofish_runs() {
 fn qualified_combined_turbofish_runs() {
     // Combined qualified turbofish `mod.Type[int].static[U](args)` — the enclosing `[int]` AND the
     // method-own `[U]` are both runtime-erased. The checker accepts it (qualified head recognized),
-    // so the compiler must lower it (not fall to CallMethod). Assert VALUE correctness, not just
-    // engine agreement (identical-but-wrong bytecode would still agree).
+    // so the compiler must lower it (not fall to CallMethod). Assert VALUE correctness.
     let out = golden_file_entry(
         &[
             (
@@ -1153,13 +1147,12 @@ main()
     assert_golden_out(src, "1\n0\n1\n4\n0\n6\n");
 }
 
-// ----- Regression: snapshot must NOT reuse a deep_clone (the deleted copy step's fault/remap modes)
-// A struct/enum key that embeds a cyclic back-edge, a live generator, or an identity-typed
-// (closure/channel/…) sub-value used to be stored BY REFERENCE and worked on a plain serial insert.
-// The first cut routed the snapshot through the airlock's deep copy (deleted in M3.5), which FAULTED on the
-// first two and gave the identity sub-value a FRESH handle (so `values_equal`, identity-only for it,
-// never matched → lookup miss). `snapshot_value` copies only mutable structural arms + keeps
-// identity/by-ref sub-values by handle, so all three insert AND resolve again.
+// ----- Regression: a map-key snapshot is NOT a deep copy
+// A struct/enum key may embed a cyclic back-edge, a live generator, or an identity-typed
+// (closure/channel/…) sub-value. A deep copy faults on the first two and gives the identity
+// sub-value a FRESH handle (so `values_equal`, identity-only for it, never matches → lookup miss).
+// `snapshot_value` copies only mutable structural arms + keeps identity/by-ref sub-values by
+// handle, so all three insert AND resolve.
 
 /// A self-cyclic struct key inserts (cycle preserved by the visited-map, no depth-overflow fault)
 /// and still resolves — regression for the `deep_clone` "maximum structural depth exceeded" fault.
@@ -1198,7 +1191,7 @@ fn main():
     k := K(gen(), 7)
     m: Map[K, str] = {}
     m[k] = "one"
-    print(m.contains(k))         # true — was a generator/airlock fault before
+    print(m.contains(k))         # true
     print(m[k])             # one
     s := {k}
     print(s.len())          # 1
@@ -1267,7 +1260,7 @@ main()
 /// tail-aliased handle whose structural `values_equal` trips the same depth guard → a silent
 /// `key not found` on the very object just inserted. The store path degrades an over-deep key to
 /// by-reference (like a cyclic key) so the identity short-circuit resolves it. Same cap prevents the
-/// unbounded `cyclic_walk` host-stack overflow (SIGABRT) on such keys. Both engines identical.
+/// unbounded `cyclic_walk` host-stack overflow (SIGABRT) on such keys.
 #[test]
 fn deep_acyclic_struct_key_inserts_and_resolves() {
     let src = r#"
@@ -1613,18 +1606,13 @@ main()
 
 /// N6 — token-sequenced: `consumer` registers `defer cleanup(s)`, hands `boom` a token, then parks in
 /// `ch.recv()`; `boom` faults. The defer is GUARANTEED registered before the fault, so it
-/// must run (42). The since-removed serial engine used to print `0`: `run_scheduler`'s `run_child(i)?` propagated the
-/// faulting child's error straight out and ABANDONED the parked consumer — never resumed, never
-/// cancelled, never unwound.
+/// must run (42): a faulting child never ABANDONS a parked sibling — it is cancelled and unwound.
 #[test]
 fn parity_defer_runs_on_parked_sibling_when_sibling_faults() {
     let src = "import Shared from std.concurrency\nfn cleanup(s: Shared[int]):\n    s.set(42)\n\
                fn consumer(ch: Channel[int], go: Channel[int], s: Shared[int]):\n    defer cleanup(s)\n    go.send(0)\n    ch.recv()\n\
                fn boom(go: Channel[int]):\n    go.recv()\n    xs := [1]\n    print(xs[9])\n\
                fn main():\n    s := Shared(0)\n    r := recover:\n        ch := Channel[int]()\n        go := Channel[int]()\n        parallel:\n            spawn consumer(ch, go, s)\n            spawn boom(go)\n        0\n    print(s.get())\nmain()\n";
-    let serial = run_capture(src).expect("the fault is recovered, so the program completes");
-    let mn = run_capture(src).expect("the fault is recovered, so the program completes");
-    assert_eq!(serial, "42\n", "serial: the parked consumer's defer ran");
-    assert_eq!(mn, "42\n", "M:N: the parked consumer's defer ran");
-    assert_same_lines(&serial, &mn);
+    let out = run_capture(src).expect("the fault is recovered, so the program completes");
+    assert_eq!(out, "42\n", "the parked consumer's defer ran");
 }

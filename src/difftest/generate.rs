@@ -950,7 +950,7 @@ impl Gen {
     }
 
     /// Float expressions, same shape as `gen_int`. **Why the sweep is sound: IEEE-754
-    /// determinism, NOT exactness.** Both engines evaluate the same expression tree in the same
+    /// determinism, NOT exactness.** Chezzi and CPython evaluate the same expression tree in the same
     /// order on binary64, and IEEE-754 `+ - *` are each correctly rounded, so the two sides
     /// compute the bit-identical double whether or not any intermediate is exact. The only thing
     /// that can differ is *formatting* — which is exactly the seam this is here to exercise, and
@@ -1104,7 +1104,7 @@ impl Gen {
     /// 8-leaf `gen_expr`, and generated functions can call each other), so magnitudes compose
     /// multiplicatively across statements and functions — `inf`, and therefore `NaN`, is
     /// structurally reachable. Measured, not assumed: 0 `inf` and 0 `NaN` across 5000
-    /// `Features::full()` programs; when they (or `-0.0`) do occur, both engines render them
+    /// `Features::full()` programs; when they (or `-0.0`) do occur, Chezzi and CPython render them
     /// byte-identically, top-level and nested in a list/map/tuple.
     fn float_leaf(&mut self) -> f64 {
         let n = self.rng.range_i64(-80, 80) as f64 / 8.0;
@@ -1177,8 +1177,8 @@ impl Gen {
         let i = *self.rng.choice(&list_cands);
         let len = self.scope[i].len.unwrap();
         let pos = self.rng.below(len as u64) as i64; // in [0, len-1]
-        // With slicing on, also exercise negative indexing xs[-k], k in [1, len] — both engines
-        // are Python-style; staying in [-len, -1] keeps it in range (no OOB fault on either).
+        // With slicing on, also exercise negative indexing xs[-k], k in [1, len] — Chezzi and
+        // CPython are both Python-style; staying in [-len, -1] keeps it in range (no OOB fault on either).
         let idx = if self.feat.slicing && self.rng.chance(0.4) {
             pos - len as i64 // maps [0, len-1] -> [-len, -1]
         } else {
@@ -1215,7 +1215,7 @@ impl Gen {
     }
 
     /// One optional slice bound: `None` (open) or a small literal incl. negatives. Slices clamp
-    /// on both engines, so the literal need not be in range.
+    /// in Chezzi and CPython alike, so the literal need not be in range.
     fn slice_bound(&mut self) -> Option<Box<Expr>> {
         if self.rng.chance(0.4) {
             None

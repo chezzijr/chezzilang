@@ -1,14 +1,6 @@
 // Extracted from vm/mod.rs (test module). `super::` == the `vm` module.
-//! Single-engine (M:N) regression tests, most as a literal golden.
-//!
-//! This file was `parity_tests.rs` until 2026-08-16: it drove a cross-engine `assert_eq!` between
-//! the cooperative `--serial` VM and the M:N VM, and its helpers (`assert_parity_out`,
-//! `parity_entry` and friends) ran a program on BOTH engines and compared them. `--serial` and the
-//! oracle it enabled are gone, so every helper here now runs the M:N engine ONCE and compares
-//! against a real expectation instead — the file and helpers were renamed to `golden_tests.rs` /
-//! `golden_entry`+`assert_golden_out` to match. Kept for institutional memory: a large fraction of
-//! the tests below still carry a `_parity` suffix in their own names from that era; that's cosmetic
-//! now; renaming ~300 individual test names was judged out of scope for this cleanup.
+//! Regression tests on the one engine, most as a literal golden: every helper here runs a program
+//! ONCE and compares against a real expectation. A `_parity` suffix in a test name is cosmetic.
 use super::*;
 use crate::test_support::TmpDir;
 use std::path::PathBuf;

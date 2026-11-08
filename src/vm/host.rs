@@ -430,8 +430,8 @@ fn env_get(host: &crate::native::HostConfig, key: &str) -> Option<String> {
 }
 
 /// `std.os.environ`. Sorted by key: the backing store is a `HashMap` (per-instance random
-/// iteration order), but every other Chezzi map is deterministic and the serial/M:N engines each
-/// build their own HashMap — an unsorted lowering would diverge run-to-run and between engines.
+/// iteration order), but every other Chezzi map is deterministic — an unsorted lowering would
+/// diverge run-to-run.
 fn env_all(host: &crate::native::HostConfig) -> Vec<(String, String)> {
     let mut pairs: Vec<(String, String)> = host
         .env

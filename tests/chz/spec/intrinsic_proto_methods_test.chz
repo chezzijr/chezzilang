@@ -539,7 +539,7 @@ test fn iterable_typed_value_still_mints_a_cursor():
 # `iter_elem` gates `for` AND `List()`/`Set()`/`Map()`/`.iter()`, but only the `for` lowering emits
 # `Op::IterableToCursor`. So the ctors type-checked an `Iterable[T]`-annotated value and then faulted
 # ("cannot iterate over struct (no `next` method)") whenever the runtime witness was a struct with
-# `iter` and no `next` — check-OK-then-broken on BOTH engines. `drain_iterable` now does the same
+# `iter` and no `next` — check-OK-then-broken. `drain_iterable` now does the same
 # one-time conversion, so checker-accepts stays a subset of runtime-can-lower.
 
 struct Pairs:

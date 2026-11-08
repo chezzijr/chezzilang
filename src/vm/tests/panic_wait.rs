@@ -136,14 +136,11 @@ fn golden_parallel_channel_chz_matches_expected() {
 
 /// The "correct pattern" companion to the cross-nursery deadlock: two mutually-dependent
 /// blocking tasks as SIBLINGS in one nursery interleave fine (nesting them would deadlock).
-/// VM-only blocking, so checked on the VM + `--parallel`
-/// engines (the frozen interp cannot suspend a cross-fiber `recv`).
 #[test]
 fn golden_parallel_cross_nursery_ok_chz_matches_expected() {
     let src = include_str!("../../../examples/parallel_cross_nursery_ok.chz");
     let expected = include_str!("../../../examples/parallel_cross_nursery_ok.expected");
     assert_eq!(run_capture(src).expect("vm run"), expected);
-    assert_eq!(run_capture(src).expect("parallel run"), expected);
 }
 
 // ---- Channel.close() + closed semantics ----
@@ -437,8 +434,8 @@ fn vm_wait_nested() {
     assert_eq!(vm, "3\n");
 }
 
-/// A `wait` inside a loop that blocks, wakes, re-iterates, and blocks again under `--parallel`: the
-/// consumer parks on each iteration until the producer feeds it. VM == interp == --parallel.
+/// A `wait` inside a loop that blocks, wakes, re-iterates, and blocks again: the consumer parks on
+/// each iteration until the producer feeds it.
 #[test]
 fn vm_wait_in_loop_reparks_parallel() {
     let src = "fn consumer(ch: Channel[int], done: Channel[int]):\n    sum := 0\n    i := 0\n    while i < 3:\n        wait:\n            v := ch.recv():\n                n := v else: panic(\"ch closed\")\n                sum += n\n        i += 1\n    done.send(sum)\nfn producer(ch: Channel[int]):\n    ch.send(10)\n    ch.send(20)\n    ch.send(30)\nfn main():\n    ch := Channel[int]()\n    done := Channel[int]()\n    parallel:\n        spawn consumer(ch, done)\n        spawn producer(ch)\n    print(done.recv())\nmain()\n";

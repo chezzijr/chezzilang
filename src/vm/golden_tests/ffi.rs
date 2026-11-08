@@ -181,9 +181,7 @@ fn interior_ptr_written_into_a_ptr_out_param_survives_the_call() {
 #[test]
 fn callback_two_engine_parity() {
     // End-to-end: a real `.chz` program passing a Chezzi closure as a callback to a C fn.
-    // `apply(10, n => n*n) == 10*10 + 1`. (Formerly run through both the serial and M:N VM
-    // engines and cross-checked against each other; M:N is the only engine now, so one run
-    // compared against the known-correct output is the whole test.)
+    // `apply(10, n => n*n) == 10*10 + 1`, against the known-correct output.
     let so = build_callback_so();
     let src = format!(
         "extern \"{}\":\n    fn apply(x: int, f: fn(int) -> int) -> int\n\nprint(apply(10, fn(n: int) -> int: n * n))\n",
@@ -220,9 +218,7 @@ fn callback_float_two_engine_parity() {
 #[test]
 fn callback_three_engine_parity() {
     // The M:N engine reuses the VM's invoke_value re-entry; a sync callback fires on the
-    // calling worker thread (no cross-thread hand-off). (Formerly cross-checked against a
-    // second serial/parallel run; M:N is the only engine now, so one run compared against the
-    // known-correct output is the whole test.)
+    // calling worker thread (no cross-thread hand-off).
     let so = build_callback_so();
     let src = format!(
         "extern \"{}\":\n    fn apply(x: int, f: fn(int) -> int) -> int\n\nprint(apply(10, fn(n: int) -> int: n * n))\n",
@@ -250,9 +246,6 @@ fn ffi_deref_load_two_engine_parity() {
     // Chezzi side reads each field via the ffi load builtins and prints them. This is the
     // end-to-end golden for the deref builtins (callbacks set the precedent: no examples/ file,
     // only the in-crate golden test — an examples/ golden would need `cc` at golden-test time).
-    // (Formerly run through both the serial and M:N VM engines and cross-checked against each
-    // other; M:N is the only engine now, so one run compared against the known-correct output
-    // is the whole test.)
     let so = build_callback_so();
     let src = format!(
         "import std.ffi\nimport ptr from std.ffi\n\
@@ -317,9 +310,7 @@ print(ffi.load_int32_at(p, 0))\n",
 
 /// C-buffer alloc layer end-to-end: `ffi.alloc` a buffer of N int64 slots, fill it from a Chezzi
 /// list via `store_int64_at`, read them back via `load_int64_at`, `ffi.free`. No `.so` needed
-/// (the buffer is process-local libc memory). Linux-gated like the other ffi goldens. (Formerly
-/// run through both the serial and M:N VM engines and cross-checked against each other; M:N is
-/// the only engine now, so one run compared against the known-correct output is the whole test.)
+/// (the buffer is process-local libc memory). Linux-gated like the other ffi goldens.
 #[test]
 #[cfg(target_os = "linux")]
 fn ffi_alloc_fill_read_two_engine_parity() {

@@ -232,11 +232,7 @@ fn parallel_spinning_sibling_does_not_hang_the_nursery_under_cancel() {
 /// `gate` (the nested nursery's task) consumes the token `task` sends only AFTER registering its
 /// `defer`, so the inner join — and therefore the escape — happens-after the defer is registered.
 /// Natural window: `cleanup=0` ~1/100 under CPU contention; with a 30ms sleep probing the gap it was
-/// 20/20 pre-fix and 0/20 after. M:N only (`run_capture`): the since-removed serial engine never
-/// started a
-/// lazy nursery's pending task before the escape, so no `defer` was registered there at all and it
-/// printed `0` — a pre-existing engine divergence in what a not-yet-started task does (gaps.md N6), not
-/// this bug.
+/// 20/20 pre-fix and 0/20 after.
 #[test]
 fn parallel_defer_runs_when_enlisted_nursery_escapes() {
     let src = "import Shared from std.concurrency\nfn cleanup(s: Shared[int]):\n    s.set(42)\n\
@@ -437,7 +433,7 @@ fn atomic_float_ops_two_engine_parity() {
 }
 
 /// `cas` on a non-scalar `T` (a list) exercises the VM's lock-held `values_equal` path
-/// — the most distinctive Atomic code path. Both engines must agree.
+/// — the most distinctive Atomic code path.
 #[test]
 fn atomic_cas_on_list_two_engine_parity() {
     let src = "import Atomic from std.concurrency\nfn main():\n    a := Atomic([1, 2])\n    print(a.cas([1, 2], [9]))\n    print(a.load())\n    print(a.cas([1, 2], [0]))\n    print(a.load())\nmain()\n";
@@ -447,13 +443,11 @@ fn atomic_cas_on_list_two_engine_parity() {
     assert_eq!(run_capture(src).expect("vm"), "true\n[9]\nfalse\n[9]\n");
 }
 
-/// `timer(0)` (and any already-elapsed deadline) delivers `true` immediately, on every engine.
+/// `timer(0)` (and any already-elapsed deadline) delivers `true` immediately.
 #[test]
 fn timer_zero_delivers_immediately() {
     let src = "import timer from std.time\nfn main():\n    print(timer(0).recv())\nmain()\n";
-    let out = run_capture(src).expect("vm");
-    assert_eq!(out, "true\n");
-    assert_eq!(run_capture(src).expect("parallel"), "true\n");
+    assert_eq!(run_capture(src).expect("vm"), "true\n");
 }
 
 /// A1 golden: `Channel[T].try_recv()` — a non-blocking poll returning `T?`. Workers `send` at the

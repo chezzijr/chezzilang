@@ -1262,11 +1262,9 @@ impl Vm {
             .push(Arc::clone(&core));
         let h = self.heap.alloc(Obj::Executor(core));
         // The handle is also a GC root here, so the executor's queued work survives even
-        // after every in-program handle is gone. `self.executors` is no longer itself walked
-        // to drain anything — that was the deleted `--serial` engine's own reap mechanism
-        // (draining through the handle, re-rooted on the operand stack); today it exists
-        // purely as this heap's GC root, and the program-exit join walks `exec_registry`
-        // (registered just above) instead.
+        // after every in-program handle is gone. `self.executors` is walked to drain nothing:
+        // it is only this heap's GC root, and the program-exit join walks `exec_registry`
+        // (registered just above).
         self.executors.push(h);
         Value::obj(h)
     }

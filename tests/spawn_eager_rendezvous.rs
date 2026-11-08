@@ -15,14 +15,12 @@
 //! measured: RELEASE 7/10 and 3/10 runs faulted, DEBUG 0/20 and 1/20, and raising the exchange count
 //! to 200 did not move debug off 0/10. So a green run here does not prove the fix present; what it
 //! does prove is that the shipping semantics are right on every run it makes, and it fails loudly if
-//! the shape regresses to the PRE-§2c1 behaviour (which faulted 6 runs in 6, on both engines, in
-//! debug and release alike). The red evidence for the fix itself is the release measurement above,
+//! the shape regresses to the PRE-§2c1 behaviour (which faulted 6 runs in 6, in debug and release
+//! alike). The red evidence for the fix itself is the release measurement above,
 //! reproduced by reverting the one `if` in `MnSched::is_deadlocked_ignoring_jobs`.
 //!
-//! **The rendezvous needs real worker threads.** On the since-removed cooperative engine a spawned
-//! task did not start until the nursery's join,
-//! so a blocking body can never reach it and the program faults by design (`EMPTY_RECV_DEADLOCK`'s
-//! own hint says so). Pre-§2c1 BOTH engines faulted these, 6 runs in 6.
+//! **The rendezvous needs real worker threads**: a spawned task starts eagerly, so the blocking body
+//! can reach it.
 //!
 //! **Looped, because both failures were RACES**, single-sample-green in either direction:
 //! - the verdict must see that the blocked body is the parked fiber's rendezvous partner — missing

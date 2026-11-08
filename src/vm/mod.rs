@@ -1,7 +1,5 @@
-//! Bytecode stack VM (M5) — the sole execution engine. Runs the [`Program`] produced by the
-//! compiler on its real-thread M:N scheduler (the cooperative `--serial` scheduler and the
-//! original tree-walk `interp` parity oracle have both been removed). M5a: handle-addressed
-//! values, no collector yet (the mark-sweep GC lands in M5b).
+//! Bytecode stack VM — the only execution engine. Runs the [`Program`] produced by the compiler on
+//! its real-thread M:N scheduler, over handle-addressed values in a mark-sweep collected heap.
 
 mod blocking_pool;
 pub mod chzstr;

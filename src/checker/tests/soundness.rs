@@ -583,8 +583,7 @@ fn widen_nonconst_int_element_in_float_list_field_rejected() {
     );
 }
 
-/// Across a `Channel[List[float]]` — the poisoned Int used to cross the spawn airlock inside the
-/// payload. (A SCALAR `Channel[float]`'s `send(1)` was already rejected: builtin method args never
+/// Across a `Channel[List[float]]` — a poisoned Int would cross inside the payload. (A SCALAR `Channel[float]`'s `send(1)` was already rejected: builtin method args never
 /// widened. Unchanged — only the diagnostic now names the `float(x)` fix.)
 #[test]
 fn widen_nonconst_int_into_float_channel_rejected() {

@@ -12,12 +12,9 @@ fn iter_sum_delegates_and_empty_is_zero() {
     let src = "import std.iter\nprint(iter.sum([1, 2, 3]))\nprint(iter.sum([]))\n";
     let entry = write_temp_chz("iter_sum", src);
     let (out, _e, res, _c) = run_file(&entry);
-    assert!(res.is_ok(), "serial iter.sum faulted: {res:?}");
-    assert_eq!(out, "6\n0\n", "serial");
-    let (pout, _pe, pres, _pc) = run_file_with(&entry, crate::native::HostConfig::default());
     let _ = std::fs::remove_file(&entry);
-    assert!(pres.is_ok(), "M:N iter.sum faulted: {pres:?}");
-    assert_eq!(pout, "6\n0\n", "M:N");
+    assert!(res.is_ok(), "iter.sum faulted: {res:?}");
+    assert_eq!(out, "6\n0\n");
 }
 
 /// Regression net for the check-time `return`-in-`defer:`/`spawn:` rejection: every legal nesting
@@ -58,10 +55,10 @@ print(f())
 // R1 — the bytes native seam (`NativeRet::Bytes` / `Host::arg_bytes` / `NativeArg::Bytes`).
 // ---------------------------------------------------------------------------------------------
 
-/// Run a std-module-importing program on BOTH engines (a `import std.*` program needs the resolver,
-/// so it runs from a file) and assert identical stdout.
+/// Run a std-module-importing program (a `import std.*` program needs the resolver, so it runs from
+/// a file) and assert its stdout.
 ///
-/// TYPE-CHECKS FIRST — `run_file`/`run_file` are resolve → compile → run and skip `check_graph`
+/// TYPE-CHECKS FIRST — `run_file` is resolve → compile → run and skip `check_graph`
 /// (the known test-helper-vs-CLI divergence), so without this gate a test could assert a program
 /// green that `chezzi run` rejects outright. Every R1 program here is what the CLI would run.
 fn assert_mc_parity_file(tag: &str, src: &str, expected: &str) {
@@ -73,9 +70,6 @@ fn assert_mc_parity_file(tag: &str, src: &str, expected: &str) {
     let (out, _e, res, _c) = run_file(&entry);
     assert!(res.is_ok(), "VM faulted: {res:?}");
     assert_eq!(out, expected, "VM output");
-    let (out_p, _e, res_p, _c) = run_file(&entry);
-    assert!(res_p.is_ok(), "M:N engine faulted: {res_p:?}");
-    assert_eq!(out_p, expected, "M:N engine");
     let _ = std::fs::remove_file(&entry);
 }
 
@@ -707,19 +701,11 @@ fn intrinsic_grants_all_have_vm_arms() {
                  template to intrinsic_grants_all_have_vm_arms (W6-3)"
             )
         });
-        for (engine, run) in [
-            (
-                "serial",
-                run_capture as fn(&str) -> Result<String, RuntimeError>,
-            ),
-            ("M:N", run_capture),
-        ] {
-            if let Err(e) = run(&src) {
-                panic!(
-                    "intrinsic grant ({p}, {m}, {kind}) is NOT callable on the {engine} engine: \
-                     {e}\n--- probe ---\n{src}"
-                );
-            }
+        if let Err(e) = run_capture(&src) {
+            panic!(
+                "intrinsic grant ({p}, {m}, {kind}) is NOT callable: \
+                 {e}\n--- probe ---\n{src}"
+            );
         }
     }
     // A registered carve-out must STAY a fault (see `INTRINSIC_UNPAIRED`) — if a later change makes it

@@ -254,9 +254,8 @@ impl Vm {
     /// VM re-entry ⇒ no GC fires mid-copy), so it needs no rooting; a caller that then re-enters the
     /// VM (e.g. `hash_value` on a *later* element) must root the returned snapshot itself.
     ///
-    /// Deliberately NOT a full deep copy (the deleted concurrency airlock's serializer): that copy
-    /// (a) FAULTED on a generator / cyclic key — nonsensical for a plain
-    /// single-thread insert that previously stored the key by reference and worked — and (b) rebuilt
+    /// Deliberately NOT a full deep copy: a deep copy (a) FAULTS on a generator / cyclic key —
+    /// nonsensical for a plain single-thread insert — and (b) rebuilds
     /// every by-reference sub-value (a `Closure`/`Channel`/`Shared`/… field) with a FRESH handle,
     /// which `values_equal` (identity-only for those arms) then never matches, so a later lookup of
     /// the same key misses. [`Vm::snapshot_value`] instead copies only the mutable, structurally-

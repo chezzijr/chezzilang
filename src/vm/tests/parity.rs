@@ -887,9 +887,7 @@ fn golden_enum_qualified_chz_matches_expected_and_interp() {
 }
 
 /// Parity edge: a top-level `fn` named like an enum must NOT shadow qualified-variant access
-/// `Enum.Variant` (the checker and VM ignore functions in the precedence gate; the interp must
-/// too). Both engines must agree — previously the interp diverged ("cannot read field of
-/// function") while the VM constructed the variant.
+/// `Enum.Variant` (the checker and VM ignore functions in the precedence gate).
 #[test]
 fn qualified_variant_not_shadowed_by_function_parity() {
     let src =
@@ -1201,8 +1199,8 @@ fn ord_chr_as_value_both_engines() {
 }
 
 /// Regression (bugs 1 & 3): a user binding named like a first-class builtin fn SHADOWS the builtin
-/// in value position on BOTH engines — the compiler resolved `LoadBuiltin` before local/global
-/// binding lookup (and the interp returned `Value::Builtin` before `env.get`), so a shadowed name
+/// in value position — the compiler resolved `LoadBuiltin` before local/global binding lookup, so a
+/// shadowed name
 /// type-checked as the binding but printed `<builtin fn …>` at runtime. Param, global (`:=`), and
 /// loop-var shadows must each resolve to the BINDING, byte-identical against the golden.
 #[test]

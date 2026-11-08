@@ -480,11 +480,6 @@ print("after nursery")
 // `request_exit`, plus an exit rung at the two CPU-side checkpoints no blocking wait covers: the loop
 // back-edge (sampled 1/1024) and `guarded`'s native-HOF per-element re-entry.
 //
-// **M:N only, deliberately.** The removed `--serial` engine ran an eager `Executor` job at the exit
-// drain rather than at `submit`, so on that engine the exiting party never existed while the nursery
-// ran — these programs were outside the cross-engine parity contract by construction, and the fix
-// never touched the serial engine (verified by hand before it was removed).
-//
 // Every one asserts ELAPSED as well as the status: on the pre-fix binary shapes (b)/(c) already
 // returned 3.
 

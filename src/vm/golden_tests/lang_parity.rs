@@ -290,8 +290,7 @@ fn str_empty_split_returns_single_empty_element_parity() {
 
 /// The i64::MIN boundary literal `-9223372036854775808` (previously unreachable — it lex-errored as
 /// "number too large" because the positive magnitude 2^63 overflows i64 before the minus applies)
-/// now evaluates to i64::MIN and behaves as an ordinary int under arithmetic and `match`, byte-
-/// identically on the serial and M:N engines.
+/// now evaluates to i64::MIN and behaves as an ordinary int under arithmetic and `match`.
 #[test]
 fn i64_min_literal_runs_parity() {
     let out = golden_entry(
@@ -356,8 +355,8 @@ fn fs_stat_walk_fileinfo_parity() {
     let file = file.to_string_lossy();
     let root = scratch.0.join("root");
     let root = root.to_string_lossy();
-    // `import FileInfo from std.fs` proves the reserved-type gate + the importer slot list skipping a type on
-    // BOTH engines (it runtime-traps if FileInfo is not registered). `import std.fs` licenses the
+    // `import FileInfo from std.fs` proves the reserved-type gate + the importer slot list skipping a type
+    // (it runtime-traps if FileInfo is not registered). `import std.fs` licenses the
     // `fs.stat`/`fs.walk` qualified calls.
     let src = format!(
         "import std.fs\n\
@@ -1008,9 +1007,7 @@ main()
 
 #[test]
 fn a_running_generator_sent_over_a_channel_is_the_same_generator() {
-    // TICKET-041(a) / M3.2. A generator sent WHILE it is running used to cross as a wire copy,
-    // which the airlock refused (a running generator's heap state describes nothing true
-    // mid-resume). M3.2: `Channel.send` moves the generator itself, so the receiver resumes the
+    // A generator sent WHILE it is running: `Channel.send` moves the generator itself, so the receiver resumes the
     // one generator after it yields: `2`, then exhausted. Go (`rewrites.go`): a stateful closure
     // sent while it runs is the same closure, `orig 1` then `copy 2 false`.
     let src = r#"

@@ -429,7 +429,7 @@ fn idxspec_int_float_key_collision_resolves() {
 #[test]
 fn nan_format_spec_sign_parity() {
     // A negative-signed NaN (0.0/0.0) must render `NaN` (not `-NaN`) through the format-spec
-    // path on BOTH engines, matching the bare stringify path. Infinities keep their sign.
+    // path, matching the bare stringify path. Infinities keep their sign.
     let src = "n := 0.0 / 0.0\n\
                    print(\"{n:.2f}\")\nprint(\"{n:f}\")\nprint(\"{n:e}\")\n\
                    ninf := -1.0 / 0.0\nprint(\"{ninf:.2f}\")\n\
@@ -563,8 +563,7 @@ fn typeid_guard_distinct_layouts_keep_distinct_values() {
 #[test]
 fn typeid_guard_struct_round_trips_through_channel() {
     // A struct sent across a Channel reaches the receiver by handle (M3.2), with its `tid`, so
-    // the receiver's field IC stays sound. VM-only (channels don't run under the frozen interp),
-    // so assert the VM output directly.
+    // the receiver's field IC stays sound.
     let src = concat!(
         "struct Pt:\n    x: int\n    y: int\n",
         "fn worker(ch: Channel[Pt]):\n    p := ch.recv() else: panic(\"ch closed\")\n    print(\"{p.x} {p.y}\")\n",

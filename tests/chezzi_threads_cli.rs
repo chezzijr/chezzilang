@@ -1,7 +1,6 @@
 //! Task 5 (continued) — the second-worker-count differential gate for `tests/chz`
-//! (`docs/contributing/bug-discovery.md` Tier 2; `--serial` is gone, so "run the suite at two worker counts" is
-//! the standing differential in its place, over the M:N engine's only remaining knob:
-//! `CHEZZI_THREADS`).
+//! (`docs/contributing/bug-discovery.md` Tier 2: "run the suite at two worker counts" is the
+//! standing differential, over the engine's scheduling knob `CHEZZI_THREADS`).
 //!
 //! **Lives in `tests/`, driving the built binary — not `test_runner::run_tests` in-process.**
 //! `vm::pool` is ONE process-wide `OnceLock`, sized to `vm::worker_count()` exactly once, lazily, on
@@ -110,8 +109,8 @@ fn every_tests_chz_subdirectory_has_a_worker_count_test() {
 
 /// The differential itself: one `tests/chz` directory must pass identically at the default
 /// (auto-sized) worker count and at `CHEZZI_THREADS=2`. ~550 real behavioural assertions over the
-/// directories, run twice, each in its own process/pool — the standing second-schedule gate
-/// now that `--serial` is gone. Both runs go at once: measured 32264 ms for `stdlib` against
+/// directories, run twice, each in its own process/pool — the standing second-schedule gate.
+/// Both runs go at once: measured 32264 ms for `stdlib` against
 /// 30583 ms alone.
 fn assert_chz_dir_at_two_worker_counts(dir: &str) {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"))

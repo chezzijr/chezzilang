@@ -215,7 +215,7 @@ test fn an_allocating_eq_survives_the_probe():
 # handed back a position that had already shifted: `m.get(k)` answered a NEIGHBOUR's value with two
 # entries left standing (a silent wrong answer), and with fewer than the position it named it was
 # `index out of bounds` — a Rust panic, i.e. an uncatchable process abort raised from pure Chezzi
-# source. Both spellings reproduced on BOTH engines.
+# source. Both spellings reproduced.
 #
 # The probe now re-validates the position after every compare and restarts when it moved (CPython
 # `lookdict`'s `DKIX_KEY_CHANGED`), so the answer is the one the POST-mutation container gives.
@@ -249,7 +249,7 @@ fn mut_reset(n: int):
     mut_armed.push(1)
 
 test fn a_probe_whose_eq_removes_an_earlier_entry_answers_the_new_container():
-    # two entries: pre-fix this was `index out of bounds` (VM panic) on both engines
+    # two entries: pre-fix this was `index out of bounds` (VM panic)
     mut_reset(2)
     assert mut_map.get(Mut(1)) == ?11, "the surviving entry's own value, not a stale slot"
     # four entries: pre-fix this silently answered `?22` — the NEXT entry's value

@@ -512,13 +512,12 @@ impl Vm {
         if tasks.is_empty() {
             return Ok(());
         }
-        // D2b: run the tasks as lightweight M:N fibers on the OS-thread pool (park-on-`recv`). This is
-        // the only engine — the cooperative scheduler that used to live here was deleted with
-        // `--serial` (`docs/design/roadmap.md` §2b).
+        // D2b: run the tasks as lightweight M:N fibers on the OS-thread pool (park-on-`recv`) — the
+        // only engine.
         self.run_mn_nursery(tasks, nursery_span)
     }
 
-    /// D2b — the `--parallel` M:N engine: run a nursery's tasks as **lightweight fibers parked on
+    /// D2b — the M:N engine: run a nursery's tasks as **lightweight fibers parked on
     /// `recv`** multiplexed over the bounded pool, the replacement for the legacy "one OS thread
     /// per task, block the thread on `recv`" model. The core M:N win: an empty `recv` parks the
     /// fiber and frees its worker instead of pinning the thread, so `#fibers ≫ #threads`

@@ -914,8 +914,8 @@ fn a_resent_payload_is_one_object_under_the_cap() {
 /// by construction:
 ///
 /// - to isolate the worker, the worker heap must be over the cap while the parent's is under it;
-/// - (before M3.4) the worker's copy was built by the airlock from the parent's OWN live value, and for a
-///   low-`Obj`-count payload it is never larger (`push` over-allocates, so the parent's
+/// - a task's payload is the parent's OWN live value (values cross by handle), so for a
+///   low-`Obj`-count payload the worker's share is never larger (`push` over-allocates, so the parent's
 ///   `Vec::capacity()` is up to 2× the worker's exact-sized rebuild);
 /// - the only wire path that AMPLIFIES is one that allocates more `Obj`s in the worker than the
 ///   parent held — the wire string carried no identity id, so N aliases of one interned string
@@ -929,10 +929,8 @@ fn a_resent_payload_is_one_object_under_the_cap() {
 /// implies the parent that built the payload was over it too, and now samples), and NO test in
 /// this pair can isolate them. `nospawn` is kept, with the same payload, asserting the new truth
 /// — that is what keeps the assertions above honest about WHY they are green. The one shape
-/// where the worker's heap really is over the cap while the parent's is under it — a
-/// non-re-interning airlock amplification behind a NESTED nursery, so the parent's own copy
-/// is garbage in the same opcode — was `over_memory_trips_on_an_all_native_task_body`, which M3.4
-/// retired with the copy (`a_spawned_payload_is_the_producers_and_costs_no_heap`). The eager-`Executor` job door has no in-tree witness at all;
+/// where the worker's heap really is over the cap while the parent's is under it needs a copy
+/// that amplifies, and values cross by handle (`a_spawned_payload_is_the_producers_and_costs_no_heap`). The eager-`Executor` job door has no in-tree witness at all;
 /// its guard is documented at `Vm::spawn_worker` rather than tested.
 #[test]
 fn over_memory_trips_on_a_worker_payload_with_no_task_allocation() {
@@ -1010,13 +1008,11 @@ fn over_memory_trips_on_a_worker_payload_with_no_task_allocation() {
     );
 }
 
-/// W6-10s residual (a) — a task whose ENTIRE body is one native call (`spawn xs.len()`) was once
-/// never sampled, while its heap held the worker's copy of the payload: the airlock (deleted in M3.5) minted a fresh
-/// `Obj::Str` per element, so 8 K aliases of one interned literal (~130 KB) became ~1.6 MB, over a
-/// 1 MB cap. `Vm::start_task` samples the cap before dispatch since (`Vm::sample_mem_cap`).
+/// W6-10s residual (a) — a task whose ENTIRE body is one native call (`spawn xs.len()`) is
+/// sampled: `Vm::start_task` samples the cap before dispatch (`Vm::sample_mem_cap`).
 ///
-/// M3.4: a spawn hands the task the producer's own list, so the task holds no copy and both bodies
-/// (the native one and the bytecode control) stay under the cap the copy used to trip. Go: a slice
+/// A spawn hands the task the producer's own list, so the task holds no copy and both bodies
+/// (the native one and the bytecode control) stay under the cap. Go: a slice
 /// passed to a goroutine copies no element. The generous-cap run pins that the program itself is
 /// fine.
 #[test]
@@ -1143,10 +1139,9 @@ fn over_memory_trips_on_inline_scalar_growth() {
 
 /// W6-10 review — the NEGATIVE direction, which matters just as much: a program comfortably
 /// UNDER the cap must still PASS while holding a shared core. A core's payload is ONE `Arc`
-/// allocation, but the airlock once minted a FRESH `Obj::Shared` alias slot for every crossing, so 50
-/// receives of the same handle used to charge that payload 50 times and fire a spurious
-/// OVER-MEMORY at ~1/50th of the real footprint — a resource cap whose false-positive rate grows
-/// with fan-out. Bytes are now charged once per CORE per heap.
+/// allocation: bytes are charged once per CORE per heap, so 50 receives of the same handle never
+/// charge that payload 50 times (a spurious OVER-MEMORY whose false-positive rate grows with
+/// fan-out).
 #[test]
 fn under_cap_still_passes_with_many_handles_to_one_core() {
     let d = TmpDir::new();

@@ -74,9 +74,7 @@ fn parity_map_gc_stress_heap_keys_and_values() {
     );
 }
 
-// (Removed `bench_vm_faster_than_interp`: it timed the bytecode VM against the tree-walk
-// interpreter, which no longer exists. Perf tracking lives in `benches/run.chz` vs CPython and
-// `docs/contributing/benchmarks.md`; correctness on loop-heavy code is covered by other tests.)
+// Perf tracking lives in `benches/run.chz` vs CPython and `docs/contributing/benchmarks.md`.
 
 // ===== gap #8: tuples + multi-return + destructuring =====
 
@@ -191,8 +189,7 @@ fn slice_survives_gc_stress() {
 }
 
 // ----- M19 lever #3: positional closure captures (HashMap → Vec<Value> by compile-time slot).
-// Characterization net: these pin observable behavior across BOTH engines so the HashMap→Vec
-// refactor cannot silently diverge. They pass on the pre-refactor (HashMap) code too. -----
+// Characterization net: these pin observable behavior of positional captures. -----
 
 /// Closure-capture golden: `examples/closure_capture.chz` (one var, several vars, nested
 /// capture, a shared mutable box, HOF callbacks, and a hot-loop capture read) byte-identical on
@@ -209,7 +206,7 @@ fn golden_closure_capture_chz_matches_expected_and_interp() {
 /// Closure-capture-across-scopes golden: `examples/closure_capture_scopes.chz` test-locks the
 /// uniform by-reference capture rule — a plain local is shared and sees later writes (`20`), a
 /// nested fn writes a captured local visible to the caller (`20`), and a global is referenced live
-/// (`20`). Byte-identical on the VM, the interpreter, the `--parallel` engine, and its `.expected`.
+/// (`20`). Byte-identical to its `.expected`.
 /// It runs through the real module graph via `run_file` (a temp entry), not
 /// `run_capture`/`compile_module_standalone`.
 #[test]
@@ -221,15 +218,9 @@ fn golden_closure_capture_scopes_chz_matches_expected_and_interp() {
     let entry = dir.join("main.chz");
     std::fs::write(&entry, src).unwrap();
     let (vo, _ve, vr, _vc) = run_file(&entry);
-    let (io, _ie, ir, _ic) = run_file(&entry);
-    let (po, _pe, pr, _pc) = run_file_with(&entry, crate::native::HostConfig::default());
     let _ = std::fs::remove_dir_all(&dir);
     assert!(vr.is_ok(), "VM faulted: {vr:?}");
-    assert!(ir.is_ok(), "interp faulted: {ir:?}");
-    assert!(pr.is_ok(), "parallel faulted: {pr:?}");
     assert_eq!(vo, expected, "VM output vs .expected");
-    assert_eq!(vo, io, "VM vs interp divergence");
-    assert_eq!(vo, po, "VM vs parallel divergence");
 }
 
 // ----- Uniform by-reference closure capture (the acceptance matrix, §4 of the design). Each row is
@@ -600,11 +591,8 @@ main()";
     assert_golden_out(src, "1\n");
 }
 
-/// FLIPPED (was `airlock_mixed_struct_closure_cycle_rejects_both`): a cycle passing through BOTH a
-/// container (`struct` field) AND a `Closure` now ROUND-TRIPS. Once every container is identity-
-/// preserved (its own id + `Backref`), the mixed cycle is no different from a pure `Cell`/`Closure`
-/// cycle — the old `nonpreserved_depth` mixed-cycle reject (commit e8dcad7) is deleted as dead. The
-/// closure `n.f = fn: n.x` closes `Closure -> Struct(n) -> Closure`; the task calls `n.f()` and reads
+/// A cycle passing through BOTH a container (`struct` field) AND a `Closure` ROUND-TRIPS to a task
+/// (values cross by handle). The closure `n.f = fn: n.x` closes `Closure -> Struct(n) -> Closure`; the task calls `n.f()` and reads
 /// `n.x == 5`.
 #[test]
 fn crossing_mixed_struct_closure_cycle_round_trips_both() {
@@ -795,7 +783,7 @@ main()";
 /// top-level `for` loop capturing the loop var gets a FRESH cell per iteration, exactly like the
 /// in-function NF#7 case. The synthetic `<toplevel>` proto must compute its own boxed-name set (base
 /// branch left it empty → the loop var stayed a raw int, and the captured `CellLoad` hit
-/// `unreachable!("CellLoad on a non-handle value")`, panicking BOTH engines / check-OK-run-crash).
+/// `unreachable!("CellLoad on a non-handle value")` — check-OK-run-crash).
 #[test]
 fn nested_fn_toplevel_loopvar_fresh_cell_parity() {
     let src = "\
@@ -952,7 +940,7 @@ main()";
 #[test]
 fn capture_closure_across_spawn_parity() {
     // A capturing closure sent across spawn/channel — exercises positional captures read by the
-    // task. VM (serial), interp, and --parallel must agree.
+    // task.
     let src = "\
 fn main():
     base := 41
@@ -1041,9 +1029,7 @@ fn vm_bytes_slice_step_parity() {
 fn bytes_crosses_channel() {
     // `bytes` is immutable; the receiver gets the sender's `bytes` by handle (M3.2; Python b'...'
     // repr preserved).
-    // Buffer-then-drain (send before recv) — a holdover from when the since-removed cooperative
-    // and interp engines could not block a consumer mid-flight on a live producer (a C5
-    // limitation, not bytes-specific).
+    // Buffer-then-drain (send before recv).
     let src = concat!(
         "fn main():\n",
         "    ch := Channel[bytes]()\n",

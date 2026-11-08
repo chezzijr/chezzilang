@@ -1,4 +1,4 @@
-//! Shell out to both engines, capture their output, and classify the result.
+//! Shell out to Chezzi and CPython, capture their output, and classify the result.
 //!
 //! The runner writes the two source renderings to temp files, runs `chezzi run <f>` and
 //! `python3 <f>` under a wall-clock timeout, then compares stdout BYTES and classifies the pair.
@@ -75,7 +75,7 @@ pub enum DivKind {
     /// Chezzi succeeded while Python failed (usually our generator emitting something
     /// Python rejects — a harness bug, not a Chezzi bug, but worth surfacing).
     PythonFault,
-    /// Both engines failed, but their stdout DIFFERS within the shared prefix — not just one
+    /// Chezzi and CPython both failed, but their stdout DIFFERS within the shared prefix — not just one
     /// side getting further before an unrelated fault of its own (`BothError`'s routine shape).
     /// Compared prefix-compatibly (`chz.stdout[..n] == py.stdout[..n]`, `n = min(len, len)`),
     /// never by plain inequality: CPython failing at parse time writes nothing to stdout while
@@ -113,7 +113,7 @@ pub enum Outcome {
     Timeout {
         which: &'static str,
     },
-    /// Both engines errored (no host panic). Usually the generator emitted something outside
+    /// Chezzi and CPython both errored (no host panic). Usually the generator emitted something outside
     /// the shared subset — not a Chezzi bug. Non-finding.
     BothError,
     /// The oracle itself could not run this seed at all — a child failed to spawn (e.g. the
@@ -585,8 +585,7 @@ mod tests {
     /// injective — `ff fe` and `fe ff` both decode to two U+FFFD — so a decoded compare reports
     /// `Match` for a run where Chezzi and CPython put DIFFERENT bytes on fd 1. Both sides can
     /// emit non-UTF-8 today (`io.stdout().write_bytes` since W6-9; CPython's
-    /// `sys.stdout.buffer.write` always could), and this oracle is the one `docs/design/roadmap.md §2b`
-    /// keeps now that `--serial` is deleted. Same class as the parity-oracle hole W6-9b closed.
+    /// `sys.stdout.buffer.write` always could).
     #[test]
     fn a_byte_only_divergence_is_not_a_match() {
         let chz = cap(vec![0xff, 0xfe]);
@@ -805,7 +804,7 @@ mod tests {
 
     // --- F4: the both-failed arm must diff stdout, not throw it away -------------------------
 
-    /// F4 test #1. Both engines failed but printed genuinely DIFFERENT bytes on stdout before
+    /// F4 test #1. Chezzi and CPython both failed but printed genuinely DIFFERENT bytes on stdout before
     /// failing — a real divergence, not the routine "one side got further" shape `BothError`
     /// exists for.
     #[test]

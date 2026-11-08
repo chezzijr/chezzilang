@@ -637,7 +637,7 @@ impl Vm {
             // already claimed = no-op; WAIT-3 same-instant = single claimed CAS = one winner).
             if let Some((i, deadline)) = soonest {
                 // A fiber about to be cancelled must not arm a stray timer — the top-of-fn
-                // cancellation checkpoint already returned in that case (on BOTH engines).
+                // cancellation checkpoint already returned in that case.
                 let sched = self.mn.clone().unwrap();
                 // `i` is the timer's SOURCE arm index; an off arm is never `soonest`.
                 let &(_, _, h, _) = keys
@@ -714,7 +714,7 @@ impl Vm {
         // whole fix.** A party that owns its OS thread (an eager `Executor` job, the top-level `main`
         // thread — with or without a native callback frame under it) blocks in place with the timer
         // as one more arm and the wait merely CLAMPED to its deadline (below). The one `InlineSleep`
-        // cell left after `--serial`'s removal: the INLINE outermost-`parallel:` builder mid-body
+        // cell: the INLINE outermost-`parallel:` builder mid-body
         // (`BlockCtx::Builder { job: false }`: `mn == None`, `mn_enlist_sched == Some`) with no eager
         // `Executor` core. It has no worker loop to drive a park, so a live timer arm inline-sleeps to
         // the soonest deadline — the alternative is the all-parties-blocked fault, which would be

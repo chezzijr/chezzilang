@@ -1113,7 +1113,7 @@ fn gen_emits_float_comparison() {
 
 /// `gen_float` used to choose only from `[Add, Sub, Mul]` — `Div` never appeared, so
 /// `emit_python.rs`'s float-`Div` shim routing (`_chz_fdiv`) was dead code by construction, exactly
-/// the `W7-37` failure mode (coverage both engines "agree" on because neither runs it). Mutation-
+/// the `W7-37` failure mode (coverage Chezzi and CPython "agree" on because neither runs it). Mutation-
 /// proven: reverting `gen_float`'s op list back to `[Add, Sub, Mul]` turns this red.
 #[test]
 fn gen_emits_float_div() {
@@ -1196,7 +1196,7 @@ fn gen_emits_mixed_int_float_arith() {
 }
 
 /// `try_call` used to be asked only for `Ty::Int`, so ~2/3 of generated functions were emitted
-/// and never invoked — code both engines "agreed" on because neither ran it.
+/// and never invoked — code Chezzi and CPython "agreed" on because neither ran it.
 #[test]
 fn gen_emits_non_int_call() {
     assert!(

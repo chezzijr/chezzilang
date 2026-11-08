@@ -333,8 +333,8 @@ fn spawn_keyword_arg_closure_capturing_protocol_local_ok() {
 #[test]
 fn spawn_protocol_value_keyword_arg_ok() {
     // Task 2 (option a): a protocol-typed value passed by label OR positionally to a spawned function
-    // value is now ACCEPTED — a protocol existential is sendable (its witness `Boxy` crosses by deep
-    // value copy, agrees serial==M:N). Both spellings agree. (Was rejected under the old rule.)
+    // value is ACCEPTED — a protocol existential crosses by handle like any value. Both spellings
+    // agree.
     let prelude = "protocol NS:\n    fn tag(self) -> int\nstruct Boxy:\n    v: int\n    fn tag(self) -> int:\n        return self.v\nfn run(r: NS):\n    print(r.tag())\n";
     entry_ok(&format!(
         "{prelude}fn main():\n    h := run\n    b: NS = Boxy(0)\n    parallel:\n        spawn h(r=b)\nmain()\n"
@@ -1105,8 +1105,7 @@ fn imported_module_used_in_spawn_block_ok() {
 
 /// A module is a NAMESPACE, not a receiver value, so `spawn lib.helper(3)` is a plain call — the
 /// same shape `defer lib.helper(3)` has always accepted, and the one Go accepts as `go pkg.F(x)`.
-/// It used to be refused with "cannot spawn on a non-sendable receiver of type module lib" because
-/// the receiver sweep asked whether the MODULE could cross the airlock. The RUNNING proof (a user
+/// The RUNNING proof (a user
 /// module, an alias, a bare `spawn`, and a native module) is
 /// `tests/chz/spec/spawn_module_target_test.chz`.
 #[test]

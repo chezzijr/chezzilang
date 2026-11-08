@@ -5,7 +5,7 @@
 use super::*;
 
 // ----- golden coverage for the formerly-orphaned examples + the comprehensive torture
-// programs (edge_cases / evaluator / ledger). Each pins exact output AND cross-engine parity.
+// programs (edge_cases / evaluator / ledger). Each pins exact output.
 
 /// `examples/hof.chz` — a function-typed parameter applied to a closure.
 #[test]
@@ -209,16 +209,7 @@ fn pad_left_multi_char_fill_is_exactly_width() {
         (r#"print("ab".pad_left(-9223372036854775808, "x"))"#, "ab\n"),
         (r#"print("".pad_left(-9223372036854775808, "x"))"#, "\n"),
     ] {
-        assert_eq!(
-            run_capture(src).expect("serial"),
-            want,
-            "serial mismatch for `{src}`"
-        );
-        assert_eq!(
-            run_capture(src).expect("M:N"),
-            want,
-            "M:N mismatch for `{src}`"
-        );
+        assert_eq!(run_capture(src).expect("run"), want, "mismatch for `{src}`");
     }
 
     // (The `std.string` free fn is a byte-identical alias — asserted in
@@ -236,14 +227,9 @@ fn pad_left_codepoints_not_bytes() {
     ] {
         let src = format!("print({call})");
         assert_eq!(
-            run_capture(&src).expect("serial"),
+            run_capture(&src).expect("run"),
             want,
-            "serial mismatch for `{call}`"
-        );
-        assert_eq!(
-            run_capture(&src).expect("M:N"),
-            want,
-            "M:N mismatch for `{call}`"
+            "mismatch for `{call}`"
         );
     }
 }
@@ -453,8 +439,7 @@ fn golden_named_struct_chz_matches_expected_and_interp() {
     assert_eq!(vm_out, expected);
 }
 
-/// Gap #5 golden: `examples/map.chz` is byte-identical to its `.expected` on the VM,
-/// and to the interpreter (the cross-engine acceptance bar for maps).
+/// Gap #5 golden: `examples/map.chz` is byte-identical to its `.expected`.
 #[test]
 fn golden_map_chz_matches_expected_and_interp() {
     let src = include_str!("../../../examples/map.chz");
@@ -613,11 +598,9 @@ fn golden_cycle_guard_chz_matches_expected_and_interp() {
     assert_eq!(vm_out, expected);
 }
 
-/// FLIPPED (item A, was `airlock_cyclic_struct_recoverable_both_engines`) — a SELF-REFERENTIAL value
-/// crossing a task boundary (`spawn` arg) now reaches the task (once via the deleted wire
-/// form's back-references, since M3.4 by handle), instead of tripping the depth cap. The
-/// spawned task reads `a.val == 1` (prints `got 1`) and the recover returns `done`; byte-identical
-/// on every engine.
+/// A SELF-REFERENTIAL value crossing a task boundary (`spawn` arg) reaches the task by handle; no
+/// walk of the cycle, no depth cap. The spawned task reads `a.val == 1` (prints `got 1`) and the
+/// recover returns `done`.
 #[test]
 fn crossing_cyclic_struct_crosses_both_engines() {
     let src = "\
@@ -642,9 +625,8 @@ main()
     assert_mc_parity(src, "got 1\nok: done\n");
 }
 
-/// FLIPPED (item A, was `airlock_cyclic_via_channel_send_and_shared_recoverable`) — the same self-
-/// referential value crossing via `Channel.send` and `Shared(...)` (M3.2/M3.3: by handle)
-/// also gets through. Regression lock on the other crossing entry points beyond a bare `spawn` arg.
+/// The same self-referential value crossing via `Channel.send` and `Shared(...)` (by handle) also
+/// gets through. Regression lock on the other crossing entry points beyond a bare `spawn` arg.
 #[test]
 fn crossing_cyclic_via_channel_send_and_shared_crosses() {
     let chan_src = "\
@@ -1532,8 +1514,8 @@ main()
     assert_mc_parity(src, "120\n");
 }
 
-/// FLIPPED (was `airlock_cyclic_module_global_recoverable_mn`): a task reads a cyclic MODULE-GLOBAL
-/// value. M3.1: the task reads the run's one global, so nothing walks the cycle; the worker prints
+/// A task reads a cyclic MODULE-GLOBAL value: the task reads the run's one global, so nothing walks
+/// the cycle; the worker prints
 /// `w`, then the recover returns `done`.
 #[test]
 fn crossing_cyclic_module_global_crosses_mn() {
@@ -1646,7 +1628,7 @@ print(P(5) >= P(5))
 }
 
 /// `Contains` operator protocol (L5): `x in some_struct` dispatches to a user
-/// `contains(self, item) -> bool` method on BOTH engines. A checker-only change would `check` OK
+/// `contains(self, item) -> bool` method. A checker-only change would `check` OK
 /// then trap at runtime in `op_contains`'s reject arm — so this RUN test is the safety net.
 #[test]
 fn contains_protocol_struct_dispatches() {
@@ -1666,7 +1648,7 @@ print(9 in b)
 }
 
 /// `Contains` on a generic `Box[T]` — the `contains` param type must be the INSTANTIATED `int`,
-/// and BOTH engines must lower the generic instantiation to the method call.
+/// and the generic instantiation must lower to the method call.
 #[test]
 fn contains_generic_box_runs() {
     let src = "\
@@ -1699,7 +1681,7 @@ print(1 in d)
 
 /// `in` resolves through a `Contains[T]` generic bound — the exact analog of `<` through a
 /// `Comparable` bound. `contains_item_ty` recovers the item type from the bound; at runtime the
-/// value is a concrete monomorphized struct/enum, so BOTH engines dispatch via `op_contains`.
+/// value is a concrete monomorphized struct/enum, so it dispatches via `op_contains`.
 #[test]
 fn contains_through_generic_bound_runs() {
     let src = "\
@@ -1996,29 +1978,18 @@ print(x == y)
 
 // ---- Bug E: runtime faults inside string interpolation report the real source line ----
 
-/// Assert a runtime fault reports `line == expected_line` on BOTH engines (serial + M:N).
+/// Assert a runtime fault reports `line == expected_line`.
 fn assert_fault_line(src: &str, needle: &str, expected_line: u32) {
     let e = run_capture(src).unwrap_err();
     assert!(
         e.message.contains(needle),
-        "serial: expected message to contain {needle:?}, got {:?}",
+        "expected message to contain {needle:?}, got {:?}",
         e.message
     );
     assert_eq!(
         e.span.line, expected_line,
-        "serial: expected line {expected_line}, got {} (col {})",
+        "expected line {expected_line}, got {} (col {})",
         e.span.line, e.span.col
-    );
-    let ep = run_capture(src).unwrap_err();
-    assert!(
-        ep.message.contains(needle),
-        "M:N: expected message to contain {needle:?}, got {:?}",
-        ep.message
-    );
-    assert_eq!(
-        ep.span.line, expected_line,
-        "M:N: expected line {expected_line}, got {} (col {})",
-        ep.span.line, ep.span.col
     );
 }
 
@@ -2028,9 +1999,7 @@ fn assert_fault_line(src: &str, needle: &str, expected_line: u32) {
 fn assert_fault_at(src: &str, needle: &str, expected: (u32, u32)) {
     assert_fault_line(src, needle, expected.0);
     let e = run_capture(src).unwrap_err();
-    assert_eq!((e.span.line, e.span.col), expected, "serial");
-    let ep = run_capture(src).unwrap_err();
-    assert_eq!((ep.span.line, ep.span.col), expected, "M:N");
+    assert_eq!((e.span.line, e.span.col), expected);
 }
 
 #[test]
@@ -2083,21 +2052,12 @@ fn interpolation_escape_newline_before_fragment_not_misattributed() {
 fn interpolation_backstop_still_faults_for_generic_str() {
     // Static format-spec/value-type checking fires only for CONCRETE scalars; a generic body
     // `"{v:.2f}"` (v: T) passes check, so instantiating it with a str MUST still fault at RUNTIME
-    // with the identical message on BOTH engines — proving the runtime backstop is intact.
+    // — proving the runtime backstop is intact.
     let src = "fn show[T](v: T) -> str:\n    return \"{v:.2f}\"\nfn main():\n    print(show(\"hi\"))\nmain()\n";
-    let e1 = run_capture(src).unwrap_err().message;
-    let e2 = run_capture(src).unwrap_err().message;
-    assert!(
-        e1.contains("type 'f' not valid for a string"),
-        "serial: {e1}"
-    );
-    assert!(
-        e2.contains("type 'f' not valid for a string"),
-        "parallel: {e2}"
-    );
-    // A valid concrete-float `{x:.2f}` still renders identically.
+    let e = run_capture(src).unwrap_err().message;
+    assert!(e.contains("type 'f' not valid for a string"), "{e}");
+    // A valid concrete-float `{x:.2f}` still renders.
     let ok = "x: float = 3.14159\nprint(\"{x:.2f}\")\n";
-    assert_eq!(run_capture(ok).unwrap(), "3.14\n");
     assert_eq!(run_capture(ok).unwrap(), "3.14\n");
 }
 

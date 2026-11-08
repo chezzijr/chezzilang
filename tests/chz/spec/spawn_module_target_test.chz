@@ -1,9 +1,7 @@
 # A MODULE-QUALIFIED function is a `spawn` target, exactly as it is a `defer` target (gaps.md M24-5).
 #
-# `spawn lib.helper(x)` is a plain call through a NAMESPACE — a module is not a receiver value — but
-# the spawn path ran it through the "spawn on a receiver" sendability rule and asked whether the
-# MODULE could cross the airlock: `cannot spawn on a non-sendable receiver of type module lib`, while
-# `defer lib.helper(x)` checked clean and ran. Go accepts `go pkg.F(x)` and `defer pkg.F(x)` alike.
+# `spawn lib.helper(x)` is a plain call through a NAMESPACE — a module is not a receiver value —
+# never a "spawn on a receiver". Go accepts `go pkg.F(x)` and `defer pkg.F(x)` alike.
 # One concept, one verdict. Gated by `chz_suite_passes` (`tests/chz_suite.rs`).
 import Shared from std.concurrency
 import std.fs

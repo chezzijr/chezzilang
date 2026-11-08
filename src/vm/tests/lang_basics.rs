@@ -456,20 +456,16 @@ print(\"after\")";
 }
 
 /// L3-1: a pure-panic assertion helper with NO return annotation (`fn boom(): panic(...)`) now
-/// type-checks (infers `-> nil`) — verify the CALLER runs and FAULTS with the panic message on
-/// BOTH engines, and that a `recover:`-wrapped call yields `Err("x")`.
+/// type-checks (infers `-> nil`) — verify the CALLER runs and FAULTS with the panic message, and
+/// that a `recover:`-wrapped call yields `Err("x")`.
 #[test]
-fn inline_panic_body_faults_both_engines() {
+fn inline_panic_body_faults() {
     let src = "fn boom(): panic(\"x\")\nfn main():\n    print(\"start\")\n    boom()\nmain()\n";
-    let (s_out, s_res) = run_program(src);
-    let (m_out, m_res) = run_program(src);
-    assert_eq!(s_out, "start\n");
-    assert_eq!(m_out, "start\n");
-    assert_eq!(s_res.unwrap_err().message, "x");
-    assert_eq!(m_res.unwrap_err().message, "x");
+    let (out, res) = run_program(src);
+    assert_eq!(out, "start\n");
+    assert_eq!(res.unwrap_err().message, "x");
     // A `recover:` around the call catches it as `Err("x")` — recoverable.
     let rec = "fn boom(): panic(\"x\")\nfn main():\n    r := recover:\n        boom()\n        0\n    match r:\n        ?v: print(\"ok {v}\")\n        !e: print(\"caught {e.message()}\")\nmain()\n";
-    assert_eq!(run_capture(rec).unwrap(), "caught x\n");
     assert_eq!(run_capture(rec).unwrap(), "caught x\n");
 }
 
@@ -1051,7 +1047,7 @@ fn vm_generator_never_yields() {
 }
 
 /// Q1: a generator with NO `-> Iterator[T]` annotation — element type inferred by strict-first-yield
-/// — drives a `for` loop and RUNS identically on BOTH engines (serial + M:N), not just type-checks.
+/// — drives a `for` loop and RUNS, not just type-checks.
 #[test]
 fn vm_generator_inferred_no_annotation() {
     let src = "fn count() -> Iterator[int]:\n    yield 1\n    yield 2\n    yield 3\nfn main():\n    for x in count():\n        print(x)\nmain()\n";
@@ -1069,7 +1065,7 @@ fn vm_generator_inferred_struct_method() {
 }
 
 /// Q1 golden: the inference-only `examples/generators_inferred.chz` showcase (free-fn + struct-method
-/// generators, no `-> Iterator[T]` anywhere) produces exactly this output on BOTH engines.
+/// generators, no `-> Iterator[T]` anywhere) produces exactly this output.
 #[test]
 fn golden_generators_inferred_chz() {
     let src = include_str!("../../../examples/generators_inferred.chz");
@@ -1092,8 +1088,7 @@ fn generator_passed_to_spawn_crosses_by_value() {
         "        spawn work(gen())\n",
         "main()\n"
     );
-    assert_eq!(run_capture(src).expect("serial"), "hi\n");
-    assert_eq!(run_capture(src).expect("M:N"), "hi\n");
+    assert_eq!(run_capture(src).expect("run"), "hi\n");
 }
 
 /// F3 path C: a generator nested inside a LIST spawn arg reaches the task too (M3.4: by handle; the
@@ -1110,8 +1105,7 @@ fn generator_in_list_arg_to_spawn_crosses_by_value() {
         "        spawn work([gen()])\n",
         "main()\n"
     );
-    assert_eq!(run_capture(src).expect("serial"), "hi\n");
-    assert_eq!(run_capture(src).expect("M:N"), "hi\n");
+    assert_eq!(run_capture(src).expect("run"), "hi\n");
 }
 
 /// F3 path C: a generator stored into `Shared(...)` is held by handle (M3.3)
@@ -1127,8 +1121,7 @@ fn generator_into_shared_crosses_by_value() {
         "    print(\"stored\")\n",
         "main()\n"
     );
-    assert_eq!(run_capture(src).expect("serial"), "stored\n");
-    assert_eq!(run_capture(src).expect("M:N"), "stored\n");
+    assert_eq!(run_capture(src).expect("run"), "stored\n");
 }
 
 /// F3 path C: a generator stored into `Atomic(...)` is held by handle.
@@ -1143,8 +1136,7 @@ fn generator_into_atomic_crosses_by_value() {
         "    print(\"stored\")\n",
         "main()\n"
     );
-    assert_eq!(run_capture(src).expect("serial"), "stored\n");
-    assert_eq!(run_capture(src).expect("M:N"), "stored\n");
+    assert_eq!(run_capture(src).expect("run"), "stored\n");
 }
 
 /// F3 path C: a closure CAPTURING a local generator submitted to an `Executor` under `--parallel` now
@@ -1165,7 +1157,7 @@ fn generator_captured_in_executor_submit_crosses_by_value() {
     assert_eq!(run_capture(src).expect("M:N"), "1\n");
 }
 
-/// F3 path C: an `Executor` task that RETURNS a generator under `--parallel` now returns it
+/// F3 path C: an `Executor` task that RETURNS a generator returns it
 /// by handle. The Executor discards task returns, so no output.
 #[test]
 fn generator_returned_from_executor_task_crosses_by_value() {
@@ -1197,8 +1189,7 @@ fn generator_into_channel_crosses_by_value() {
         "    print(\"sent\")\n",
         "main()\n"
     );
-    assert_eq!(run_capture(src).expect("serial"), "sent\n");
-    assert_eq!(run_capture(src).expect("M:N"), "sent\n");
+    assert_eq!(run_capture(src).expect("run"), "sent\n");
 }
 
 /// Captured args mutate across yields; an infinite generator terminates via `break`.

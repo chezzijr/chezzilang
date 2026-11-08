@@ -1,8 +1,6 @@
 //! Differential-testing oracle: generate semantically-equivalent programs, render them as
-//! Chezzi and Python, run both, and diff stdout. Catches *shared* semantic bugs that comparing
-//! Chezzi against itself never could — the historical VM↔interp comparison, back when there were
-//! two engines, missed exactly these (both were co-developed, so they shared the same blind
-//! spots). See `docs/contributing/bug-discovery.md` lever #2.
+//! Chezzi and Python, run both, and diff stdout. Catches semantic bugs that comparing Chezzi
+//! against itself never could. See `docs/contributing/bug-discovery.md` "Ranked plan" item 2.
 //!
 //! Self-contained: no `crate::` references, so the same sources compile into both the
 //! `tests/difftest.rs` CI gate and the `src/bin/difffuzz.rs` long-runner via `#[path]`.
@@ -23,7 +21,7 @@ pub mod run;
 pub use generate::Features;
 pub use run::{Config, Outcome};
 
-/// Generate the program for `seed`, run it on both engines, and classify. Returns the
+/// Generate the program for `seed`, run it on Chezzi and CPython, and classify. Returns the
 /// outcome plus the rendered Chezzi and Python sources (for reporting / reproduction).
 pub fn run_seed(cfg: &Config, seed: u64, feat: Features) -> (Outcome, String, String) {
     let p = generate::gen_program(seed, feat);

@@ -212,13 +212,9 @@ fn parallel_faulting_task_flushes_partial_output_3engine() {
     assert_mc_parity(src, "SOLO-PARTIAL\ncaught boom\n");
 }
 
-/// Deadlock-abort output-flush: when a `parallel:` nursery is aborted by the M:N
-/// scheduler's deadlock detector, a still-PARKED task's ALREADY-BUFFERED stdout must be
-/// preserved at its task-order slot (matching what the since-removed serial engine did). Pre-fix
-/// `flag_deadlock` wrote each parked
-/// fiber's `Fault` slot with an EMPTY buffer (`out: String::new()`), so the parked consumer's
-/// three buffered lines were silently discarded on M:N (the since-removed serial engine printed
-/// them live, so it kept them).
+/// Deadlock-abort output-flush: when a `parallel:` nursery is aborted by the scheduler's deadlock
+/// detector, a still-PARKED task's ALREADY-BUFFERED stdout must be preserved at its task-order
+/// slot: `flag_deadlock` writes each parked fiber's `Fault` slot WITH its buffer, never an empty one.
 ///
 /// This repro is order-DETERMINISTIC: the consumer is the SOLE printer. The producer's buffered
 /// `send(1)` deterministically satisfies the consumer's first `recv()` (→ `1`), so the consumer
@@ -249,11 +245,9 @@ main()
 
 /// Deadlock-abort MULTI-PARKED output-flush: when a `parallel:` nursery deadlocks with TWO
 /// OR MORE parked fibers, EVERY parked fiber's already-buffered stdout must be flushed at its
-/// task-order slot (matching what the since-removed serial engine did, which printed those lines
-/// live). Pre-fix `reduce_task_slots`
-/// flushed only the LOWEST-index propagating fault's buffer (the `first_fault.is_none()` guard), so
-/// a HIGHER-index parked printer whose LOWER-index sibling parks silently had its output silently
-/// dropped on M:N (the silent lower-index fiber's empty buffer won `first_fault`).
+/// task-order slot: `reduce_task_slots` flushes every fault's buffer, not only the LOWEST-index
+/// propagating one (else a HIGHER-index parked printer whose LOWER-index sibling parks silently
+/// loses its output to the silent fiber's empty buffer).
 ///
 /// This repro is order-DETERMINISTIC: `silent` (task_index 0) prints NOTHING, so `printer`
 /// (task_index 1) is the sole printer and its single line is fixed. Both fibers park forever on an

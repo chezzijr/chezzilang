@@ -9,33 +9,26 @@ use super::*;
 /// killed between its first statement and its `defer` line, so the defer never registered and cleanup
 /// silently never ran (measured: 0/20 on M:N). With CANCELLATION POINTS (loop back-edges + blocking
 /// ops) a STARTED task always runs its straight-line prologue, so the defer is registered by
-/// construction — deterministically 42. The pre-defer `print` must survive too (a cancelled M:N
-/// task's buffer is flushed at its task slot; the since-removed serial engine printed live).
+/// construction — deterministically 42. The pre-defer `print` must survive too (a cancelled task's
+/// buffer is flushed at its task slot).
 #[test]
-fn parity_probe_defer_runs_when_cancelled_before_its_defer_line() {
+fn probe_defer_runs_when_cancelled_before_its_defer_line() {
     let src = "import Shared from std.concurrency\nfn cleanup(s: Shared[int]):\n    s.set(42)\n\
                fn consumer(ch: Channel[int], s: Shared[int]):\n    print(\"consumer started\")\n    defer cleanup(s)\n    ch.recv()\n\
                fn boom():\n    xs := [1]\n    print(xs[9])\n\
                fn main():\n    s := Shared(0)\n    r := recover:\n        ch := Channel[int]()\n        parallel:\n            spawn consumer(ch, s)\n            spawn boom()\n        0\n    print(s.get())\nmain()\n";
-    let serial = run_capture(src).expect("the fault is recovered, so the program completes");
-    let mn = run_capture(src).expect("the fault is recovered, so the program completes");
+    let out = run_capture(src).expect("the fault is recovered, so the program completes");
     assert!(
-        serial.contains("42\n"),
-        "serial: the started consumer's defer ran: {serial:?}"
+        out.contains("42\n"),
+        "the started consumer's defer ran: {out:?}"
     );
-    assert!(
-        mn.contains("42\n"),
-        "M:N: the started consumer's defer ran: {mn:?}"
-    );
-    // Cross-task ORDER is nondeterministic; the line SET is the contract.
-    assert_same_lines(&serial, &mn);
 }
 
 /// `os.exit` inside a CANCELLED task's `defer`: the exit code wins and is
 /// never demoted to the sibling's catchable fault (Exit > Fault, lowest task index wins via
-/// M:N's `reduce_task_slots`). The line SET is asserted; order is not.
+/// `reduce_task_slots`).
 #[test]
-fn parity_os_exit_inside_a_cancelled_tasks_defer() {
+fn os_exit_inside_a_cancelled_tasks_defer_wins() {
     let src = "import std.os\n\
                fn bye():\n    print(\"cleanup\")\n    os.exit(7)\n\
                fn consumer(ch: Channel[int], go: Channel[int]):\n    defer bye()\n    go.send(0)\n    ch.recv()\n\
@@ -43,53 +36,35 @@ fn parity_os_exit_inside_a_cancelled_tasks_defer() {
                fn main():\n    ch := Channel[int]()\n    go := Channel[int]()\n    r := recover:\n        parallel:\n            spawn consumer(ch, go)\n            spawn boom(go)\n        0\n    print(\"unreachable\")\nmain()\n";
     let t = TmpDir::new();
     let entry = t.write("main.chz", src);
-    let (mo, _me, _mr, mc) = run_file(&entry);
-    let (so, _se, _sr, sc) = run_file(&entry);
-    assert_eq!(sc, Some(7), "serial: the cancelled defer's os.exit wins");
-    assert_eq!(mc, Some(7), "M:N: the cancelled defer's os.exit wins");
-    assert!(
-        !so.contains("unreachable") && !mo.contains("unreachable"),
-        "os.exit hard-halts: serial={so:?} mn={mo:?}"
-    );
-    assert_same_lines(&so, &mo);
+    let (out, _e, _r, code) = run_file(&entry);
+    assert_eq!(code, Some(7), "the cancelled defer's os.exit wins");
+    assert!(!out.contains("unreachable"), "os.exit hard-halts: {out:?}");
 }
 
-/// The probe shape with the FAULTER SPAWNED FIRST — the shape that exposed the deterministic
-/// serial-vs-M:N divergence the cancellation-point change first shipped with. M:N is structurally
-/// forced to start every spawned fiber (a scope completes only at `done == total`; `take_runnable`
-/// never consults the scope cancel), so `talker` runs its prologue, prints, registers its `defer` and
-/// unwinds at its `recv` checkpoint — even though `boom` already faulted. Serial's cancel drain used
-/// to SKIP a never-started (`Pending`) sibling, so it emitted `{"0"}` while M:N emitted `{"hi","42"}`
-/// (20/20 — near-deterministic, not a rare race). The drain now starts every not-`Done` sibling with
-/// the cancel tripped, so the task runs and its `defer` runs too.
+/// The probe shape with the FAULTER SPAWNED FIRST. The scheduler starts every spawned fiber (a
+/// scope completes only at `done == total`; `take_runnable` never consults the scope cancel), so
+/// `talker` runs its prologue, prints, registers its `defer` and unwinds at its `recv` checkpoint —
+/// even though `boom` already faulted.
 #[test]
-fn parity_probe_faulter_spawned_first_still_runs_the_siblings_defer() {
+fn probe_faulter_spawned_first_still_runs_the_siblings_defer() {
     let src = "import Shared from std.concurrency\nfn cleanup(s: Shared[int]):\n    s.set(42)\n\
                fn talker(ch: Channel[int], s: Shared[int]):\n    print(\"hi\")\n    defer cleanup(s)\n    ch.recv()\n\
                fn boom():\n    xs := [1]\n    print(xs[9])\n\
                fn main():\n    s := Shared(0)\n    r := recover:\n        ch := Channel[int]()\n        parallel:\n            spawn boom()\n            spawn talker(ch, s)\n        0\n    print(s.get())\nmain()\n";
-    let serial = run_capture(src).expect("the fault is recovered, so the program completes");
-    let mn = run_capture(src).expect("the fault is recovered, so the program completes");
-    assert!(serial.contains("42\n"), "serial: the defer ran: {serial:?}");
-    assert!(mn.contains("42\n"), "M:N: the defer ran: {mn:?}");
-    assert!(
-        serial.contains("hi\n"),
-        "serial: the prologue ran: {serial:?}"
-    );
-    assert_same_lines(&serial, &mn);
+    let out = run_capture(src).expect("the fault is recovered, so the program completes");
+    assert!(out.contains("42\n"), "the defer ran: {out:?}");
+    assert!(out.contains("hi\n"), "the prologue ran: {out:?}");
 }
 
-/// A never-started straight-line sibling with NO defer, faulter first: M:N runs it to completion
-/// (`Done`, output flushed) — the line SET is the contract.
+/// A never-started straight-line sibling with NO defer, faulter first: it runs to completion
+/// (`Done`, output flushed).
 #[test]
-fn parity_straight_line_sibling_runs_even_when_the_scope_is_already_cancelled() {
+fn straight_line_sibling_runs_even_when_the_scope_is_already_cancelled() {
     let src = "fn noisy():\n    print(\"hi\")\n\
                fn boom():\n    xs := [1]\n    print(xs[9])\n\
                fn main():\n    r := recover:\n        parallel:\n            spawn boom()\n            spawn noisy()\n        0\n    print(\"end\")\nmain()\n";
-    let serial = run_capture(src).expect("recovered");
-    let mn = run_capture(src).expect("recovered");
-    assert!(serial.contains("hi\n"), "serial: {serial:?}");
-    assert_same_lines(&serial, &mn);
+    let out = run_capture(src).expect("recovered");
+    assert!(out.contains("hi\n"), "{out:?}");
 }
 
 /// Cancellation points and a NATIVE-driven loop: `xs.map(f)` iterates in RUST (`for e in ..
@@ -101,28 +76,18 @@ fn parity_straight_line_sibling_runs_even_when_the_scope_is_already_cancelled() 
 /// loop's back-edge.
 ///
 /// The faulter is spawned FIRST so the scope cancel is already tripped when `work` starts: no timing
-/// race — M:N must abort the map, popping its still-queued fiber after the cancel (the since-removed
-/// serial engine's drain used to start `work` with the cancel already tripped). A CPU-bound task that
-/// is ALREADY RUNNING when the cancel trips was a different, pre-existing story on the since-removed
-/// serial engine — it was cooperative, so it simply ran to its next park before any sibling got to
-/// fault (that is why the `while true:` spinner test is M:N-only).
+/// race — the map must abort, popping its still-queued fiber after the cancel.
 #[test]
-fn parity_native_hof_loop_is_cancellable() {
+fn native_hof_loop_is_cancellable() {
     let src = "fn sq(x: int) -> int:\n    return x * x\n\
                fn work(xs: List[int]):\n    ys := xs.map(sq)\n    print(\"map finished\")\n    print(ys.len())\n\
                fn boom():\n    zs := [1]\n    print(zs[9])\n\
                fn main():\n    xs := []\n    i := 0\n    while i < 200000:\n        xs.push(i)\n        i = i + 1\n    r := recover:\n        parallel:\n            spawn boom()\n            spawn work(xs)\n        0\n    print(\"end\")\nmain()\n";
-    let serial = run_capture(src).expect("recovered");
-    let mn = run_capture(src).expect("recovered");
+    let out = run_capture(src).expect("recovered");
     assert!(
-        !serial.contains("map finished"),
-        "serial: the cancelled task's native map must abort at a per-element checkpoint: {serial:?}"
+        !out.contains("map finished"),
+        "the cancelled task's native map must abort at a per-element checkpoint: {out:?}"
     );
-    assert!(
-        !mn.contains("map finished"),
-        "M:N: the cancelled task's native map must abort at a per-element checkpoint: {mn:?}"
-    );
-    assert_same_lines(&serial, &mn);
 }
 
 /// A NESTED nursery's deadlock, with an outer sibling PARKED and holding a registered `defer`, is
@@ -155,58 +120,41 @@ fn genuine_deadlock_is_detected_and_fatal() {
 /// task that ends on the NORMAL-return path (or faults on its own) while a sibling has already
 /// tripped the scope cancel hit the checkpoint at the top of `guarded` (`run_one_deferred` runs every
 /// deferred call through it) with `cancelled` still false: the FIRST (LIFO) deferred call returned
-/// `cancelled` BEFORE its body ran, and only the rest of the defers executed. Measured on both
-/// engines: `cleanup2` was silently swallowed — arbitrary PARTIAL cleanup (one fd released, the next
-/// not), while parity stayed green because both engines dropped it identically.
+/// `cancelled` BEFORE its body ran, and only the rest of the defers executed: `cleanup2` was
+/// silently swallowed — arbitrary PARTIAL cleanup (one fd released, the next not).
 #[test]
-fn parity_every_defer_of_a_normally_returning_task_runs_under_a_tripped_cancel() {
+fn every_defer_of_a_normally_returning_task_runs_under_a_tripped_cancel() {
     let src = "fn boom() -> int:\n    return 1 / 0\n\
                fn tidy():\n    defer print(\"cleanup1\")\n    defer print(\"cleanup2\")\n    print(\"start\")\n\
                fn main():\n    r := recover:\n        parallel:\n            spawn boom()\n            spawn tidy()\n        0\n    print(\"end\")\nmain()\n";
-    let serial = run_capture(src).expect("recovered");
-    let mn = run_capture(src).expect("recovered");
-    for (engine, out) in [("serial", &serial), ("M:N", &mn)] {
-        assert!(
-            out.contains("cleanup1\n") && out.contains("cleanup2\n"),
-            "{engine}: EVERY registered defer runs (LIFO), not all-but-the-first: {out:?}"
-        );
-    }
-    assert_same_lines(&serial, &mn);
+    let out = run_capture(src).expect("recovered");
+    assert!(
+        out.contains("cleanup1\n") && out.contains("cleanup2\n"),
+        "EVERY registered defer runs (LIFO), not all-but-the-first: {out:?}"
+    );
 }
 
 /// Structured concurrency — cancelling a scope cancels its DESCENDANT scopes. A nested `parallel:`
-/// entered from a task that is then cancelled used to be UNCANCELLABLE: the nested scope got a fresh
-/// cancel flag (M:N) / serial handed the level `cancel = None`, so the nested spinner's back-edge
-/// checkpoint had no tripped flag to read and looped forever — the teardown never finished and the
-/// program HUNG on BOTH engines (measured: `timeout` on both). The nested scope now INHERITS its
-/// enclosing scopes' flags (`JoinScope::ancestors` / `Vm::cancel_outer`; serial inherits the `Arc`).
+/// entered from a cancelled task INHERITS its enclosing scopes' cancel flags
+/// (`JoinScope::ancestors` / `Vm::cancel_outer`), so the nested spinner's back-edge checkpoint sees
+/// the tripped flag; with a fresh flag it loops forever and the program hangs.
 #[test]
-fn parity_nested_nursery_inside_a_cancelled_task_is_cancellable() {
+fn nested_nursery_inside_a_cancelled_task_is_cancellable() {
     let src = "fn boom() -> int:\n    return 1 / 0\n\
                fn spin():\n    i := 0\n    while true:\n        i = i + 1\n\
                fn t():\n    parallel:\n        spawn spin()\n\
                fn main():\n    r := recover:\n        parallel:\n            spawn boom()\n            spawn t()\n        0\n    print(\"end\")\nmain()\n";
-    let serial = run_capture(src).expect("recovered — must not hang");
-    let mn = run_capture(src).expect("recovered — must not hang");
-    assert_eq!(serial, "end\n", "serial: the nested spinner was cancelled");
-    assert_eq!(mn, "end\n", "M:N: the nested spinner was cancelled");
+    let out = run_capture(src).expect("recovered — must not hang");
+    assert_eq!(out, "end\n", "the nested spinner was cancelled");
 }
 
 /// A blocking native (`sleep_ms` / `io.*` / `fs.*` / `request`) is an **ENTRY** cancellation
-/// checkpoint — the check sits OUTSIDE the M:N-only offload gate. It used to be
-/// M:N-only, so a cancelled SERIAL task slept the full duration (stalling the whole teardown —
-/// `sleep_ms(60000)` would freeze it for a minute) and then, having no other checkpoint, ran every
-/// straight-line statement AFTER the sleep to completion: `{napper start, napper woke, end}` on the
-/// since-removed serial engine vs `{napper start, end}` on M:N, deterministically. The line SET is the contract.
+/// checkpoint — the check sits OUTSIDE the offload gate. A cancelled task never sleeps the full
+/// duration and never runs the straight-line statements AFTER the sleep: `{napper start, end}`.
 ///
-/// **Scope, tightened by W7-16.** This fence covers only the case where the cancel is ALREADY TRIPPED
-/// when the blocking call is reached — which is what its fixture produced by accident, `boom()`
-/// faulting before `napper` could enter the sleep. It said nothing about a cancel arriving DURING the
-/// sleep, and that case was broken (measured 3005 ms M:N / 3054 ms serial, `napper
-/// woke` printed) until W7-16. The mid-flight half is
-/// `tests::a_sleeping_nursery_task_is_cancelled_mid_flight_by_a_sibling_fault`, M:N-only because
-/// serial cannot preempt a sleeping fiber at all (nothing else runs), so its line SET legitimately
-/// differs there.
+/// This fence covers only the case where the cancel is ALREADY TRIPPED when the blocking call is
+/// reached. The mid-flight half (a cancel arriving DURING the sleep) is
+/// `tests::a_sleeping_nursery_task_is_cancelled_mid_flight_by_a_sibling_fault`.
 ///
 /// The fixture is left ungated ON PURPOSE: `boom()` divides by zero as its first act while `napper`
 /// still has a `print` ahead of the sleep, so the cancel is reliably tripped BEFORE the blocking call
@@ -214,7 +162,7 @@ fn parity_nested_nursery_inside_a_cancelled_task_is_cancellable() {
 /// race, not remove it (nothing can order "boom's fault" against "napper's sleep ENTRY" from inside
 /// the language), and would blur which checkpoint is under test.
 #[test]
-fn parity_blocking_native_is_an_entry_cancellation_checkpoint_on_both_engines() {
+fn blocking_native_is_an_entry_cancellation_checkpoint() {
     let src = "import std.time\n\
                fn boom() -> int:\n    return 1 / 0\n\
                fn napper():\n    print(\"napper start\")\n    time.sleep_ms(3000)\n    print(\"napper woke\")\n\
@@ -222,28 +170,23 @@ fn parity_blocking_native_is_an_entry_cancellation_checkpoint_on_both_engines() 
     let t = TmpDir::new();
     let entry = t.write("main.chz", src);
     let t0 = std::time::Instant::now();
-    let (mn, _me, _mr, _mc) = run_file(&entry);
-    let (serial, _se, _sr, _sc) = run_file(&entry);
-    for (engine, out) in [("serial", &serial), ("M:N", &mn)] {
-        assert!(
-            !out.contains("napper woke"),
-            "{engine}: the cancelled task dies AT the blocking native, and never runs past it: {out:?}"
-        );
-    }
-    assert_same_lines(&serial, &mn);
+    let (out, _e, _r, _c) = run_file(&entry);
+    assert!(
+        !out.contains("napper woke"),
+        "the cancelled task dies AT the blocking native, and never runs past it: {out:?}"
+    );
     assert!(
         t0.elapsed() < std::time::Duration::from_millis(1500),
-        "neither engine's teardown waits out the cancelled task's 3s sleep: {:?}",
+        "the teardown does not wait out the cancelled task's 3s sleep: {:?}",
         t0.elapsed()
     );
 }
 
-/// Run one engine under a HARD DEADLINE: a scheduler bug in this area is a HANG, and a hung test
-/// would just wedge the suite. On timeout we panic with the engine name (the hung VM thread is left
-/// to die with the test process).
+/// Run a program under a HARD DEADLINE: a scheduler bug in this area is a HANG, and a hung test
+/// would just wedge the suite. On timeout we panic (the hung VM thread is left to die with the test
+/// process).
 #[cfg(test)]
 fn run_with_deadline(
-    engine: &str,
     f: impl FnOnce() -> (String, Result<(), RuntimeError>) + Send + 'static,
 ) -> (String, Result<(), RuntimeError>) {
     let (tx, rx) = std::sync::mpsc::channel();
@@ -255,56 +198,47 @@ fn run_with_deadline(
         .expect("failed to spawn the deadline thread");
     rx.recv_timeout(std::time::Duration::from_secs(20))
         .unwrap_or_else(|_| {
-            panic!("{engine} HUNG: a defer that can never complete must be REPORTED as a deadlock, never a silent hang")
+            panic!("HUNG: a defer that can never complete must be REPORTED as a deadlock, never a silent hang")
         })
 }
 
 /// A `defer` that can NEVER complete (its body `recv`s on a channel nobody will ever send to) inside
 /// a CANCELLED task is REPORTED as a deadlock — never a silent hang. A defer is not itself cancellable
-/// (`halt_requested`'s `in_defer` term), so on M:N that cleanup parks in its frame drain; the
-/// scope is then incomplete BECAUSE of it, which made the N4 cancel-teardown veto
-/// (`any_cancelled_scope_awaiting_drain`, mod.rs) permanent and the M:N engine hung SILENTLY while
-/// serial reported (measured: M:N `timeout` rc=124, serial rc=1). The veto is now bounded to the
+/// (`halt_requested`'s `in_defer` term), so that cleanup parks in its frame drain. The N4
+/// cancel-teardown veto (`any_cancelled_scope_awaiting_drain`, mod.rs) is bounded to the
 /// trip→`cancel_drain` window (an UNDRAINED PARKED fiber), so the quiesce is detected, the verdict
-/// cuts the stuck cleanup (`SchedCore::verdict_victim`), and — the task being already cancelled — its error is swallowed and the
-/// SIBLING'S real fault is what propagates, identically.
+/// cuts the stuck cleanup (`SchedCore::verdict_victim`), and — the task being already cancelled —
+/// its error is swallowed and the SIBLING'S real fault is what propagates.
 #[test]
-fn parity_a_defer_that_can_never_complete_is_reported_not_hung() {
+fn a_defer_that_can_never_complete_is_reported_not_hung() {
     let src = "fn cleanup(dead: Channel[int]):\n    print(\"CLEANUP-ENTER\")\n    dead.recv()\n    print(\"CLEANUP-DONE\")\n\
                fn consumer(ch: Channel[int], go: Channel[int], dead: Channel[int]):\n    defer cleanup(dead)\n    go.send(0)\n    ch.recv()\n\
                fn boom(go: Channel[int]):\n    go.recv()\n    xs := [1]\n    print(xs[9])\n\
                fn main():\n    ch := Channel[int]()\n    go := Channel[int]()\n    dead := Channel[int]()\n    parallel:\n        spawn consumer(ch, go, dead)\n        spawn boom(go)\nmain()\n";
     let s = src.to_string();
-    let (mn, mn_res) = run_with_deadline("M:N", move || run_program(&s));
-    let s = src.to_string();
-    let (serial, se_res) = run_with_deadline("serial", move || run_program(&s));
-    for (engine, out, res) in [("serial", &serial, &se_res), ("M:N", &mn, &mn_res)] {
-        assert!(
-            out.contains("CLEANUP-ENTER\n"),
-            "{engine}: the cleanup RAN (it is the cancel's whole point): {out:?}"
-        );
-        assert!(
-            !out.contains("CLEANUP-DONE\n"),
-            "{engine}: it can never finish — its recv has no sender: {out:?}"
-        );
-        let err = res.as_ref().expect_err("the program must FAIL, not hang");
-        assert!(
-            err.message.contains("index 9 out of bounds"),
-            "{engine}: the sibling's real fault is what is reported (the stuck cleanup's own error \
-             is swallowed with its cancelled task): {err:?}"
-        );
-    }
-    assert_same_lines(&serial, &mn);
+    let (out, res) = run_with_deadline(move || run_program(&s));
+    assert!(
+        out.contains("CLEANUP-ENTER\n"),
+        "the cleanup RAN (it is the cancel's whole point): {out:?}"
+    );
+    assert!(
+        !out.contains("CLEANUP-DONE\n"),
+        "it can never finish — its recv has no sender: {out:?}"
+    );
+    let err = res.expect_err("the program must FAIL, not hang");
+    assert!(
+        err.message.contains("index 9 out of bounds"),
+        "the sibling's real fault is what is reported (the stuck cleanup's own error \
+         is swallowed with its cancelled task): {err:?}"
+    );
 }
 
 /// The regression guard for the demote-path cancel fix: a `defer` whose body BLOCKS (here
-/// `time.sleep_ms`) in a CANCELLED task runs to COMPLETION — cleanup is never truncated mid-body. The
-/// M:N demote loops used to read the raw `self.cancel` flag instead of `cancel_requested()`, so the
-/// blocking op inside the cleanup saw the already-tripped scope cancel and aborted the defer at that
-/// call: `CLEANUP-ENTER` then nothing, sentinel 0 on M:N vs 42 on serial. Blocking cleanup is what
-/// real cleanup DOES (close a socket, send a final message, flush).
+/// `time.sleep_ms`) in a CANCELLED task runs to COMPLETION — cleanup is never truncated mid-body: a
+/// blocking op inside the cleanup reads `cancel_requested()`, never the raw already-tripped scope
+/// flag. Blocking cleanup is what real cleanup DOES (close a socket, send a final message, flush).
 #[test]
-fn parity_a_blocking_defer_body_completes_when_the_task_is_cancelled() {
+fn a_blocking_defer_body_completes_when_the_task_is_cancelled() {
     let src = "import Shared from std.concurrency\nimport std.time\n\
                fn cleanup(s: Shared[int]):\n    print(\"CLEANUP-ENTER\")\n    time.sleep_ms(20)\n    s.set(42)\n    print(\"CLEANUP-DONE\")\n\
                fn consumer(ch: Channel[int], go: Channel[int], s: Shared[int]):\n    defer cleanup(s)\n    go.send(0)\n    ch.recv()\n\
@@ -312,27 +246,22 @@ fn parity_a_blocking_defer_body_completes_when_the_task_is_cancelled() {
                fn main():\n    s := Shared(0)\n    r := recover:\n        ch := Channel[int]()\n        go := Channel[int]()\n        parallel:\n            spawn consumer(ch, go, s)\n            spawn boom(go)\n        0\n    print(\"sentinel=\" + \"{s.get()}\")\nmain()\n";
     let t = TmpDir::new();
     let entry = t.write("main.chz", src);
-    let (mn, _me, _mr, _mc) = run_file(&entry);
-    let (serial, _se, _sr, _sc) = run_file(&entry);
-    for (engine, out) in [("serial", &serial), ("M:N", &mn)] {
-        assert!(
-            out.contains("CLEANUP-DONE\n") && out.contains("sentinel=42\n"),
-            "{engine}: a blocking op inside a defer must NOT truncate the cleanup: {out:?}"
-        );
-    }
-    assert_same_lines(&serial, &mn);
+    let (out, _e, _r, _c) = run_file(&entry);
+    assert!(
+        out.contains("CLEANUP-DONE\n") && out.contains("sentinel=42\n"),
+        "a blocking op inside a defer must NOT truncate the cleanup: {out:?}"
+    );
 }
 
 /// The cleanup's OWN work must survive too: a `parallel:` (or `spawn`) opened INSIDE a cancelled task's
-/// `defer` runs to completion on BOTH engines. The `in_defer()` suppression that makes a defer
-/// uncancellable is per-task and does NOT cross a spawn — a worker fiber starts with no drain — while the cancel-flag chain DOES cross it (`Vm::scope_ancestors` →
-/// `JoinScope::ancestors` → `cancel_outer`). So the child of a cleanup's nursery inherited the
-/// already-tripped enclosing flag and died at its first checkpoint (back-edge / blocking op): M:N
-/// printed `CLEANUP-ENTER|CLEANUP-DONE|sentinel=0` (the child silently dropped, rc 0) against serial's
-/// `sentinel=42` — serial severs the flag in a defer (`run_scheduler`'s `in_defer`). `scope_ancestors`
-/// now severs identically, so cleanup that DELEGATES is as uncancellable as cleanup that blocks inline.
+/// `defer` runs to completion. The `in_defer()` suppression that makes a defer uncancellable is
+/// per-task and does NOT cross a spawn — a worker fiber starts with no drain — while the cancel-flag
+/// chain DOES cross it (`Vm::scope_ancestors` → `JoinScope::ancestors` → `cancel_outer`). So
+/// `scope_ancestors` severs the chain inside a defer: else the child of a cleanup's nursery inherits
+/// the already-tripped flag and dies at its first checkpoint. Cleanup that DELEGATES is as
+/// uncancellable as cleanup that blocks inline.
 #[test]
-fn parity_a_nursery_inside_a_cancelled_tasks_defer_runs_to_completion() {
+fn a_nursery_inside_a_cancelled_tasks_defer_runs_to_completion() {
     let src = "import Shared from std.concurrency\n\
                fn setit(s: Shared[int]):\n    i := 0\n    while i < 1000:\n        i = i + 1\n    s.set(42)\n    print(\"CHILD-DONE\")\n\
                fn cleanup(s: Shared[int]):\n    print(\"CLEANUP-ENTER\")\n    parallel:\n        spawn setit(s)\n    print(\"CLEANUP-DONE\")\n\
@@ -340,16 +269,11 @@ fn parity_a_nursery_inside_a_cancelled_tasks_defer_runs_to_completion() {
                fn boom(go: Channel[int]):\n    go.recv()\n    zs := [1]\n    print(zs[9])\n\
                fn main():\n    s := Shared(0)\n    r := recover:\n        ch := Channel[int]()\n        go := Channel[int]()\n        parallel:\n            spawn worker(ch, go, s)\n            spawn boom(go)\n        0\n    print(\"sentinel=\" + \"{s.get()}\")\nmain()\n";
     let s = src.to_string();
-    let (mn, _) = run_with_deadline("M:N", move || run_program(&s));
-    let s = src.to_string();
-    let (serial, _) = run_with_deadline("serial", move || run_program(&s));
-    for (engine, out) in [("serial", &serial), ("M:N", &mn)] {
-        assert!(
-            out.contains("CHILD-DONE\n") && out.contains("sentinel=42\n"),
-            "{engine}: a task spawned by a cancelled task's cleanup must NOT inherit that cancel: {out:?}"
-        );
-    }
-    assert_same_lines(&serial, &mn);
+    let (out, _) = run_with_deadline(move || run_program(&s));
+    assert!(
+        out.contains("CHILD-DONE\n") && out.contains("sentinel=42\n"),
+        "a task spawned by a cancelled task's cleanup must NOT inherit that cancel: {out:?}"
+    );
 }
 
 /// N4 (demoted half), at the PROGRAM level: a DEMOTED fiber (a `recv` inside a native HOF callback —
@@ -360,120 +284,102 @@ fn parity_a_nursery_inside_a_cancelled_tasks_defer_runs_to_completion() {
 /// INNOCENT outer-scope sibling `b`, which is waiting for the value the cleanup is about to send. Fails
 /// 7/8 runs with the veto removed (`B-GOT` replaced by a bogus nursery deadlock error).
 #[test]
-fn parity_a_cancel_wakeable_demoted_fiber_is_not_a_deadlock() {
+fn a_cancel_wakeable_demoted_fiber_is_not_a_deadlock() {
     let src = "fn b(ch2: Channel[int]):\n    v := ch2.recv()\n    print(\"B-GOT=\" + \"{v}\")\n\
                fn acleanup(ch2: Channel[int]):\n    ch2.send(7)\n    print(\"A-CLEANUP-DONE\")\n\
                fn a(ch: Channel[int], go: Channel[int], ch2: Channel[int]):\n    defer acleanup(ch2)\n    go.send(0)\n    xs := [1]\n    ys := xs.map(fn(x: int) -> int: ch.recv())\n    print(\"A-NEVER\")\n\
                fn boom(go: Channel[int]):\n    go.recv()\n    zs := [1]\n    print(zs[9])\n\
                fn main():\n    ch := Channel[int]()\n    ch2 := Channel[int]()\n    go := Channel[int]()\n    parallel:\n        spawn b(ch2)\n        r := recover:\n            parallel:\n                spawn a(ch, go, ch2)\n                spawn boom(go)\n            0\nmain()\n";
     let s = src.to_string();
-    let (mn, _) = run_with_deadline("M:N", move || run_program(&s));
-    let s = src.to_string();
-    let (serial, _) = run_with_deadline("serial", move || run_program(&s));
-    for (engine, out) in [("serial", &serial), ("M:N", &mn)] {
-        assert!(
-            out.contains("A-CLEANUP-DONE\n") && out.contains("B-GOT=7\n"),
-            "{engine}: an innocent parked sibling must not be faulted while a demoted fiber is \
-             resuming on a tripped cancel: {out:?}"
-        );
-        assert!(
-            !out.contains("deadlock"),
-            "{engine}: no false deadlock: {out:?}"
-        );
-    }
-    assert_same_lines(&serial, &mn);
+    let (out, _) = run_with_deadline(move || run_program(&s));
+    assert!(
+        out.contains("A-CLEANUP-DONE\n") && out.contains("B-GOT=7\n"),
+        "an innocent parked sibling must not be faulted while a demoted fiber is \
+         resuming on a tripped cancel: {out:?}"
+    );
+    assert!(!out.contains("deadlock"), "no false deadlock: {out:?}");
 }
 
 // ===== R2 — std.io Writer / file-handle type (buffered + streaming file output) =====
 
 /// R2 — `create(path)` opens a truncating write handle; `write` + `close` land the bytes; `read_file`
-/// reads them back. Serial and M:N each.
+/// reads them back.
 #[test]
-fn writer_create_roundtrip_parity() {
-    for run in [run_file as fn(&std::path::Path) -> RunOutput, run_file] {
-        let t = TmpDir::new();
-        let f = t.0.join("out.txt");
-        let src = format!(
-            "import create, read_file from std.io\nfn main():\n    w := create(\"{}\")?\n    w.write(\"hi\")?\n    w.close()?\n    print(read_file(\"{}\")?)\nmain()\n",
-            f.display(),
-            f.display()
-        );
-        let entry = t.write("main.chz", &src);
-        let (out, _e, r, _c) = run(&entry);
-        assert!(r.is_ok(), "run faulted: {r:?}");
-        assert_eq!(out, "hi\n");
-    }
+fn writer_create_roundtrip() {
+    let t = TmpDir::new();
+    let f = t.0.join("out.txt");
+    let src = format!(
+        "import create, read_file from std.io\nfn main():\n    w := create(\"{}\")?\n    w.write(\"hi\")?\n    w.close()?\n    print(read_file(\"{}\")?)\nmain()\n",
+        f.display(),
+        f.display()
+    );
+    let entry = t.write("main.chz", &src);
+    let (out, _e, r, _c) = run_file(&entry);
+    assert!(r.is_ok(), "run faulted: {r:?}");
+    assert_eq!(out, "hi\n");
 }
 
 /// R2 — `append` never truncates: create+write "a", close; append+write "b", close; file == "ab".
 #[test]
-fn writer_append_no_truncate_parity() {
-    for run in [run_file as fn(&std::path::Path) -> RunOutput, run_file] {
-        let t = TmpDir::new();
-        let f = t.0.join("log.txt");
-        let src = format!(
-            "import create, append, read_file from std.io\nfn main():\n    w := create(\"{f}\")?\n    w.write(\"a\")?\n    w.close()?\n    w2 := append(\"{f}\")?\n    w2.write(\"b\")?\n    w2.close()?\n    print(read_file(\"{f}\")?)\nmain()\n",
-            f = f.display()
-        );
-        let entry = t.write("main.chz", &src);
-        let (out, _e, r, _c) = run(&entry);
-        assert!(r.is_ok(), "run faulted: {r:?}");
-        assert_eq!(out, "ab\n");
-    }
+fn writer_append_no_truncate() {
+    let t = TmpDir::new();
+    let f = t.0.join("log.txt");
+    let src = format!(
+        "import create, append, read_file from std.io\nfn main():\n    w := create(\"{f}\")?\n    w.write(\"a\")?\n    w.close()?\n    w2 := append(\"{f}\")?\n    w2.write(\"b\")?\n    w2.close()?\n    print(read_file(\"{f}\")?)\nmain()\n",
+        f = f.display()
+    );
+    let entry = t.write("main.chz", &src);
+    let (out, _e, r, _c) = run_file(&entry);
+    assert!(r.is_ok(), "run faulted: {r:?}");
+    assert_eq!(out, "ab\n");
 }
 
 /// R2 — a method on a CLOSED writer is a clean `Result::Err` (contains "closed writer"), NOT a panic.
 #[test]
-fn writer_use_after_close_clean_err_parity() {
-    for run in [run_file as fn(&std::path::Path) -> RunOutput, run_file] {
-        let t = TmpDir::new();
-        let f = t.0.join("x.txt");
-        let src = format!(
-            "import create from std.io\nfn main():\n    w := create(\"{f}\")?\n    w.close()?\n    match w.write(\"z\"):\n        ?n: print(\"wrote \" + \"{{n}}\")\n        !e: print(\"ERR:\" + e.message())\nmain()\n",
-            f = f.display()
-        );
-        let entry = t.write("main.chz", &src);
-        let (out, _e, r, _c) = run(&entry);
-        assert!(
-            r.is_ok(),
-            "run faulted (should be a clean Err, not a fault): {r:?}"
-        );
-        assert!(
-            out.contains("closed writer"),
-            "want a clean closed-writer Err, got: {out:?}"
-        );
-    }
+fn writer_use_after_close_clean_err() {
+    let t = TmpDir::new();
+    let f = t.0.join("x.txt");
+    let src = format!(
+        "import create from std.io\nfn main():\n    w := create(\"{f}\")?\n    w.close()?\n    match w.write(\"z\"):\n        ?n: print(\"wrote \" + \"{{n}}\")\n        !e: print(\"ERR:\" + e.message())\nmain()\n",
+        f = f.display()
+    );
+    let entry = t.write("main.chz", &src);
+    let (out, _e, r, _c) = run_file(&entry);
+    assert!(
+        r.is_ok(),
+        "run faulted (should be a clean Err, not a fault): {r:?}"
+    );
+    assert!(
+        out.contains("closed writer"),
+        "want a clean closed-writer Err, got: {out:?}"
+    );
 }
 
 /// R2 — `write_bytes` round-trips arbitrary binary through `read_bytes`.
 #[test]
-fn writer_write_bytes_binary_roundtrip_parity() {
-    for run in [run_file as fn(&std::path::Path) -> RunOutput, run_file] {
-        let t = TmpDir::new();
-        let f = t.0.join("bin");
-        let src = format!(
-            "import create, read_bytes from std.io\nfn main():\n    w := create(\"{f}\")?\n    w.write_bytes(bytes.from_iter([0, 1, 255]))?\n    w.close()?\n    b := read_bytes(\"{f}\")?\n    print(\"{{b.len()}}\" + \":\" + \"{{b[0]}}\" + \",\" + \"{{b[1]}}\" + \",\" + \"{{b[2]}}\")\nmain()\n",
-            f = f.display()
-        );
-        let entry = t.write("main.chz", &src);
-        let (out, _e, r, _c) = run(&entry);
-        assert!(r.is_ok(), "run faulted: {r:?}");
-        assert_eq!(out, "3:0,1,255\n");
-    }
+fn writer_write_bytes_binary_roundtrip() {
+    let t = TmpDir::new();
+    let f = t.0.join("bin");
+    let src = format!(
+        "import create, read_bytes from std.io\nfn main():\n    w := create(\"{f}\")?\n    w.write_bytes(bytes.from_iter([0, 1, 255]))?\n    w.close()?\n    b := read_bytes(\"{f}\")?\n    print(\"{{b.len()}}\" + \":\" + \"{{b[0]}}\" + \",\" + \"{{b[1]}}\" + \",\" + \"{{b[2]}}\")\nmain()\n",
+        f = f.display()
+    );
+    let entry = t.write("main.chz", &src);
+    let (out, _e, r, _c) = run_file(&entry);
+    assert!(r.is_ok(), "run faulted: {r:?}");
+    assert_eq!(out, "3:0,1,255\n");
 }
 
 /// R2 — `buffered(stdout())`: N writes then one flush; the whole batch reaches stdout, and the output
-/// is BYTE-IDENTICAL serial vs M:N (single task → exact-match). Routes through `emit_out` (the oracle).
+/// is exactly the written bytes. Routes through `emit_out`.
 #[test]
-fn buffered_stdout_one_flush_byte_identical() {
+fn buffered_stdout_one_flush_writes_the_whole_batch() {
     let t = TmpDir::new();
     let src = "import stdout, buffered from std.io\nfn main():\n    bw := buffered(stdout())\n    bw.write(\"a\")?\n    bw.write(\"b\")?\n    bw.write(\"c\")?\n    bw.flush()?\nmain()\n";
     let entry = t.write("main.chz", src);
-    let (serial, _se, sr, _sc) = run_file(&entry);
-    let (mn, _me, mr, _mc) = run_file(&entry);
-    assert!(sr.is_ok() && mr.is_ok(), "faulted: s={sr:?} m={mr:?}");
-    assert_eq!(serial, "abc");
-    assert_eq!(serial, mn, "serial vs M:N byte-identical");
+    let (out, _e, r, _c) = run_file(&entry);
+    assert!(r.is_ok(), "faulted: {r:?}");
+    assert_eq!(out, "abc");
 }
 
 /// M5d — a buffered file writer dropped WITHOUT `flush()`/`close()` loses its tail at heap
@@ -495,21 +401,19 @@ fn buffered_file_dropped_without_close_loses_its_tail() {
 }
 
 /// R2 — `import Writer from std.io` (a pure TYPE with no runtime member value) and `import buffered
-/// from std.io` in a RUNNING program: no runtime fault (the `bind_import` skip). Both engines.
+/// from std.io` in a RUNNING program: no runtime fault (the `bind_import` skip).
 #[test]
-fn import_writer_type_and_buffered_runs_parity() {
-    for run in [run_file as fn(&std::path::Path) -> RunOutput, run_file] {
-        let t = TmpDir::new();
-        let src = "import Writer, buffered, stdout from std.io\nfn tag(w: Writer) -> Writer:\n    return w\nfn main():\n    bw := tag(buffered(stdout()))\n    bw.write(\"ok\")?\n    bw.flush()?\nmain()\n";
-        let entry = t.write("main.chz", src);
-        let (out, _e, r, _c) = run(&entry);
-        assert!(r.is_ok(), "run faulted (bind_import skip missing?): {r:?}");
-        assert_eq!(out, "ok");
-    }
+fn import_writer_type_and_buffered_runs() {
+    let t = TmpDir::new();
+    let src = "import Writer, buffered, stdout from std.io\nfn tag(w: Writer) -> Writer:\n    return w\nfn main():\n    bw := tag(buffered(stdout()))\n    bw.write(\"ok\")?\n    bw.flush()?\nmain()\n";
+    let entry = t.write("main.chz", src);
+    let (out, _e, r, _c) = run_file(&entry);
+    assert!(r.is_ok(), "run faulted (bind_import skip missing?): {r:?}");
+    assert_eq!(out, "ok");
 }
 
 /// R2 — a shared `Writer` written by two spawned tasks: order is UNSPECIFIED (Fork A), so compare the
-/// line MULTISET (`assert_same_lines`), not exact-match. Both engines.
+/// line MULTISET (`assert_same_lines`) against a literal, not exact-match.
 #[test]
 fn shared_writer_across_tasks_same_lines() {
     let t = TmpDir::new();
@@ -519,27 +423,24 @@ fn shared_writer_across_tasks_same_lines() {
         f = f.display()
     );
     let entry = t.write("main.chz", &src);
-    let (serial, _se, sr, _sc) = run_file(&entry);
-    let (mn, _me, mr, _mc) = run_file(&entry);
-    assert!(sr.is_ok() && mr.is_ok(), "faulted: s={sr:?} m={mr:?}");
-    assert_same_lines(&serial, &mn);
+    let (out, _e, r, _c) = run_file(&entry);
+    assert!(r.is_ok(), "faulted: {r:?}");
+    assert_same_lines(&out, "A\nB\n\n");
 }
 
-/// R2 — `create` into a nonexistent directory is a clean `Result::Err`, not a panic. Both engines.
+/// R2 — `create` into a nonexistent directory is a clean `Result::Err`, not a panic.
 #[test]
-fn create_into_missing_dir_clean_err_parity() {
-    for run in [run_file as fn(&std::path::Path) -> RunOutput, run_file] {
-        let t = TmpDir::new();
-        let f = t.0.join("no_such_dir").join("x.txt");
-        let src = format!(
-            "import create from std.io\nfn main():\n    match create(\"{f}\"):\n        ?w: print(\"opened\")\n        !e: print(\"ERR\")\nmain()\n",
-            f = f.display()
-        );
-        let entry = t.write("main.chz", &src);
-        let (out, _e, r, _c) = run(&entry);
-        assert!(r.is_ok(), "run faulted (should be a clean Err): {r:?}");
-        assert_eq!(out, "ERR\n");
-    }
+fn create_into_missing_dir_clean_err() {
+    let t = TmpDir::new();
+    let f = t.0.join("no_such_dir").join("x.txt");
+    let src = format!(
+        "import create from std.io\nfn main():\n    match create(\"{f}\"):\n        ?w: print(\"opened\")\n        !e: print(\"ERR\")\nmain()\n",
+        f = f.display()
+    );
+    let entry = t.write("main.chz", &src);
+    let (out, _e, r, _c) = run_file(&entry);
+    assert!(r.is_ok(), "run faulted (should be a clean Err): {r:?}");
+    assert_eq!(out, "ERR\n");
 }
 
 /// R2 — a full `Writer` program TYPE-CHECKS clean through `check_graph` (run_file skips the checker, so
@@ -564,183 +465,164 @@ fn writer_program_type_checks_clean() {
 // ===== R2b — std.io Reader / file-handle type (line/chunk streaming file INPUT) =====
 
 /// R2b — `open(path)` opens a read-only handle; `read_line()` streams the file line-by-line
-/// (trailing newline stripped, `None` = EOF); `close()` releases the fd. Serial and M:N each.
+/// (trailing newline stripped, `None` = EOF); `close()` releases the fd.
 #[test]
-fn reader_open_read_line_parity() {
-    for run in [run_file as fn(&std::path::Path) -> RunOutput, run_file] {
-        let t = TmpDir::new();
-        let f = t.0.join("in.txt");
-        std::fs::write(&f, "one\ntwo\nthree\n").unwrap();
-        let src = format!(
-            "import open from std.io\nfn main():\n    r := open(\"{f}\")?\n    while true:\n        match r.read_line():\n            ?ln: print(ln)\n            None: break\n    r.close()?\nmain()\n",
-            f = f.display()
-        );
-        let entry = t.write("main.chz", &src);
-        let (out, _e, r, _c) = run(&entry);
-        assert!(r.is_ok(), "run faulted: {r:?}");
-        assert_eq!(out, "one\ntwo\nthree\n");
-    }
+fn reader_open_read_line() {
+    let t = TmpDir::new();
+    let f = t.0.join("in.txt");
+    std::fs::write(&f, "one\ntwo\nthree\n").unwrap();
+    let src = format!(
+        "import open from std.io\nfn main():\n    r := open(\"{f}\")?\n    while true:\n        match r.read_line():\n            ?ln: print(ln)\n            None: break\n    r.close()?\nmain()\n",
+        f = f.display()
+    );
+    let entry = t.write("main.chz", &src);
+    let (out, _e, r, _c) = run_file(&entry);
+    assert!(r.is_ok(), "run faulted: {r:?}");
+    assert_eq!(out, "one\ntwo\nthree\n");
 }
 
 /// R2b — a file whose last line has NO trailing newline: `read_line` still yields it, then `None`.
 #[test]
-fn reader_read_line_no_trailing_newline_parity() {
-    for run in [run_file as fn(&std::path::Path) -> RunOutput, run_file] {
-        let t = TmpDir::new();
-        let f = t.0.join("in.txt");
-        std::fs::write(&f, "a\nb").unwrap();
-        let src = format!(
-            "import open from std.io\nfn main():\n    r := open(\"{f}\")?\n    while true:\n        match r.read_line():\n            ?ln: print(\"[\" + ln + \"]\")\n            None: break\n    r.close()?\nmain()\n",
-            f = f.display()
-        );
-        let entry = t.write("main.chz", &src);
-        let (out, _e, r, _c) = run(&entry);
-        assert!(r.is_ok(), "run faulted: {r:?}");
-        assert_eq!(out, "[a]\n[b]\n");
-    }
+fn reader_read_line_no_trailing_newline() {
+    let t = TmpDir::new();
+    let f = t.0.join("in.txt");
+    std::fs::write(&f, "a\nb").unwrap();
+    let src = format!(
+        "import open from std.io\nfn main():\n    r := open(\"{f}\")?\n    while true:\n        match r.read_line():\n            ?ln: print(\"[\" + ln + \"]\")\n            None: break\n    r.close()?\nmain()\n",
+        f = f.display()
+    );
+    let entry = t.write("main.chz", &src);
+    let (out, _e, r, _c) = run_file(&entry);
+    assert!(r.is_ok(), "run faulted: {r:?}");
+    assert_eq!(out, "[a]\n[b]\n");
 }
 
 /// R2b — line-terminator stripping matches the module-level `io.read_line` UNCONDITIONALLY: a CRLF
 /// (`\r\n`) line and a final bare-`\r` line (classic-Mac / no trailing `\n`) both come back with the
 /// `\r` gone. Guards the anti-drift contract (a nested `\r`-only-if-`\n` strip retained the bare `\r`).
 #[test]
-fn reader_read_line_strips_bare_cr_parity() {
-    for run in [run_file as fn(&std::path::Path) -> RunOutput, run_file] {
-        let t = TmpDir::new();
-        let f = t.0.join("in.txt");
-        std::fs::write(&f, "a\r\nb\r").unwrap(); // CRLF line, then a bare-CR final line (no \n)
-        let src = format!(
-            "import open from std.io\nfn main():\n    r := open(\"{f}\")?\n    while true:\n        match r.read_line():\n            ?ln: print(\"[\" + ln + \"]\")\n            None: break\n    r.close()?\nmain()\n",
-            f = f.display()
-        );
-        let entry = t.write("main.chz", &src);
-        let (out, _e, r, _c) = run(&entry);
-        assert!(r.is_ok(), "run faulted: {r:?}");
-        assert_eq!(out, "[a]\n[b]\n");
-    }
+fn reader_read_line_strips_bare_cr() {
+    let t = TmpDir::new();
+    let f = t.0.join("in.txt");
+    std::fs::write(&f, "a\r\nb\r").unwrap(); // CRLF line, then a bare-CR final line (no \n)
+    let src = format!(
+        "import open from std.io\nfn main():\n    r := open(\"{f}\")?\n    while true:\n        match r.read_line():\n            ?ln: print(\"[\" + ln + \"]\")\n            None: break\n    r.close()?\nmain()\n",
+        f = f.display()
+    );
+    let entry = t.write("main.chz", &src);
+    let (out, _e, r, _c) = run_file(&entry);
+    assert!(r.is_ok(), "run faulted: {r:?}");
+    assert_eq!(out, "[a]\n[b]\n");
 }
 
 /// R2b — `r.lines()` is a BODIED Chezzi method on the `native struct Reader` (mixing Rust-backed
 /// `native fn` sigs with a pure-Chezzi generator method on one native handle). It streams the file
-/// line-by-line lazily (a generator over `read_line()`). Both engines.
+/// line-by-line lazily (a generator over `read_line()`).
 #[test]
-fn reader_lines_parity() {
-    for run in [run_file as fn(&std::path::Path) -> RunOutput, run_file] {
-        let t = TmpDir::new();
-        let f = t.0.join("in.txt");
-        std::fs::write(&f, "one\ntwo\nthree\n").unwrap();
-        let src = format!(
-            "import open from std.io\nfn main():\n    r := open(\"{f}\")?\n    for ln in r.lines():\n        print(ln)\n    r.close()?\nmain()\n",
-            f = f.display()
-        );
-        let entry = t.write("main.chz", &src);
-        let (out, _e, r, _c) = run(&entry);
-        assert!(r.is_ok(), "run faulted: {r:?}");
-        assert_eq!(out, "one\ntwo\nthree\n");
-    }
+fn reader_lines() {
+    let t = TmpDir::new();
+    let f = t.0.join("in.txt");
+    std::fs::write(&f, "one\ntwo\nthree\n").unwrap();
+    let src = format!(
+        "import open from std.io\nfn main():\n    r := open(\"{f}\")?\n    for ln in r.lines():\n        print(ln)\n    r.close()?\nmain()\n",
+        f = f.display()
+    );
+    let entry = t.write("main.chz", &src);
+    let (out, _e, r, _c) = run_file(&entry);
+    assert!(r.is_ok(), "run faulted: {r:?}");
+    assert_eq!(out, "one\ntwo\nthree\n");
 }
 
 /// R2b — `r.lines()` yields LAZILY: an early `break` after the first line must NOT drain the file
-/// into a list. Proves the generator suspends between lines (does not snapshot the file). Both engines.
+/// into a list. Proves the generator suspends between lines (does not snapshot the file).
 #[test]
-fn reader_lines_lazy_early_break_parity() {
-    for run in [run_file as fn(&std::path::Path) -> RunOutput, run_file] {
-        let t = TmpDir::new();
-        let f = t.0.join("in.txt");
-        std::fs::write(&f, "one\ntwo\nthree\n").unwrap();
-        let src = format!(
-            "import open from std.io\nfn main():\n    r := open(\"{f}\")?\n    for ln in r.lines():\n        print(ln)\n        break\n    r.close()?\nmain()\n",
-            f = f.display()
-        );
-        let entry = t.write("main.chz", &src);
-        let (out, _e, r, _c) = run(&entry);
-        assert!(r.is_ok(), "run faulted: {r:?}");
-        assert_eq!(out, "one\n");
-    }
+fn reader_lines_lazy_early_break() {
+    let t = TmpDir::new();
+    let f = t.0.join("in.txt");
+    std::fs::write(&f, "one\ntwo\nthree\n").unwrap();
+    let src = format!(
+        "import open from std.io\nfn main():\n    r := open(\"{f}\")?\n    for ln in r.lines():\n        print(ln)\n        break\n    r.close()?\nmain()\n",
+        f = f.display()
+    );
+    let entry = t.write("main.chz", &src);
+    let (out, _e, r, _c) = run_file(&entry);
+    assert!(r.is_ok(), "run faulted: {r:?}");
+    assert_eq!(out, "one\n");
 }
 
 /// R2b — `read_bytes(n)` chunks the file: exactly-n bytes until the short final chunk, then empty
-/// bytes (`len == 0`) = EOF. Both engines.
+/// bytes (`len == 0`) = EOF.
 #[test]
-fn reader_read_bytes_chunk_parity() {
-    for run in [run_file as fn(&std::path::Path) -> RunOutput, run_file] {
-        let t = TmpDir::new();
-        let f = t.0.join("bin");
-        std::fs::write(&f, [10u8, 20, 30, 40, 50, 60]).unwrap(); // 6 bytes
-        let src = format!(
-            "import open from std.io\nfn main():\n    r := open(\"{f}\")?\n    c1 := r.read_bytes(4)?\n    c2 := r.read_bytes(4)?\n    c3 := r.read_bytes(4)?\n    print(\"{{c1.len()}}\" + \":\" + \"{{c1[0]}}\" + \",\" + \"{{c1[3]}}\")\n    print(\"{{c2.len()}}\" + \":\" + \"{{c2[0]}}\" + \",\" + \"{{c2[1]}}\")\n    print(\"{{c3.len()}}\")\n    r.close()?\nmain()\n",
-            f = f.display()
-        );
-        let entry = t.write("main.chz", &src);
-        let (out, _e, r, _c) = run(&entry);
-        assert!(r.is_ok(), "run faulted: {r:?}");
-        assert_eq!(out, "4:10,40\n2:50,60\n0\n");
-    }
+fn reader_read_bytes_chunk() {
+    let t = TmpDir::new();
+    let f = t.0.join("bin");
+    std::fs::write(&f, [10u8, 20, 30, 40, 50, 60]).unwrap(); // 6 bytes
+    let src = format!(
+        "import open from std.io\nfn main():\n    r := open(\"{f}\")?\n    c1 := r.read_bytes(4)?\n    c2 := r.read_bytes(4)?\n    c3 := r.read_bytes(4)?\n    print(\"{{c1.len()}}\" + \":\" + \"{{c1[0]}}\" + \",\" + \"{{c1[3]}}\")\n    print(\"{{c2.len()}}\" + \":\" + \"{{c2[0]}}\" + \",\" + \"{{c2[1]}}\")\n    print(\"{{c3.len()}}\")\n    r.close()?\nmain()\n",
+        f = f.display()
+    );
+    let entry = t.write("main.chz", &src);
+    let (out, _e, r, _c) = run_file(&entry);
+    assert!(r.is_ok(), "run faulted: {r:?}");
+    assert_eq!(out, "4:10,40\n2:50,60\n0\n");
 }
 
 /// R2b — `read_bytes` on a CLOSED reader is a clean `Result::Err` (contains "closed reader"), NOT a
-/// panic. Both engines.
+/// panic.
 #[test]
-fn reader_use_after_close_clean_err_parity() {
-    for run in [run_file as fn(&std::path::Path) -> RunOutput, run_file] {
-        let t = TmpDir::new();
-        let f = t.0.join("x.txt");
-        std::fs::write(&f, "data").unwrap();
-        let src = format!(
-            "import open from std.io\nfn main():\n    r := open(\"{f}\")?\n    r.close()?\n    match r.read_bytes(4):\n        ?b: print(\"got \" + \"{{b.len()}}\")\n        !e: print(\"ERR:\" + e.message())\nmain()\n",
-            f = f.display()
-        );
-        let entry = t.write("main.chz", &src);
-        let (out, _e, r, _c) = run(&entry);
-        assert!(
-            r.is_ok(),
-            "run faulted (should be a clean Err, not a fault): {r:?}"
-        );
-        assert!(
-            out.contains("closed reader"),
-            "want a clean closed-reader Err, got: {out:?}"
-        );
-    }
+fn reader_use_after_close_clean_err() {
+    let t = TmpDir::new();
+    let f = t.0.join("x.txt");
+    std::fs::write(&f, "data").unwrap();
+    let src = format!(
+        "import open from std.io\nfn main():\n    r := open(\"{f}\")?\n    r.close()?\n    match r.read_bytes(4):\n        ?b: print(\"got \" + \"{{b.len()}}\")\n        !e: print(\"ERR:\" + e.message())\nmain()\n",
+        f = f.display()
+    );
+    let entry = t.write("main.chz", &src);
+    let (out, _e, r, _c) = run_file(&entry);
+    assert!(
+        r.is_ok(),
+        "run faulted (should be a clean Err, not a fault): {r:?}"
+    );
+    assert!(
+        out.contains("closed reader"),
+        "want a clean closed-reader Err, got: {out:?}"
+    );
 }
 
-/// R2b — `open` on a nonexistent file is a clean `Result::Err`, not a panic. Both engines.
+/// R2b — `open` on a nonexistent file is a clean `Result::Err`, not a panic.
 #[test]
-fn reader_open_missing_file_clean_err_parity() {
-    for run in [run_file as fn(&std::path::Path) -> RunOutput, run_file] {
-        let t = TmpDir::new();
-        let f = t.0.join("no_such_dir").join("x.txt");
-        let src = format!(
-            "import open from std.io\nfn main():\n    match open(\"{f}\"):\n        ?r: print(\"opened\")\n        !e: print(\"ERR:\" + e.message())\nmain()\n",
-            f = f.display()
-        );
-        let entry = t.write("main.chz", &src);
-        let (out, _e, r, _c) = run(&entry);
-        assert!(r.is_ok(), "run faulted (should be a clean Err): {r:?}");
-        assert!(
-            out.starts_with("ERR:"),
-            "want a clean open Err, got: {out:?}"
-        );
-    }
+fn reader_open_missing_file_clean_err() {
+    let t = TmpDir::new();
+    let f = t.0.join("no_such_dir").join("x.txt");
+    let src = format!(
+        "import open from std.io\nfn main():\n    match open(\"{f}\"):\n        ?r: print(\"opened\")\n        !e: print(\"ERR:\" + e.message())\nmain()\n",
+        f = f.display()
+    );
+    let entry = t.write("main.chz", &src);
+    let (out, _e, r, _c) = run_file(&entry);
+    assert!(r.is_ok(), "run faulted (should be a clean Err): {r:?}");
+    assert!(
+        out.starts_with("ERR:"),
+        "want a clean open Err, got: {out:?}"
+    );
 }
 
 /// R2b — `import Reader from std.io` (a pure TYPE with no runtime member value) + send the handle
 /// across a `spawn` boundary and read in the task: no runtime fault (the `bind_import` skip).
-/// Both engines.
 #[test]
-fn import_reader_type_and_send_across_spawn_parity() {
-    for run in [run_file as fn(&std::path::Path) -> RunOutput, run_file] {
-        let t = TmpDir::new();
-        let f = t.0.join("in.txt");
-        std::fs::write(&f, "hello\n").unwrap();
-        let src = format!(
-            "import Reader, open from std.io\nfn first(r: Reader) -> str?:\n    return r.read_line()\nfn main():\n    r := open(\"{f}\")?\n    parallel:\n        spawn:\n            match first(r):\n                ?ln: print(ln)\n                None: print(\"empty\")\nmain()\n",
-            f = f.display()
-        );
-        let entry = t.write("main.chz", &src);
-        let (out, _e, r, _c) = run(&entry);
-        assert!(r.is_ok(), "run faulted (bind_import skip missing?): {r:?}");
-        assert_eq!(out, "hello\n");
-    }
+fn import_reader_type_and_send_across_spawn() {
+    let t = TmpDir::new();
+    let f = t.0.join("in.txt");
+    std::fs::write(&f, "hello\n").unwrap();
+    let src = format!(
+        "import Reader, open from std.io\nfn first(r: Reader) -> str?:\n    return r.read_line()\nfn main():\n    r := open(\"{f}\")?\n    parallel:\n        spawn:\n            match first(r):\n                ?ln: print(ln)\n                None: print(\"empty\")\nmain()\n",
+        f = f.display()
+    );
+    let entry = t.write("main.chz", &src);
+    let (out, _e, r, _c) = run_file(&entry);
+    assert!(r.is_ok(), "run faulted (bind_import skip missing?): {r:?}");
+    assert_eq!(out, "hello\n");
 }
 
 /// R2b — a full `Reader` program TYPE-CHECKS clean through `check_graph` (the CLI path; `run_file`
@@ -845,7 +727,7 @@ fn atomic_int_contention_parity() {
 }
 
 /// Reserved-name hole guard: `import AtomicInt from std.concurrency` must RUN (bind_import skip),
-/// not check-pass-then-runtime-trap. Both engines.
+/// not check-pass-then-runtime-trap.
 #[test]
 fn atomic_int_from_import_runs_parity() {
     let src = "import AtomicInt from std.concurrency\nfn main():\n    a := AtomicInt(0)\n    a.add(3)\n    print(a.load())\nmain()\n";

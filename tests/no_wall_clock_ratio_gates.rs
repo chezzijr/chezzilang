@@ -85,7 +85,7 @@ const CLOCK_READING_TESTS: [&str; 19] = [
     // TICKET-205. The grid bounds how long a victim waits behind a spinner; a starved victim never
     // acts, so there is no event to count. One absolute bound with 20x headroom (0.1 s vs 2 s).
     "every_victim_acts_while_the_spinner_runs",
-    "parity_blocking_native_is_an_entry_cancellation_checkpoint_on_both_engines",
+    "blocking_native_is_an_entry_cancellation_checkpoint",
     // TICKET-151 (W14-40): the bound is a LIVENESS deadline, not a cost measure -- the test
     // withholds stdin and asks whether a runnable sibling printed before the read returned.
     // "The sibling never ran" has no counted measure; the clock is the outer bound on how
@@ -429,8 +429,8 @@ const SLEEP_SYNCHRONISED_TESTS: [&str; 120] = [
     // TICKET-134. Same reason as the recv entry above: the sleep only orders the owner's block
     // before the child's fault, and `owner_fault_window_hook` is the real latch.
     "owner_fault_recorded_after_the_fault_rung_still_outranks_the_full_send_deadlock_verdict",
-    "parity_a_blocking_defer_body_completes_when_the_task_is_cancelled",
-    "parity_blocking_native_is_an_entry_cancellation_checkpoint_on_both_engines",
+    "a_blocking_defer_body_completes_when_the_task_is_cancelled",
+    "blocking_native_is_an_entry_cancellation_checkpoint",
     "read_timeout_returns_err",
     "read_without_timeout_still_parks_forever",
     "reaps_idle_thread",

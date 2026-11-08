@@ -416,7 +416,7 @@ fn flag_usage_deterministic_parity() {
 }
 
 /// std.flag golden: `examples/flag_demo.chz` exercises every case in one program, byte-matches
-/// `.expected`, and stays identical on the serial + M:N engines.
+/// `.expected`.
 #[test]
 fn golden_flag_demo_via_run_file() {
     let path = fixture("examples/flag_demo.chz");
@@ -506,7 +506,6 @@ fn main():
     print(iter.reduce([7], fn(a: int, b: int) -> int: a + b))
 main()
 "#;
-    // `golden_entry` runs the graph path on BOTH engines and asserts byte-identical stdout.
     let out = golden_entry(src);
     assert!(
         out.contains("caught: reduce: empty list with no initial value"),
@@ -530,8 +529,8 @@ fn golden_iter_more_via_run_file() {
 }
 
 // --- lazy iterator adapters (gaps §3) — count/repeat/cycle/chain/islice/imap/ifilter ---
-// Each RUNS inline source through the graph path on BOTH engines (serial + M:N) via golden_entry
-// and asserts byte-identical stdout. The count+islice test is the laziness canary: an infinite
+// Each RUNS inline source through the graph path via golden_entry against a literal stdout. The
+// count+islice test is the laziness canary: an infinite
 // source pulled through a finite prefix MUST terminate — if it hangs, laziness broke.
 
 #[test]
@@ -560,8 +559,7 @@ fn test_lazy_islice_consumes_exactly_stop() {
 }
 
 // std.string.count with an EMPTY substring matches Python/Go (`len(s)+1`), not 0 (the old guard drifted
-// from both ancestors + from its own sibling `index_of(s,"")==0`). Both engines agreed on the wrong value
-// before the fix, so the parity oracle was blind — this pins the corrected value.
+// from both ancestors + from its own sibling `index_of(s,"")==0`) — this pins the corrected value.
 #[test]
 fn string_count_empty_substring_matches_python() {
     let out = golden_entry(
@@ -856,10 +854,8 @@ fn golden_optchain_via_run_file() {
 }
 
 /// Runtime stack trace: a faulting nested call reports the error line + the call chain (innermost
-/// first) with each call's line, and its formatted rendering matches a literal golden. Asserts
-/// against that golden rather than a SECOND run of the same file (TICKET-059): with `--serial`
-/// deleted 2026-08-16 there is only one engine, so running the file twice and diffing the two traces
-/// against each other proves nothing (`CLAUDE.md`'s one-engine rule).
+/// first) with each call's line, and its formatted rendering matches a literal golden — never a
+/// SECOND run of the same file: there is one engine, so diffing two traces proves nothing.
 #[test]
 fn stack_trace_reports_call_chain() {
     let path = fixture("examples/stack_trace.chz");
@@ -1557,7 +1553,7 @@ fn multi_file_identical_under_gc_stress() {
 
 #[test]
 fn parity_map_missing_key_read_errors() {
-    // Both engines must error identically on a missing key.
+    // A missing key is a runtime error.
     let src = "m := {\"a\": 1}\nprint(m[\"z\"])\n";
     assert_eq!(
         vm_outcome(src).unwrap_err(),

@@ -844,7 +844,7 @@ fn a_method_default_from_a_sibling_module_resolves_in_its_definer() {
 ///
 /// Measured: `b1307258` prints `12`, the equivalent Python prints `12`, and `dfdc7a1b` refused with
 /// `cannot use the default for 'x' of 'S.mprobe' here: it is declared in module 'a', which module
-/// 'z' does not import`. Both engines, both import orders. Here `u.av()` is reachable from `z` as
+/// 'z' does not import`. Both import orders. Here `u.av()` is reachable from `z` as
 /// well, so this case agreed with the definer even under the old clone; its sibling below is the
 /// one that could not.
 /// TICKET-187 (supersedes DEC-075): a protocol call binds by the protocol's own parameter list, so
@@ -1170,20 +1170,17 @@ fn a_provider_frame_in_a_trace_is_readable() {
     )
     .unwrap();
     let (_o, _e, res, _c) = run_file(&entry);
-    let (_po, _pe, pres, _pc) = run_file(&entry);
     let _ = std::fs::remove_dir_all(&dir);
-    for (engine, r) in [("serial", res), ("M:N", pres)] {
-        let e = r.expect_err("the default faults");
-        let trace = format_trace(&e);
-        assert!(
-            trace.contains("at <default for 'x' of 'f'>"),
-            "[{engine}] expected a readable provider frame, got:\n{trace}"
-        );
-        assert!(
-            !trace.contains(crate::base::provider_name::PROVIDER_PREFIX),
-            "[{engine}] the internal `$def$` name must not reach a user-visible trace:\n{trace}"
-        );
-    }
+    let e = res.expect_err("the default faults");
+    let trace = format_trace(&e);
+    assert!(
+        trace.contains("at <default for 'x' of 'f'>"),
+        "expected a readable provider frame, got:\n{trace}"
+    );
+    assert!(
+        !trace.contains(crate::base::provider_name::PROVIDER_PREFIX),
+        "the internal `$def$` name must not reach a user-visible trace:\n{trace}"
+    );
 }
 
 /// TICKET-048 (W8-14 residual) — a nursery-deadlock fault's headline must name a real file and
@@ -1372,11 +1369,10 @@ fn concurrency_from_import_runs_both_engines() {
 /// Gate `Socket`/`Listener` behind `import std.net` — a `Socket` carries no runtime module-member
 /// value (the runtime resolves `Ty::Socket` directly; the ctor is `connect`/`listen`), so a
 /// from-import (`import Socket from std.net`) would fault `module 'std.net' has no member 'Socket'`
-/// WITHOUT the `bind_import` skip. This pins the skip on BOTH engines (single-engine fault = red)
-/// plus a whole-module twin. Phase 4c-net: the bodies now also call `Socket`/`Listener` METHODS
+/// WITHOUT the `bind_import` skip. This pins the skip plus a whole-module twin. Phase 4c-net: the bodies now also call `Socket`/`Listener` METHODS
 /// (`read`/`write`/`accept`/`close`) so the harvested method table (the retired bespoke arm's
 /// replacement) is exercised at check time; the `use_*` fns are checked though never
-/// called (no live I/O — the method resolution is a front-end concern, identical across engines).
+/// called (no live I/O — the method resolution is a front-end concern).
 #[test]
 fn net_from_import_runs_both_engines() {
     for src in [
@@ -1421,8 +1417,7 @@ fn timer_whole_module_runs_both_engines() {
 }
 
 /// CRITICAL — a SELECTIVE `import timer from std.time` must RUN. `timer` is opcode-
-/// backed with NO runtime module-member value, so the from-import type-checks green but BOTH engines
-/// would fault `module 'std.time' has no member 'timer'` WITHOUT the timer-specific `bind_import`
+/// backed with NO runtime module-member value, so the from-import type-checks green but would fault `module 'std.time' has no member 'timer'` WITHOUT the timer-specific `bind_import`
 /// skip. The call resolves via the compiler name→opcode dispatch, not a bound member.
 #[test]
 fn timer_from_import_runs_both_engines() {

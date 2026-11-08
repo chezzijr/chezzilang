@@ -160,7 +160,7 @@ fn parity_std_io_eprint_goes_to_stderr_not_stdout() {
 #[test]
 fn parity_std_log_defaults_to_stderr() {
     // std.log: default min level INFO → debug() dropped, info/warn land on STDERR (not stdout),
-    // formatted "LEVEL message" in order. Both engines identical.
+    // formatted "LEVEL message" in order.
     let src = "import std.log\nfn main():\n    lg := log.new()\n    lg.info(\"served\")\n    lg.debug(\"noisy\")\n    lg.warn(\"careful\")\nmain()";
     assert_eq!(golden_entry(src), ""); // nothing on stdout
     let t = TmpDir::new();
@@ -262,13 +262,9 @@ match json.decode[(In, In)](r'[{"w":"p"},{"w":"q"}]'):
 /// un-`shutdown()`'d jobs mutate a module-global aggregate (forcing the snapshot path) and allocate,
 /// and the drain must complete with no error and full isolation (the parent's `xs` untouched).
 ///
-/// Historical note: this path used to carry a `pinned_module_roots` GC pin, because the cooperative
-/// `--serial` engine's `with_serial_child_modules` swapped the shell's REAL `module_objs` out into a
-/// plain local while a child copy ran in the SAME shared heap — unrooted across a safepoint. That
-/// window died with the engine (89f20591): under M:N the ONLY thing that swaps `module_objs` out of
-/// the VM is [`Vm::swap_ctx`], which moves the fiber's heap in the same call, so a swapped-out view
-/// always parks together with the heap its `GcRef`s index and `collect()` (which walks only the LIVE
-/// heap) can never sweep it. The pin was left writerless by that deletion and is gone too.
+/// No GC pin is needed: the ONLY thing that swaps `module_objs` out of the VM is [`Vm::swap_ctx`],
+/// which moves the fiber's heap in the same call, so a swapped-out view always parks together with
+/// the heap its `GcRef`s index and `collect()` (which walks only the LIVE heap) can never sweep it.
 #[test]
 fn executor_exit_drain_module_globals_survive_gc_stress() {
     let src = "\
@@ -401,7 +397,7 @@ fn native_returned_heap_values_survive_gc_stress() {
     assert_eq!(out, "done 300\n");
 }
 
-/// A spread of programs exercising every feature class — run through BOTH engines.
+/// A spread of programs exercising every feature class, each with its expected outcome.
 const PROGRAMS: &[(&str, Result<&str, &str>)] = &[
     // arithmetic + promotion + truncation
     (
@@ -1040,10 +1036,9 @@ fn golden_std_demo_via_run_file() {
 
 // ----- std.io TTY detection (gaps §6) — separated block near golden_std_demo to shrink the
 // hand-resolved conflict with the concurrent List-methods task also editing this file. -----
-/// `io.isatty()`/`isatty_stdin()`/`isatty_stderr()` each return a plain `bool` without faulting, and
-/// serial==M:N (an env fd query is engine-agnostic). The value depends on how the harness's real fds
-/// are wired (a terminal → true, a pipe/redirect → false — libtest's capture doesn't touch the fd),
-/// so we assert bool-SHAPE + engine agreement, NOT a fixed value.
+/// `io.isatty()`/`isatty_stdin()`/`isatty_stderr()` each return a plain `bool` without faulting. The
+/// value depends on how the harness's real fds are wired (a terminal → true, a pipe/redirect → false
+/// — libtest's capture doesn't touch the fd), so we assert bool-SHAPE, NOT a fixed value.
 #[test]
 fn golden_isatty_via_run_file() {
     let out = golden_entry(
@@ -1063,7 +1058,7 @@ fn golden_isatty_via_run_file() {
 // conflict with the concurrent std.csv task also editing this file. -----
 /// setenv writes and environ/env READ the SAME per-VM HostConfig env map (gaps §6 drift-fix): after
 /// `os.setenv("K","V")`, BOTH `os.env("K")` and `os.environ()["K"]` observe "V", and a seeded var
-/// survives — proving one consistent env source. serial==M:N (per-VM HostConfig, deterministic).
+/// survives — proving one consistent env source (per-VM HostConfig, deterministic).
 #[test]
 fn golden_os_setenv_environ_consistency() {
     let src = "import std.os\nos.setenv(\"K\", \"V\")\nmatch os.env(\"K\"):\n    ?v: print(v)\n    None: print(\"NONE\")\nprint(os.environ()[\"K\"])\nprint(os.environ()[\"SEED\"])\n";
@@ -1078,8 +1073,8 @@ fn golden_os_setenv_environ_consistency() {
     assert_eq!(out, "V\nV\n1\n");
 }
 
-/// getpid/platform/temp_dir/home_dir are engine-agnostic queries: assert SHAPE + serial==M:N
-/// agreement (values are machine-dependent — no fixed literal). pid>0, platform nonempty, temp_dir
+/// getpid/platform/temp_dir/home_dir: assert SHAPE (values are machine-dependent — no fixed
+/// literal). pid>0, platform nonempty, temp_dir
 /// nonempty, home_dir is Some/None-shaped.
 #[test]
 fn golden_os_queries() {

@@ -101,7 +101,7 @@ pub enum Expr {
         idx: Box<Expr>,
     },
     /// Python-style slice `base[start:end:step]` (each bound optional). Lists and strings only;
-    /// both engines clamp out-of-range bounds identically, so no shim is needed.
+    /// Chezzi and CPython clamp out-of-range bounds identically, so no shim is needed.
     Slice {
         ret: Ty,
         base: Box<Expr>,

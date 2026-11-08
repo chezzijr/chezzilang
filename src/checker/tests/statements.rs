@@ -391,7 +391,7 @@ fn for_over_int_still_rejected() {
     rejects("for x in 5:\n    print(x)\n", "cannot iterate over int");
 }
 
-// ===== loop variable is immutable (gap: cross-engine divergence on reassignment) =====
+// ===== loop variable is immutable =====
 
 #[test]
 fn for_range_var_reassign_rejected() {

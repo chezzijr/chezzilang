@@ -10,7 +10,7 @@ const MAX_DEPTH: usize = 16;
 const MAX_WIDTH: usize = 64;
 
 /// TICKET-254 — which objects of the value graph an expression builds are new: no name holds them
-/// (TICKET-240 drew the shape for the deleted airlock; the temporary-write warning reads it).
+/// (the temporary-write warning reads it).
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(super) enum Fresh {
     /// A name may still hold it: do not descend.

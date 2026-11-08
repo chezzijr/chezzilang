@@ -317,8 +317,7 @@ test fn cyclic_set_element_views():
 # so element 0's half-finished attempt left a `Cell` holding the inert placeholder in that shared map,
 # and element 1 hit the cell's first-wins dedupe and got `None`:
 #   sl[1]()  ->  runtime error: type None has no method 'len'
-# M3.3: a view returns the closures by handle and rebuilds nothing, so no map can be poisoned. Both engines agreed on the wrong answer,
-# so parity could not have caught it.
+# A view returns the closures by handle and rebuilds nothing, so no map can be poisoned.
 test fn cyclic_slice_shared_map_is_not_poisoned_by_a_piece_that_needs_the_container():
     xs: List[fn() -> int] = []
     f := fn() -> int: xs.len()

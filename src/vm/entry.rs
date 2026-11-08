@@ -28,8 +28,7 @@ pub fn run_program(src: &str) -> (String, Result<(), RuntimeError>) {
     (captured(out), result)
 }
 
-/// [`run_program`] without the lossy [`captured`] decode — the raw sink bytes, for a cross-engine
-/// comparison (W6-9b).
+/// [`run_program`] without the lossy [`captured`] decode — the raw sink bytes.
 #[cfg(test)]
 pub fn run_program_bytes(src: &str) -> (Vec<u8>, Result<(), RuntimeError>) {
     let src = src.to_string();
@@ -70,23 +69,20 @@ pub(super) fn run_program_inner(src: &str) -> (Vec<u8>, Result<(), RuntimeError>
 }
 
 /// Assert two program outputs contain the SAME lines regardless of order — for a concurrency test
-/// whose line ORDER legitimately varies between runs under the M:N scheduler (racing spawns /
-/// `Executor` tasks / multi-producer channel drains) while the line SET does not.
+/// whose line ORDER legitimately varies between runs (racing spawns / `Executor` tasks /
+/// multi-producer channel drains) while the line SET does not.
 ///
-/// **Both arguments are M:N runs.** Before 2026-08-16 the first was the cooperative `--serial`
-/// engine, which delivered a deterministic order, and the exact order was asserted there separately;
-/// that engine is gone, so no run of any program pins a cross-task order any more. Comparing two runs
-/// of the same program against each other is a *stability* check and nothing more — if a test wants a
-/// real expectation, give it a literal line set.
+/// No run pins a cross-task order. Comparing two runs of the same program against each other is a
+/// *stability* check and nothing more — if a test wants a real expectation, give it a literal line set.
 #[cfg(test)]
-pub fn assert_same_lines(cooperative: &str, mn: &str) {
-    let mut a: Vec<&str> = cooperative.lines().collect();
-    let mut b: Vec<&str> = mn.lines().collect();
+pub fn assert_same_lines(first: &str, second: &str) {
+    let mut a: Vec<&str> = first.lines().collect();
+    let mut b: Vec<&str> = second.lines().collect();
     a.sort_unstable();
     b.sort_unstable();
     assert_eq!(
         a, b,
-        "line multiset differs between the two runs\n first:\n{cooperative}\n second:\n{mn}"
+        "line multiset differs between the two runs\n first:\n{first}\n second:\n{second}"
     );
 }
 
@@ -192,10 +188,7 @@ pub fn run_with(src: &str, stress: bool) -> (Result<String, RuntimeError>, usize
     run_with_cfg(src, stress)
 }
 
-/// [`run_with`] with the engine selectable, so a GC-stress test can run on the M:N engine too. The
-/// eager `Executor` path needs that: its hazards (a submitted closure rebuilt into a worker heap while
-/// the parent holds the executor's core lock) exist only on that engine, and the serial-only
-/// [`run_capture_stress`] cannot reach them.
+/// The body of [`run_with`]: compile, run on a fresh VM thread, report output and live objects.
 #[cfg(test)]
 pub fn run_with_cfg(src: &str, stress: bool) -> (Result<String, RuntimeError>, usize) {
     let src = src.to_string();
@@ -221,7 +214,7 @@ pub fn run_with_cfg(src: &str, stress: bool) -> (Result<String, RuntimeError>, u
 /// Run a program on a deliberately SMALL host stack (test helper for the call-flattening guarantee).
 /// Deep *plain-function* recursion must not consume host stack — frames live in the heap `frames`
 /// `Vec`, not via a per-call `run_until` recursion — so it survives a stack far below the production
-/// [`VM_STACK_BYTES`]. On the old recurse-per-call engine this overflowed and aborted.
+/// [`VM_STACK_BYTES`].
 #[cfg(test)]
 pub fn run_capture_on_stack(src: &str, stack_bytes: usize) -> Result<String, RuntimeError> {
     let src = src.to_string();
@@ -238,8 +231,8 @@ pub fn run_capture_on_stack(src: &str, stack_bytes: usize) -> Result<String, Run
         .expect("VM thread panicked")
 }
 
-/// Stdout from a stress-mode run (panics on error) — convenience for parity-under-GC tests. Runs on
-/// the M:N engine (via [`run_with`]) so it exercises the eager `Executor` dispatch.
+/// Stdout from a stress-mode run (panics on error) — convenience for GC-stress tests (via
+/// [`run_with`]).
 #[cfg(test)]
 pub fn run_capture_stress(src: &str) -> String {
     run_with(src, true)

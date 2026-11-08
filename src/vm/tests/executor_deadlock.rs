@@ -105,7 +105,7 @@ print("done")
 ///
 /// Watchdogged: getting this wrong is a hang, which would otherwise stall the suite rather than fail it.
 #[test]
-fn executor_job_blocked_during_shutdown_faults_both_engines() {
+fn executor_job_blocked_during_shutdown_faults() {
     let src = r#"
 import Executor from std.concurrency
 ch := Channel[int](1)
@@ -116,18 +116,16 @@ ch.send(42)
 "#;
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
-        let _ = tx.send((run_capture(src), run_capture(src)));
+        let _ = tx.send(run_capture(src));
     });
-    let (serial, mn) = rx
+    let got = rx
         .recv_timeout(std::time::Duration::from_secs(60))
         .expect("a job blocked on its own joiner must fault, not hang");
-    let serial = err_text(&serial.expect_err("serial: this program is a deadlock"));
-    let mn = err_text(&mn.expect_err("M:N: this program is a deadlock"));
+    let fault = err_text(&got.expect_err("this program is a deadlock"));
     assert!(
-        serial.contains("recv() on an empty channel"),
-        "serial fault was: {serial}"
+        fault.contains("recv() on an empty channel"),
+        "fault was: {fault}"
     );
-    assert_eq!(serial, mn, "the deadlock verdict must be engine-identical");
 }
 
 /// `W7-12r` residual (a), CLOSED by the process-wide verdict (`future.md` §2d step 0): TWO jobs of one
@@ -282,7 +280,7 @@ ex.submit(fn(): print("job got {ch.recv()}"))
 /// ```
 ///
 /// Both ancestors print `main got 42` (measured: CPython `ThreadPoolExecutor` + `queue.Queue(1)`, and
-/// Go with a goroutine over a buffered channel). Chezzi faulted, on BOTH engines. The cause is the
+/// Go with a goroutine over a buffered channel). Chezzi faulted. The cause is the
 /// stale premise `future.md` §2d names: `chan_recv_step`'s "I have no scheduler ⇒ nobody can ever
 /// send" `else` arm, which stopped being true the moment eager execution put running jobs outside
 /// every scheduler. `main` now blocks there like any other counted party, and the verdict declines
@@ -1449,9 +1447,7 @@ ex.shutdown()
 /// **Depends on real interleaving.** Under the lazy queue-at-`submit` model both jobs are queued and
 /// the drain runs them one at a time, so `blocker` would fault `FULL_SEND_DEADLOCK` before `closer`
 /// got to run its `close()` — that model cannot express this program at all (it is NOT that the
-/// closer is absent: it runs, and closes the channel, after the fault). `docs/contributing/gaps.md` W7-13r records
-/// that as a deliberate divergence of the since-removed cooperative engine, under the standing rule
-/// that correctness outranks engine agreement.
+/// closer is absent: it runs, and closes the channel, after the fault).
 #[test]
 fn eager_send_blocked_on_a_full_channel_faults_when_the_channel_is_closed() {
     let src = "
@@ -1978,20 +1974,16 @@ print(\"main done\")
 }
 
 /// W7-16 — a nursery task **already inside** a `sleep_ms` must die when a sibling faults, not at its
-/// own deadline. This is the case the existing parity fence never covered: with the fault ORDERED
-/// AFTER the sleep begins, `parity_blocking_native_is_a_cancellation_checkpoint_on_both_engines`'s
-/// contract is delivered by the *entry* checkpoint at `invoke_native` — reorder the fault by 50 ms and
-/// pre-fix M:N ran the full 3005 ms and printed `napper woke`.
+/// own deadline. With the fault ORDERED AFTER the sleep begins, the *entry* checkpoint at
+/// `invoke_native` (`blocking_native_is_an_entry_cancellation_checkpoint`) does not fire; the
+/// sleep itself must be woken by the cancel.
 ///
 /// | | before | after |
 /// |---|---|---|
 /// | sibling faults at ~100 ms, task sleeping 3 s | `napper woke` printed, exit @ **3005 ms** | nothing printed, exit @ **~105 ms** |
 ///
-/// **M:N-only, deliberately.** Serial cannot preempt: nothing else runs while the fiber sleeps, so the
-/// fault can only precede or follow the sleep and serial keeps taking the entry checkpoint. Asserting
-/// this shape would be asserting a physics claim, not a contract — `CLAUDE.md`'s
-/// "correctness outranks engine agreement". The `--timeout` half of the same contract IS engine-common
-/// and is fenced in `test_runner` (`timeout_aborts_a_sleeping_test_everywhere`).
+/// The `--timeout` half of the same contract is fenced in `test_runner`
+/// (`timeout_aborts_a_sleeping_test_everywhere`).
 ///
 /// The `gate` handshake is what makes the ordering deterministic rather than raced: `boom` cannot
 /// fault until `napper` has announced it is about to sleep, and then waits another 100 ms. (Losing
@@ -2055,18 +2047,14 @@ main()
 /// W7-5b — an `Executor` constructed INSIDE a task, never explicitly shut down, must still have its
 /// work run and waited for at program exit.
 ///
-/// It did not before: `Vm.executors` is a `Vec<GcRef>`, heap-keyed and swapped per fiber, so a nested
-/// executor landed in the task's throwaway worker list and was dropped when the task finished — its
-/// jobs never ran, were never reaped, and raised no fault. Verified on the pre-change binary: M:N
-/// printed `main done` alone, while the since-removed cooperative engine (one shared heap, so its
-/// list survived) ran both jobs — which is how the heap-keying was identified as the cause.
-/// The fix is the heap-independent `ExecRegistry`, which every worker shares.
+/// The executor list is the heap-independent `ExecRegistry`, which every worker shares: a per-fiber
+/// list would drop a nested executor when its task finished, and its jobs would never run.
 ///
 /// The jobs print their own evidence rather than a counter being read at the end, because the exit
 /// join happens AFTER the last top-level statement — a `print` of an accumulator would race the jobs
 /// it is trying to observe. Compared as a line SET: the jobs are concurrent, so their order is free.
 #[test]
-fn executor_created_inside_a_task_is_joined_at_exit_both_engines() {
+fn executor_created_inside_a_task_is_joined_at_exit() {
     let src = r#"
 import Executor from std.concurrency
 parallel:
@@ -2078,38 +2066,35 @@ print("main done")
 "#;
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
-        let _ = tx.send((run_capture(src), run_capture(src)));
+        let _ = tx.send(run_capture(src));
     });
-    let (serial, mn) = rx
+    let got = rx
         .recv_timeout(std::time::Duration::from_secs(60))
         .expect("the exit join must not hang");
     let mut want = ["inner job A", "inner job B", "main done"];
     want.sort_unstable();
-    for (engine, got) in [("serial", serial), ("mn", mn)] {
-        let mut lines: Vec<&str> = got
-            .as_deref()
-            .expect("run")
-            .lines()
-            .filter(|l| !l.is_empty())
-            .collect();
-        lines.sort_unstable();
-        assert_eq!(lines, want, "{engine}: a task-created executor lost work");
-    }
+    let mut lines: Vec<&str> = got
+        .as_deref()
+        .expect("run")
+        .lines()
+        .filter(|l| !l.is_empty())
+        .collect();
+    lines.sort_unstable();
+    assert_eq!(lines, want, "a task-created executor lost work");
 }
 
 /// An `Executor` created BY a job that the program-exit join is itself running must also be joined.
 ///
 /// Pre-existing and silent: the exit reap iterated a SNAPSHOT of the executor list
 /// taken before it started, so an executor born during the reap was never in it and its work simply
-/// vanished (verified on the pre-change binary — neither engine printed the inner line). Both sides
-/// now re-scan until no un-shut executor is left, which terminates because `shutdown` marks a core
+/// vanished. The reap now re-scans until no un-shut executor is left, which terminates because `shutdown` marks a core
 /// `shut` before running anything.
 ///
 /// Worth a test of its own rather than folding into the W7-5b case: that one is about an executor
 /// created inside a TASK (a heap-visibility problem), this one is about an executor created inside the
 /// JOIN (an iteration-order problem). Fixing either does not fix the other.
 #[test]
-fn executor_created_by_a_joined_job_is_also_joined_both_engines() {
+fn executor_created_by_a_joined_job_is_also_joined() {
     let src = r#"
 import Executor from std.concurrency
 fn makes_another():
@@ -2121,26 +2106,21 @@ print("main done")
 "#;
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
-        let _ = tx.send((run_capture(src), run_capture(src)));
+        let _ = tx.send(run_capture(src));
     });
-    let (serial, mn) = rx
+    let got = rx
         .recv_timeout(std::time::Duration::from_secs(60))
         .expect("the exit join must not hang");
     let mut want = ["job created BY a job", "main done"];
     want.sort_unstable();
-    for (engine, got) in [("serial", serial), ("mn", mn)] {
-        let mut lines: Vec<&str> = got
-            .as_deref()
-            .expect("run")
-            .lines()
-            .filter(|l| !l.is_empty())
-            .collect();
-        lines.sort_unstable();
-        assert_eq!(
-            lines, want,
-            "{engine}: an executor born during the join was lost"
-        );
-    }
+    let mut lines: Vec<&str> = got
+        .as_deref()
+        .expect("run")
+        .lines()
+        .filter(|l| !l.is_empty())
+        .collect();
+    lines.sort_unstable();
+    assert_eq!(lines, want, "an executor born during the join was lost");
 }
 
 /// `cancel()` must reach a job running inside a NESTED executor, not just the job it submitted

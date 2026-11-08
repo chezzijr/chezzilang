@@ -23,14 +23,15 @@ cargo run -- test tests/chz/spec/list_test.chz   # one file
 
 ## The gate (why this replaces Rust `parity_*` tests)
 
-The bytecode VM on its M:N scheduler is the **sole** engine. The Rust tests these are ported from used
-to also assert *serial VM == M:N VM* (byte-identical); the cooperative `--serial` engine was removed
-2026-08-16, so that cross-engine comparison no longer exists. Two `cargo test` gates carry the suite:
+The bytecode VM on its M:N scheduler is the **only** engine, so every test asserts against a literal
+expectation, never against a second run. Two `cargo test` gates carry the suite:
 
 - **`chz_suite_passes`** (`tests/chz_suite.rs`) runs this entire suite and asserts every test passes.
 - **`chezzi_threads_cli`** (`tests/chezzi_threads_cli.rs`) runs it again at `CHEZZI_THREADS=2` — a
-  *second schedule*, which is what replaced the cross-engine oracle as the accidental-divergence
-  detector (`docs/contributing/bug-discovery.md` Tier 2).
+  *second schedule*, the accidental-divergence detector (`docs/contributing/bug-discovery.md` Tier 2).
+
+A schedule-dependent failure replays under a fixed seed: `CHEZZI_SCHED_SEED=<u64>` (seeded
+scheduler mode; a failing run reports its seed on stderr, see `docs/contributing/dev-commands.md`).
 
 Both live in `tests/`, not the lib unit suite: `vm::pool` is one process-wide `OnceLock`, so a test
 that needs uncontended pool workers must have its own process. So `cargo test` — not just
