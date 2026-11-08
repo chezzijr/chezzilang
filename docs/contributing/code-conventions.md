@@ -24,7 +24,9 @@ The full text of every convention, moved out of `CLAUDE.md` (which every agent t
   `clippy::wildcard_enum_match_arm`; add an exhaustive classifier on the enum first, name the variants
   second, and raise `PINNED_ALLOWS` in `tests/wildcard_enum_lint_gate.rs` for an `#[allow]` (with a
   one-line reason at the site). Test code is out of scope. Do not turn the `match` into `if let` or
-  `matches!` on the raw enum to silence the lint. See `docs/contributing/lessons.md` §4.
+  `matches!` on the raw enum to silence the lint. A `match` over a tuple of enums (`match (l, r)`)
+  may keep a `_ =>` arm: clippy does not lint it, and every pair cannot be written out. See
+  `docs/contributing/lessons.md` §4.
 - **New builtin types/ctors/fns go in their owning `std.*` module, NOT the global namespace.** The
   global surface stays minimal: scalars, `tuple`, `Range`, `Channel`, `T!E`/`T?`/`Iterator`,
   structural protocols. Declare the member in the module's `.chz` (`native fn` / `native type` /
