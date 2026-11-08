@@ -4,6 +4,7 @@
 
 use super::proto::Grant;
 use super::proto::HookMiss;
+use super::proto::RecvKind;
 use super::proto::ReqMiss;
 use super::*;
 use std::collections::{HashMap, HashSet};
@@ -365,6 +366,15 @@ impl Checker {
                 return Ok(Grant::no_intrinsic_method());
             }
         }
+        // A scalar satisfies a protocol with no type parameters exactly when its
+        // `INTRINSIC_PROTO_METHODS` row exists. A row has no arguments, so a parameterized protocol
+        // (`Contains[int]` on a `str`) is decided by its own arm below.
+        if pinfo.type_params.is_empty()
+            && Self::intrinsic_recv_kind(ty).is_some_and(RecvKind::is_scalar)
+            && Self::has_intrinsic_row(protocol, ty)
+        {
+            return self.grant_intrinsic(protocol, ty);
+        }
         if protocol == "Contains"
             && let Some(verdict) =
                 self.builtin_contains_verdict(ty, args.first().unwrap_or(&Ty::Unknown))
@@ -463,14 +473,6 @@ impl Checker {
                 return self.grant_intrinsic(protocol, ty);
             }
         }
-        if protocol == "Comparable"
-            && matches!(
-                ty,
-                Ty::Int | Ty::Float | Ty::Bool | Ty::Str | Ty::Bytes | Ty::ByteArray
-            )
-        {
-            return self.grant_intrinsic(protocol, ty);
-        }
         // **D1 — `Eq` satisfaction IS what `==` accepts.** Chezzi's structural `==` is an automatic
         // derive (`Vm::values_equal`) that never told the protocol system: `[1] == [1]`,
         // `(1,2) == (1,2)`, `Some(1) == Some(1)`, `P(1) == P(2)` for a plain struct — every one of
@@ -566,12 +568,6 @@ impl Checker {
             }
             return self.grant_intrinsic(protocol, ty);
         }
-        // `Hashable` is satisfied intrinsically by the scalar key types (mirrors the map/set key
-        // restriction; float is excluded — its equality is a hazard). A struct or enum needs both
-        // hooks (below).
-        if protocol == "Hashable" && matches!(ty, Ty::Int | Ty::Str | Ty::Bytes | Ty::Bool) {
-            return self.grant_intrinsic(protocol, ty);
-        }
         // TICKET-280 (owner decision U15): a struct or enum is `Hashable` only when it declares both
         // hooks, `hash` and `eq`, as Rust needs `Hash` and `Eq`. No declared type is a key on its
         // own: a zero-field struct needs both hooks, and structural `==` does not count as the `Eq`
@@ -585,19 +581,6 @@ impl Checker {
                 "type {ty} does not satisfy Hashable (missing method '{}')",
                 Hook::Eq.method()
             ));
-        }
-        // `str` conforms to `Error` intrinsically (Go-style: its message is itself).
-        if protocol == "Error" && matches!(ty, Ty::Str) {
-            return self.grant_intrinsic(protocol, ty);
-        }
-        // W7-8 — `PathLike` is satisfied intrinsically by the three byte-ish spellings of a path: a
-        // `str` (UTF-8-encoded), a `bytes` (itself), a `bytearray` (copied). This is a VALUE-level
-        // early-out keyed on the concrete scalar `Ty` alone — it can never widen a CONTAINER (a
-        // `List[str]` is compared element-wise by `compatible`, which does not route here), so
-        // `List[int] -> List[Any]` and friends stay rejected exactly as before. `path.Path` is a
-        // struct and falls through to the structural check against its own `as_path(self) -> bytes`.
-        if protocol == "PathLike" && matches!(ty, Ty::Str | Ty::Bytes | Ty::ByteArray) {
-            return self.grant_intrinsic(protocol, ty);
         }
         // `Iterator` conformance is "HOLDS a cursor position" — a real cursor/generator
         // (`Ty::Struct("Iterator", [E])`, minted by `.iter()` or returned by a generator) or a user

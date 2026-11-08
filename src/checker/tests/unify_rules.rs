@@ -194,6 +194,72 @@ fn builtin_operator_and_bound_agree_grid() {
     );
 }
 
+/// A scalar under a std bound with no type parameters, written out (Rust: `f64` is not `Hash`;
+/// CPython: `bytearray` is unhashable; Go: a `str` is its own error message). The `(protocol, kind)`
+/// rows of `INTRINSIC_PROTO_METHODS` decide these cells. A bound with type parameters is decided by
+/// its arguments, not by a row: `str` has `Contains` and `Iterable` rows and still fails
+/// `Contains[int]` and `Iterable[int]`.
+#[test]
+fn builtin_scalar_bound_grid() {
+    use super::proto::RecvKind;
+    const PROTOCOLS: [&str; 6] = [
+        "Comparable",
+        "Hashable",
+        "Eq",
+        "Stringable",
+        "Error",
+        "PathLike",
+    ];
+    let grid: [(RecvKind, &[&str]); 6] = [
+        (
+            RecvKind::Int,
+            &["Comparable", "Hashable", "Eq", "Stringable"],
+        ),
+        (RecvKind::Float, &["Comparable", "Eq", "Stringable"]),
+        (
+            RecvKind::Bool,
+            &["Comparable", "Hashable", "Eq", "Stringable"],
+        ),
+        (RecvKind::Str, &PROTOCOLS),
+        (
+            RecvKind::Bytes,
+            &["Comparable", "Hashable", "Eq", "Stringable", "PathLike"],
+        ),
+        (
+            RecvKind::ByteArray,
+            &["Comparable", "Eq", "Stringable", "PathLike"],
+        ),
+    ];
+    let bound = |p: &str, args: &str, lit: &str| {
+        let owner = crate::checker::graph_pass::std_protocol_owner(p).expect("a std protocol");
+        format!(
+            "import {p} from {owner}\nfn f[T: {p}{args}](x: T) -> int:\n    return 1\nf({lit})\n"
+        )
+    };
+    let mut red: Vec<String> = Vec::new();
+    for (kind, yes) in grid {
+        let lit = grid_samples(kind)[0].lit;
+        for p in PROTOCOLS {
+            let got = grid_check(&bound(p, "", lit)).is_empty();
+            if got != yes.contains(&p) {
+                red.push(format!("{kind} x {p}: got ok={got}"));
+            }
+        }
+    }
+    let lit = grid_samples(RecvKind::Str)[0].lit;
+    for p in ["Contains", "Iterable"] {
+        if grid_check(&bound(p, "[int]", lit)).is_empty() {
+            red.push(format!("str x {p}[int]: got ok=true"));
+        }
+    }
+    assert!(
+        red.is_empty(),
+        "{} red cells:\n{}",
+        red.len(),
+        red.join("\n")
+    );
+}
+
 /// TICKET-257 — `+` and `-` on builtin types ask `Add` and `Sub`. What the grant must NOT allow:
 /// mixed element types, a set `+`, a str `-`, str + bytes.
 #[test]

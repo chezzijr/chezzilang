@@ -261,6 +261,34 @@ impl RecvKind {
         RecvKind::Atomic,
     ];
 
+    /// A kind with no element types and no declared methods: its row alone decides a protocol
+    /// with no type parameters.
+    pub fn is_scalar(self) -> bool {
+        match self {
+            RecvKind::Int
+            | RecvKind::Float
+            | RecvKind::Bool
+            | RecvKind::Str
+            | RecvKind::Bytes
+            | RecvKind::ByteArray => true,
+            RecvKind::List
+            | RecvKind::Map
+            | RecvKind::Set
+            | RecvKind::Tuple
+            | RecvKind::Struct
+            | RecvKind::Cursor
+            | RecvKind::Enum
+            | RecvKind::Option
+            | RecvKind::Result
+            | RecvKind::Func
+            | RecvKind::Protocol
+            | RecvKind::Channel
+            | RecvKind::Shared
+            | RecvKind::RwShared
+            | RecvKind::Atomic => false,
+        }
+    }
+
     pub fn name(self) -> &'static str {
         // Display below reads this; keep the match exhaustive.
         match self {
@@ -484,6 +512,14 @@ impl Checker {
     /// protocol grant keyed on `"struct"` would be check-OK-then-`has no method` for it.
     pub(super) fn is_cursor_ty(ty: &Ty) -> bool {
         matches!(ty, Ty::Struct(n, a) if n == "Iterator" && a.len() == 1)
+    }
+
+    /// Does `INTRINSIC_PROTO_METHODS` hold the row `(protocol, kind of ty)`?
+    pub(super) fn has_intrinsic_row(protocol: &str, ty: &Ty) -> bool {
+        let kind = Self::intrinsic_recv_kind(ty);
+        INTRINSIC_PROTO_METHODS
+            .iter()
+            .any(|(p, k)| *p == protocol && Some(*k) == kind)
     }
 
     /// Grant `ty` conformance to `protocol` INTRINSICALLY (no user method) — the single funnel every

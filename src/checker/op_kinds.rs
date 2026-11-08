@@ -12,16 +12,10 @@ impl Checker {
     /// `(protocol, receiver kind)` row is in `INTRINSIC_PROTO_METHODS`, the one builtin grant table.
     /// A width type reads as its scalar here, as everywhere a width value is read (TICKET-262).
     pub(super) fn builtin_arith_kind(protocol: &str, ty: &Ty) -> bool {
-        let arithmetic = HOOKS
+        HOOKS
             .iter()
-            .any(|row| row.protocol == protocol && row.hook.is_arithmetic());
-        let Some(kind) = Self::intrinsic_recv_kind(ty) else {
-            return false;
-        };
-        arithmetic
-            && super::proto::INTRINSIC_PROTO_METHODS
-                .iter()
-                .any(|(p, k)| *p == protocol && *k == kind)
+            .any(|row| row.protocol == protocol && row.hook.is_arithmetic())
+            && Self::has_intrinsic_row(protocol, ty)
     }
 
     /// Result type of an overloaded arithmetic operator (`+`/`-`/`*`) on two operands of the *same*
