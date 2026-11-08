@@ -8,6 +8,7 @@
 import std.fs
 import std.os
 import std.path
+import std.time
 
 fn ok_nil(r: None!, what: str):
     match r:
@@ -75,3 +76,14 @@ test fn glob_limits_wildcard_directory_depth_as_go():
         match fs.glob("nope_globdir/" + "*/".repeat(n) + "x"):
             ?m: assert false, "{n} parts must be a bad pattern, got {m}"
             !e: assert "bad pattern" in e.message(), "{n} parts: the error must say bad pattern"
+
+# A long literal prefix before many wildcard parts must cost linear time. Each level used to rescan
+# the whole prefix for a wildcard: 400 KB of `q/` before 9998 `*/` took about 16 s (Go 1.27 is just
+# as slow on it). The bound is wide so a loaded box cannot flake it.
+test fn glob_long_literal_prefix_is_linear():
+    start := time.monotonic()
+    match fs.glob("q/".repeat(200000) + "*/".repeat(9998) + "x"):
+        ?m: assert m == [], "{m.len()} matches"
+        !e: assert false, "must not error"
+    took := time.monotonic() - start
+    assert took < 3.0, "took {took} s"
