@@ -39,6 +39,7 @@ fn run_with(
     cmd.arg("run")
         .arg(&path)
         .env("CHEZZI_THREADS", threads)
+        .env("CHEZZI_SCHED_STATS", "1")
         .stdin(if stdin { Stdio::piped() } else { Stdio::null() })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -148,7 +149,6 @@ enum Expect {
 struct Ctx {
     name: &'static str,
     call: &'static str,
-    /// an Executor job
     /// the outcome when nothing can satisfy the op
     nothing: Expect,
 }
@@ -222,63 +222,45 @@ fn main():
 ";
 
 fn contexts() -> Vec<Ctx> {
-    let ctx = |name, call, _demote: bool, _job: bool, nothing| Ctx {
+    let ctx = |name, call, nothing| Ctx {
         name,
         call,
         nothing,
     };
     let dead = Expect::Fault(DEADLOCK);
     vec![
-        ctx("main", "        _ := op(0)\n", false, false, dead),
-        ctx("main_cb", "        _ := [0].map(op)\n", false, false, dead),
-        ctx("main_defer", "        viadefer()\n", false, false, dead),
-        ctx(
-            "fiber",
-            "        spawn:\n            _ := op(0)\n",
-            false,
-            false,
-            dead,
-        ),
+        ctx("main", "        _ := op(0)\n", dead),
+        ctx("main_cb", "        _ := [0].map(op)\n", dead),
+        ctx("main_defer", "        viadefer()\n", dead),
+        ctx("fiber", "        spawn:\n            _ := op(0)\n", dead),
         ctx(
             "fiber_cb",
             "        spawn:\n            _ := [0].map(op)\n",
-            true,
-            false,
             dead,
         ),
         ctx(
             "fiber_defer",
             "        spawn:\n            viadefer()\n",
-            false,
-            false,
             dead,
         ),
         ctx(
             "fiber_gen",
             "        spawn:\n            for _ in gen():\n                pass\n",
-            true,
-            false,
             dead,
         ),
         ctx(
             "fiber_update",
             "        spawn:\n            s.update(bump)\n",
-            true,
-            false,
             dead,
         ),
         ctx(
             "job",
             "        ex := Executor()\n        _ := ex.submit(job)\n        ex.shutdown()\n",
-            false,
-            true,
             dead,
         ),
         ctx(
             "job_cb",
             "        ex := Executor()\n        _ := ex.submit(job_cb)\n        ex.shutdown()\n",
-            false,
-            true,
             dead,
         ),
     ]
@@ -520,6 +502,15 @@ fn cells() -> Vec<Cell> {
     v
 }
 
+/// `demotes=<n>` from the `[sched-stats]` line `CHEZZI_SCHED_STATS=1` prints (`None` if missing).
+fn demotes(err: &str) -> Option<usize> {
+    err.lines()
+        .filter_map(|l| l.strip_prefix("[sched-stats] "))
+        .flat_map(|l| l.split(' '))
+        .find_map(|f| f.strip_prefix("demotes="))
+        .and_then(|n| n.parse().ok())
+}
+
 /// Runs one cell at every worker count (and seeds 1..3 at T=1/T=2 for a sibling cell); returns
 /// one line per miss.
 fn check_cell(c: &Cell) -> Vec<String> {
@@ -536,6 +527,19 @@ fn check_cell(c: &Cell) -> Vec<String> {
     let mut misses = Vec::new();
     for (t, seed) in runs {
         let got = run_with(&tag, &c.src, t, seed, c.stdin, limit);
+        // A wait parks its task, as in Go (Go 1.27: no new thread per waiter). Only a stdin read
+        // is a blocking syscall, which hands off its worker in Go too.
+        if let Some((_, _, err)) = &got
+            && !c.stdin
+        {
+            let d = demotes(err);
+            if d != Some(0) {
+                misses.push(format!(
+                    "{} T={t} seed={seed:?}: [sched-stats] demotes={d:?}; expected Some(0)",
+                    c.name
+                ));
+            }
+        }
         let ok = match (&got, c.expect) {
             (Some((0, out, _)), Expect::Out(w)) => out == w,
             (Some((code, _, err)), Expect::Fault(w)) => *code != 0 && err.contains(w),

@@ -20,11 +20,19 @@ impl SchedCore {
             return false;
         }
         let buckets: Vec<Vec<ParkedEntry>> = self.parked.drain().map(|(_, v)| v).collect();
+        let mut own_joins = Vec::new();
         for v in buckets {
             for entry in v {
                 let fiber = match entry {
                     ParkedEntry::Recv(f) => Some(f),
-                    ParkedEntry::Send(f) => Some(f),
+                    ParkedEntry::Send(f) | ParkedEntry::Guard(f) => Some(f),
+                    // A join with slack is of this sched's own Executor ([`Vm::join_executor`]):
+                    // judged below, once the jobs it waits for are ended.
+                    ParkedEntry::ExecJoin(f, _, slack) if slack > 0 => {
+                        own_joins.push((f, slack));
+                        None
+                    }
+                    ParkedEntry::ExecJoin(f, ..) => Some(f),
                     ParkedEntry::Wait(wp) => {
                         if wp
                             .claimed
@@ -55,6 +63,18 @@ impl SchedCore {
             self.scopes[origin].joins_blocked -= 1;
             self.scopes[f.scope_id].owners_blocked -= 1;
             self.verdict_victim(f, err);
+        }
+        // A fiber joining this sched's own Executor whose join the verdict just ended resumes (its
+        // `shutdown` returns), as an in-place joiner sees its join over before the cut. The
+        // verdict's caller adds it to `runnable` ([`MnSched::take_cut_requeued`]).
+        for (mut f, slack) in own_joins {
+            if self.join_over(slack) {
+                f.state = FiberState::Ready;
+                self.global.push_back(f);
+                self.cut_requeued += 1;
+            } else {
+                self.verdict_victim(f, err);
+            }
         }
         self.parked_n = 0;
         // TICKET-296: a demoted fiber reads the cut, unwinds and can requeue itself, so the workers
@@ -125,7 +145,14 @@ impl SchedCore {
             let mut keep = Vec::new();
             for entry in v {
                 match entry {
-                    ParkedEntry::Recv(f) | ParkedEntry::Send(f) if stuck(&f) => cut.push(f),
+                    ParkedEntry::Recv(f)
+                    | ParkedEntry::Send(f)
+                    | ParkedEntry::Guard(f)
+                    | ParkedEntry::ExecJoin(f, ..)
+                        if stuck(&f) =>
+                    {
+                        cut.push(f)
+                    }
                     ParkedEntry::Wait(wp) => {
                         // `None`: a claimed token's stale copy, dropped as `drain_parked` drops it.
                         let take = wp
@@ -151,7 +178,10 @@ impl SchedCore {
                             );
                         }
                     }
-                    other @ (ParkedEntry::Recv(_) | ParkedEntry::Send(_)) => keep.push(other),
+                    other @ (ParkedEntry::Recv(_)
+                    | ParkedEntry::Send(_)
+                    | ParkedEntry::Guard(_)
+                    | ParkedEntry::ExecJoin(..)) => keep.push(other),
                 }
             }
             if !keep.is_empty() {
@@ -197,7 +227,12 @@ impl SchedCore {
         // parked at a join names no site), else the sched-wide `err`.
         // M1.4 — take the context out of the registry before any field moves: this thread may not
         // be attached to the GC (see `RootRegistry::roots`).
-        let ctx = f.ctx.into_inner();
+        let mut ctx = f.ctx.into_inner();
+        // The verdict cut this holder: the guards its frames hold (innermost last) are freed as
+        // cut, no progress for a task that waits for them (`core::UpdateGuard::release_cut`).
+        while let Some(g) = ctx.held_guards.pop() {
+            g.release_cut();
+        }
         // A fiber parked at a wait is one entry of the run's listing, with its frames; an owner
         // parked at a join is not (its blocked children stand in its place).
         let scope_err = match (f.park_site, &self.scopes[sid].deadlock_err) {
@@ -482,7 +517,12 @@ impl SchedCore {
             let mut keep: Vec<ParkedEntry> = Vec::new();
             for entry in v {
                 let fiber = match entry {
-                    ParkedEntry::Recv(f) | ParkedEntry::Send(f) if target.contains(&f.scope_id) => {
+                    ParkedEntry::Recv(f)
+                    | ParkedEntry::Send(f)
+                    | ParkedEntry::Guard(f)
+                    | ParkedEntry::ExecJoin(f, ..)
+                        if target.contains(&f.scope_id) =>
+                    {
                         Some(f)
                     }
                     ParkedEntry::Wait(wp) => {
@@ -512,7 +552,10 @@ impl SchedCore {
                             }
                         }
                     }
-                    other @ ParkedEntry::Recv(_) | other @ ParkedEntry::Send(_) => {
+                    other @ (ParkedEntry::Recv(_)
+                    | ParkedEntry::Send(_)
+                    | ParkedEntry::Guard(_)
+                    | ParkedEntry::ExecJoin(..)) => {
                         keep.push(other); // outside every joined leaf: stays parked
                         continue;
                     }
@@ -574,7 +617,10 @@ impl SchedCore {
             .values()
             .flatten()
             .filter_map(|e| match e {
-                ParkedEntry::Recv(f) | ParkedEntry::Send(f) => Some(f.scope_id),
+                ParkedEntry::Recv(f)
+                | ParkedEntry::Send(f)
+                | ParkedEntry::Guard(f)
+                | ParkedEntry::ExecJoin(f, ..) => Some(f.scope_id),
                 ParkedEntry::Wait(wp) => (!wp.claimed.load(Ordering::Acquire))
                     .then(|| Self::peek_wait_scope(wp))
                     .flatten(),

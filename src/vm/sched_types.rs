@@ -110,6 +110,8 @@ pub(super) struct FiberCtx {
     /// See [`Vm::held_guards`]: the guards the task's box-closure frames hold. Dropping a context
     /// releases them.
     pub(super) held_guards: Vec<super::core::UpdateGuard>,
+    /// See [`Vm::guard_ticket`]: the place in line of a task parked for a guard.
+    pub(super) guard_ticket: Option<super::core::WaitTicket>,
     /// See [`Vm::held_gens`]: the holds the task's generator body frames keep. Dropping a context
     /// puts those generators back `Done`.
     pub(super) held_gens: Vec<super::core::GenHold>,
@@ -692,6 +694,8 @@ pub(super) fn entry_settled(e: &ParkedEntry) -> bool {
             f.pending.as_ref().is_some_and(|op| !op.p.is_queued())
         }
         ParkedEntry::Wait(wp) => wp.p.as_ref().is_some_and(|p| !p.is_queued()),
+        // Woken only by a release's or a join's `WakeKind::All` wake.
+        ParkedEntry::Guard(_) | ParkedEntry::ExecJoin(..) => false,
     }
 }
 
@@ -713,6 +717,14 @@ pub(super) enum ParkedEntry {
     /// TICKET-028 — a fiber parked on a blocked `send` (its offer published). Filed by
     /// `MnSched::park_send`; a [`WakeKind::Settled`] wake requeues it once its offer was taken.
     Send(Fiber),
+    /// A fiber parked for a `Shared`/`RwShared` guard (its `WaitTicket` is in its context), in the
+    /// bucket of the box's lock. Filed by `MnSched::park_guard`; a release wakes it.
+    Guard(Fiber),
+    /// A fiber parked in an `Executor.shutdown()` join of the sched it names, which owes it the
+    /// `slack` of [`Vm::join_executor`], in the bucket keyed by that sched's address. Filed by
+    /// `MnSched::park_exec_join`; the joined sched wakes it when its join is over
+    /// ([`SchedCore::task_done`]).
+    ExecJoin(Fiber, std::sync::Weak<MnSched>, usize),
 }
 
 impl ParkedEntry {
@@ -720,8 +732,9 @@ impl ParkedEntry {
     /// names through the one pair of answers every blocked thing uses
     /// ([`quiesce::recv_satisfiable`], [`quiesce::wait_satisfiable`]). A fiber with nothing to
     /// ask (no `pending`, no channel, already claimed) answers `true`, which only declines the
-    /// verdict.
-    pub(super) fn satisfiable(&self) -> bool {
+    /// verdict. `here` is the core of `me`, the sched this entry is parked on (it is locked): a
+    /// join answers [`SchedCore::join_of_over`].
+    pub(super) fn satisfiable(&self, here: &SchedCore, me: &MnSched) -> bool {
         match self {
             ParkedEntry::Recv(f) => f.pending.as_ref().is_none_or(|op| {
                 op.at
@@ -729,6 +742,14 @@ impl ParkedEntry {
                     .is_none_or(|(core, _, _)| quiesce::recv_satisfiable(core, Some(&op.p)))
             }),
             ParkedEntry::Send(f) => f.pending.as_ref().is_none_or(|op| !op.p.is_queued()),
+            ParkedEntry::Guard(f) => f
+                .ctx
+                .guard_ticket
+                .as_ref()
+                .is_none_or(|t| t.satisfiable(f.ctx.guard_token)),
+            ParkedEntry::ExecJoin(_, s, slack) => s
+                .upgrade()
+                .is_none_or(|s| here.join_of_over(me, &s, *slack)),
             ParkedEntry::Wait(wp) => {
                 let g = wp.fiber.lock().unwrap_or_else(|e| e.into_inner());
                 g.as_ref()
@@ -1170,6 +1191,10 @@ pub(super) struct SchedCore {
     /// `MnSched::wake_completed_joins` once every scope of the origin's family is done; recorded
     /// `Deadlocked` by `flag_deadlock`.
     pub(super) join_parked: Vec<(usize, Fiber)>,
+    /// The scheds holding a fiber parked in an `Executor` join of this sched, with the join's
+    /// slack and bucket key (`MnSched::park_exec_join`). [`SchedCore::task_done`] wakes each whose
+    /// join is over.
+    pub(super) exec_joiners: Vec<(std::sync::Weak<MnSched>, usize, usize)>,
     /// Cross-nursery flat scheduler (M:N) — the per-nursery join records, replacing the old scalar
     /// `{done,total,body_open}`. ONE global `MnSched` is shared by every nested `run_mn_nursery` /
     /// eager nursery (built only by the outermost owner); each `register_scope` appends a `JoinScope`
@@ -1248,6 +1273,13 @@ pub(super) enum Disp {
     /// TICKET-103 — the fiber reached the `JoinNursery` of a fiber-owned nursery whose family is
     /// incomplete; filed via `MnSched::park_join`; the op re-executes on resume.
     JoinPark(usize),
+    /// The fiber waits for a `Shared`/`RwShared` guard (the box lock's bucket key); filed via
+    /// `MnSched::park_guard`; the rewound box method re-runs on resume.
+    GuardPark(usize),
+    /// The fiber waits in an `Executor.shutdown()` join of the sched, owed `slack`
+    /// ([`Vm::join_executor`]); filed via `MnSched::park_exec_join`; the rewound `shutdown` re-runs
+    /// on resume.
+    ExecJoinPark(Arc<MnSched>, usize),
     Finish(TaskOutcome),
 }
 

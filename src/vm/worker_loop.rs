@@ -449,8 +449,14 @@ impl Vm {
             }
             // TICKET-286 — a channel park under `--timeout` has nothing else that wakes it at the
             // deadline: arm the run deadline's one drain.
-            if let (Some(dl), Disp::Park(..) | Disp::SendPark(_) | Disp::WaitPark(_)) =
-                (fiber.park_deadline, &disp)
+            if let (
+                Some(dl),
+                Disp::Park(..)
+                | Disp::SendPark(_)
+                | Disp::WaitPark(_)
+                | Disp::GuardPark(_)
+                | Disp::ExecJoinPark(..),
+            ) = (fiber.park_deadline, &disp)
             {
                 sched.arm_deadline_wake(dl);
             }
@@ -484,6 +490,10 @@ impl Vm {
                 Disp::PollPark(pp) => sched.poll_park_offload(fiber, pp),
                 // TICKET-103 — file the owner until its nursery's family completes.
                 Disp::JoinPark(origin) => sched.park_join(fiber, origin),
+                // A guard wait: file the fiber in the box lock's bucket until a release.
+                Disp::GuardPark(key) => sched.park_guard(key, fiber),
+                // An Executor join: file the fiber until the joined sched's join is over.
+                Disp::ExecJoinPark(joined, slack) => sched.park_exec_join(joined, slack, fiber),
                 Disp::Finish(outcome) => {
                     // `finish` reports whether the STORED outcome aborts: it may itself turn a `Done`
                     // into a hard-halt over-memory `Fault` (W7-26r), which needs the same sibling
@@ -630,6 +640,8 @@ impl Vm {
         self.suspend = None;
         self.wait_suspend = None; // set by `op_wait_poll`'s M:N snapshot-park (→ `Disp::WaitPark`)
         self.send_suspend = None; // set by a full bounded `send` (→ `Disp::SendPark`)
+        self.guard_suspend = None; // set by a guard wait's park (→ `Disp::GuardPark`)
+        self.exec_join_suspend = None; // set by an Executor join's park (→ `Disp::ExecJoinPark`)
         self.offload = None;
         self.poll_park = None;
         // TICKET-096 review fix — a delivered cut's floor indexes THIS fiber's `nurseries` (swapped
@@ -776,9 +788,12 @@ impl Vm {
             if self.join_suspend.is_none()
                 && self.fault_park.is_none()
                 && let Some(how) = verdict_cut
-                && let Err(e) = self.take_verdict_cut(how, park_site, span)
             {
-                return Disp::Finish(self.classify_mn_outcome(Err(e)));
+                // A cut guard wait leaves its box's line: its rewound op never re-runs.
+                self.guard_ticket = None;
+                if let Err(e) = self.take_verdict_cut(how, park_site, span) {
+                    return Disp::Finish(self.classify_mn_outcome(Err(e)));
+                }
             }
             // TICKET-287 — a fiber that parked mid fault-unwind ([`FaultPark`](super::frames::FaultPark))
             // resumes that unwind here, not at its `ip`. It may park again at a lower level. A park
@@ -818,6 +833,13 @@ impl Vm {
             } else if res.is_ok() && self.join_suspend.is_some() {
                 // TICKET-103 — the fiber parked at a fiber-owned nursery's `JoinNursery`.
                 Disp::JoinPark(self.join_suspend.take().unwrap())
+            } else if res.is_ok() && self.guard_suspend.is_some() {
+                // A guard wait: its ticket travels in the context `swap_task` saves below.
+                Disp::GuardPark(self.guard_suspend.take().unwrap())
+            } else if res.is_ok() && self.exec_join_suspend.is_some() {
+                // An Executor join: the rewound `shutdown` re-runs on resume.
+                let (joined, slack) = self.exec_join_suspend.take().unwrap();
+                Disp::ExecJoinPark(joined, slack)
             } else if res.is_ok() && self.suspend.is_some() {
                 let h = self.suspend.take().unwrap();
                 // Capture the park key + the channel `Arc` WHILE the fiber heap is live (`h` is a

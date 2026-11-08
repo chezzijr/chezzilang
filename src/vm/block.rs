@@ -384,11 +384,12 @@ pub(super) fn mode(ctx: BlockCtx, spec: WaitSpec) -> BlockMode {
     let join = |reentered: bool| if reentered { InPlace } else { Help };
     match ctx {
         BlockCtx::Park => match spec {
-            // DEC-151: stdin is a host wait we do not own; DEC-016: a guard waits in place, then
-            // demotes; changed cell (c), X1: an Executor join cannot snapshot-park (the join loop
-            // holds its state on the host stack), so it hands its runner slot over.
-            W::HostFd | W::Guard | W::Join => Demote,
+            // DEC-151: stdin is a host wait we do not own. A guard wait parks on the box's lock
+            // (Go `sync.Mutex`); an Executor join parks on the joined sched's completion.
+            W::HostFd => Demote,
             W::Recv
+            | W::Guard
+            | W::Join
             | W::Timer
             | W::Send
             | W::Wait { .. }
@@ -1275,8 +1276,8 @@ mod tests {
         ("HostFd", "DD DD DDDD", true),
         ("Socket", "PD RR IIII", true),
         ("Connect", "PI II IIII", true),
-        ("Guard", "DD DD DDDD", false),
-        ("Join", "DD II IIII", false),
+        ("Guard", "PD DD DDDD", false),
+        ("Join", "PD II IIII", false),
         ("Nursery", "PD HI HIHI", false),
         ("Extern", "II II IIII", true),
     ];
@@ -1330,8 +1331,8 @@ mod tests {
         ("HostFd", "F--- F--- F--- F--- F--- F--- F--- F---"),
         ("Socket", "K--- F--- K--- K--- K--- K--- K--- K---"),
         ("Connect", "K--- K--- K--- K--- K--- K--- K--- K---"),
-        ("Guard", "W-w- W-w- W-w- W-w- W-w- W-w- Wpw- Wpw-"),
-        ("Join", "W-w- W-w- K-w- K-w- K-w- K-w- Kpw- Kpw-"),
+        ("Guard", "K-w- W-w- W-w- W-w- W-w- W-w- Wpw- Wpw-"),
+        ("Join", "K-w- W-w- K-w- K-w- K-w- K-w- Kpw- Kpw-"),
         ("Nursery", "K-ao J-ao Kpa- Jpa- Kpa- Jpa- Kpa- Jpa-"),
         ("Extern", "K--- K--- K--- K--- K--- K--- K--- K---"),
     ];

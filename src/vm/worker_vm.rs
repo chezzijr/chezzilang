@@ -144,7 +144,8 @@ impl Vm {
     ///
     /// The joiner is not an ancestor of the jobs, so its wait reads its halts itself, through
     /// [`Vm::block_halts`] and nowhere else. It never declares a deadlock: the joined sched's idle
-    /// runner is the one judge, and a fiber joiner is a registered waiter that judge can read.
+    /// runner is the one judge, and a fiber joiner is a parked entry that judge can read
+    /// ([`ParkedEntry::ExecJoin`]), a demoted one a registered waiter.
     ///
     /// How it leaves:
     /// - done: the scope is taken out of the core and its slots are reduced (`slack == 0` only);
@@ -165,33 +166,48 @@ impl Vm {
         sched.close_body(0);
         sched.latch_terminate_if_done();
         let slack = usize::from(self.owns_nested_sched(&sched));
-        let mut reg = self.wait_begin(
-            WaitSpec::Join,
-            Some(
-                Blocked::on(PartyWait::Join(Arc::clone(&sched), slack))
-                    .named(super::deadlock::Wait::ExecutorJoin, span),
-            ),
-            "an Executor join",
-            span,
-        )?;
-        let leave = loop {
+        let leave = if self.block_mode(WaitSpec::Join) == BlockMode::Park {
+            // A fiber parks until the join is over, then the rewound `shutdown` re-runs this
+            // (`exec_join_suspend`, [`Vm::park_sentinel`]): every step above is idempotent.
             if sched.lock().join_over(slack) {
-                break None;
+                None
+            } else if let Err(e) = self.block_halts(span) {
+                Some(e)
+            } else {
+                self.park_site = Some((super::deadlock::Wait::ExecutorJoin.phrase(), span));
+                self.exec_join_suspend = Some((sched, slack));
+                return Err(Self::park_sentinel(span));
             }
-            if let Err(e) = self.block_halts(span) {
-                break Some(e);
+        } else {
+            let mut reg = self.wait_begin(
+                WaitSpec::Join,
+                Some(
+                    Blocked::on(PartyWait::Join(Arc::clone(&sched), slack))
+                        .named(super::deadlock::Wait::ExecutorJoin, span),
+                ),
+                "an Executor join",
+                span,
+            )?;
+            let leave = loop {
+                if sched.lock().join_over(slack) {
+                    break None;
+                }
+                if let Err(e) = self.block_halts(span) {
+                    break Some(e);
+                }
+                if let Some(m) = self.mn.clone()
+                    && self.in_place_cut(&m.lock(), reg.tok())
+                {
+                    break Some(self.cut_fault(&m, span));
+                }
+                self.wait_door(&[], |_| sched.join_tick(slack, DEMOTE_POLL_BACKOFF));
+            };
+            if let Some(m) = self.mn.clone() {
+                reg.release(&m, &mut m.lock());
             }
-            if let Some(m) = self.mn.clone()
-                && self.in_place_cut(&m.lock(), reg.tok())
-            {
-                break Some(self.cut_fault(&m, span));
-            }
-            self.wait_door(&[], |_| sched.join_tick(slack, DEMOTE_POLL_BACKOFF));
+            self.wait_end(reg, &[]);
+            leave
         };
-        if let Some(m) = self.mn.clone() {
-            reg.release(&m, &mut m.lock());
-        }
-        self.wait_end(reg, &[]);
         let take_scope =
             |core: &ExecutorCore| core.scope.lock().unwrap_or_else(|e| e.into_inner()).take();
         let Some(e) = leave else {

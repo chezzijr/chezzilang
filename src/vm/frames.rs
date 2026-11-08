@@ -381,11 +381,10 @@ impl Vm {
                         width::holds(),
                         "TICKET-230: a Chezzi slice ran without a runner permit"
                     );
-                    // A task that holds a box guard (its closure is a frame) is not preempted
-                    // off the thread either: its guard's waiters wait in place, so a yielded
-                    // holder would cost each of them a demote budget. A blocking wait parks it.
-                    if self.mn.is_some() && self.native_reentry == 0 && self.held_guards.is_empty()
-                    {
+                    // A task that holds a box guard (its closure is a frame) is preempted like any
+                    // other: a fiber that waits for its guard parks (Go preempts a goroutine that
+                    // holds a `sync.Mutex`).
+                    if self.mn.is_some() && self.native_reentry == 0 {
                         self.yield_now = true;
                         return Ok(());
                     } else {
@@ -818,7 +817,7 @@ impl Vm {
             if let Some(e) = self.drain_deferred(fi, 0) {
                 u.defer_err = Some(e);
             }
-            self.pop_unwound_frame();
+            self.pop_unwound_frame(false);
         }
         match u.then {
             UnwindThen::Fault {
@@ -844,7 +843,7 @@ impl Vm {
         drained: Option<RuntimeError>,
     ) -> Result<(), RuntimeError> {
         u.defer_err = drained.or(u.defer_err);
-        self.pop_unwound_frame();
+        self.pop_unwound_frame(false);
         self.unwind_on(u)
     }
 

@@ -120,17 +120,34 @@ count. Every cell with a cut feeder of a plain channel is a deadlock fault.
 
 ## Guard waits
 
-**A guard wait does not cost an OS thread unless it is long.** A contended `set`/`update`/`write`
-waits in place on its worker for up to 5 ms (`GUARD_DEMOTE_BUDGET`, `src/vm/core.rs`) before it
-demotes the worker and spawns one replacement OS thread — almost every wait is microseconds, so
-almost none pays for a thread. Demoting on every acquire instead made 50 000 one-`update` fibers
-exhaust a 32 768-task ceiling and never finish (TICKET-016). A waiter that demoted waits for the
-guard to come FREE holding no width permit, then takes the permit, then the guard. Taking the guard
-first made 6 tasks x 2000 `update`s take 16-22 s at `--threads=2`, one 5 ms timeout per handoff
-(TICKET-193). The 5 ms in-place stage waits the same way, holding no width permit (TICKET-194): a
-waiter that held its permit sat out the full 5 ms whenever the holder was preempted inside its
-closure, and the seeded two-box program (`CHEZZI_SCHED_SEED=1`, `--threads=1`) took about 9 s; it
-now runs under the 3 s debug `GRID_CEILING` (`tests/shared_update_contention.rs`).
+**A fiber's guard wait parks (2026-11-08), as a goroutine's `sync.Mutex` wait does.** A contended
+`set`/`update`/`write` in a fiber (the `Park` cell) retries its take a few times (a few
+microseconds, as Go spins), then files its wait-for edge (`GuardGraph::waiting`, so AB-BA still
+faults `a lock cycle`), lists its sched with the box (`BoxLock::park_waiter`) and parks
+(`ParkedEntry::Guard`). Its `WaitTicket` travels in the task's `FiberCtx` (`Vm::guard_ticket`), so a
+parked writer stays counted (writer preference) and a parked reader keeps its admission; the rewound
+method call re-runs and takes the box through that ticket. A release (`release_write`, the last
+reader's drop, a ticket drop) wakes the box's bucket on each listed sched (`MnSched::wake_cross`; a
+wake that finds the sched's core lock held hops to the timer thread). The verdict asks a parked
+waiter the same question as an in-place one (`core::wait_may_end`). 200 waiters at `--threads=2`:
+`demotes=0` (`tests/park_scale.rs`; base 199).
+
+A holder that a deadlock verdict cut never released its guard, as a deadlocked goroutine never
+unlocks its `sync.Mutex`: its release (any release on the verdict's fault: the deadlock unwind, a cut `defer`, a closure
+that is not a frame; or the verdict's drop of a parked holder's context, `record_deadlocked`) frees the box with the `CUT` bit of its lock word
+set (`UpdateGuard::release_cut`). A waiter, parked or in place, does not take a `CUT` box, so it
+stays blocked and the next verdict lists it; a cut write release admits no waiting reader and wakes
+nobody, and a waiting writer that leaves wakes the box's waiters only when the box looks free (a
+woken parked waiter is runnable, which the verdict reads as progress). Any take
+clears the bit, and a fresh acquire may take the box, so a `chezzi test` after a deadlocked test
+still uses a module-global `Shared`.
+
+The other contexts wait in place (`main`, the builder, an eager job, a fiber inside a nested native
+callback). Such a waiter waits for the guard to come FREE holding no width permit, then takes the
+permit, then the guard. Taking the guard first made 6 tasks x 2000 `update`s take 16-22 s at
+`--threads=2`, one 5 ms timeout per handoff (TICKET-193). A fiber in a Demote context first waits in
+place for up to 5 ms (`GUARD_DEMOTE_BUDGET`, `src/vm/core.rs`), then demotes its worker: demoting on
+every acquire made 50 000 one-`update` fibers exhaust a 32 768-task ceiling (TICKET-016).
 
 ## A wait inside a callback
 
@@ -151,9 +168,9 @@ unchanged). A generator resume copies the body's one saved frame onto the caller
 copies it back at `yield`.
 
 A box guard belongs to the task, not the worker: the task's `held_guards` and guard token travel in
-its `FiberCtx` across a park. A task that holds a guard is not preempted at the D3 safepoint (its
-guard's waiters wait in place, so a yielded holder would cost each of them a demote budget); a
-blocking wait still parks it.
+its `FiberCtx` across a park. A task that holds a guard is preempted at the D3 safepoint like any
+other (since 2026-11-08): a fiber that waits for its guard parks, as Go preempts a goroutine that
+holds a `sync.Mutex`.
 
 **What still re-enters.** A push is legal only from the dispatch loop (`flat`: every method call
 op reaches it there). A hook reached from a nested container walk (`==`/`hash`/`str`/`<` inside a list, tuple, map
@@ -404,7 +421,9 @@ table. A new blocking shape adds a `PartyWait` arm or a table row, never a new l
    `!"read would block: an Executor job doesn't own its thread …"`; CPython and Go block and
    read.
 3. An Executor join (`ex.shutdown()`) in a fiber demotes (X1). It held the only runner and hung at
-   T=1; Go and CPython complete.
+   T=1; Go and CPython complete. Since 2026-11-08 it parks instead (`ParkedEntry::ExecJoin`; the
+   joined sched wakes it from `SchedCore::task_done` through `MnSched::wake_cross`): no thread per
+   joiner, as in Go.
 4. A `wait:` send arm on a thread that owns itself (or a job) blocks in a callback or `defer:`. It
    faulted `send on a full channel: deadlock`; Go blocks until a receiver frees the slot.
 5. A `timer(ms).recv()` in a Demote context demotes. It pinned its worker, so at T=1 a sibling it

@@ -833,7 +833,8 @@ impl Vm {
         // TICKET-147 — a defer fault stays the root cause; an aborted nursery's child fault fills the gap.
         if let Some(e) = defer_err.or(escaped) {
             self.pop();
-            self.drop_ret(frame.ret, frame.base);
+            // A verdict's fault (the defer was cut) releases a box guard as a cut one.
+            self.drop_ret(frame.ret, frame.base, e.is_deadlock);
             return Err(e);
         }
         // A hook frame's operator post-step, at the operator's own span.

@@ -370,6 +370,27 @@ impl MnSched {
                             keep.push(ParkedEntry::Send(f)); // a sibling scope's park — leave it.
                         }
                     }
+                    ParkedEntry::Guard(mut f) => {
+                        if wake(&f) {
+                            list(&f);
+                            drained += 1;
+                            f.state = FiberState::Ready;
+                            c.global.push_back(f);
+                        } else {
+                            keep.push(ParkedEntry::Guard(f)); // a sibling scope's park — leave it.
+                        }
+                    }
+                    ParkedEntry::ExecJoin(mut f, s, slack) => {
+                        if wake(&f) {
+                            list(&f);
+                            drained += 1;
+                            f.state = FiberState::Ready;
+                            c.global.push_back(f);
+                        } else {
+                            // A sibling scope's park — leave it.
+                            keep.push(ParkedEntry::ExecJoin(f, s, slack));
+                        }
+                    }
                     ParkedEntry::Wait(wp) => {
                         // Peek the fiber's scope WITHOUT claiming (so a non-matching wait fiber is left
                         // intact in every bucket). If already claimed (a prior bucket of THIS token in

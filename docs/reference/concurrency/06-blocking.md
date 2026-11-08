@@ -90,8 +90,8 @@ Modes:
 | stdin (`io.input`, …), a `Writer`/`Reader` on a FIFO, pipe or device | D | D | D | D | D | D | yes |
 | socket `accept`/`read`/`write` | P | D | R | R | R | I | yes |
 | `net.connect` handshake | P | I | I | R | R | I | yes |
-| `Shared` update guard | D | D | D | D | D | D | no |
-| `Executor.shutdown()` / join | D | D | I | I | I | I | yes |
+| `Shared` update guard | P | D | D | D | D | D | no |
+| `Executor.shutdown()` / join | P | D | I | I | I | I | yes |
 | `parallel:` nursery join | P | D | H¹ | H¹ | I | H¹ | no |
 | `extern` C call (the watcher hands over a long call's permit) | I | I | I | I | I | I | yes |
 

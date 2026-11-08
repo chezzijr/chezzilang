@@ -1140,6 +1140,14 @@ pub struct Vm {
     /// exclusive with `suspend`/`wait_suspend` (a fiber parks via exactly one). VM-global like
     /// `suspend` (one fiber runs at once).
     send_suspend: Option<GcRef>,
+    /// The `Shared`/`RwShared` guard wait that parked the running fiber: the box lock's bucket key
+    /// ([`core::BoxLock::park_key`]), consumed by `run_one_fiber` into `Disp::GuardPark`. The box
+    /// method re-pushed its operands and rewound ([`Vm::take_update_guard`]).
+    guard_suspend: Option<usize>,
+    /// The `Executor` join that parked the running fiber: the joined sched and the join's slack
+    /// ([`Vm::join_executor`]), consumed by `run_one_fiber` into `Disp::ExecJoinPark`. The
+    /// `shutdown` call re-pushed its receiver and rewound.
+    exec_join_suspend: Option<(Arc<MnSched>, usize)>,
     /// TICKET-208 — where and why the running fiber asked to park: the deadlock text the in-place
     /// path raises for the same op, and the op's span. Set beside `suspend` / `send_suspend` /
     /// `wait_suspend`, moved to [`Fiber::park_site`] by `run_one_fiber`.
@@ -1182,6 +1190,10 @@ pub struct Vm {
     /// mirror of [`FiberCtx::held_guards`]: a parked holder keeps them, and a dropped task releases
     /// them. The frame's exit releases its guard ([`Vm::drop_ret`]).
     held_guards: Vec<core::UpdateGuard>,
+    /// The place in line of a task parked for a guard (its writer count or reader admission),
+    /// from its park to the re-run acquire, which takes the guard through it. Live mirror of
+    /// [`FiberCtx::guard_ticket`]; dropping it leaves the line.
+    guard_ticket: Option<core::WaitTicket>,
     /// The holds this task's generator body frames (`RetAction::Gen`) keep on their generators'
     /// slots, innermost last. Live mirror of [`FiberCtx::held_gens`]: a dropped task's holds put
     /// its generators back `Done`. The frame's `yield` or exit disarms its hold.

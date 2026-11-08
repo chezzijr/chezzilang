@@ -282,9 +282,10 @@ the wait-for graph is read only on a contended acquire, so a cycle that passes t
 > RwShared box`. `get` / `read` nested in `read` are legal while no writer waits; past a waiting
 > writer they fault (`a lock cycle`). The re-entry text names the box kind (`Shared` or `RwShared`).
 
-> **A guard wait does not cost an OS thread unless it is long.** A contended `set`/`update`/`write`
-> waits in place on its worker for up to 5 ms (`GUARD_DEMOTE_BUDGET`) before it demotes the worker
-> and spawns one replacement OS thread, so almost no wait pays for a thread. Details:
+> **A guard wait in a task parks, as a goroutine's `sync.Mutex` wait does.** A contended
+> `set`/`update`/`write` in a spawned task or an Executor job retries for a few microseconds, then
+> parks the task: no OS thread per waiter, and a task that holds the guard can be preempted. `main`
+> waits in place on its own thread. Details:
 > [`concurrency-runtime.md`](../../design/concurrency-runtime.md#guard-waits).
 
 ### Fan out big shared data — use a collection

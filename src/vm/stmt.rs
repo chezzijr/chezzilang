@@ -237,7 +237,7 @@ impl Vm {
             } else if run_defers && let Some(e) = self.drain_deferred(fi, 0) {
                 err = Some(e);
             }
-            self.pop_unwound_frame();
+            self.pop_unwound_frame(!run_defers);
         }
         (err, escaped_err)
     }
@@ -256,10 +256,10 @@ impl Vm {
     }
 
     /// Drop the top frame of an unwind, after its `defer`s, with the `recover:` handlers it
-    /// installed.
-    pub(super) fn pop_unwound_frame(&mut self) {
+    /// installed. `cut`: a deadlock verdict cut this task ([`Vm::drop_ret`]).
+    pub(super) fn pop_unwound_frame(&mut self, cut: bool) {
         let frame = self.frames.pop().unwrap();
-        self.drop_ret(frame.ret, frame.base);
+        self.drop_ret(frame.ret, frame.base, cut);
         if frame.counted {
             self.call_depth -= 1;
         }

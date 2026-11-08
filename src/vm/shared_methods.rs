@@ -55,15 +55,38 @@ impl Vm {
             SharedMethod::Update => BoxCall::Update,
             SharedMethod::Read => BoxCall::Read,
             SharedMethod::Get | SharedMethod::Set => {
-                return self
+                let r = self
                     .with_method_rooted(h, args, |vm| {
                         vm.shared_method_rooted(h, which == SharedMethod::Set, args, span)
                     })
                     .map(Some);
+                return self.rewind_if_parked(h, args, r);
             }
         };
         self.arity_err(method, args, 1, span)?;
-        self.box_frame(h, call, args[0], span)
+        let r = self.box_frame(h, call, args[0], span);
+        self.rewind_if_parked(h, args, r)
+    }
+
+    /// A box method `h.m(args)` whose guard wait parked the fiber (`guard_suspend`, set with the
+    /// sentinel `Err` of [`Vm::take_update_guard`]): put the receiver and the arguments back and
+    /// rewind, so the `CallMethod` re-runs on resume (as a parked `recv` does,
+    /// [`Vm::park_recv`]). `Ok(None)`: no result push.
+    fn rewind_if_parked(
+        &mut self,
+        h: GcRef,
+        args: &[Value],
+        r: Result<Option<Value>, RuntimeError>,
+    ) -> Result<Option<Value>, RuntimeError> {
+        if r.is_err() && self.guard_suspend.is_some() {
+            self.push(Value::obj(h));
+            for &a in args {
+                self.push(a);
+            }
+            self.rewind_op();
+            return Ok(None);
+        }
+        r
     }
 
     /// The box `h`'s lock, for `call`.
@@ -128,6 +151,8 @@ impl Vm {
     ) -> Result<Value, RuntimeError> {
         let base = self.stack.len() - BOX_SLOTS;
         let h = self.stack[base].as_obj().expect("a box slot holds the box");
+        // A closure a verdict cut releases its guard as a cut one.
+        let cut = r.as_ref().is_err_and(|e| e.is_deadlock);
         let out = r.map(|r| match call {
             BoxCall::Update => {
                 self.shared_core(h).v.set(r);
@@ -140,18 +165,23 @@ impl Vm {
             BoxCall::Read | BoxCall::RwRead => r,
         });
         self.stack.truncate(base);
-        self.box_release(call);
+        self.box_release(call, cut);
         out
     }
 
-    /// Release the innermost guard a box-closure frame holds (LIFO: box frames nest).
-    pub(super) fn box_release(&mut self, call: BoxCall) {
+    /// Release the innermost guard a box-closure frame holds (LIFO: box frames nest). `cut`: a
+    /// deadlock verdict cut the holder ([`core::UpdateGuard::release_cut`]).
+    pub(super) fn box_release(&mut self, call: BoxCall, cut: bool) {
         let guard = self.held_guards.pop().expect("a box frame holds a guard");
         if call.mode() == GuardMode::Read {
             let read = self.held_reads.pop();
             debug_assert_eq!(read, Some(Arc::as_ptr(guard.lock()) as usize));
         }
-        drop(guard);
+        if cut {
+            guard.release_cut();
+        } else {
+            drop(guard);
+        }
     }
 
     /// Run a box method `f` with its popped receiver `h` and `args` rooted on the operand stack.
@@ -242,12 +272,15 @@ impl Vm {
             } else {
                 BoxCall::RwWrite
             };
-            return self.box_frame(h, call, args[0], span);
+            let r = self.box_frame(h, call, args[0], span);
+            return self.rewind_if_parked(h, args, r);
         }
-        self.with_method_rooted(h, args, |vm| {
-            vm.rwshared_method_rooted(h, method, args, span)
-        })
-        .map(Some)
+        let r = self
+            .with_method_rooted(h, args, |vm| {
+                vm.rwshared_method_rooted(h, method, args, span)
+            })
+            .map(Some);
+        self.rewind_if_parked(h, args, r)
     }
 
     /// The `Option` value a RwShared map primitive returns (`_set_key` the value it replaced,
@@ -707,8 +740,17 @@ impl Vm {
                 // Mark shut first so a task that re-enters this executor (submit/shutdown) sees it.
                 core.inner.lock().unwrap().shut = true;
                 // Every job started at its `submit`, so `shutdown` is purely the JOIN: wait for the
-                // unfinished jobs, then reduce the submission-ordered slots.
-                self.join_executor(&core, span)?;
+                // unfinished jobs, then reduce the submission-ordered slots. A fiber's join parks:
+                // put the receiver back and rewind, so this call re-runs on resume (the caller
+                // pushes no result while `exec_join_suspend` is set).
+                if let Err(e) = self.join_executor(&core, span) {
+                    if self.exec_join_suspend.is_some() {
+                        self.push(Value::obj(h));
+                        self.rewind_op();
+                        return Ok(Value::nil());
+                    }
+                    return Err(e);
+                }
                 self.cancel_at_join(span)?; // TICKET-147 (W14-15): the join is a cancellation point
                 Ok(Value::nil())
             }

@@ -185,6 +185,8 @@ impl Vm {
             join_suspend: None,
             wait_suspend: None,
             send_suspend: None,
+            guard_suspend: None,
+            exec_join_suspend: None,
             park_site: None,
             wait_site: None,
             pending: None,
@@ -194,6 +196,7 @@ impl Vm {
             pending_connect: None,
             held_reads: Vec::new(),
             held_guards: Vec::new(),
+            guard_ticket: None,
             held_gens: Vec::new(),
             poll_timed_out: false,
             poll_deadline: None,
@@ -281,6 +284,7 @@ impl Vm {
         std::mem::swap(&mut self.guard_token, &mut ctx.guard_token);
         std::mem::swap(&mut self.held_reads, &mut ctx.held_reads);
         std::mem::swap(&mut self.held_guards, &mut ctx.held_guards);
+        std::mem::swap(&mut self.guard_ticket, &mut ctx.guard_ticket);
         std::mem::swap(&mut self.held_gens, &mut ctx.held_gens);
         std::mem::swap(&mut self.drains, &mut ctx.drains);
         // stdin is NOT swapped: it is ONE source every task shares (Go/Python) — see `Stdin` and
@@ -324,6 +328,8 @@ impl Vm {
             || self.join_suspend.is_some()
             || self.wait_suspend.is_some()
             || self.send_suspend.is_some()
+            || self.guard_suspend.is_some()
+            || self.exec_join_suspend.is_some()
             || self.yield_now
             || self.offload.is_some()
             || self.poll_park.is_some()

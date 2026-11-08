@@ -255,6 +255,26 @@ worktree and target dir.
 | `benches/chz/hook_dispatch.chz` | +0.07% |
 | `benches/chz/defer.chz` | +0.22% |
 
+### Guard waits and Executor joins park (2026-11-08)
+
+Plan `2026-11-08-park-guard-and-join`: a fiber's guard wait and `Executor.shutdown()` park, and a
+guard holder is preempted. Release, `perf stat -e instructions:u`, median of 5 interleaved single
+runs at the default worker count, base `96d3d719` built in its own worktree and target dir.
+Budget: +3% per bench.
+
+| bench | change vs base |
+|---|---|
+| `benches/chz/struct.chz` | +2.84% |
+| `benches/chz/hof.chz` | +0.95% |
+| `benches/chz/hook_dispatch.chz` | +1.32% |
+| `benches/chz/defer.chz` | +1.25% |
+| `benches/sched/rendezvous_pingpong.chz` | +0.67% |
+| `benches/sched/guard_contend.chz` (new: 8 tasks x 20000 `update`s on one box) | −35.73% |
+
+`guard_contend.chz` wall time, median of 5: T=1 117 -> 101 ms, T=2 367 -> 108 ms. 200 guard
+waiters at `--threads=2` (`tests/park_scale.rs`): `demotes=0`, base 199; 100 fiber joiners of their
+own `Executor`: `demotes=0`, base 100.
+
 ### Peak memory vs Go
 
 Peak process RSS, `benches/maxrss.py`, median of 3, 2026-07-25 after the four memory levers
