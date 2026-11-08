@@ -30,7 +30,12 @@ bytes**, so a filename that is not valid UTF-8 round-trips (`fs.exists(fs.list_d
     `glob("a/..")` is `["a/.."]` (Go and CPython 3.14.7).
   - The directory prefix you wrote is kept byte-exact: `glob("./*.txt")` gives `./x.txt`. CPython
     keeps it the same way; Go cleans it to `x.txt`.
-  - `[` is a **metacharacter**: it opens a class.
+  - `[` is a **metacharacter**: it opens a class. Class rules are Go's: an item may not start with
+    `]` or `-`, and a range may not end with one (`[]a]`, `[-a]`, `[a-]` are bad patterns). Negation
+    is `[^...]` only; `[!a]` matches `!` or `a`. An inverted range `[c-a]` is valid and matches nothing.
+    Two differences from Go: `\` is a literal here, also inside a class (Go's `[\]]` matches `]`;
+    here it is the class `[\]` followed by a literal `]`, so it matches the name `\]`). And a byte
+    that is not valid UTF-8 is a class item of one byte (`b"[\xff]"`); Go calls it a bad pattern.
   - A malformed `[...]` class in any component is an `!e` carrying `"bad pattern"`, checked **before**
     any directory is read, so the result never depends on whether the directory exists.
   - A pattern with 10000 or more wildcard directory parts is also `!e` `"bad pattern"` (Go's

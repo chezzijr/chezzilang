@@ -286,7 +286,10 @@ fn glob(h: &mut dyn Host) -> Result<NativeRet, HostError> {
             return Ok(NativeRet::Err(format!("{shown_pat}: {msg}")));
         }
     }
-    let Some(hits) = glob_paths(&pattern, 0) else {
+    let first_meta = pattern
+        .iter()
+        .position(|&b| matches!(b, b'*' | b'?' | b'['));
+    let Some(hits) = glob_paths(&pattern, first_meta, 0) else {
         return Ok(NativeRet::Err(format!(
             "{shown_pat}: bad pattern: {GLOB_DEPTH_LIMIT} or more wildcard directory parts"
         )));
@@ -300,18 +303,18 @@ fn glob(h: &mut dyn Host) -> Result<NativeRet, HostError> {
 /// a pattern of 1000000 `*/` parts overflowed the native stack and aborted the process.
 const GLOB_DEPTH_LIMIT: usize = 10000;
 
-/// Does `part` hold a wildcard? (No escape character, so `\` is literal.)
-fn has_meta(part: &[u8]) -> bool {
-    part.iter().any(|&b| matches!(b, b'*' | b'?' | b'['))
-}
-
 /// Go `filepath.Glob` over a pattern already checked by [`check_pattern`]. A pattern with no
 /// wildcard is returned as written when it exists (Go `Lstat`: `"a/"` and `"a/.."` match). Else the
 /// directory part is expanded first, recursively when it holds a wildcard itself, and the last part
 /// is matched inside each directory found. Results go directory by directory, each one's names
 /// sorted by bytes (Go: `a/x` before `a-b/x`). The caller's directory prefix is kept byte-exact.
 /// `None` when the recursion reaches [`GLOB_DEPTH_LIMIT`].
-fn glob_paths(pattern: &[u8], depth: usize) -> Option<Vec<Vec<u8>>> {
+///
+/// Every level's pattern is a prefix of the caller's, so `first_meta` (the byte index of the
+/// caller's first `*`, `?` or `[`; there is no escape character) answers "does this prefix hold a
+/// wildcard" in O(1). Rescanning each prefix made a long literal prefix cost quadratic time.
+fn glob_paths(pattern: &[u8], first_meta: Option<usize>, depth: usize) -> Option<Vec<Vec<u8>>> {
+    let has_meta = |prefix: &[u8]| first_meta.is_some_and(|m| m < prefix.len());
     if depth == GLOB_DEPTH_LIMIT {
         return None;
     }
@@ -326,7 +329,7 @@ fn glob_paths(pattern: &[u8], depth: usize) -> Option<Vec<Vec<u8>>> {
         None => (None, pattern),
     };
     let dirs: Vec<Vec<u8>> = match dir {
-        Some(d) if has_meta(d) => glob_paths(d, depth + 1)?,
+        Some(d) if has_meta(d) => glob_paths(d, first_meta, depth + 1)?,
         Some(d) => vec![d.to_vec()],
         None => vec![Vec::new()],
     };
@@ -524,12 +527,23 @@ fn utf8_len_at(n: &[u8], i: usize) -> usize {
     }
 }
 
+/// One class character at `p[j]` (Go `getEsc`): `None` at the end of the pattern or on a `]` or
+/// `-`, which may not begin a class item or end a range.
+fn class_char_at(p: &[u8], j: usize) -> Option<&[u8]> {
+    match p.get(j) {
+        None | Some(b']') | Some(b'-') => None,
+        Some(_) => Some(&p[j..j + utf8_len_at(p, j)]),
+    }
+}
+
 /// Parse a `[...]` character class starting at `p[i]` (`p[i] == b'['`). Returns
-/// `(index just past the closing ']', negated?, [(lo, hi), ...])`, or `None` on a malformed class
-/// (unterminated, or empty after an optional leading `^`).
+/// `(index just past the closing ']', negated?, [(lo, hi), ...])`, or `None` on a malformed class.
 ///
-/// Entries compare as byte slices, which IS code-point order for valid UTF-8. A `]` in first
-/// position (right after `[` or `[^`) is a literal, matching Go and bash. There is deliberately NO
+/// Go 1.27 `filepath.Match` rules (`getEsc`): the class is non-empty and terminated, an item may not
+/// start with `]` or `-` (`[]a]`, `[-a]` are bad), and a range end may not be `]` or `-` (`[a-]` is
+/// bad). An inverted range (`[c-a]`) is valid and matches nothing.
+///
+/// Entries compare as byte slices, which IS code-point order for valid UTF-8. There is deliberately NO
 /// escape character — this matcher has never had one, and adding it would change what every
 /// existing `*`/`?` pattern containing a backslash matches.
 type ClassResult<'a> = Option<(usize, bool, Vec<(&'a [u8], &'a [u8])>)>;
@@ -548,18 +562,12 @@ fn class_at(p: &[u8], i: usize) -> ClassResult<'_> {
         if p[j] == b']' && !items.is_empty() {
             return Some((j + 1, neg, items));
         }
-        let lo_len = utf8_len_at(p, j);
-        let lo = &p[j..j + lo_len];
-        j += lo_len;
+        let lo = class_char_at(p, j)?;
+        j += lo.len();
         let mut hi = lo;
-        if j < p.len() && p[j] == b'-' && j + 1 < p.len() && p[j + 1] != b']' {
-            j += 1;
-            let hi_len = utf8_len_at(p, j);
-            hi = &p[j..j + hi_len];
-            j += hi_len;
-        }
-        if lo > hi {
-            return None;
+        if j < p.len() && p[j] == b'-' {
+            hi = class_char_at(p, j + 1)?;
+            j += 1 + hi.len();
         }
         items.push((lo, hi));
     }
@@ -841,7 +849,7 @@ mod tests {
         assert!(!wildcard_match(b"*.[ch]", b"c.txt"));
         assert!(wildcard_match(b"[a-c]x", b"bx"));
         assert!(!wildcard_match(b"[^a-c]x", b"bx"));
-        assert!(wildcard_match(b"[]a]", b"]"));
+        assert!(!wildcard_match(b"[c-a]", b"b"));
         assert!(!wildcard_match(b"[abc]", b""));
     }
 

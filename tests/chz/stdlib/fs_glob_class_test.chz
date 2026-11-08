@@ -1,0 +1,47 @@
+# tests/chz/stdlib/fs_glob_class_test.chz — `fs.glob`'s `[...]` class follows Go `filepath.Match`.
+#
+# Every verdict below is Go 1.27 `filepath.Match` output (run 2026-11-09). A class item may not
+# start with `]` or `-`, a range end may not be `]` or `-`, and an empty class is bad. An inverted
+# range (`[c-a]`) is valid and matches nothing. Before this fix `[]a]` matched `]`, `[a-]` read
+# `-` as a plain character, and `[c-a]` was a bad pattern.
+
+import std.fs
+import std.os
+
+NAMES := ["a", "b", "]", "-", "!", "[", "^", "d"]
+
+fn fixture() -> str:
+    d := os.temp_dir().str() + "/chz_globclass_{os.getpid()}"
+    match fs.mkdir(d):
+        ?_: pass
+        !e: assert false, "mkdir: " + e.message()
+    for n in NAMES:
+        match fs.atomic_write(d + "/" + n, "x"):
+            ?_: pass
+            !e: assert false, "write " + n + ": " + e.message()
+    return d
+
+fn cleanup(d: str):
+    for n in NAMES:
+        _ := fs.remove_file(d + "/" + n)
+    _ := fs.remove_dir(d)
+
+test fn glob_class_rejects_what_go_rejects():
+    for p in ["[]a]", "[^]a]", "[]-a]", "[-a]", "[a-]", "[^-]", "[a-c-e]", "[a-]x", "[]", "[^]", "x["]:
+        match fs.glob("nope_globclass/" + p):
+            ?m: assert false, p + " must be a bad pattern, got {m}"
+            !e: assert "bad pattern" in e.message(), p + ": " + e.message()
+
+test fn glob_class_matches_what_go_matches():
+    d := fixture()
+    defer cleanup(d)
+    cases := [("[a]", ["a"]), ("[a-c]", ["a", "b"]), ("[c-a]", []), ("[!a]", ["!", "a"]),
+        ("[[]", ["["]), ("[a^]", ["^", "a"]), ("[a-c]x", [])]
+    for p, want in cases:
+        got: List[str] = []
+        match fs.glob(d + "/" + p):
+            ?hits:
+                for h in hits:
+                    got.push(h.str().strip_prefix(d + "/"))
+            !e: assert false, p + " must not error: " + e.message()
+        assert got == want, p + ": {got}"
