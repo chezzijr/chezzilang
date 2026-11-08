@@ -469,40 +469,31 @@ impl Checker {
     /// IMPROVES the message: "type int does not satisfy Sized (missing method 'len')" instead of
     /// the bare clause.
     pub(super) fn native_witness_key(ty: &Ty) -> Option<&'static str> {
-        match ty.scalar() {
-            Ty::List(_) => Some("List"),
-            Ty::Map(..) => Some("Map"),
-            Ty::Set(_) => Some("Set"),
-            Ty::Str => Some("str"),
-            Ty::Bytes => Some("bytes"),
-            Ty::ByteArray => Some("bytearray"),
-            Ty::Int => Some("int"),
-            Ty::Float => Some("float"),
-            Ty::Bool => Some("bool"),
-            Ty::Nil
-            | Ty::Func { .. }
-            | Ty::Tuple(_)
-            | Ty::Struct(..)
-            | Ty::Enum(..)
-            | Ty::Param(_)
-            | Ty::Result(..)
-            | Ty::Option(_)
-            | Ty::Channel(_)
-            | Ty::Shared(_)
-            | Ty::Atomic(_)
-            | Ty::AtomicInt
-            | Ty::RwShared(_)
-            | Ty::Executor
-            | Ty::Socket
-            | Ty::Listener
-            | Ty::Writer
-            | Ty::Reader
-            | Ty::Ptr
-            | Ty::Width(_)
-            | Ty::Protocol(..)
-            | Ty::Module(_)
-            | Ty::Unknown
-            | Ty::Var(_) => None,
+        let b = BuiltinType::of(ty)?;
+        match b {
+            BuiltinType::List
+            | BuiltinType::Map
+            | BuiltinType::Set
+            | BuiltinType::Str
+            | BuiltinType::Bytes
+            | BuiltinType::ByteArray
+            | BuiltinType::Int
+            | BuiltinType::Float
+            | BuiltinType::Bool => Some(b.name()),
+            BuiltinType::Iterator
+            | BuiltinType::Channel
+            | BuiltinType::Range
+            | BuiltinType::Socket
+            | BuiltinType::Listener
+            | BuiltinType::Writer
+            | BuiltinType::Reader
+            | BuiltinType::Ptr
+            | BuiltinType::OwnedStr
+            | BuiltinType::Shared
+            | BuiltinType::RwShared
+            | BuiltinType::Atomic
+            | BuiltinType::AtomicInt
+            | BuiltinType::Executor => None,
         }
     }
 

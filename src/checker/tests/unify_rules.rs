@@ -260,6 +260,66 @@ fn builtin_scalar_bound_grid() {
     );
 }
 
+/// `BuiltinType::of` reads back the builtin type a name spells: every `plain_ty` / `applied_ty`
+/// result maps back to its own variant. `owned_str` spells `str`, so it reads back as `str`.
+/// `Iterator` and `Range` are struct-shaped `Ty`s with no variant of their own, and a type that no
+/// builtin name spells has no builtin type.
+#[test]
+fn builtin_type_of_round_trip_grid() {
+    let mut red: Vec<String> = Vec::new();
+    for b in BuiltinType::ALL {
+        let ty = b
+            .plain_ty()
+            .or_else(|| b.applied_ty(vec![Ty::Int; b.arity()]));
+        let want = match b {
+            BuiltinType::OwnedStr => Some(BuiltinType::Str),
+            BuiltinType::Iterator | BuiltinType::Range => None,
+            BuiltinType::Int
+            | BuiltinType::Float
+            | BuiltinType::Bool
+            | BuiltinType::Str
+            | BuiltinType::Bytes
+            | BuiltinType::ByteArray
+            | BuiltinType::List
+            | BuiltinType::Set
+            | BuiltinType::Map
+            | BuiltinType::Channel
+            | BuiltinType::Socket
+            | BuiltinType::Listener
+            | BuiltinType::Writer
+            | BuiltinType::Reader
+            | BuiltinType::Ptr
+            | BuiltinType::Shared
+            | BuiltinType::RwShared
+            | BuiltinType::Atomic
+            | BuiltinType::AtomicInt
+            | BuiltinType::Executor => Some(b),
+        };
+        let got = ty.as_ref().and_then(BuiltinType::of);
+        if got != want {
+            red.push(format!("{}: {ty:?} -> {got:?}, want {want:?}", b.name()));
+        }
+    }
+    for ty in [
+        Ty::Nil,
+        Ty::Tuple(vec![Ty::Int]),
+        Ty::Option(Box::new(Ty::Int)),
+        Ty::Struct("P".to_string(), vec![]),
+        Ty::Param("T".to_string()),
+        Ty::Unknown,
+    ] {
+        if let Some(b) = BuiltinType::of(&ty) {
+            red.push(format!("{ty:?} -> {}, want None", b.name()));
+        }
+    }
+    assert!(
+        red.is_empty(),
+        "{} red cells:\n{}",
+        red.len(),
+        red.join("\n")
+    );
+}
+
 /// TICKET-257 — `+` and `-` on builtin types ask `Add` and `Sub`. What the grant must NOT allow:
 /// mixed element types, a set `+`, a str `-`, str + bytes.
 #[test]

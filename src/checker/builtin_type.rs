@@ -89,6 +89,47 @@ impl BuiltinType {
         Self::ALL.into_iter().find(|b| b.name() == name)
     }
 
+    /// The builtin type `ty` is: the inverse of [`Self::plain_ty`] and [`Self::applied_ty`]. A C
+    /// width reads as its scalar. `Iterator` and `Range` are struct-shaped and have no `Ty` of their
+    /// own, so a `Ty::Struct` is never a builtin type here.
+    pub(crate) fn of(ty: &Ty) -> Option<BuiltinType> {
+        Some(match ty.scalar() {
+            Ty::Int => BuiltinType::Int,
+            Ty::Float => BuiltinType::Float,
+            Ty::Bool => BuiltinType::Bool,
+            Ty::Str => BuiltinType::Str,
+            Ty::Bytes => BuiltinType::Bytes,
+            Ty::ByteArray => BuiltinType::ByteArray,
+            Ty::List(_) => BuiltinType::List,
+            Ty::Map(..) => BuiltinType::Map,
+            Ty::Set(_) => BuiltinType::Set,
+            Ty::Channel(_) => BuiltinType::Channel,
+            Ty::Shared(_) => BuiltinType::Shared,
+            Ty::RwShared(_) => BuiltinType::RwShared,
+            Ty::Atomic(_) => BuiltinType::Atomic,
+            Ty::AtomicInt => BuiltinType::AtomicInt,
+            Ty::Executor => BuiltinType::Executor,
+            Ty::Socket => BuiltinType::Socket,
+            Ty::Listener => BuiltinType::Listener,
+            Ty::Writer => BuiltinType::Writer,
+            Ty::Reader => BuiltinType::Reader,
+            Ty::Ptr => BuiltinType::Ptr,
+            Ty::Nil
+            | Ty::Func { .. }
+            | Ty::Tuple(_)
+            | Ty::Struct(..)
+            | Ty::Enum(..)
+            | Ty::Param(_)
+            | Ty::Result(..)
+            | Ty::Option(_)
+            | Ty::Width(_)
+            | Ty::Protocol(..)
+            | Ty::Module(_)
+            | Ty::Unknown
+            | Ty::Var(_) => return None,
+        })
+    }
+
     /// The scalar type a name spells, or `None` for every other builtin type.
     pub(crate) fn scalar_ty(self) -> Option<Ty> {
         match self {

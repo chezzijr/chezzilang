@@ -138,18 +138,38 @@ impl Checker {
 
     /// A `where T: List/Map/Set` bound names a container CONSTRUCTOR rather than a protocol, making it
     /// a HEAD-CONSTRUCTOR equality constraint (`T`'s head must be exactly this container, its element/
-    /// key/value types free). The constructor-kind generalization of [`scalar_bound_ty`] — closed set
-    /// in ONE place (add a container = add an arm). Returns `true` iff `ty`'s head matches `name`
-    /// (`Ty::Unknown` doesn't cascade — handled by the caller). Tuple is EXCLUDED (heterogeneous).
-    /// This is the surface form of the `RwShared` read-view gate (`expr.rs`); no element binder, so no
-    /// harvest-scoping change. Returns `None` if `name` is not a recognized container.
+    /// key/value types free). The constructor-kind generalization of [`scalar_bound_ty`]. Returns
+    /// `true` iff `ty`'s builtin type is the one `name` spells (`Ty::Unknown` doesn't cascade —
+    /// handled by the caller). Tuple is EXCLUDED (heterogeneous). This is the surface form of the
+    /// `RwShared` read-view gate (`expr.rs`); no element binder, so no harvest-scoping change.
+    /// Returns `None` if `name` is not a container.
     pub(super) fn container_bound_matches(name: &str, ty: &Ty) -> Option<bool> {
-        Some(match name {
-            "List" => matches!(ty, Ty::List(_)),
-            "Map" => matches!(ty, Ty::Map(_, _)),
-            "Set" => matches!(ty, Ty::Set(_)),
-            _ => return None,
-        })
+        let b = BuiltinType::from_name(name)?;
+        match b {
+            BuiltinType::List | BuiltinType::Map | BuiltinType::Set => {
+                Some(BuiltinType::of(ty) == Some(b))
+            }
+            BuiltinType::Int
+            | BuiltinType::Float
+            | BuiltinType::Bool
+            | BuiltinType::Str
+            | BuiltinType::Bytes
+            | BuiltinType::ByteArray
+            | BuiltinType::Iterator
+            | BuiltinType::Channel
+            | BuiltinType::Range
+            | BuiltinType::Socket
+            | BuiltinType::Listener
+            | BuiltinType::Writer
+            | BuiltinType::Reader
+            | BuiltinType::Ptr
+            | BuiltinType::OwnedStr
+            | BuiltinType::Shared
+            | BuiltinType::RwShared
+            | BuiltinType::Atomic
+            | BuiltinType::AtomicInt
+            | BuiltinType::Executor => None,
+        }
     }
 
     /// Visited-set core of [`satisfies_args`]. `seen` guards the embed-flattening recursion (M22):

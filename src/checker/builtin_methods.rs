@@ -5,50 +5,15 @@
 use super::*;
 use crate::base::builtin_method::DECLARED_METHODS;
 
-/// Does `method` mutate its receiver in place (as opposed to returning a new value)? Maps the
-/// receiver's type to its kind and reads the one table, `crate::native::is_mutating_native_kind`.
+/// Does `method` mutate its receiver in place (as opposed to returning a new value)? Reads the one
+/// table, `crate::native::is_mutating_native_kind`, under the receiver's builtin type name.
 ///
 /// The handle types (`Channel`/`Shared`/`RwShared`/`Atomic`/`Executor`/`Socket`/`Listener`/`Writer`/
-/// `Reader`) are absent BY DESIGN and must stay absent: a task holds them by handle, so a
-/// task-side `s.update(...)` / `ch.send(v)` IS visible to the parent (measured). This predicate feeds
-/// the DEC-089 read-temporary warning, so handles must stay absent.
+/// `Reader`) have no row there and must not get one: a task holds them by handle, so a task-side
+/// `s.update(...)` / `ch.send(v)` IS visible to the parent. This predicate feeds the DEC-089
+/// read-temporary warning.
 pub(super) fn mutates_receiver(recv: &Ty, method: &str) -> bool {
-    let kind = match recv {
-        Ty::List(_) => "List",
-        Ty::Map(..) => "Map",
-        Ty::Set(_) => "Set",
-        Ty::ByteArray => "bytearray",
-        Ty::Int
-        | Ty::Float
-        | Ty::Bool
-        | Ty::Str
-        | Ty::Bytes
-        | Ty::Nil
-        | Ty::Func { .. }
-        | Ty::Tuple(_)
-        | Ty::Struct(..)
-        | Ty::Enum(..)
-        | Ty::Param(_)
-        | Ty::Result(..)
-        | Ty::Option(_)
-        | Ty::Channel(_)
-        | Ty::Shared(_)
-        | Ty::Atomic(_)
-        | Ty::AtomicInt
-        | Ty::RwShared(_)
-        | Ty::Executor
-        | Ty::Socket
-        | Ty::Listener
-        | Ty::Writer
-        | Ty::Reader
-        | Ty::Ptr
-        | Ty::Width(_)
-        | Ty::Protocol(..)
-        | Ty::Module(_)
-        | Ty::Unknown
-        | Ty::Var(_) => return false,
-    };
-    crate::native::is_mutating_native_kind(kind, method)
+    BuiltinType::of(recv).is_some_and(|b| crate::native::is_mutating_native_kind(b.name(), method))
 }
 
 // The bespoke `str_method_sig` / `bytes_method_sig` / `bytearray_method_sig` arms are RETIRED (phase
