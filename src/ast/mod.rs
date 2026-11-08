@@ -1635,13 +1635,10 @@ pub fn type_application(e: &Expr) -> Option<TypeApplication<'_>> {
     }
 }
 
-/// Collect every `recover:` block reachable from expression `e`, in source order, **without
-/// descending into a nested closure** (a closure's body is its own scope). `recover:` is the only
-/// expression form carrying a statement block, so generator analyses that must see statements buried
-/// in expression position (`x := recover: … yield …`) walk into these. The recover block's *own*
-/// statements are NOT recursed here — the caller drives that via its statement walk (which re-applies
-/// this to each nested statement's expressions), so nested recovers compose correctly.
-pub fn expr_recover_blocks<'a>(e: &'a Expr, out: &mut Vec<&'a Block>) {
+/// Every `recover:` and `else:` block in expression `e`, in source order, not inside a nested
+/// closure (a closure is its own frame). The blocks' own statements are not walked; see
+/// [`stmt_blocks`].
+fn expr_recover_blocks<'a>(e: &'a Expr, out: &mut Vec<&'a Block>) {
     let mut go = |x: &'a Expr| expr_recover_blocks(x, out);
     match &e.kind {
         ExprKind::Int(_)
@@ -1754,44 +1751,82 @@ pub fn expr_recover_blocks<'a>(e: &'a Expr, out: &mut Vec<&'a Block>) {
     }
 }
 
-/// Collect every `recover:` block reachable from the expressions a single statement holds directly
-/// (not its sub-blocks — those are walked as statements by the caller). Companion to
-/// [`expr_recover_blocks`]; together they let a statement-level walk also see statements that live in
-/// `recover:` blocks in expression position.
-pub fn stmt_expr_recover_blocks<'a>(s: &'a Stmt, out: &mut Vec<&'a Block>) {
-    let mut go = |e: &'a Expr| expr_recover_blocks(e, out);
+/// Every block a statement holds in its own frame: its sub-blocks, and each `recover:` or `else:`
+/// block in the expressions it holds directly. Not a nested declaration's bodies (a `fn`, a type's
+/// methods): those are frames of their own. The blocks' own statements are not walked; a caller
+/// recurses into them.
+pub fn stmt_blocks<'a>(s: &'a Stmt, out: &mut Vec<&'a Block>) {
     match &s.kind {
-        StmtKind::Let { value, .. } => go(value),
+        StmtKind::Let { value, .. } => expr_recover_blocks(value, out),
         StmtKind::Assign { target, value, .. } => {
-            go(target);
-            go(value);
+            expr_recover_blocks(target, out);
+            expr_recover_blocks(value, out);
         }
-        StmtKind::Expr(e) | StmtKind::Yield(e) => go(e),
-        StmtKind::Return(Some(e)) => go(e),
-        StmtKind::If { branches, .. } => branches.iter().for_each(|(c, _)| go(c)),
-        StmtKind::While { cond, .. } => go(cond),
-        StmtKind::For { iter, .. } => go(iter),
-        StmtKind::Match { scrutinee, .. } => go(scrutinee),
-        StmtKind::Defer(DeferTarget::Call(e)) => go(e),
-        StmtKind::Spawn(SpawnTarget::Call(e)) => go(e),
-        StmtKind::Wait { arms, .. } => arms.iter().for_each(|a| {
-            if let Some(g) = &a.guard {
-                expr_recover_blocks(g, out);
+        StmtKind::Expr(e) | StmtKind::Yield(e) | StmtKind::Return(Some(e)) => {
+            expr_recover_blocks(e, out)
+        }
+        StmtKind::Assert { cond, msg } => {
+            expr_recover_blocks(cond, out);
+            if let Some(m) = msg {
+                expr_recover_blocks(m, out);
             }
-            match &a.kind {
-                WaitArmKind::Recv { chan, .. } => expr_recover_blocks(chan, out),
-                WaitArmKind::Send { call } => expr_recover_blocks(call, out),
+        }
+        StmtKind::If {
+            branches,
+            else_block,
+        } => {
+            for (c, b) in branches {
+                expr_recover_blocks(c, out);
+                out.push(b);
             }
-        }),
-        StmtKind::Fn(_)
+            if let Some(b) = else_block {
+                out.push(b);
+            }
+        }
+        StmtKind::For { iter, body, .. } => {
+            expr_recover_blocks(iter, out);
+            out.push(body);
+        }
+        StmtKind::While { cond, body } => {
+            expr_recover_blocks(cond, out);
+            out.push(body);
+        }
+        StmtKind::Match { scrutinee, arms } => {
+            expr_recover_blocks(scrutinee, out);
+            for a in arms {
+                if let Some(g) = &a.guard {
+                    expr_recover_blocks(g, out);
+                }
+                out.push(&a.body);
+            }
+        }
+        StmtKind::Defer(DeferTarget::Call(e)) | StmtKind::Spawn(SpawnTarget::Call(e)) => {
+            expr_recover_blocks(e, out)
+        }
+        StmtKind::Defer(DeferTarget::Block(b))
+        | StmtKind::Spawn(SpawnTarget::Block(b))
+        | StmtKind::Parallel { body: b } => out.push(b),
+        StmtKind::Wait { arms, else_block } => {
+            for a in arms {
+                if let Some(g) = &a.guard {
+                    expr_recover_blocks(g, out);
+                }
+                match &a.kind {
+                    WaitArmKind::Recv { chan, .. } => expr_recover_blocks(chan, out),
+                    WaitArmKind::Send { call } => expr_recover_blocks(call, out),
+                }
+                out.push(&a.body);
+            }
+            if let Some(b) = else_block {
+                out.push(b);
+            }
+        }
+        StmtKind::Return(None)
+        | StmtKind::Fn(_)
         | StmtKind::Struct { .. }
         | StmtKind::Protocol { .. }
         | StmtKind::Enum { .. }
         | StmtKind::TypeAlias { .. }
-        | StmtKind::Return(_)
-        | StmtKind::Defer(_)
-        | StmtKind::Parallel { .. }
-        | StmtKind::Spawn(_)
         | StmtKind::Break
         | StmtKind::Continue
         | StmtKind::Pass
@@ -1800,8 +1835,7 @@ pub fn stmt_expr_recover_blocks<'a>(s: &'a Stmt, out: &mut Vec<&'a Block>) {
         | StmtKind::Native(_)
         | StmtKind::NativeStruct { .. }
         | StmtKind::NativeEnum { .. }
-        | StmtKind::NativeType { .. }
-        | StmtKind::Assert { .. } => {}
+        | StmtKind::NativeType { .. } => {}
     }
 }
 

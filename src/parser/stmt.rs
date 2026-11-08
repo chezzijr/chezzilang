@@ -1080,55 +1080,10 @@ pub(super) fn body_contains_yield(block: &Block) -> bool {
 }
 
 fn stmt_contains_yield(s: &Stmt) -> bool {
-    // A `yield` can also live in a `recover:` block in expression position (`x := recover: … yield …`),
-    // which the statement structure does not reach — scan those too. Stops at closures (a closure's
-    // yields are its own). See `ast::expr_recover_blocks`.
-    let mut recover_blocks = Vec::new();
-    stmt_expr_recover_blocks(s, &mut recover_blocks);
-    if recover_blocks.iter().any(|b| body_contains_yield(b)) {
+    if matches!(s.kind, StmtKind::Yield(_)) {
         return true;
     }
-    match &s.kind {
-        StmtKind::Yield(_) => true,
-        StmtKind::If {
-            branches,
-            else_block,
-        } => {
-            branches.iter().any(|(_, b)| body_contains_yield(b))
-                || else_block.as_ref().is_some_and(body_contains_yield)
-        }
-        StmtKind::For { body, .. } | StmtKind::While { body, .. } | StmtKind::Parallel { body } => {
-            body_contains_yield(body)
-        }
-        StmtKind::Match { arms, .. } => arms.iter().any(|a| body_contains_yield(&a.body)),
-        StmtKind::Defer(DeferTarget::Block(b)) | StmtKind::Spawn(SpawnTarget::Block(b)) => {
-            body_contains_yield(b)
-        }
-        StmtKind::Wait { arms, else_block } => {
-            arms.iter().any(|a| body_contains_yield(&a.body))
-                || else_block.as_ref().is_some_and(body_contains_yield)
-        }
-        // A nested `fn` owns its own yields — do not descend.
-        StmtKind::Let { .. }
-        | StmtKind::Assign { .. }
-        | StmtKind::Fn(_)
-        | StmtKind::Struct { .. }
-        | StmtKind::Protocol { .. }
-        | StmtKind::Enum { .. }
-        | StmtKind::TypeAlias { .. }
-        | StmtKind::Return(_)
-        | StmtKind::Defer(_)
-        | StmtKind::Spawn(_)
-        | StmtKind::Break
-        | StmtKind::Continue
-        | StmtKind::Pass
-        | StmtKind::Import(_)
-        | StmtKind::Extern { .. }
-        | StmtKind::Native(_)
-        | StmtKind::NativeStruct { .. }
-        | StmtKind::NativeEnum { .. }
-        | StmtKind::NativeType { .. }
-        | StmtKind::Assert { .. }
-        | StmtKind::Expr(_) => false,
-    }
+    let mut blocks = Vec::new();
+    stmt_blocks(s, &mut blocks);
+    blocks.iter().any(|b| body_contains_yield(b))
 }

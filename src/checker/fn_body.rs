@@ -101,16 +101,11 @@ impl Checker {
         }
     }
 
-    /// A generator body rejects the statements `boundary::RULES` names for it. The walk descends
-    /// through nested control-flow blocks and expression-position `recover:` blocks, but not into
-    /// nested `fn` definitions (those have their own generator status).
+    /// A generator body rejects the statements `boundary::RULES` names for it, in every block the
+    /// body holds (`ast::stmt_blocks`), but not in nested `fn` definitions (those have their own
+    /// generator status). A rejected statement's own blocks are not walked: one error per statement.
     pub(super) fn check_generator_restrictions(&mut self, body: &[Stmt]) {
         for s in body {
-            let mut recover_blocks = Vec::new();
-            crate::ast::stmt_expr_recover_blocks(s, &mut recover_blocks);
-            for b in recover_blocks {
-                self.check_generator_restrictions(b);
-            }
             if let Some(c) = boundary::Construct::of_stmt(&s.kind)
                 && let Some(boundary::Rule::Rejected(reason)) = boundary::Block::Generator.rule(c)
             {
@@ -118,51 +113,12 @@ impl Checker {
                     s.span,
                     boundary::message(boundary::Block::Generator, c, reason),
                 );
+                continue;
             }
-            match &s.kind {
-                StmtKind::Defer(_)
-                | StmtKind::Spawn(_)
-                | StmtKind::Parallel { .. }
-                | StmtKind::Wait { .. } => {}
-                StmtKind::If {
-                    branches,
-                    else_block,
-                } => {
-                    for (_, b) in branches {
-                        self.check_generator_restrictions(b);
-                    }
-                    if let Some(b) = else_block {
-                        self.check_generator_restrictions(b);
-                    }
-                }
-                StmtKind::For { body, .. } | StmtKind::While { body, .. } => {
-                    self.check_generator_restrictions(body)
-                }
-                StmtKind::Match { arms, .. } => {
-                    for a in arms {
-                        self.check_generator_restrictions(&a.body);
-                    }
-                }
-                StmtKind::Let { .. }
-                | StmtKind::Assign { .. }
-                | StmtKind::Fn(_)
-                | StmtKind::Struct { .. }
-                | StmtKind::Protocol { .. }
-                | StmtKind::Enum { .. }
-                | StmtKind::TypeAlias { .. }
-                | StmtKind::Return(_)
-                | StmtKind::Yield(_)
-                | StmtKind::Break
-                | StmtKind::Continue
-                | StmtKind::Pass
-                | StmtKind::Import(_)
-                | StmtKind::Extern { .. }
-                | StmtKind::Native(_)
-                | StmtKind::NativeStruct { .. }
-                | StmtKind::NativeEnum { .. }
-                | StmtKind::NativeType { .. }
-                | StmtKind::Assert { .. }
-                | StmtKind::Expr(_) => {}
+            let mut blocks = Vec::new();
+            crate::ast::stmt_blocks(s, &mut blocks);
+            for b in blocks {
+                self.check_generator_restrictions(b);
             }
         }
     }
