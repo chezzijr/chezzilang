@@ -31,6 +31,9 @@ enum Fix {
     /// a `defer` kind: already `deadlock`, but its wait demoted until this task of plan
     /// 2026-11-07-defer-drain-frames drains it on frames; every cell must report `demotes=0`
     Drain(u8),
+    /// judged at this plan task, as `Task`, and its guard wait parks: every cell must report
+    /// `demotes=0` (plan 2026-11-08-park-guard-and-join; Go parks a goroutine on `mu.Lock()`)
+    Parks(u8),
     /// never: a nested container walk keeps the nested loop (narrowed W23-1, out of scope)
     Residual,
 }
@@ -83,7 +86,7 @@ const KINDS: &[Kind] = &[
     // sender both finish.
     Kind {
         name: "update_contend",
-        fix: Fix::Task(5),
+        fix: Fix::Parks(5),
         prelude: "s := Shared[int](0)\nheld := Channel[int](1)\n\nfn hold(v: int) -> int:\n    held.send(1)\n    return v + w()",
         act: "parallel:\n    spawn:\n        _ := held.recv()\n        s.update(fn(v: int) -> int: v + 1)\n    s.update(hold)\nprint(s.get())",
         out: "8\n",
@@ -556,8 +559,8 @@ fn expect(kind: &Kind, caller: Caller, live: bool) -> Expect {
     }
     match kind.fix {
         Fix::Drain(_) => Expect::Deadlock,
-        Fix::Task(t) if t <= LANDED => Expect::Deadlock,
-        Fix::Task(_) | Fix::Residual => Expect::Hang,
+        Fix::Task(t) | Fix::Parks(t) if t <= LANDED => Expect::Deadlock,
+        Fix::Task(_) | Fix::Parks(_) | Fix::Residual => Expect::Hang,
     }
 }
 
@@ -681,7 +684,7 @@ fn check_cell(kind: &Kind, caller: Caller, live: bool) -> Vec<String> {
     for t in ["1", "2", "4"] {
         let counted = run_counted(&tag, &src, test_fn, t, limit);
         if let Some((_, demotes)) = &counted
-            && matches!(kind.fix, Fix::Drain(_))
+            && matches!(kind.fix, Fix::Drain(_) | Fix::Parks(_))
             && *demotes != Some(0)
         {
             misses.push(format!(

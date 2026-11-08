@@ -1621,6 +1621,69 @@ fn m3_3_guard_modes_grid() {
     );
 }
 
+/// Plan 2026-11-08 Task 5 (review S1) — a verdict-cut holder's release (`UpdateGuard::release_cut`)
+/// frees the box but is no progress for a waiter: a waiter's ticket refuses it and does not see it
+/// free, a cut write release admits no waiting reader, and a fresh take gets it and ends the cut.
+#[test]
+fn s1_a_cut_release_is_no_progress_for_a_waiter() {
+    use crate::vm::core::{WaitTicket, try_update_guard};
+    let lx = test_lock();
+    let rd = |l| GuardKey {
+        lock: l,
+        mode: GuardMode::Read,
+    };
+    let wr = |l| GuardKey {
+        lock: l,
+        mode: GuardMode::Write,
+    };
+    let (a, b, c) = (u64::MAX - 41, u64::MAX - 42, u64::MAX - 43);
+    // A cut write release admits no waiting reader; a fresh reader takes it and ends the cut.
+    let w = try_update_guard(wr(&lx), a).expect("a free write");
+    let mut tr = WaitTicket::new(rd(&lx));
+    w.release_cut();
+    assert!(lx.writer() == 0, "the cut release frees the box");
+    assert!(!tr.looks_takeable(), "a waiting reader sees no progress");
+    assert!(
+        tr.try_take(b).is_none(),
+        "a cut write release admits no reader"
+    );
+    let rc = try_update_guard(rd(&lx), c).expect("a fresh reader takes a cut box");
+    let rb = tr.try_take(b).expect("the fresh take ended the cut");
+    drop((rb, rc));
+    // A waiting writer refuses a cut write release; a fresh writer takes it once the waiter left.
+    let w = try_update_guard(wr(&lx), a).expect("a free write");
+    let mut tw = WaitTicket::new(wr(&lx));
+    w.release_cut();
+    assert!(
+        !tw.looks_takeable() && tw.try_take(b).is_none(),
+        "a waiting writer sees no progress"
+    );
+    drop(tw);
+    let wc = try_update_guard(wr(&lx), c).expect("a fresh writer takes a cut box");
+    drop(wc);
+    let mut tw = WaitTicket::new(wr(&lx));
+    assert!(tw.try_take(b).is_some(), "the fresh take ended the cut");
+    // A cut read release marks the box cut only when it frees it.
+    let (r1, r2) = (
+        try_update_guard(rd(&lx), a).expect("a free read"),
+        try_update_guard(rd(&lx), b).expect("readers share"),
+    );
+    let mut tw = WaitTicket::new(wr(&lx));
+    r1.release_cut();
+    drop(r2);
+    let wc = tw
+        .try_take(c)
+        .expect("a read cut that did not free the box is no cut");
+    drop(wc);
+    let r1 = try_update_guard(rd(&lx), a).expect("a free read");
+    let mut tw = WaitTicket::new(wr(&lx));
+    r1.release_cut();
+    assert!(
+        tw.try_take(c).is_none(),
+        "the last reader's cut release is no progress"
+    );
+}
+
 /// TICKET-063 — `guard_wait_satisfiable` answers whether an acquire issued now would not block.
 #[test]
 fn ticket_063_guard_wait_satisfiable_answers_the_acquire_outcome() {

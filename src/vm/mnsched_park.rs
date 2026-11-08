@@ -98,6 +98,109 @@ impl MnSched {
             c.parked_n += 1;
         }
     }
+    /// Park the running fiber for the `Shared`/`RwShared` guard whose bucket key is `key`
+    /// ([`core::BoxLock::park_key`]); its [`core::WaitTicket`] travels in its context. Under the
+    /// core lock it lists this sched with the box ([`core::BoxLock::park_waiter`]), then re-checks
+    /// the gap: a guard a take could get now, a cancel or a due deadline requeues it, else it parks
+    /// until a release wakes the bucket ([`MnSched::wake_cross`]).
+    pub(super) fn park_guard(self: &Arc<Self>, key: usize, mut fiber: Fiber) {
+        let mut c = self.lock();
+        c.leave_running();
+        let free = fiber.ctx.guard_ticket.as_ref().is_none_or(|t| {
+            t.lock().park_waiter(self);
+            t.looks_takeable()
+        });
+        let cancelled =
+            fiber.cancel_wakes(c.scope_cancel_tripped(fiber.scope_id)) || fiber.deadline_due();
+        if free || cancelled {
+            fiber.state = FiberState::Ready;
+            c.global.push_back(fiber);
+            self.runnable.fetch_add(1, Ordering::Relaxed); // running → ready (requeued)
+            self.notify_waiters();
+        } else {
+            fiber.state = FiberState::Blocked; // running → parked: runnable unchanged
+            c.parked
+                .entry(key)
+                .or_default()
+                .push(ParkedEntry::Guard(fiber));
+            c.parked_n += 1;
+        }
+    }
+
+    /// A wake from outside this sched's lock order, for the fibers parked here in bucket `key`: a
+    /// release of a guard ([`MnSched::park_guard`]) or the end of a joined sched's join
+    /// ([`MnSched::park_exec_join`]). It can run under a core lock (a verdict drops a holder's
+    /// context; a join's sched is locked at [`SchedCore::task_done`], and may be this one), so the
+    /// wake takes the lock only when it is free and hands the wake to the poll thread otherwise; a
+    /// parked waiter whose wait is over answers the verdict `satisfiable` meanwhile.
+    pub(super) fn wake_cross(self: &Arc<Self>, key: usize) {
+        let c = match self.core.try_lock() {
+            Ok(c) => c,
+            Err(std::sync::TryLockError::Poisoned(e)) => e.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => {
+                let s = Arc::clone(self);
+                super::timer::submit_at(
+                    std::time::Instant::now(),
+                    Box::new(move || s.wake_key(key, WakeKind::All)),
+                );
+                return;
+            }
+        };
+        let mut c = c;
+        let n = self.wake_bucket(&mut c, key, WakeKind::All);
+        drop(c);
+        if n > 0 {
+            self.notify_waiters();
+        }
+    }
+
+    /// Park the running fiber in an `Executor` join of `joined` owed `slack`
+    /// ([`Vm::join_executor`]), in the bucket keyed by `joined`'s address. A cancel or a due
+    /// deadline requeues it at once. Else it is filed here first, then listed with `joined` under
+    /// that sched's lock, where `task_done` reads the join: a join already over wakes it at once,
+    /// and every later end of a task is seen by the listing ([`MnSched::wake_cross`]).
+    pub(super) fn park_exec_join(
+        self: &Arc<Self>,
+        joined: Arc<MnSched>,
+        slack: usize,
+        mut fiber: Fiber,
+    ) {
+        let key = Arc::as_ptr(&joined) as usize;
+        {
+            let mut c = self.lock();
+            c.leave_running();
+            if fiber.cancel_wakes(c.scope_cancel_tripped(fiber.scope_id)) || fiber.deadline_due() {
+                fiber.state = FiberState::Ready;
+                c.global.push_back(fiber);
+                self.runnable.fetch_add(1, Ordering::Relaxed); // running → ready (requeued)
+                drop(c);
+                self.notify_waiters();
+                return;
+            }
+            fiber.state = FiberState::Blocked; // running → parked: runnable unchanged
+            c.parked.entry(key).or_default().push(ParkedEntry::ExecJoin(
+                fiber,
+                Arc::downgrade(&joined),
+                slack,
+            ));
+            c.parked_n += 1;
+        }
+        let mut j = joined.lock();
+        if j.join_over(slack) {
+            drop(j);
+            self.wake_key(key, WakeKind::All);
+            return;
+        }
+        let me = Arc::downgrade(self);
+        if !j
+            .exec_joiners
+            .iter()
+            .any(|(s, n, _)| s.ptr_eq(&me) && *n == slack)
+        {
+            j.exec_joiners.push((me, slack, key));
+        }
+    }
+
     /// Wake `kind`'s parked entries on `key` (TICKET-185: the receive side passes
     /// [`WakeKind::Settled`], so only the sender whose offer it took wakes).
     ///
@@ -505,7 +608,9 @@ impl MnSched {
                     f.state = FiberState::Ready;
                     c.global.push_back(f);
                 }
-                ParkedEntry::Send(mut f) => {
+                ParkedEntry::Send(mut f)
+                | ParkedEntry::Guard(mut f)
+                | ParkedEntry::ExecJoin(mut f, ..) => {
                     c.parked_n -= 1;
                     self.runnable.fetch_add(1, Ordering::Relaxed); // parked → ready
                     woken += 1;

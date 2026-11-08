@@ -579,7 +579,13 @@ impl Vm {
                 }
                 "Atomic" => self.atomic_method(h, method, &args, span)?,
                 "AtomicInt" => self.atomic_int_method(h, method, &args, span)?,
-                "Executor" => self.executor_method(h, method, &args, span)?,
+                "Executor" => {
+                    let r = self.executor_method(h, method, &args, span)?;
+                    if self.exec_join_suspend.is_some() {
+                        return Ok(()); // a parked `shutdown` re-pushed its receiver and rewound.
+                    }
+                    r
+                }
                 // D6: `Socket` / `Listener` ops operate on the fd in the `Arc`'d core and may park the
                 // fiber on the netpoller (a would-block `read`/`write`/`accept`); gate the result-push
                 // on `poll_park` (mirrors the channel `recv` park gate, but routed to the poller).

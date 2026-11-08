@@ -174,9 +174,11 @@ impl Vm {
 
     /// A frame based at `base` left without its return (a fault, a cancel or a halt unwinds it):
     /// give back what its `ret` holds. Its slots below the frame go with the caller's stack.
-    pub(super) fn drop_ret(&mut self, ret: RetAction, base: usize) {
+    /// `cut`: a deadlock verdict cut this task, so a guard it holds is released as cut
+    /// ([`core::UpdateGuard::release_cut`]).
+    pub(super) fn drop_ret(&mut self, ret: RetAction, base: usize, cut: bool) {
         match ret {
-            RetAction::Box(call) => self.box_release(call),
+            RetAction::Box(call) => self.box_release(call, cut),
             RetAction::Gen(_) => self.gen_drop(base),
             RetAction::Push
             | RetAction::Discard

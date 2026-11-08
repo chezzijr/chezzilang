@@ -170,7 +170,9 @@ impl SchedCore {
         }
         self.parked.values().flatten().any(|e| match e {
             ParkedEntry::Recv(f) => f.woken_by(&[sid]),
-            ParkedEntry::Send(f) => f.woken_by(&[sid]),
+            ParkedEntry::Send(f) | ParkedEntry::Guard(f) | ParkedEntry::ExecJoin(f, ..) => {
+                f.woken_by(&[sid])
+            }
             ParkedEntry::Wait(wp) => wp
                 .fiber
                 .lock()
@@ -209,10 +211,24 @@ impl SchedCore {
         self.note_left();
     }
 
-    /// TICKET-236 — THE way a task of scope `sid` becomes done.
+    /// TICKET-236 — THE way a task of scope `sid` becomes done. A fiber parked in an `Executor`
+    /// join of this sched whose join is now over is woken on its own sched (this core is locked,
+    /// so [`MnSched::wake_cross`]).
     pub(super) fn task_done(&mut self, sid: usize) {
         self.scopes[sid].done += 1;
         self.note_left();
+        if !self.exec_joiners.is_empty() {
+            let undone = self.undone_tasks();
+            self.exec_joiners.retain(|(s, slack, key)| {
+                if undone > *slack {
+                    return true;
+                }
+                if let Some(s) = s.upgrade() {
+                    s.wake_cross(*key);
+                }
+                false
+            });
+        }
     }
 
     /// TICKET-236 — THE way a scope leaves the table ([`MnSched::retire_scope`]).
@@ -287,27 +303,33 @@ impl SchedCore {
     pub(super) fn any_blocked_satisfiable(&self, me: &MnSched) -> bool {
         self.waiters.values().any(|w| match &*w.wait {
             quiesce::PartyWait::Join(s, slack) => {
-                if w.cancel.iter().any(|f| f.load(Ordering::Relaxed)) {
-                    return true;
-                }
-                if std::ptr::eq(Arc::as_ptr(s), me) {
-                    self.join_over(*slack)
-                } else {
-                    match s.core.try_lock() {
-                        Ok(c) => c.join_over(*slack),
-                        Err(std::sync::TryLockError::Poisoned(e)) => {
-                            e.into_inner().join_over(*slack)
-                        }
-                        Err(std::sync::TryLockError::WouldBlock) => true,
-                    }
-                }
+                w.cancel.iter().any(|f| f.load(Ordering::Relaxed))
+                    || self.join_of_over(me, s, *slack)
             }
             quiesce::PartyWait::Recv(..)
             | quiesce::PartyWait::Send(_)
             | quiesce::PartyWait::Wait(..)
             | quiesce::PartyWait::Nursery(_)
             | quiesce::PartyWait::Guard(..) => w.satisfiable(),
-        }) || self.parked.values().flatten().any(ParkedEntry::satisfiable)
+        }) || self
+            .parked
+            .values()
+            .flatten()
+            .any(|e| e.satisfiable(self, me))
+    }
+
+    /// Is a join of `s` owed `slack` over, asked under the core lock of `me` (this core)? A join
+    /// of `me` reads `self`; a join of another sched uses `try_lock` (a busy core answers `true`,
+    /// which only declines the verdict).
+    pub(super) fn join_of_over(&self, me: &MnSched, s: &MnSched, slack: usize) -> bool {
+        if std::ptr::eq(s, me) {
+            return self.join_over(slack);
+        }
+        match s.core.try_lock() {
+            Ok(c) => c.join_over(slack),
+            Err(std::sync::TryLockError::Poisoned(e)) => e.into_inner().join_over(slack),
+            Err(std::sync::TryLockError::WouldBlock) => true,
+        }
     }
 
     /// TICKET-236 — THE Join predicate: a join of this sched is over when it owes nothing but
@@ -377,6 +399,7 @@ impl MnSched {
                 parked_n: 0,
                 cut_requeued: 0,
                 join_parked: Vec::new(),
+                exec_joiners: Vec::new(),
                 scopes: ScopeTable::with_root(JoinScope {
                     base_index: 0,
                     total,

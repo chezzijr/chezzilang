@@ -1,0 +1,14 @@
+# Plan 2026-11-08-park-guard-and-join — the contended guard path: 8 tasks each run 20000
+# `update`s on one `Shared[int]`, so waiters park and every release wakes the box's bucket.
+import Shared from std.concurrency
+fn inc(v: int) -> int:
+    return v + 1
+fn main():
+    s := Shared[int](0)
+    parallel:
+        for _ in 0..8:
+            spawn:
+                for _ in 0..20000:
+                    s.update(inc)
+    print(s.get())
+main()

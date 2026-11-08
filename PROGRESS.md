@@ -42,6 +42,10 @@ waiting in a `defer` at `--threads=2` use 5 OS threads, not 2005. Only the synch
 drains (`--max-heap`, `--timeout`) keep the `deferring` exception in `BlockCtx::judged`
 ([2026-11 log](docs/history/progress/2026-11.md)). The nested container walks, map/set probes, `json.decode` defaults and FFI
 callbacks still re-enter (`gaps.md` W23-1, narrowed). Grid: `tests/callback_park_grid.rs`.
+A task's `Shared`/`RwShared` guard wait and its `Executor.shutdown()` park too (branch
+`feat/park-guard-join`, 2026-11-08), as a goroutine's `sync.Mutex` wait does, and a guard holder
+is preempted: every op of `tests/blocking_context_grid.rs` but `stdin` runs with `demotes=0`, and
+200 guard waiters at `--threads=2` add no OS thread (base: 199 demotes).
 
 The checker has a non-fatal warning channel (`Severity::Warning`, `"severity"` in `--errors=json`,
 `DiagnosticSeverity::WARNING` in the LSP). It has five rules:
