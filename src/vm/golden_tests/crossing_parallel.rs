@@ -1232,3 +1232,27 @@ main()
         "no I/O error on the happy path: {out:?}"
     );
 }
+
+#[test]
+fn parallel_body_fault_defers_run_before_join_in_callee_frame() {
+    // TICKET-299 (wave 24 F2). A faulting `parallel:` body drains its `defer`s BEFORE the children
+    // are cancelled and joined, in every frame shape. Same-frame `recover:` already did; a caller's
+    // `recover:` drained the nursery first, so the deferred `recv` deadlocked.
+    let src = r#"
+fn feeder(c: Channel[int]):
+    for i in 0..3:
+        c.send(i * 100)
+fn body(c: Channel[int]):
+    parallel:
+        spawn feeder(c)
+        defer:
+            for _ in 0..3:
+                print("got {c.recv() ?? -1}")
+        panic("body boom")
+fn main():
+    r2 := recover:
+        body(Channel[int](0))
+    print("callee -> {r2}")
+main()"#;
+    assert_golden_out(src, "got 0\ngot 100\ngot 200\ncallee -> !body boom\n");
+}
