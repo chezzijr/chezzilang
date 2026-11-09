@@ -78,8 +78,6 @@ the box waits.
   does not catch the child's fault. A `parallel:` opened inside the closure joins the scheduler of the
   task's enclosing `parallel:`, so a nursery deadlock there is reported the same way
   (`deadlock: N tasks are blocked and none can proceed`, then each task, exit 1).
-- One shape declines the verdict and hangs: under an enclosing `parallel:` whose sibling is blocked,
-  a closure that itself waits on a channel nobody can feed.
 - A reader of a `RwShared` whose writer is blocked for good is listed as `waiting for the RwShared
   guard` at its own `read` / `get`, as a `Shared` user is.
 

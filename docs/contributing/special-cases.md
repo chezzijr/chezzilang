@@ -101,6 +101,22 @@ number of blocks that read a tail value was not measured. `None` in `None!` mean
 is not a value type (`x: None = None` is an error), `None?` is not a type, and success is a bare
 `return`. Docs and diagnostics use the short spelling `!` for this type.
 
+## Owner design decisions (2026-11-09, bug hunt wave 24)
+
+Decided before any fix. Families, repros and sites: `~/.claude/plans/2026-11-09-bug-hunt-w24/report.md`
+(per-family notes in `families/F<n>.md`, repros in `~/.cache/w24-repros/`). No ticket filed yet.
+
+| Family | Decision | Ancestor (run) |
+|---|---|---|
+| F1 cut and verdict | A cancelled task's stuck `defer` that holds a `Shared`/`RwShared` guard is a fatal deadlock; the guard is released `CUT`, so no waiter reads the half-done value. A lock cycle (write or read guard) and a task re-entering its own guard are fatal too. One rule from the cut's cause, not from the unwind path. Still open: (Q3) does a deadlock report list every task at a join, as Go lists `WaitGroup.Wait`; (Q4) a cancel of a holder outside a `defer` publishes its partial in-place change (`C sees [0, 1]`): keep, or release `CUT`? | Go: `fatal error: all goroutines are asleep - deadlock!` |
+| F2 `parallel:` defer order | A level's body `defer`s run before its children are cancelled and joined on every non-normal exit (fault, `?`, `return`, `break`/`continue`, cancel), wherever the `recover:` sits. Normal fall-through keeps the order of 43cdc74e (after the join). | Go `defer` + `wg.Wait`, Python `TaskGroup` + `finally`: cleanup first in both shapes |
+| F3 names | `Self` is a keyword (`struct Self` is an error). Inside a method `Self(...)` and `Self.m()` are values. Compiler temps use the private `$` names (`__opt{n}` / `__optrecv{n}` go). Every binder kind hides a full module path (`match` bare capture, `else` err name, nested `fn` included), as `16-imports.md` says. The no-inference rule of TICKET-238 (`xs := []` is an error) stays. Still open: (Q4) `std := 1` beside `import std.math` is accepted while `math := 1` is rejected; intended? | Rust: `Self` is a keyword; Go `fmt := 1; fmt.Println` and Python `case os: os.path`: the local wins |
+| F4 `copy` | No intrinsic struct `copy`. A type has `copy` only when it declares one, and the author picks shallow or deep. `List.copy` stays shallow. This is not the report's recommendation (a std `Copy` protocol), which also gave enums a `copy`: an enum now gets `copy` only by declaring it, as a struct. Still open: (Q2) whether hook methods (`(5).str()`) are callable directly; (Q3) whether an intrinsic method satisfies a same-shaped user protocol; (Q4) whether a function value is comparable (`==` says yes, `Atomic.cas` says no). | Rust `Clone` is opt-in; CPython `list.copy()` is shallow |
+| F5 conversions | `[1].map(Rat.from[int])` (a picked overload as a value) works. Other F5 questions take the report's recommendations unless the owner changes them. | Rust: `<Rat as From<i64>>::from` as a value works |
+| F6 range bounds | A missing bound is judged on the value only: `Range.iter` / `Range.len` own the rule, and the checker's literal-only check goes (U7). `(..5).len()` and `r := ..5; r.len()` give the same runtime error. | — |
+| F7 native tables | No decision needed (latent, no language change). | — |
+| F8 numerals | Not decided: `_` in a literal's exponent (`1e1_0`), `json.decode[int]("1.0")`, and whether `1.e5` stays a field access. | CPython/Rust/Go accept `1e1_0`; Go rejects `1.0` into `int` |
+
 ## Open findings by rule
 
 These were measured at audit time. Rows that a landed ticket closed (U5 operator against bound, the
@@ -116,8 +132,8 @@ Sibling types that differed with no stated reason:
 | `"ab".repeat(3)`, `[0].repeat(3)` (2026-11-03: `*` means multiply only, so `[0] * 3` and `"ab" * 3` are both type errors) | — | Rust `str.repeat`, `vec.repeat` |
 | `1 == 1.0`, `[1] == [1.0]` | `1 in [1.0]`, `[1.0].contains(1)`, `[1] < [1.5]` | CPython: all `True` |
 | tuple of `Hashable` as a map key; a struct or enum with `hash` and `eq` | zero-field struct, enum or struct without both hooks, `int?` | Rust: `Hash + Eq` derive; CPython: enum members and `None` are keys (U15; `T?` owner note 2026-10-21) |
-| `int? < int?`, `false < true` (2026-11-03) | `int!str < int!str` | Rust orders both |
-| struct has automatic `.copy()` | enum has none | Rust derives `Clone` on both |
+| `false < true` (2026-11-03) | `int? < int?` (`cannot compare int? and int?`, since TICKET-265), `int!str < int!str` | Rust orders both |
+| struct has automatic `.copy()` | enum has none | Rust derives `Clone` on both. Owner 2026-11-09 (wave 24 F4): the automatic struct `copy` goes, so both have `copy` only when declared |
 | `iter.islice({1, 2}, 1)`, `[1.5].sum()` | `iter.enumerate({1, 2})`, `iter.sum([1.5])`, `{1, 2}.map(f)`, `xs.extend({2})`, `",".join({"a"})` | CPython works |
 | `bytearray()`, `bytes()`, `bytearray.zeroed(2)`, `bytes.zeroed(2)`, `bytes.from_iter({1, 2})` (2026-11-03) | — | CPython works |
 | `match` literal patterns for int, float (2026-11-03), str, bool, tuple | bytes | CPython `case 1.5:` |

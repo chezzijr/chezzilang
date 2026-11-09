@@ -173,12 +173,13 @@ is **not** exhaustive (it's a runtime race, not a type match); ≥1 recv or send
 | waiter | untimed `wait:` | `wait:` with a live timer arm |
 |---|---|---|
 | a spawned fiber | parks on every arm's channel | parks; the timer is one more bucket |
-| a fiber inside a native callback (`Shared.update` closure, list HOF) | demotes and blocks in place | demotes; the deadline bounds the wait |
+| a fiber inside a callback that runs as a frame (`Shared.update` closure, list HOF, hook, sort comparator, generator, `defer` drain; since 2026-11-07) | parks on every arm's channel | parks; the timer is one more bucket |
+| a fiber inside a nested native callback (a hook reached from a map/set probe, a `json.decode` default, an FFI callback) | demotes and blocks in place | demotes; the deadline bounds the wait |
 | a thread that owns itself (`main`, an `Executor` job) | blocks in place | blocks in place, clamped to the deadline |
 | the inline body of an outermost `parallel:` builder | refuses (deadlock fault) | sleeps to the deadline, then takes the timer arm (N10) |
 
 - A value that arrives before the deadline wins the wait; the deadline wins only if nothing else did.
-- A send-arm that cannot move its value inside a native callback demotes and blocks on its offer, as
+- A send-arm that cannot move its value inside a nested native callback demotes and blocks on its offer, as
   Go blocks — like a plain full `send` there.
 - `main` inside a native callback blocks in place for any `wait:`. Nothing judges that context for a
   deadlock, so a `wait:` there that nothing can satisfy hangs (a deliberate difference from Go, see

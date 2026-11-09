@@ -150,9 +150,9 @@ User code calls `submit`.
 
 **Jobs do not print in submission order, and `shutdown()` does not withhold their output.** Under
 `chezzi run` a job's `print` reaches stdout the moment it runs, so concurrent jobs interleave in
-completion order, as with `spawn` and `ThreadPoolExecutor`. Submission order fixes only which job's
-fault wins (`shutdown()` raises the lowest-index one) and the byte order of the **buffered** sink that
-embedders get. For ordered output, collect results with `submit` and print them after the join.
+completion order, as with `spawn` and `ThreadPoolExecutor`. Submission order fixes only the byte order
+of the **buffered** sink that embedders get; `shutdown()` raises no job's fault (each stays on its own
+Task). For ordered output, collect results with `submit` and print them after the join.
 Full statement: `concurrency.md` §"Output ordering".
 
 A job may `shutdown()`/`cancel()` the executor it runs under: that join waits for the executor's

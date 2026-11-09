@@ -375,9 +375,9 @@ kind of party:
 Grid: `tests/runner_handover_grid.rs` (spinner kind x victim kind x action x worker count, 672
 cells; 36 were red before the fix, all job-versus-job at one worker).
 A gated thread releases its slot around every wait in place (demotes, guard waits, inline nursery
-joins and aborts, inline sleeps, `Executor.shutdown()`, blocking natives). Since TICKET-181 an
-`Executor.shutdown()` in a fiber also DEMOTES for the join, so the slot promise holds at T=1 too
-(see the "Blocking-context table" section). A `Kind::HostWait` native
+joins and aborts, inline sleeps, `Executor.shutdown()`, blocking natives). Since 2026-11-08 an
+`Executor.shutdown()` in a fiber PARKS for the join (item 3 below; TICKET-181 had it demote), so it
+holds no runner slot and the slot promise holds at T=1 too. A `Kind::HostWait` native
 (the `std.io` stdin readers) demotes the worker and gives its slot back for the read, direct or
 inside a callback, so a runnable sibling runs while stdin is withheld, as under Go's `sysmon`.
 

@@ -23,18 +23,18 @@ hook is bound-only).
 | `chars` | `() -> List[str]` | One-character strings. |
 | `starts_with` | `(prefix: str) -> bool` | |
 | `ends_with` | `(suffix: str) -> bool` | Empty suffix is always true. |
-| `contains` | `(sub: str) -> bool` | Substring test. |
-| `join` | `(xs: List[str]) -> str` | Join `xs` with the receiver as the separator. |
+| `contains` | `(item: str) -> bool` | Substring test. |
+| `join` | `(parts: List[str]) -> str` | Join `parts` with the receiver as the separator. |
 | `replace` | `(old: str, new: str) -> str` | Replace every non-overlapping `old`; empty `old` matches at every codepoint boundary, so `new` lands between every codepoint and at both ends (`"abc".replace("", "-")` → `"-a-b-c-"`, matching CPython and Go). |
 | `repeat` | `(n: int) -> str` | `n <= 0` → `""`. Raises a recoverable `string repeat capacity overflow` fault if `n * len` would exceed allocatable capacity. |
 | `reversed` | `() -> str` | A NEW string with the codepoints in reverse order (there is no `s[::-1]` or `s.reverse()`). |
 | `pad_left` | `(width: int, fill: str) -> str` | Left-pad to `width` codepoints; never shrinks (`width` ≤ len → unchanged). A multi-char `fill` is a repeating cycle truncated to fit, so the result is **exactly** `width` codepoints (`"a".pad_left(4, "xy")` → `"xyxa"`). An empty `fill` raises a recoverable `pad_left: fill must not be empty` fault. Raises a recoverable `string pad capacity overflow` fault if the pad would exceed allocatable capacity. |
 | `pad_right` | `(width: int, fill: str) -> str` | Right-pad (CPython `str.ljust`): the mirror of `pad_left` with the fill after the text (`"ab".pad_right(5, ".")` → `"ab..."`); same never-shrink rule, exact-width cycle, and faults (`pad_right: fill must not be empty`, `string pad capacity overflow`). For a runtime column width either this or `"{s:<{w}}"` works. |
-| `index_of` | `(sub: str) -> int` | First **codepoint** index, `-1` if absent, `0` for empty `sub`. A **sentinel, not a carrier**: see the `-1` hazard under `List.index_of`. |
-| `count` | `(sub: str) -> int` | Non-overlapping occurrences; empty `sub` → codepoint length + 1 (`"abc".count("")` → `4`), matching Python/Go/`std.string.count`. |
+| `index_of` | `(needle: str) -> int` | First **codepoint** index, `-1` if absent, `0` for empty `needle`. A **sentinel, not a carrier**: see the `-1` hazard under `List.index_of`. |
+| `count` | `(needle: str) -> int` | Non-overlapping occurrences; empty `needle` → codepoint length + 1 (`"abc".count("")` → `4`), matching Python/Go/`std.string.count`. |
 | `strip` | `() -> str` | Trim alias (strip leading/trailing whitespace). |
-| `strip_prefix` | `(p: str) -> str` | Remove `p` from the front if present, else unchanged. |
-| `strip_suffix` | `(p: str) -> str` | Remove `p` from the end if present, else unchanged. |
+| `strip_prefix` | `(prefix: str) -> str` | Remove `prefix` from the front if present, else unchanged. |
+| `strip_suffix` | `(suffix: str) -> str` | Remove `suffix` from the end if present, else unchanged. |
 | `split_lines` | `() -> List[str]` | Split on `"\n"`, `"\r\n"` or a lone `"\r"`; a trailing terminator yields no final empty piece (Python `str.splitlines()`). It does NOT split on `\v`, `\f`, U+0085, U+2028 or U+2029. |
 | `to_int` | `() -> int!` | Parse (trims first, accepts PEP-515 underscores between digits): `?n`, or an error that names the cause: `!"to_int: cannot parse 'x' as int"`, `!"to_int: '99999999999999999999' is out of range for int"`. ASCII digits only: `"١٢"`/`"１２"` are errors (Go/Rust semantics; CPython's `int()` accepts Unicode decimal digits). Same for `to_float` and `math.parse_int_base`. |
 | `to_float` | `() -> float!` | Parse (trims first, accepts PEP-515 underscores between digits): `?f` or `!"to_float: cannot parse 'x' as float"`. |
@@ -51,22 +51,22 @@ recoverable capacity fault in both spellings. The empty-`old` rule of `replace` 
 | Method | Signature | Notes |
 |--------|-----------|-------|
 | `len` | `() -> int` | |
-| `push` | `(x: T) -> None` | *mutates*: append. |
+| `push` | `(v: T) -> None` | *mutates*: append. |
 | `pop` | `() -> T?` | *mutates*: remove & return last (`None` if empty). |
 | `reverse` | `() -> None` | *mutates*: reverse in place (`List` and `bytearray`; `bytearray` also has `reversed() -> bytearray`, and `bytes.reversed() -> bytes`). |
-| `contains` | `(x: T) -> bool` | |
-| `index_of` | `(x: T) -> int` | First index, or `-1`. A **sentinel, not a carrier**: see the `-1` hazard below. |
+| `contains` | `(item: T) -> bool` | |
+| `index_of` | `(v: T) -> int` | First index, or `-1`. A **sentinel, not a carrier**: see the `-1` hazard below. |
 | `concat` | `(other: List[T]) -> List[T]` | Returns a **new** list. Operator form: `a + b`. |
 | `extend` | `(other: List[T]) -> None` | *mutates*: append all of `other`. |
 | `sum` | `() -> T` | Numeric lists (`int`→`int`). Integer sums use checked add: overflow raises a recoverable `integer overflow in Add`, never wraps. Any-float lists accumulate to `float` with CPython 3.12+'s Neumaier compensation (ints included: `[0.1, 0.2, 0.3].sum()` is `0.6`, `[1e16, 1.0, 1.0].sum()` is `1.0000000000000002e+16`; may reach `inf`, never `nan` from the compensation). The ELEMENT TYPE decides the numeric kind, so an EMPTY list sums to `0.0` for `List[float]` and to `0` for `List[int]`. |
 | `sort` | `() -> None` | *mutates*: ascending. Orderable elements (`int`/`float`/`bool`/`str`, or tuples and `List`s of orderable elements, lexicographic) or `Comparable` structs or enums. A `T?` element is not orderable. Float `NaN` uses a total order (`NaN` sorts to one end), deterministic; `+0.0` and `-0.0` are Equal (input order kept, like CPython). Faults if the callback mutates the receiver (only reachable via a `Comparable` struct's or enum's `compare`). |
 | `sort_by` | `(cmp: fn(T, T) -> int) -> None` | *mutates*: custom comparator (`<0`, `0`, `>0`). Faults if the callback mutates the receiver. |
-| `sort_by_key` | `(key: fn(T) -> K) -> None` | *mutates*: sort by a derived orderable/`Comparable` key. A `NaN` float key sorts deterministically (total order, `NaN` to one end), consistent with `sort()`. Faults if the callback mutates the receiver. |
+| `sort_by_key` | `(f: fn(T) -> K) -> None` | *mutates*: sort by a derived orderable/`Comparable` key. A `NaN` float key sorts deterministically (total order, `NaN` to one end), consistent with `sort()`. Faults if the callback mutates the receiver. |
 | `map` | `(f: fn(T) -> U) -> List[U]` | Returns a new list. |
-| `filter` | `(pred: fn(T) -> bool) -> List[T]` | Returns a new list. |
+| `filter` | `(p: fn(T) -> bool) -> List[T]` | Returns a new list. |
 | `fold` | `(init: U, f: fn(U, T) -> U) -> U` | Left fold. |
 | `min` / `max` | `() -> T?` | Smallest / largest element by natural order (`int`/`float`/`bool`/`str`, a tuple or `List` of orderable elements, lexicographic, or a `Comparable` struct or enum; a `T?` element is not orderable), wrapped in `?v`. Ties resolve to the first-seen element. Empty list is `None`, never a fault. Float `NaN` uses the same total order as `sort()`. |
-| `min_by` / `max_by` | `(key: fn(T) -> K) -> T?` | The **element** whose derived key `K` (orderable/`Comparable`) is smallest / largest, wrapped in `?v`; first-seen ties. Empty list is `None`, never a fault. |
+| `min_by` / `max_by` | `(f: fn(T) -> K) -> T?` | The **element** whose derived key `K` (orderable/`Comparable`) is smallest / largest, wrapped in `?v`; first-seen ties. Empty list is `None`, never a fault. |
 | `first` / `last` | `() -> T?` | The first / last element, `None` if empty. Non-mutating. |
 | `reversed` | `() -> List[T]` | Returns a **new** reversed list; the receiver is untouched (contrast in-place `reverse`). |
 | `repeat` | `(n: int) -> List[T]` | A **new** list holding `n` copies of the elements, in order (Rust `vec.repeat(n)`); the receiver is untouched. `n <= 0` → `[]`. An empty receiver gives `[]` in constant time for any `n`. Raises a recoverable `list repeat capacity overflow` fault if the total would exceed allocatable capacity. `*` is not a list repeat. |
@@ -116,13 +116,13 @@ Keep callbacks pure; if you need both, sort a copy and merge after.
 | Method | Signature | Notes |
 |--------|-----------|-------|
 | `len` | `() -> int` | |
-| `has` | `(key: K) -> bool` | |
-| `get` | `(key: K) -> V?` | |
+| `contains` | `(k: K) -> bool` | Key membership, the method form of `k in m`. |
+| `get` | `(k: K) -> V?` | |
 | `keys` | `() -> List[K]` | Insertion order. |
 | `values` | `() -> List[V]` | Insertion order. |
 | `items` | `() -> List[(K, V)]` | Insertion order, the same order as `keys()`, so `Map.from_iter(m.items()) == m`. Returns a fresh list (a snapshot, like `keys()`; CPython returns a live view). |
-| `insert` | `(key: K, val: V) -> V?` | *mutates*: sets `m[key] = val` and returns the value it replaced, or `None` for a new key (Rust `HashMap::insert`). A bare `m.insert(k, v)` statement warns, like every dropped `V?`; write `m[k] = v`, or `_ := m.insert(k, v)`. |
-| `remove` | `(key: K) -> V?` | *mutates*: returns the removed value, or `None`. |
+| `insert` | `(k: K, v: V) -> V?` | *mutates*: sets `m[k] = v` and returns the value it replaced, or `None` for a new key (Rust `HashMap::insert`). A bare `m.insert(k, v)` statement warns, like every dropped `V?`; write `m[k] = v`, or `_ := m.insert(k, v)`. |
+| `remove` | `(k: K) -> V?` | *mutates*: returns the removed value, or `None`. |
 | `merge` | `(other: Map[K, V]) -> Map[K, V]` | Returns a **new** map (`other` wins on key clash). |
 | `update` | `(other: Map[K, V]) -> None` | *mutates*: merge `other` into self. |
 | `copy` | `() -> Map[K, V]` | Returns a **new** map, shallow in the values (Python `dict.copy()`); struct/enum keys are snapshotted, as `merge` does. |
@@ -133,9 +133,9 @@ Index a map with `m[k]` (read/write); iterate with `for k, v in m:`.
 | Method | Signature | Notes |
 |--------|-----------|-------|
 | `len` | `() -> int` | |
-| `has` | `(x: T) -> bool` | |
-| `insert` | `(x: T) -> bool` | *mutates*: idempotent insert; returns `true` when `x` was new (Rust `HashSet::insert`). |
-| `remove` | `(x: T) -> bool` | *mutates*: returns whether it was present. |
+| `contains` | `(v: T) -> bool` | Membership, the method form of `v in s`. |
+| `insert` | `(v: T) -> bool` | *mutates*: idempotent insert; returns `true` when `v` was new (Rust `HashSet::insert`). |
+| `remove` | `(v: T) -> bool` | *mutates*: returns whether it was present. |
 | `union` / `intersection` / `difference` | `(other: Set[T]) -> Set[T]` | Return a **new** set. Operator forms: `a \| b` / `a & b` / `a - b`. |
 | `copy` | `() -> Set[T]` | Returns a **new** set (shallow, Python `set.copy()`); struct/enum elements are snapshotted, as `insert` does. |
 
@@ -143,7 +143,7 @@ Index a map with `m[k]` (read/write); iterate with `for k, v in m:`.
 > symmetric-difference, identical to the methods above (`^` has no method form). Lists support `+`
 > (concat); a list repeats with `repeat`, not `*`; see [`syntax.md` §4](../syntax/03-operators.md).
 
-> **Cyclic keys fault (recoverably).** Map/Set membership and key-equality (`has`, `get`, `remove`,
+> **Cyclic keys fault (recoverably).** Map/Set membership and key-equality (`contains`, `get`, `remove`,
 > `insert`, `m[k]`, `in`, set algebra, and `List.contains`/`index_of`/`unique`/`dedup`) are *defined by*
 > `==`, so a key holding a reference cycle raises the same recoverable *"maximum structural depth
 > (10000) exceeded"* fault that `a == b` does, never a silent `false`. This matches Python's

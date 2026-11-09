@@ -203,7 +203,7 @@ print(eqm(Key(1), Key(2)))                   # false — through the bound: the 
 
 A real `eq` hook is dispatched through the bound, so `.eq()` and `==` never disagree.
 
-A user `eq` reaches every equality site: `Map`/`Set` key lookup (`m[k]`, `has`, `get`, `remove`, `in`,
+A user `eq` reaches every equality site: `Map`/`Set` key lookup (`m[k]`, `contains`, `get`, `remove`, `in`,
 `add`), `x in xs`, `list.contains`/`index_of`/`dedup`/`unique`, set algebra, and the element/field/entry
 compares inside `==` on a container:
 

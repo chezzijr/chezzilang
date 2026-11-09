@@ -178,9 +178,9 @@ Results use `struct Match { text: str, start: int, end: int, groups: List[str] }
 offsets, like Python's `re`, so `subject[m.start..m.end] == m.text` holds on non-ASCII input; `groups`
 are capture groups 1..n; a non-participating optional group is `""`.
 
-`is_match(pattern, subject) -> bool!` · `find(pattern, subject) -> Match?!` ·
-`find_all(pattern, subject) -> List[Match]!` · `find_all_text(pattern, subject) -> List[str]!` ·
-`replace_all(pattern, subject, repl) -> str!` · `split(pattern, subject) -> List[str]!`. A bad pattern is
+`is_match(pat, s) -> bool!` · `find(pat, s) -> Match?!` ·
+`find_all(pat, s) -> List[Match]!` · `find_all_text(pat, s) -> List[str]!` ·
+`replace_all(pat, s, repl) -> str!` · `split(pat, s) -> List[str]!` (`pat` is the pattern, `s` the subject). A bad pattern is
 `!e`. Each call takes the pattern as a string; an internal cache holds the compiled form. There is no
 compiled `Regex` handle value yet.
 
@@ -201,7 +201,7 @@ backslash literal.
   `!e` naming the RE2 form (`'$2'`). A backslash not followed by a digit or `g<` stays literal, so
   `r"\n"` as a replacement produces backslash-n. That is the only way to put a literal backslash in a
   replacement.
-- **Argument order is `(pattern, subject, repl)`**: the *replacement is last*, the reverse of
+- **Argument order is `(pat, s, repl)`**: the *replacement is last*, the reverse of
   `re.sub(pattern, repl, subject)`. Both are `str`, so swapping them type-checks.
 - **No lookaround and no backreferences** (RE2 drops them for its linear-time guarantee):
   `r"(?<=a)b"` and `r"(a)\1"` each come back `!"regex parse error: … not supported"`. Rewrite with an
