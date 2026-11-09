@@ -2280,3 +2280,37 @@ fn a_let_binder_is_not_in_scope_in_its_own_value() {
         "{err:?}"
     );
 }
+
+/// TICKET-300 SA-1: a user binder spelled like a compiler temp is an ordinary binder, so the
+/// element-type hole check (TICKET-238) applies to it as it does to `xs`.
+#[test]
+fn t300_user_binder_with_temp_spelling_gets_the_hole_check() {
+    rejects(
+        "__optrecv1 := []\n__optrecv1.push(1)\n__optrecv1.push(\"a\")\nprint(__optrecv1[1] + 1)\n",
+        "cannot infer the element type",
+    );
+}
+
+/// TICKET-300 P4-1: a match capture hides the full module path whose head it spells.
+#[test]
+fn t300_match_capture_hides_a_full_module_path() {
+    files_reject(
+        &[
+            ("a/b.chz", "K := 5\n"),
+            (
+                "main.chz",
+                "import a.b\ny := match 7:\n    a: \"{a} {a.b.K}\"\nprint(y)\n",
+            ),
+        ],
+        "int has no field 'b'",
+    );
+}
+
+/// TICKET-300 SA-2: `Self` is a keyword, so no declaration may be named `Self`.
+#[test]
+fn t300_self_is_a_reserved_keyword() {
+    parse_rejects(
+        "struct Self:\n    x: int\nstruct P:\n    y: int\n    fn mk() -> Self:\n        return Self(x=1)\nprint(1)\n",
+        "reserved keyword 'Self'",
+    );
+}
