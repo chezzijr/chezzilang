@@ -23,14 +23,24 @@ pub(super) struct HaltLatch {
 pub(super) enum FaultPark {
     /// In a frame unwind ([`Unwind`]), before the abort and the `defer`s of the frame it stopped at.
     Unwind(Unwind),
-    /// At the catching `recover:`'s own nursery reclaim, after its recover-block `defer`s.
-    Catch {
-        nursery_len: usize,
-        rte: RuntimeError,
-    },
+    /// At the catching `recover:`'s level leave ([`Vm::reclaim_caught`]), after the body `defer`s
+    /// of the level it stopped at and before its abort.
+    Catch(Caught),
     /// A `return` or `?` escape that parked with a body `defer` fault in hand. Nothing resumes
     /// here: the rewound op re-runs and takes the fault back ([`Vm::take_escape_park`]).
     Escape(RuntimeError),
+}
+
+/// TICKET-299: a `recover:` that caught a fault, between the frame unwind and the bound `Err`
+/// ([`Vm::reclaim_caught`]); held by a parked fiber ([`FaultPark::Catch`]) or by the drain of the
+/// recover block's `defer`s ([`DrainCont::Catch`]).
+pub(super) struct Caught {
+    base_level: usize,
+    nursery_len: usize,
+    /// The boundary frame's `defer` count at the `recover:`: the recover block's own sit above it.
+    defer_len: usize,
+    markers_len: usize,
+    rte: RuntimeError,
 }
 
 /// THE state of a frame unwind that runs `defer`s ([`Vm::unwind_on`]): where it resumes, held by
@@ -806,8 +816,13 @@ impl Vm {
             // innermost first (`Vm::leave_level`); the frame's implicit nursery and `defer`s follow.
             if self.nurseries.len() > self.level_floor(fi) {
                 let top = self.nurseries.len() - 1;
+                // A `defer` that will not run (a pending `os.exit`, a halt that cuts cleanup) stays
+                // in the frame: only a record that runs makes the drain below progress.
                 if self.drains_on_frames()
-                    && self.frames[fi].deferred.len() > self.nursery_defer_floors[top].defers
+                    && matches!(
+                        self.has_next_deferred(fi, self.nursery_defer_floors[top].defers),
+                        Ok(true)
+                    )
                 {
                     return self.leave_level(LevelThen::Unwind(Box::new(u)));
                 }
@@ -924,7 +939,7 @@ impl Vm {
                 Ok(())
             }
             FaultPark::Unwind(u) => self.unwind_on(u),
-            FaultPark::Catch { nursery_len, rte } => self.reclaim_caught(0, nursery_len, rte),
+            FaultPark::Catch(c) => self.reclaim_caught(c),
         }
     }
 
@@ -976,18 +991,17 @@ impl Vm {
                 self.call_depth = h.call_depth;
                 self.cur_base = self.frames.last().map(|f| f.base).unwrap_or(0);
                 self.frames[h.frame_len - 1].ip = h.ip;
-                // The unwind ran the defers of frames ABOVE the boundary, but the boundary
-                // frame's own (recover-block) defers remain — drain them now, before binding the
-                // result (`catch_drained`). A fault in one supersedes the original.
-                self.drain_then(
-                    h.defer_len,
-                    DrainCont::Catch {
-                        base_level,
-                        nursery_len: h.nursery_len,
-                        markers_len: h.markers_len,
-                        rte,
-                    },
-                )
+                // The unwind ran the defers of frames ABOVE the boundary. The boundary frame's
+                // own `parallel:` levels (each body `defer`s, then its abort) and recover-block
+                // `defer`s remain: `reclaim_caught` leaves them, innermost first, before binding
+                // the result (`catch_drained`). A fault in one supersedes the original.
+                self.reclaim_caught(Caught {
+                    base_level,
+                    nursery_len: h.nursery_len,
+                    defer_len: h.defer_len,
+                    markers_len: h.markers_len,
+                    rte,
+                })
             }
             // Uncaught: the unwind above already cancelled-and-reported every unwound frame's
             // escaped nurseries (the toplevel module nursery preserved).
@@ -999,13 +1013,10 @@ impl Vm {
     /// latest fault): rank, bind the recover's `Err`, resume at the boundary's `ip`.
     pub(super) fn catch_drained(
         &mut self,
-        base_level: usize,
-        nursery_len: usize,
-        markers_len: usize,
-        rte: RuntimeError,
+        c: Caught,
         drained: Option<RuntimeError>,
     ) -> Result<(), RuntimeError> {
-        let rte = self.unwind_result(rte, drained, false);
+        let rte = self.unwind_result(c.rte, drained, false);
         // This `recover:` caught the fault: discard any trace captured deeper in (it belongs
         // to a fault that is now handled, a recover-block `defer`'s fault too), so a later
         // uncaught fault re-captures.
@@ -1025,45 +1036,59 @@ impl Vm {
             .last_mut()
             .expect("the catching frame")
             .defer_markers
-            .truncate(markers_len);
-        // Reclaim any `parallel:` nursery the fault unwound past (its `JoinNursery`
-        // never ran) — the nursery list is always reclaimed on unwind.
-        // TASK B: route through `drain_escaped_nursery` so a `?` caught by `recover:`
-        // cancels its tasks IDENTICALLY to an uncaught `?`.
-        // TICKET-287 — a fiber-owned nursery that is not done parks this fiber here,
-        // after the recover-block defers, as the frame unwind parks.
-        self.reclaim_caught(base_level, nursery_len, rte)
+            .truncate(c.markers_len);
+        // Every `parallel:` level the fault unwound past was left by `reclaim_caught` before the
+        // recover-block drain (TICKET-299).
+        self.finish_catch(c.base_level, c.nursery_len, rte)
     }
 
-    /// TICKET-287/TICKET-294 — the catching `recover:`'s nursery reclaim. At a fiber's outermost
-    /// loop it parks at each fiber-owned level that is not done ([`Vm::park_abort_origin`]), on the
-    /// first run and on every resume, so no level waits inline on this fiber's stack.
-    fn reclaim_caught(
+    /// TICKET-287/TICKET-294/TICKET-299 — the catching `recover:` after the frame unwind. It leaves
+    /// each `parallel:` level the fault left inside the recover block ([`Vm::leave_level`],
+    /// innermost first), then drains the recover block's own `defer`s ([`Vm::catch_drained`]). The
+    /// first run and every resume ([`FaultPark::Catch`]) enter here (DEC-294).
+    fn reclaim_caught(&mut self, c: Caught) -> Result<(), RuntimeError> {
+        if self.nurseries.len() > c.nursery_len {
+            return self.leave_level(LevelThen::Catch(Box::new(c)));
+        }
+        let defer_len = c.defer_len;
+        self.drain_then(defer_len, DrainCont::Catch(Box::new(c)))
+    }
+
+    /// [`Vm::reclaim_caught`] after level `top`'s body `defer`s ran (`drained`: their latest fault,
+    /// which supersedes the caught one as a recover-block `defer`'s does). At a fiber's outermost
+    /// loop it parks at a fiber-owned level that is not done. The owner's `Cut::Delivered` is still
+    /// set here; `catch_drained` clears it after the recover block's `defer`s (TICKET-195).
+    pub(super) fn catch_level_drained(
         &mut self,
-        base_level: usize,
-        nursery_len: usize,
-        rte: RuntimeError,
+        top: usize,
+        mut c: Caught,
+        drained: Option<RuntimeError>,
     ) -> Result<(), RuntimeError> {
-        if base_level == 0
-            && let Some(origin) = self.park_abort_origin(nursery_len)
+        c.rte = self.unwind_result(c.rte, drained, false);
+        if c.base_level == 0
+            && let Some(origin) = self.park_abort_origin(top)
         {
             self.join_suspend = Some(origin);
-            self.fault_park = Some(FaultPark::Catch { nursery_len, rte });
+            self.fault_park = Some(FaultPark::Catch(c));
             return Ok(());
         }
-        self.finish_catch(base_level, nursery_len, rte)
+        // TICKET-147 — the caught fault is the root cause; a child's fault is dropped.
+        let _ = self.drain_escaped_nursery(top);
+        self.reclaim_caught(c)
     }
 
-    /// The end of a `recover:` catch: reclaim the nurseries above `nursery_len`, then push the
-    /// caught fault as the boundary's `Err` value.
+    /// The end of a `recover:` catch: every level above `nursery_len` is left, so push the caught
+    /// fault as the boundary's `Err` value.
     fn finish_catch(
         &mut self,
         base_level: usize,
         nursery_len: usize,
         rte: RuntimeError,
     ) -> Result<(), RuntimeError> {
-        // TICKET-147 — the caught fault is the root cause; a child's fault is dropped.
-        let _ = self.drain_escaped_nursery(nursery_len);
+        debug_assert!(
+            self.nurseries.len() <= nursery_len,
+            "reclaim_caught left every level"
+        );
         let rte = self.cleanup_met_halt(base_level, rte)?;
         // Convert the fault message (a `str`, i.e. an `Error`) into `Err(msg)`; the
         // boundary's `done` label receives a ready `Result`.

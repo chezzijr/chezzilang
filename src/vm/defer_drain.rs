@@ -10,7 +10,7 @@
 //! the records on the Rust stack instead ([`Vm::run_one_deferred`]); both paths call a record with
 //! [`Vm::call_loaded`].
 
-use super::frames::Unwind;
+use super::frames::{Caught, Unwind};
 use super::*;
 use crate::base::op::{DrainStep, Proto};
 use std::sync::LazyLock;
@@ -78,13 +78,9 @@ pub(super) enum DrainCont {
     /// A fault or cancel unwind ran the `defer`s of the frame it is at. Boxed: a drain moves its
     /// continuation on every return, and an unwind is the one large one.
     Unwind(Box<Unwind>),
-    /// A `recover:` that caught `rte` ran its recover block's `defer`s ([`Vm::catch_drained`]).
-    Catch {
-        base_level: usize,
-        nursery_len: usize,
-        markers_len: usize,
-        rte: RuntimeError,
-    },
+    /// A `recover:` that caught a fault ran its recover block's `defer`s ([`Vm::catch_drained`]).
+    /// Boxed like [`DrainCont::Unwind`].
+    Catch(Box<Caught>),
 }
 
 impl DrainCont {
@@ -92,7 +88,7 @@ impl DrainCont {
     /// fault arm ([`Vm::on_step_fault`]).
     fn unwinds(&self) -> bool {
         match self {
-            DrainCont::Unwind(_) | DrainCont::Catch { .. } => true,
+            DrainCont::Unwind(_) | DrainCont::Catch(_) => true,
             DrainCont::Level { then, .. } => then.unwinds(),
             DrainCont::Return { .. }
             | DrainCont::Op
@@ -170,12 +166,7 @@ impl Vm {
             DrainCont::TryBody { span, parked } => self.try_escape(span, err.or(parked)),
             DrainCont::TryRecover { ip, body } => self.try_recover(ip, body, err),
             DrainCont::Unwind(u) => self.unwind_drained(*u, err),
-            DrainCont::Catch {
-                base_level,
-                nursery_len,
-                markers_len,
-                rte,
-            } => self.catch_drained(base_level, nursery_len, markers_len, rte, err),
+            DrainCont::Catch(c) => self.catch_drained(*c, err),
         }
     }
 

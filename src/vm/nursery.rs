@@ -2,7 +2,7 @@
 //! escape, M:N and eager nurseries.
 //! Split out of `src/vm/sched.rs`. `super::*` is the parent module.
 
-use super::frames::Unwind;
+use super::frames::{Caught, Unwind};
 use super::sched::JoinCover;
 use super::sched::NestedDrainerSlot;
 use super::sched::SpawnHead;
@@ -27,6 +27,9 @@ pub(super) enum LevelThen {
     Return { err: Option<RuntimeError> },
     /// A fault or cancel unwind ([`Vm::unwind_on`]) leaves the top level of the frame it is at.
     Unwind(Box<Unwind>),
+    /// A `recover:` that caught a fault leaves a level the fault left inside its recover block
+    /// ([`Vm::reclaim_caught`]).
+    Catch(Box<Caught>),
 }
 
 impl LevelThen {
@@ -35,7 +38,7 @@ impl LevelThen {
     pub(super) fn unwinds(&self) -> bool {
         match self {
             LevelThen::Return { .. } => false,
-            LevelThen::Unwind(_) => true,
+            LevelThen::Unwind(_) | LevelThen::Catch(_) => true,
         }
     }
 }
@@ -492,6 +495,7 @@ impl Vm {
                 self.return_levels(err)
             }
             LevelThen::Unwind(u) => self.unwind_level_drained(*u, err),
+            LevelThen::Catch(c) => self.catch_level_drained(top, *c, err),
         }
     }
 
