@@ -853,3 +853,92 @@ fn a_recovered_reentry_or_lock_cycle_is_fatal() {
         bad.join("\n")
     );
 }
+
+/// How main joins an `Executor` job whose body re-enters its own guard.
+#[derive(Clone, Copy, Debug)]
+enum Join {
+    Get,
+    RecoveredGet,
+    Shutdown,
+}
+
+impl Join {
+    const ALL: [Join; 3] = [Join::Get, Join::RecoveredGet, Join::Shutdown];
+
+    /// This variant's index in `ALL`; the exhaustive match makes a new variant fail the build.
+    fn index(self) -> usize {
+        match self {
+            Join::Get => 0,
+            Join::RecoveredGet => 1,
+            Join::Shutdown => 2,
+        }
+    }
+
+    fn tail(self) -> &'static str {
+        match self {
+            Join::Get => "_ := t.get()\n",
+            Join::RecoveredGet => "r := recover:\n    _ := t.get()\nprint(\"r\", r)\n",
+            Join::Shutdown => "ex.shutdown()\n",
+        }
+    }
+}
+
+/// An `Executor` job that re-enters its own guard is a fatal deadlock that reports itself, however
+/// main joins it (`MnSched::finish_with`): a deadlock-marked job fault that no verdict decided is
+/// no verdict's end, so it is published as the run's fault instead of sealing nothing and leaving
+/// `t.get()` to wait for a result that never comes.
+#[test]
+fn an_executor_job_reentry_is_fatal_whichever_way_it_is_joined() {
+    for (i, j) in Join::ALL.iter().enumerate() {
+        assert_eq!(j.index(), i, "Join::ALL is out of order");
+    }
+    let dir = std::env::temp_dir().join(format!("chz-ticket298-job-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("create fixture dir");
+    let mut bad = Vec::new();
+    // `None` = CHEZZI_THREADS unset, the default worker count.
+    for t in [Some("1"), Some("2"), None] {
+        for r in Res::ALL {
+            for j in Join::ALL {
+                let (imp, _, _) = int_box(r);
+                let call = match r {
+                    Res::Shared => "s.update(fn(x: int) -> int: s.get() + x)",
+                    Res::RwWrite => "s.write(fn(x: int) -> int: s.get() + x)",
+                    Res::RwRead => "_ := s.read(fn(x: int) -> int: set_in(x))",
+                };
+                let program = format!(
+                    "import {imp}, Executor from std.concurrency\ns := {imp}(0)\nfn set_in(x: int) -> int:\n    s.set(x)\n    return x\nfn job() -> int:\n    {call}\n    return 1\nex := Executor()\nt := ex.submit(job)\n{}",
+                    j.tail()
+                );
+                let path = dir.join(format!("{r:?}_{j:?}.chz"));
+                std::fs::write(&path, program).expect("write fixture");
+                let mut cmd = Command::new(env!("CARGO_BIN_EXE_chezzi"));
+                cmd.arg("run").arg(&path);
+                match t {
+                    Some(n) => cmd.env("CHEZZI_THREADS", n),
+                    None => cmd.env_remove("CHEZZI_THREADS"),
+                };
+                let out = cmd.output().expect("run chezzi");
+                let stdout = String::from_utf8_lossy(&out.stdout);
+                let stderr = String::from_utf8_lossy(&out.stderr);
+                if out.status.code() != Some(1)
+                    || !stderr.contains("deadlock:")
+                    || stderr.contains("recv() on an empty channel")
+                    || stdout.contains("r ")
+                {
+                    bad.push(format!(
+                        "{r:?} x {j:?} T={t:?}: rc={:?} stdout={stdout:?} stderr={:?}",
+                        out.status.code(),
+                        stderr.lines().next().unwrap_or("")
+                    ));
+                }
+            }
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        bad.is_empty(),
+        "{} cell(s) wrong:\n{}",
+        bad.len(),
+        bad.join("\n")
+    );
+}

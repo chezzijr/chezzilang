@@ -116,7 +116,9 @@ ready `recv` completes after a cancel. Grid: `tests/executor_stop_grid.rs`.
   `ThreadPoolExecutor`, Java's `ExecutorService`, Go's `errgroup`, none of which abort siblings by
   default). A non-terminating sibling therefore still blocks `shutdown()`.
 - **A hard abort is never a Task outcome.** A `--max-heap` abort ends the run, and a `--timeout` cut
-  leaves the Task unsettled; `os.exit` and a deadlock verdict are run halts as well.
+  leaves the Task unsettled; `os.exit` and a deadlock verdict are run halts as well. So is a job
+  that re-enters its own `Shared`/`RwShared` guard or closes a lock cycle: it is a fatal deadlock
+  that reports itself, however main joins it (`t.get()`, `recover:` around it, `shutdown()`).
 
   ```chezzi
   ex := Executor(1)

@@ -43,7 +43,6 @@ impl MnSched {
     ) -> (bool, bool) {
         let mut c = self.lock();
         debug_assert!(Arc::ptr_eq(&c.left, &self.quiesce.epoch()));
-        let job_fault = self.publish_job_fault(&c, scope_id, &outcome);
         c.leave_running();
         // A task that ends with a deadlock verdict's fault cancels no sibling when every other
         // party of this sched is stuck too: the sched-wide verdict cut them all at once, or (a
@@ -53,6 +52,12 @@ impl MnSched {
         // verdict, and the join lists every one in task order.
         let cut_end = matches!(&outcome, TaskOutcome::Fault { err, .. } if err.is_deadlock)
             && (c.cut_in_place() || self.is_deadlocked(&c));
+        // A deadlock-marked job fault is the verdict's end when a verdict decided it. A lock cycle or
+        // a re-entry (TICKET-298) is deadlock-marked with no verdict behind it: that fault reports
+        // itself, so `publish_job_fault` ends the run with it.
+        let verdict_end = matches!(&outcome, TaskOutcome::Fault { err, .. } if err.is_deadlock)
+            && (cut_end || self.quiesce.run_halt() == RunHalt::Deadlock);
+        let job_fault = self.publish_job_fault(&c, scope_id, &outcome, verdict_end);
         // The outcome the worker handed in, before the W7-26r conversion below: that conversion
         // trips the scope's own flag, for a backlog only.
         if let Some(flag) = trip
@@ -85,13 +90,13 @@ impl MnSched {
         // A job the deadlock verdict ended: the verdict cut the sched (it latched `terminate`, or a
         // demoted fiber is left to settle), so a released held job would never run and its `None`
         // slot would hang the join. It reads as a latched verdict.
-        let verdict_end = matches!(&outcome, TaskOutcome::Fault { err, .. } if err.is_deadlock);
         let seal = match &outcome {
             // The body returned: `_run_outcome` sealed its value, and the first writer wins.
             TaskOutcome::Done(_) => JobSeal::Nothing,
-            // A hard abort is never a Task outcome (TICKET-289): the run halts instead.
+            // A hard abort is never a Task outcome (TICKET-289): the run halts instead. A fault
+            // `publish_job_fault` published ends the run the same way.
             TaskOutcome::Fault { err, .. } | TaskOutcome::CancelledFault { err, .. }
-                if executor_hard_halt(err) =>
+                if job_fault || executor_hard_halt(err) =>
             {
                 JobSeal::Nothing
             }
@@ -146,20 +151,28 @@ impl MnSched {
         (aborts, job_fault)
     }
 
-    /// TICKET-270 — THE publisher of the one job end that halts the run: an `Executor` job's
-    /// `--max-heap` abort (TICKET-289). A hard abort is never a Task outcome, so the run halts and
-    /// the Task seals nothing ([`JobSeal::Nothing`]). Every other job end stays in its Task: an
-    /// ordinary fault, a deadlock verdict and a `--timeout` cut (each party reads the deadline)
-    /// publish nothing. It stores the cell under `finish`'s core-lock hold, before the slot: a
+    /// TICKET-270 — THE publisher of the job ends that halt the run: an `Executor` job's
+    /// `--max-heap` abort (TICKET-289) and, since TICKET-298, a deadlock-marked fault no verdict
+    /// decided (`verdict_end` false: a lock cycle or a re-entry, which reports itself and is fatal).
+    /// Such an end is never a Task outcome, so the run halts and the Task seals nothing
+    /// ([`JobSeal::Nothing`]). Every other job end stays in its Task: an ordinary fault, a deadlock
+    /// verdict and a `--timeout` cut (each party reads the deadline) publish nothing. It stores the cell under `finish`'s core-lock hold, before the slot: a
     /// joiner that reads the halt takes this lock to read finished output
     /// (`take_finished_streams`), so it finds the job's slot filled, and `job_event` reads the cell
     /// before it releases a held job (DEC-219). An `os.exit` is not published here: the host
     /// `request_exit` stores its code at the call (W7-57, DEC-213). The caller runs
     /// [`Vm::halt_run`] after `finish` returns: `halt_all_scheds` takes every core lock.
-    fn publish_job_fault(&self, c: &SchedCore, scope_id: usize, outcome: &TaskOutcome) -> bool {
+    fn publish_job_fault(
+        &self,
+        c: &SchedCore,
+        scope_id: usize,
+        outcome: &TaskOutcome,
+        verdict_end: bool,
+    ) -> bool {
         match outcome {
             TaskOutcome::Fault { err, trace, .. }
-                if c.is_job_scope(scope_id) && err.is_over_memory =>
+                if c.is_job_scope(scope_id)
+                    && (err.is_over_memory || (err.is_deadlock && !verdict_end)) =>
             {
                 self.quiesce.request_job_fault(err.clone(), trace.clone());
                 true
