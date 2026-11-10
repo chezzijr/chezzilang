@@ -26,11 +26,13 @@ main()
 
 - **`parallel:` is a nursery:** every task spawned inside joins at the dedent. `spawn` returns at once
   and the task starts there, beside the rest of the body (Go's `go f()`). The barrier guarantees
-  completion, not start.
+  completion, not start. At the dedent the block joins its tasks, then runs its own `defer`s. Any
+  other exit (`return`, `?`, `break`, `continue`, a fault, a cancel) runs the block's `defer`s first,
+  then cancels and joins its tasks, wherever the `recover:` sits.
 - **Every function body and the module top level is an implicit nursery.** A bare `spawn` is legal
   anywhere and joins at the body's `return`/end (the top level joins at program exit). `return`,
-  fall-through and `?` are join points; `defer`s run after the join. A task cannot outlive the
-  function that spawned it.
+  fall-through and `?` are join points; the function's `defer`s run after the join. A task cannot
+  outlive the function that spawned it.
 - **`return`, `break` and `continue` inside a `spawn:` block are compile errors**
   (`'return' is not allowed inside a spawn block: a spawned task has no caller to return to`;
   `'break' is not allowed inside a spawn block: a spawned task runs outside the loop`), also in an `if`/`for`/`match`/`wait:` arm in the block. Send the value on a

@@ -36,6 +36,8 @@ pub(super) enum LevelThen {
         span: Span,
         err: Option<RuntimeError>,
     },
+    /// `break` and `continue` ([`Op::ReclaimNursery`]): one level per op, innermost first.
+    Jump,
 }
 
 impl LevelThen {
@@ -43,7 +45,7 @@ impl LevelThen {
     /// ([`Vm::on_step_fault`]).
     pub(super) fn unwinds(&self) -> bool {
         match self {
-            LevelThen::Return { .. } | LevelThen::Try { .. } => false,
+            LevelThen::Return { .. } | LevelThen::Try { .. } | LevelThen::Jump => false,
             LevelThen::Unwind(_) | LevelThen::Catch(_) => true,
         }
     }
@@ -512,6 +514,20 @@ impl Vm {
                     return Ok(());
                 }
                 self.try_levels(span, err)
+            }
+            LevelThen::Jump => {
+                // A body defer fault is a fault at the jump: the unwind leaves the level.
+                if let Some(e) = err {
+                    return Err(e);
+                }
+                if self.park_escaped_abort(top) {
+                    return Ok(());
+                }
+                // TICKET-147 -- the aborted level's child fault is a real fault.
+                match self.drain_escaped_nursery(top) {
+                    Some(e) => Err(e),
+                    None => Ok(()),
+                }
             }
         }
     }

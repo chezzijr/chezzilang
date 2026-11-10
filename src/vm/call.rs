@@ -818,8 +818,8 @@ impl Vm {
         // nursery (it captured the parent depth
         // at entry). TASK B: route through `drain_escaped_nursery` so the unstarted tasks are
         // cancelled-and-reported (not silently dropped). NB: within-frame `break`/`continue` out of a
-        // `parallel:` no longer rely on this — the compiler emits a `ReclaimNursery` before their
-        // loop-exit `Jump` (see `compile_parallel`/`emit_loop_escape_drain`), reclaiming block-scoped.
+        // `parallel:` no longer rely on this — the compiler emits one `ReclaimNursery` per escaped
+        // level (`Vm::leave_level`) before their loop-exit `Jump`.
         let escaped = self.drain_escaped_nursery(frame.nursery_len);
         // Drop any `recover:` handlers installed in the frame we just left (e.g. a `?` early-return
         // out of a recover block) — they must not survive to catch a later, unrelated fault.

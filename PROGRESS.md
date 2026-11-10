@@ -73,9 +73,9 @@ workspace crates, the blocking-point table (`block::wait_steps`) and the boundar
 
 0. **Bug hunt wave 24 (2026-11-09): file one ticket per family.** 8 families, each with a P0 cell
    (F1 a cancelled cleanup's guard gives a waiter a half-done value; F2 `parallel:` defer order
-   depends on where `recover:` sits; F3 to F8 design inconsistencies). Owner decisions:
+   (landed, TICKET-299); F3 to F8 design inconsistencies). Owner decisions:
    `docs/contributing/special-cases.md` "Owner design decisions (2026-11-09)". Report, order and
-   repros: `~/.claude/plans/2026-11-09-bug-hunt-w24/report.md`. Ready to file: F2, F5, F6, F7,
+   repros: `~/.claude/plans/2026-11-09-bug-hunt-w24/report.md`. Ready to file: F5, F6, F7,
    F4 (the `copy` part), F1 and F3 except their open questions (F1 Q3/Q4, F3 Q4). F8 waits on three
    owner answers.
 1. **TICKET-266, a `never` return type.** `exit` and `panic` declare `-> never`, and a call of that

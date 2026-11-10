@@ -387,13 +387,23 @@ A `break`/`continue`/`return`/fault that leaves a `parallel:` body early **cance
 tasks, and prints **nothing** about it. A task starts at its `spawn`, so there are no unstarted tasks
 to count. `trio` and `asyncio.TaskGroup` are silent here too.
 
-The order is innermost-first: a `return`, `?`, `break` or `continue` runs the `parallel:` block's own
-defers, then cancels its children and **waits** for them to finish unwinding (their defers run), and
-only then runs the enclosing blocks' defers. A defer that flushes a log channel therefore sees what a
-cancelled child's defer wrote. Go does the same (`cancel()` + `wg.Wait()` before the function returns)
-and so does `asyncio.TaskGroup`.
+The order is innermost-first, and every exit but fall-through takes it. A `return`, `?`,
+`break`, `continue`, a fault (a `panic`, an index fault, a child's fault) or a cancel runs the
+`parallel:` block's own defers, then cancels its children and **waits** for them to finish
+unwinding (their defers run), and only then runs the enclosing blocks' defers. This holds
+wherever the `recover:` that catches a fault sits: in the same function, in a caller, around
+an `if` or a loop, or outside a hook or callback that a builtin calls. A defer that flushes a
+log channel therefore sees what a cancelled child's defer wrote, and a defer that receives from
+a child still has its sender. Go does the same (`cancel()` + `wg.Wait()` before the function
+returns) and so does `asyncio.TaskGroup`.
 
-An uncaught **fault** propagating out of a body cancels the implicit nursery's tasks (abnormal exit,
-not a join). `defer`s run *after* the implicit join (tasks complete, then cleanup), and identically
-for an **explicit** `parallel:` block: a `defer` directly inside the block runs after the block's
-dedent join. Each nursery on the unwind path is reclaimed separately, innermost-first.
+Normal fall-through is the exception: a `parallel:` block that reaches its dedent joins its
+children first, then runs its own defers, so a defer can close a channel the children sent on.
+
+A hard halt (`--timeout`, `--max-heap`) in a task that is not cancelled runs every block's
+defers, innermost first, and joins no block: the run is ending, and a child that waits would
+stall the halt. In a cancelled task that is already unwinding, a hard halt leaves each block
+the same way as any other exit.
+
+An uncaught fault propagating out of a function body cancels the implicit nursery's tasks
+(abnormal exit, not a join); the function's own defers run after that cancel.

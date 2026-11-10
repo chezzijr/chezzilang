@@ -779,19 +779,9 @@ impl Vm {
                 self.join_nursery_released()?;
                 self.cancel_at_join(span)?;
             }
-            // TASK B — `break`/`continue` leaving a `parallel:` scope: cancel its
-            // tasks and pop exactly that one level (the compiler emits one per escaped scope).
-            Op::ReclaimNursery => {
-                let from = self.nurseries.len().saturating_sub(1);
-                // TICKET-132 — park the owner instead of waiting inline if `from`'s level is a
-                // fiber-owned escape; the rewound op re-runs once the cancelled family settles.
-                if !self.park_escaped_abort(from)
-                    && let Some(e) = self.drain_escaped_nursery(from)
-                {
-                    // TICKET-147 — the aborted nursery's child fault is a real fault.
-                    return Err(e);
-                }
-            }
+            // TICKET-299: a `break`/`continue` leaves one `parallel:` level per op, innermost first
+            // (`Vm::leave_level`); the compiler emits one per escaped level.
+            Op::ReclaimNursery => self.leave_level(LevelThen::Jump)?,
             Op::SpawnCall(argc, entry) => {
                 self.do_spawn(super::sched::SpawnHead::Callee(*entry), *argc, span)?
             }
