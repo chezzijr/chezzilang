@@ -1,0 +1,26 @@
+# TICKET-300: `Self` is a keyword that names the enclosing type; the compiler's temps are private
+# `$` names, so a user binder spelled like an old temp (`__opt0`) is an ordinary name.
+struct NstP:
+    x: int
+    fn mk() -> Self:
+        return Self(x=1)
+    fn two() -> int:
+        return Self.mk().x + 1
+
+enum NstE:
+    A
+    B
+    fn other(self) -> NstE:
+        return Self.B
+
+test fn self_is_the_enclosing_type_in_a_method():
+    assert NstP.two() == 2, "got {NstP.two()}"
+    assert NstE.A.other() == NstE.B, "Self.B is NstE.B"
+
+test fn a_user_binder_spelled_like_a_temp_is_ordinary():
+    __opt0 := 5
+    __optrecv0 := 2
+    x: int? = ?3
+    p: NstP? = ?NstP(x=4)
+    assert (x ?? 0) + __opt0 + __optrecv0 == 10, "got {(x ?? 0) + __opt0 + __optrecv0}"
+    assert (p?.x ?? 0) + __opt0 == 9, "got {(p?.x ?? 0) + __opt0}"

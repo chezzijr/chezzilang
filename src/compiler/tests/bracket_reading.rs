@@ -35,3 +35,25 @@ fn an_index_bracket_call_records_its_reading() {
     assert_eq!(count(&rs, "IndexCall"), 1, "reading counts");
     assert_eq!(count(&rs, "TypeArgsCall"), 0, "reading counts");
 }
+
+/// Parse, desugar and compile `src` (the production lowering of one module).
+fn compiles(src: &str) -> Result<(), String> {
+    let tokens = crate::lexer::tokenize(src).expect("lex");
+    let mut module = crate::parser::parse(tokens).expect("parse");
+    crate::desugar::run_standalone(&mut module).expect("desugar");
+    compile_module_standalone(&module)
+        .map(|_| ())
+        .map_err(|e| e.message)
+}
+
+#[test]
+fn a_type_args_bracket_call_compiles() {
+    let src = "fn id[T](x: T) -> T:\n    return x\nfn main():\n    y := id[int](1)\n    print(y)\nmain()\n";
+    assert_eq!(compiles(src), Ok(()));
+}
+
+#[test]
+fn an_index_bracket_call_compiles() {
+    let src = "fn one(x: int) -> int:\n    return x\nfn main():\n    fs := [one]\n    k := 0\n    print(fs[k](1))\nmain()\n";
+    assert_eq!(compiles(src), Ok(()));
+}
