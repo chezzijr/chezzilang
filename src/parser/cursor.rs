@@ -346,6 +346,16 @@ impl Parser {
         )))
     }
 
+    /// Whether `t` is a keyword that parses as an operand (`None`, `true`, `false`, `Self`), so the
+    /// expression path cannot tell it from a bad target and `try_parse_walrus_target` reads it from
+    /// the token. Every other keyword keeps the expression path's own error at `:=`.
+    pub(super) fn is_operand_keyword(t: &Token) -> bool {
+        matches!(
+            t,
+            Token::NoneKw | Token::True | Token::False | Token::SelfKw
+        )
+    }
+
     /// The error for an expression at `:=` that `try_parse_walrus_target` did not take; a keyword in
     /// a name slot never reaches here.
     pub(super) fn bind_target_error(&self, target: Expr, otherwise: &str) -> ParseError {
