@@ -91,7 +91,7 @@ pub(super) struct FiberCtx {
     pub(super) mn_scopes: Vec<Option<usize>>,
     /// TASK B — see [`Vm::nursery_defer_floors`]; carried per-fiber so a parked fiber's per-nursery
     /// defer floors travel with its `nurseries` across `swap_ctx`.
-    pub(super) nursery_defer_floors: Vec<usize>,
+    pub(super) nursery_defer_floors: Vec<LevelFloor>,
     /// TICKET-048 — see [`Vm::nursery_spans`]; carried per-fiber so a parked fiber's spans travel
     /// with its nurseries across `swap_ctx`.
     pub(super) nursery_spans: Vec<Span>,

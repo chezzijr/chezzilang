@@ -254,6 +254,13 @@ impl Vm {
         floor.min(self.nurseries.len())
     }
 
+    /// TICKET-299: the nursery count below frame `fi`'s `parallel:` levels; its implicit nursery and
+    /// the module nursery sit at or below it.
+    pub(super) fn level_floor(&self, fi: usize) -> usize {
+        let f = &self.frames[fi];
+        (f.nursery_len + usize::from(f.has_implicit_nursery)).min(self.nurseries.len())
+    }
+
     /// Drop the top frame of an unwind, after its `defer`s, with the `recover:` handlers it
     /// installed. `cut`: a deadlock verdict cut this task ([`Vm::drop_ret`]).
     pub(super) fn pop_unwound_frame(&mut self, cut: bool) {
@@ -309,7 +316,7 @@ impl Vm {
                 if let Some(h) = self.same_frame_handler()
                     && self.nurseries.len() > h.nursery_len
                 {
-                    let floor = self.nursery_defer_floors[h.nursery_len];
+                    let floor = self.nursery_defer_floors[h.nursery_len].defers;
                     let parked = self.take_escape_park();
                     return self.drain_then(floor, DrainCont::TryBody { span, parked });
                 }

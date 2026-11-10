@@ -1422,7 +1422,17 @@ impl Vm {
         self.mn_scopes.push(None); // lockstep — set Some(scope_id) only if early-enlisted
         // TASK B — capture this parallel body's defer floor so a recover-scoped `?` can run
         // the body's defers before the nursery reclaim (see `nursery_defer_floors`).
-        let floor = self.frames.last().map(|f| f.deferred.len()).unwrap_or(0);
+        let floor = self
+            .frames
+            .last()
+            .map(|f| LevelFloor {
+                defers: f.deferred.len(),
+                markers: f.defer_markers.len(),
+            })
+            .unwrap_or(LevelFloor {
+                defers: 0,
+                markers: 0,
+            });
         self.nursery_defer_floors.push(floor);
         self.nursery_spans.push(span);
         // §2c1 — EVERY nursery on the M:N engine activates an EAGER sched NOW, so a `spawn`

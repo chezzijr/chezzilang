@@ -11,6 +11,31 @@ use super::sched::join_helpers;
 use super::sched::spawn_worker_thread;
 use super::*;
 
+/// TICKET-299: where an open `parallel:` level starts in its frame, captured at `Op::EnterNursery`:
+/// the frame's `defer` count (the level's body `defer`s sit above it) and its defer-scope marker
+/// count (the scopes the level opened sit above it).
+#[derive(Clone, Copy, Debug)]
+pub(super) struct LevelFloor {
+    pub(super) defers: usize,
+    pub(super) markers: usize,
+}
+
+/// TICKET-299: what a non-normal exit goes on with once it left one `parallel:` level.
+pub(super) enum LevelThen {
+    /// `return` and function-scoped `?` ([`Vm::return_levels`]); `err`: the fault in hand.
+    Return { err: Option<RuntimeError> },
+}
+
+impl LevelThen {
+    /// Whether the exit is a fault or cancel unwind, whose failure has already run the fault arm
+    /// ([`Vm::on_step_fault`]).
+    pub(super) fn unwinds(&self) -> bool {
+        match self {
+            LevelThen::Return { .. } => false,
+        }
+    }
+}
+
 impl Vm {
     /// A nursery's sched-wide deadlock fault: a blocked task of `parallel:` at `span`, for a task
     /// whose own wait no site named. Every cut that knows its wait re-sites it
@@ -423,40 +448,64 @@ impl Vm {
         None
     }
 
-    /// W14-4 -- a `return` escapes every `parallel:` level above the frame's own nurseries,
-    /// innermost-first: run the level's body defers (down to its `nursery_defer_floors` entry),
-    /// then cancel it and wait for its children ([`Vm::return_level_done`]); then the rest of the
-    /// return ([`Vm::return_join`]). Enclosing defers therefore run after the cancelled children
-    /// unwind (Go cancel + `wg.Wait()`, asyncio `TaskGroup`). `err` is the fault in hand.
-    pub(super) fn return_levels(&mut self, err: Option<RuntimeError>) -> Result<(), RuntimeError> {
-        let f = self.frames.last().unwrap();
-        let from_len = f.nursery_len + usize::from(f.has_implicit_nursery);
-        if self.nurseries.len() > from_len {
-            let top = self.nurseries.len() - 1;
-            let floor = self.nursery_defer_floors[top];
-            return self.drain_then(floor, DrainCont::ReturnLevel { top, err });
-        }
-        self.return_join(err)
+    /// THE leave of the top `parallel:` level on every exit but fall-through (TICKET-299, owner rule
+    /// F2): drop the defer scopes it opened, run its body `defer`s down to its floor, then
+    /// ([`Vm::level_drained`]) park or cancel and wait for its children, then `then`. Enclosing
+    /// defers therefore run after the cancelled children unwind (Go cancel + `wg.Wait()`, asyncio
+    /// `TaskGroup`). Fall-through (`compile_parallel`) is the one exit with the other order.
+    pub(super) fn leave_level(&mut self, then: LevelThen) -> Result<(), RuntimeError> {
+        let top = self.nurseries.len() - 1;
+        let floor = self.nursery_defer_floors[top];
+        self.frames
+            .last_mut()
+            .expect("a level has its frame")
+            .defer_markers
+            .truncate(floor.markers);
+        self.drain_then(floor.defers, DrainCont::Level { top, then })
     }
 
-    /// Level `top` of [`Vm::return_levels`] after its body defers ran (`err`: the latest fault).
-    /// A level that parks (TICKET-132) rewinds the op, which re-runs with the drained defers
-    /// consumed; TICKET-287 — the fault in hand parks with the fiber ([`Vm::store_escape_park`])
-    /// and comes back on the re-run.
-    pub(super) fn return_level_done(
+    /// [`Vm::leave_level`] after level `top`'s body `defer`s ran (`err`: their latest fault).
+    pub(super) fn level_drained(
         &mut self,
         top: usize,
-        mut err: Option<RuntimeError>,
+        then: LevelThen,
+        err: Option<RuntimeError>,
     ) -> Result<(), RuntimeError> {
+        match then {
+            LevelThen::Return { err: prior } => {
+                let mut err = err.or(prior);
+                if self.escape_level_parks(top, &mut err) {
+                    return Ok(());
+                }
+                self.return_levels(err)
+            }
+        }
+    }
+
+    /// An escape's (`return`, `?`, TICKET-132/TICKET-287) park or abort of level `top`: `true` when
+    /// it parked (the op rewinds and re-runs once the family settles), the fault in hand going with
+    /// the fiber ([`Vm::store_escape_park`]); else a child fault fills a gap in `err` (TICKET-147:
+    /// a body defer fault stays the root cause).
+    fn escape_level_parks(&mut self, top: usize, err: &mut Option<RuntimeError>) -> bool {
         if self.park_escaped_abort(top) {
             if let Some(e) = err.take() {
                 self.store_escape_park(e);
             }
-            return Ok(());
+            return true;
         }
-        // TICKET-147 — a body defer fault stays the root cause; a child fault only fills the gap.
         let child = self.drain_escaped_nursery(top);
-        self.return_levels(err.or(child))
+        *err = err.take().or(child);
+        false
+    }
+
+    /// W14-4 -- a `return` escapes every `parallel:` level above the frame's own nurseries,
+    /// innermost-first ([`Vm::leave_level`]); then the rest of the return ([`Vm::return_join`]).
+    /// `err` is the fault in hand.
+    pub(super) fn return_levels(&mut self, err: Option<RuntimeError>) -> Result<(), RuntimeError> {
+        if self.nurseries.len() > self.level_floor(self.frames.len() - 1) {
+            return self.leave_level(LevelThen::Return { err });
+        }
+        self.return_join(err)
     }
 
     pub(super) fn join_nursery(&mut self) -> Result<(), RuntimeError> {

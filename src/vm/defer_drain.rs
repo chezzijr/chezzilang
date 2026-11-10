@@ -58,11 +58,9 @@ pub(super) enum DrainCont {
     /// A `return` (or a function-scoped `?`): the rest of `do_return`; `err` is the fault the
     /// escaped levels raised.
     Return { err: Option<RuntimeError> },
-    /// The body `defer`s of escaped `parallel:` level `top` of a `return`.
-    ReturnLevel {
-        top: usize,
-        err: Option<RuntimeError>,
-    },
+    /// The body `defer`s of the `parallel:` level `top` a non-normal exit leaves
+    /// ([`Vm::leave_level`]).
+    Level { top: usize, then: LevelThen },
     /// `Op::LeaveDeferScope` / `Op::DrainHandlerDefers`: the fault is the op's.
     Op,
     /// A recover-scoped `?` that escapes a `parallel:` body ran the body's `defer`s; `parked` is
@@ -87,6 +85,21 @@ pub(super) enum DrainCont {
         markers_len: usize,
         rte: RuntimeError,
     },
+}
+
+impl DrainCont {
+    /// Whether the continuation is a fault or cancel unwind's: one that fails has already run the
+    /// fault arm ([`Vm::on_step_fault`]).
+    fn unwinds(&self) -> bool {
+        match self {
+            DrainCont::Unwind(_) | DrainCont::Catch { .. } => true,
+            DrainCont::Level { then, .. } => then.unwinds(),
+            DrainCont::Return { .. }
+            | DrainCont::Op
+            | DrainCont::TryBody { .. }
+            | DrainCont::TryRecover { .. } => false,
+        }
+    }
 }
 
 impl Vm {
@@ -149,9 +162,7 @@ impl Vm {
     ) -> Result<(), RuntimeError> {
         match then {
             DrainCont::Return { err: prior } => self.return_finish(err.or(prior)),
-            DrainCont::ReturnLevel { top, err: prior } => {
-                self.return_level_done(top, err.or(prior))
-            }
+            DrainCont::Level { top, then } => self.level_drained(top, then, err),
             DrainCont::Op => match err {
                 Some(e) => Err(e),
                 None => Ok(()),
@@ -210,7 +221,7 @@ impl Vm {
         self.cur_base = self.frames.last().map(|f| f.base).unwrap_or(0);
         // An unwind's or a catch's continuation that fails has already run the fault arm
         // ([`Vm::on_step_fault`]) on its fault: the fault arm only hands it on.
-        let unwound = matches!(d.then, DrainCont::Unwind(_) | DrainCont::Catch { .. });
+        let unwound = d.then.unwinds();
         let r = self.drain_done(d.then, d.err);
         self.unwound = unwound && r.is_err();
         r

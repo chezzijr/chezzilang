@@ -1066,7 +1066,7 @@ pub struct Vm {
     /// i.e. the defer floor of that `parallel:` body. A recover-scoped `?` escaping a `parallel:`
     /// must run the body's defers (those at `deferred[floor..]`) BEFORE reclaiming the nursery and
     /// only THEN run the recover block's own defers.
-    nursery_defer_floors: Vec<usize>,
+    nursery_defer_floors: Vec<LevelFloor>,
     /// TICKET-048 — parallel to [`Vm::nurseries`] (same length, pushed and popped in lockstep): the
     /// source span of the construct that OPENED each nursery — the `parallel:` keyword, or the first
     /// statement of an implicit nursery's block. Read when building the `DEADLOCK_MSG` fault so its
@@ -1488,6 +1488,7 @@ mod frames;
 mod globals;
 mod netio;
 mod nursery;
+use nursery::{LevelFloor, LevelThen};
 mod range;
 mod sched;
 mod shared_methods;
