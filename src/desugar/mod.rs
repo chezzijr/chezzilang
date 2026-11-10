@@ -1506,39 +1506,39 @@ fn variant_pat(id: crate::ast::NodeId, name: &str, bindings: Vec<Pattern>) -> Pa
 
 /// Lower an `OptChain` / `NullCoalesce` carrier (in place) to an expression-position `match` —
 /// the **Option** lowering:
-///   `a ?? b`     → `match a: Some(__optN): __optN; None: b`
-///   `x?.field`   → `match x: Some(__optN): Some(__optN.field); None: None`
-///   `x?.m(args)` → `match x: Some(__optN): Some(__optN.m(args)); None: None`
-/// The scrutinee is evaluated once by `match`; the payload binds to `__opt{tmp}` (the caller owns the
-/// counter, so temps stay unique within one expression). The arm bodies and field/method access use
+///   `a ?? b`     → `match a: Some($opt{id}): $opt{id}; None: b`
+///   `x?.field`   → `match x: Some($opt{id}): Some($opt{id}.field); None: None`
+///   `x?.m(args)` → `match x: Some($opt{id}): Some($opt{id}.m(args)); None: None`
+/// The scrutinee is evaluated once by `match`; the payload binds to `$opt{id}`, numbered by the carrier's
+/// node id, so temps stay unique within one expression. The arm bodies and field/method access use
 /// only nodes the checker + the compiler already handle.
 ///
 /// Ctx-free and free-standing on purpose: every consumer that needs this lowering must call THIS
 /// function, so the synthesized spans (and therefore the `WitnessKey`s derived from
 /// them) cannot drift between consumers.
-pub fn lower_carrier_option(expr: &mut Expr, tmp: usize) {
-    lower_carrier_option_as(expr, tmp, false)
+pub fn lower_carrier_option(expr: &mut Expr) {
+    lower_carrier_option_as(expr, false)
 }
 
 /// TICKET-239 — the `?.` lowering for a CALL that returns nothing (`CarrierMode::OptionVoid`):
-///   `x?.m(args)` → `match x: Some(__optN): __optN.m(args); None: pass`
+///   `x?.m(args)` → `match x: Some($opt{id}): $opt{id}.m(args); None: pass`
 /// The call runs when the value is present and the expression has no value. Same builder as
 /// [`lower_carrier_option`], so both forms give every shared node the same id.
-pub fn lower_carrier_option_void(expr: &mut Expr, tmp: usize) {
-    lower_carrier_option_as(expr, tmp, true)
+pub fn lower_carrier_option_void(expr: &mut Expr) {
+    lower_carrier_option_as(expr, true)
 }
 
 /// The one builder behind [`lower_carrier_option`] and [`lower_carrier_option_void`]. Both forms
 /// draw node ids in the SAME order: the checker infers the void form speculatively and then, on a
 /// miss, the value form of the same carrier, and the resolve table is not rolled back between.
-fn lower_carrier_option_as(expr: &mut Expr, tmp: usize, void: bool) {
+fn lower_carrier_option_as(expr: &mut Expr, void: bool) {
     let span = expr.span;
     let (base, k) = (expr.id, std::cell::Cell::new(0));
     let nid = || {
         k.set(k.get() + 1);
         base.carrier_child(k.get())
     };
-    let c = crate::ast::CarrierTemp::Payload.name(tmp);
+    let c = crate::ast::CarrierTemp::Payload.name(expr.id);
     let kind = std::mem::replace(&mut expr.kind, ExprKind::Bool(false));
     expr.kind = match kind {
         ExprKind::NullCoalesce { lhs, rhs, .. } => {
@@ -1584,7 +1584,7 @@ fn lower_carrier_option_as(expr: &mut Expr, tmp: usize, void: bool) {
                 },
                 span,
             };
-            // `__optN.field` or `__optN.method(args)`, then wrapped in `Some(...)`.
+            // `$opt{id}.field` or `$opt{id}.method(args)`, then wrapped in `Some(...)`.
             let access = match call {
                 None => field,
                 Some(call) => {
@@ -1680,7 +1680,7 @@ fn lower_carrier_option_as(expr: &mut Expr, tmp: usize, void: bool) {
 }
 
 /// Lower a `NullCoalesce` carrier (in place) to the **Result-discard** lowering:
-///   `r ?? b` → `match r: Ok(__optN): __optN; Err(_): b`
+///   `r ?? b` → `match r: Ok($opt{id}): $opt{id}; Err(_): b`
 /// The `Err` arm binds NOTHING — `Pattern::Wildcard` — so the error payload is discarded. This is
 /// Rust's `Result::unwrap_or`, not `?`: it never propagates. Nothing is required of `E`, because
 /// Chezzi is GC'd and has no destructor to run on the dropped value.
@@ -1688,14 +1688,14 @@ fn lower_carrier_option_as(expr: &mut Expr, tmp: usize, void: bool) {
 /// Distinct from [`lower_carrier_try`], which also applies to a `Result` operand but PROPAGATES the
 /// error with `?`. Collapsing the two into one `CarrierMode` would let `?.`'s propagation reach a
 /// `??`.
-pub fn lower_carrier_result_coalesce(expr: &mut Expr, tmp: usize) {
+pub fn lower_carrier_result_coalesce(expr: &mut Expr) {
     let span = expr.span;
     let (base, k) = (expr.id, std::cell::Cell::new(0));
     let nid = || {
         k.set(k.get() + 1);
         base.carrier_child(k.get())
     };
-    let c = crate::ast::CarrierTemp::Payload.name(tmp);
+    let c = crate::ast::CarrierTemp::Payload.name(expr.id);
     let kind = std::mem::replace(&mut expr.kind, ExprKind::Bool(false));
     let ExprKind::NullCoalesce { lhs, rhs, .. } = kind else {
         unreachable!("lower_carrier_result_coalesce applies to '??' only");
@@ -2220,9 +2220,9 @@ mod tests {
             let ExprKind::OptChain { ref mut obj, .. } = outer.kind else {
                 panic!("outer carrier")
             };
-            lower_carrier_option(obj, 0);
-            lower_carrier_option(&mut outer, 1);
-            // `match <inner>: Some(__opt1): Some(__opt1.n(c)) …`
+            lower_carrier_option(obj);
+            lower_carrier_option(&mut outer);
+            // `match <inner>: Some($opt{id}): Some($opt{id}.n(c)) …`
             let callee_name_span = |e: &Expr| -> Span {
                 let ExprKind::Match { arms, .. } = &e.kind else {
                     panic!("match")
@@ -2267,7 +2267,8 @@ mod tests {
     fn lower_carrier_result_coalesce_builds_ok_err_arms() {
         let stmts = desugar_ok("fn g() -> int!str:\n    return ?1\nx := g() ?? 0\n");
         let mut e = last_let_value(&stmts);
-        lower_carrier_result_coalesce(&mut e, 0);
+        let id = e.id;
+        lower_carrier_result_coalesce(&mut e);
         let ExprKind::Match { arms, .. } = &e.kind else {
             panic!("expected a Match, got {:?}", e.kind)
         };
@@ -2278,7 +2279,7 @@ mod tests {
         assert_eq!(*name, crate::ast::private_name("Ok"));
         assert_eq!(bindings.len(), 1);
         assert!(
-            matches!(&bindings[0], Pattern::Ident(n, _, _) if *n == crate::ast::CarrierTemp::Payload.name(0))
+            matches!(&bindings[0], Pattern::Ident(n, _, _) if *n == crate::ast::CarrierTemp::Payload.name(id))
         );
         let Pattern::Variant { name, bindings, .. } = &arms[1].pattern else {
             panic!("expected a variant pattern, got {:?}", arms[1].pattern)
@@ -2302,8 +2303,8 @@ mod tests {
         };
         assert!(matches!(lhs.kind, ExprKind::NullCoalesce { .. }));
         assert!(matches!(rhs.kind, ExprKind::NullCoalesce { .. }));
-        lower_carrier_option(&mut lhs, 0);
-        lower_carrier_option(&mut rhs, 1);
+        lower_carrier_option(&mut lhs);
+        lower_carrier_option(&mut rhs);
         let name_of = |e: &Expr| -> String {
             let ExprKind::Match { arms, .. } = &e.kind else {
                 panic!("expected Match")

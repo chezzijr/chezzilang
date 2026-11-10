@@ -691,11 +691,4 @@ impl Compiler {
     }
 
     // ----- expressions -----
-
-    /// W7-43 — the next `__optN` temp index for the Option carrier lowering.
-    pub(super) fn next_opt_tmp(&mut self) -> usize {
-        let n = self.next_opt_tmp;
-        self.next_opt_tmp += 1;
-        n
-    }
 }

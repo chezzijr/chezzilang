@@ -73,7 +73,7 @@ impl Scan {
         let Some(top) = self.scopes.last_mut() else {
             return;
         };
-        let report = if name.starts_with('_') {
+        let report = if name.starts_with('_') || crate::ast::is_private_name(name) {
             Report::Never
         } else {
             report

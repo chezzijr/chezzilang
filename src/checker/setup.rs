@@ -146,7 +146,6 @@ impl Checker {
             fall_off: FallOffTable::new(),
             module_idx_of: HashMap::new(),
             fn_homes: HashMap::new(),
-            next_opt_tmp: 0,
             witness_scope: Vec::new(),
             witness_member_names: std::collections::HashSet::new(),
             entry_fn: None,

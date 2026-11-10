@@ -5,9 +5,9 @@
 /// [`CarrierTemp::of`]; neither spells a prefix.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CarrierTemp {
-    /// The payload binder of a desugared carrier `match` (`__opt{n}`).
+    /// The payload binder of a desugared carrier `match` (`$opt{id}`).
     Payload,
-    /// The checker's pre-typed stand-in for a carrier's operand (`__optrecv{n}`).
+    /// The checker's pre-typed stand-in for a carrier's operand (`$optrecv{id}`).
     Operand,
 }
 
@@ -18,18 +18,20 @@ impl CarrierTemp {
     /// The spelling every binder of this kind starts with (a test asks a message for it).
     pub fn prefix(self) -> &'static str {
         match self {
-            CarrierTemp::Payload => "__opt",
-            CarrierTemp::Operand => "__optrecv",
+            CarrierTemp::Payload => "$opt",
+            CarrierTemp::Operand => "$optrecv",
         }
     }
 
-    /// The `n`th binder of this kind.
-    pub fn name(self, n: usize) -> String {
-        format!("{}{n}", self.prefix())
+    /// The binder of this kind for the carrier whose node is `id`. The number is the carrier's
+    /// node id, so the checker and the compiler name one carrier alike with no counter. The
+    /// spelling starts with `$`, which does not lex, so no user binder can take it.
+    pub fn name(self, id: crate::ast::NodeId) -> String {
+        format!("{}{}", self.prefix(), id.0)
     }
 
     /// The kind of carrier binder `name` is, or `None` for any other name. Only the exact shape
-    /// [`CarrierTemp::name`] builds (prefix + digits) is one: a user's `__options` is not.
+    /// [`CarrierTemp::name`] builds (prefix + digits) is one: a user's `$options` is not.
     pub fn of(name: &str) -> Option<CarrierTemp> {
         Self::ALL.into_iter().find(|k| {
             name.strip_prefix(k.prefix())
@@ -46,19 +48,21 @@ mod tests {
     #[test]
     fn carrier_temp_of_matches_only_built_names() {
         let rows = [
-            ("__opt12", Some(CarrierTemp::Payload)),
-            ("__optrecv3", Some(CarrierTemp::Operand)),
-            ("__options", None),
-            ("__opt", None),
-            ("__optrecv", None),
-            ("__optrecvx", None),
+            ("$opt12", Some(CarrierTemp::Payload)),
+            ("$optrecv3", Some(CarrierTemp::Operand)),
+            ("__opt12", None),
+            ("__optrecv3", None),
+            ("$options", None),
+            ("$opt", None),
+            ("$optrecv", None),
+            ("$optrecvx", None),
             ("x", None),
         ];
         for (name, want) in rows {
             assert_eq!(CarrierTemp::of(name), want, "{name}");
         }
         for k in CarrierTemp::ALL {
-            assert_eq!(CarrierTemp::of(&k.name(7)), Some(k));
+            assert_eq!(CarrierTemp::of(&k.name(crate::ast::NodeId(7))), Some(k));
         }
     }
 }

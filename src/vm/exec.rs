@@ -971,7 +971,7 @@ impl Vm {
         self.run_invoke(proto, vec![recv])
     }
 
-    /// `chezzi test` — construct a suite instance via its synthetic zero-arg `__new_<Suite>` thunk.
+    /// `chezzi test` — construct a suite instance via its synthetic zero-arg `$new_<Suite>` thunk.
     pub fn build_suite_instance(&mut self, new_thunk: ProtoId) -> Result<Value, RuntimeError> {
         self.run_invoke(new_thunk, Vec::new())
     }

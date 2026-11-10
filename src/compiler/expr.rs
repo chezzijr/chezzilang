@@ -345,11 +345,11 @@ impl Compiler {
                 // a green `chezzi check`.
                 match self.carriers.get(&key) {
                     Some(crate::checker::CarrierMode::ResultCoalesce) => {
-                        crate::desugar::lower_carrier_result_coalesce(&mut c, self.next_opt_tmp())
+                        crate::desugar::lower_carrier_result_coalesce(&mut c)
                     }
                     Some(
                         crate::checker::CarrierMode::Option | crate::checker::CarrierMode::Unknown,
-                    ) => crate::desugar::lower_carrier_option(&mut c, self.next_opt_tmp()),
+                    ) => crate::desugar::lower_carrier_option(&mut c),
                     Some(
                         crate::checker::CarrierMode::Try | crate::checker::CarrierMode::OptionVoid,
                     ) => {
@@ -389,11 +389,11 @@ impl Compiler {
                         crate::desugar::lower_carrier_try(&mut c)
                     }
                     Some(crate::checker::CarrierMode::OptionVoid) => {
-                        crate::desugar::lower_carrier_option_void(&mut c, self.next_opt_tmp())
+                        crate::desugar::lower_carrier_option_void(&mut c)
                     }
                     Some(
                         crate::checker::CarrierMode::Option | crate::checker::CarrierMode::Unknown,
-                    ) => crate::desugar::lower_carrier_option(&mut c, self.next_opt_tmp()),
+                    ) => crate::desugar::lower_carrier_option(&mut c),
                     Some(crate::checker::CarrierMode::ResultCoalesce) => {
                         return Err(CompileError {
                             message: "internal: a '??' lowering was recorded for a '?.' — the \

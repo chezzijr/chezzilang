@@ -1139,10 +1139,6 @@ struct Checker {
     graph_binds: std::rc::Rc<Vec<Vec<(String, crate::resolver::GlobalSource)>>>,
     /// The current module's from-imported fns: bound name -> (declaring module, declared name).
     fn_homes: HashMap<String, (usize, String)>,
-    /// W7-43 — a monotonic counter for the `__opt{n}` binding the Option lowering synthesizes, so a
-    /// carrier nested inside another carrier's operand can never shadow it. Mirrors the desugar
-    /// walker's `next_tmp`; never reset (uniqueness within one checked graph is free).
-    next_opt_tmp: usize,
     /// M24 — the witness slots whose `$w:` binding is reachable at the statement
     /// currently being checked: the witness params of the enclosing MODULE-LEVEL free fn or of the
     /// enclosing MEMBER (Task 5 — a method/static method declares its own `[T]`, and the hidden

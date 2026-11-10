@@ -1071,7 +1071,7 @@ impl Checker {
                         self.record_imported_pattern_variant(*id, enum_name, name, span);
                         // Still bind the payload sub-patterns (as Unknown) so the arm body doesn't
                         // cascade into spurious "unknown name" errors — notably the desugared `?.`
-                        // case, where the payload binding is an internal `__opt` temp the user can't
+                        // case, where the payload binding is an internal `$opt` temp the user can't
                         // see. (The `cannot match` error already flags the real problem.)
                         for b in bindings {
                             self.bind_subpattern(b, &Ty::Unknown, span, &mut BindMode::Match);

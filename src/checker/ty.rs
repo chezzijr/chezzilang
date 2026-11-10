@@ -124,14 +124,14 @@ pub type CarrierKey = (usize, Span, usize, Span);
 /// compiler CONSUMES it and never re-derives it (the backend is type-blind).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CarrierMode {
-    /// Operand is an `Option[T]` — the `match x: Some(__optN): Some(…); None: None` lowering.
+    /// Operand is an `Option[T]` — the `match x: Some($opt{id}): Some(…); None: None` lowering.
     Option,
     /// Operand is an `Option[T]` and the call returns nothing — the
-    /// `match x: Some(__optN): __optN.m(..); None: pass` lowering. The expression has no value.
+    /// `match x: Some($opt{id}): $opt{id}.m(..); None: pass` lowering. The expression has no value.
     OptionVoid,
     /// Operand is a `Result[T, E]` — `?` then `.`, byte-identical to the spaced `x? .f` spelling.
     Try,
-    /// `??` operand is a `Result[T, E]` — `match x: Ok(__optN): __optN; Err(_): rhs`, discarding the
+    /// `??` operand is a `Result[T, E]` — `match x: Ok($opt{id}): $opt{id}; Err(_): rhs`, discarding the
     /// error. Rust's `unwrap_or`, not `?`: distinct from [`CarrierMode::Try`], which PROPAGATES.
     ResultCoalesce,
     /// The operand did not type, or is not a carrier at all. The checker already reported it; the

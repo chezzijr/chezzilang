@@ -598,17 +598,15 @@ impl Checker {
     ///
     /// Three properties this shape depends on:
     /// * **Its own scope.** A fresh scope can't shadow a user name and is removed on every path.
-    /// * **`Span::default()`**, like the `__optN` payload binder `lower_carrier_option` synthesizes.
+    /// * **`Span::default()`**, like the `$opt{id}` payload binder `lower_carrier_option` synthesizes.
     ///   No lowered node derives its span from the operand's (both `lower_carrier_*` stamp everything
     ///   from the carrier's own `span`/`name_span`), and a default span can never equal the 1-based
     ///   `hover_probe` position, so the LSP probe keeps landing on the real operand.
     /// * **Side tables are untouched.** `WitnessTable`/`CarrierTable` are keyed by
     ///   source spans and are `HashMap`s, so the operand's entries — recorded by the caller's
     ///   `infer_value` from the ORIGINAL spans — are simply no longer overwritten with themselves.
-    fn scratch_operand(&mut self, t: Ty) -> Expr {
-        let n = self.next_opt_tmp;
-        self.next_opt_tmp += 1;
-        let name = crate::ast::CarrierTemp::Operand.name(n);
+    fn scratch_operand(&mut self, carrier: crate::ast::NodeId, t: Ty) -> Expr {
+        let name = crate::ast::CarrierTemp::Operand.name(carrier);
         self.push_scope();
         self.declare(&name, t);
         Expr {
@@ -699,7 +697,7 @@ impl Checker {
             Ty::Result(..) => {
                 self.record_carrier(key, CarrierMode::Try, span, "?.");
                 let mut c = carrier.clone();
-                let scratch = self.scratch_operand(t.clone());
+                let scratch = self.scratch_operand(carrier.id, t.clone());
                 if let ExprKind::OptChain { obj, .. } = &mut c.kind {
                     **obj = scratch;
                 }
@@ -718,13 +716,11 @@ impl Checker {
                 let mut failed = false;
                 if matches!(carrier.kind, ExprKind::OptChain { call: Some(_), .. }) {
                     let mut c = carrier.clone();
-                    let scratch = self.scratch_operand(t.clone());
+                    let scratch = self.scratch_operand(carrier.id, t.clone());
                     if let ExprKind::OptChain { obj, .. } = &mut c.kind {
                         **obj = scratch;
                     }
-                    let tmp = self.next_opt_tmp;
-                    self.next_opt_tmp += 1;
-                    crate::desugar::lower_carrier_option_void(&mut c, tmp);
+                    crate::desugar::lower_carrier_option_void(&mut c);
                     let mark = self.diag_mark();
                     // A call that types `Unknown` (its own error: a failed pick) is not void:
                     // the `pass` arm alone makes the match `Nil`. The value form keeps that one
@@ -742,13 +738,11 @@ impl Checker {
                 }
                 self.record_carrier(key, CarrierMode::Option, span, "?.");
                 let mut c = carrier.clone();
-                let scratch = self.scratch_operand(t.clone());
+                let scratch = self.scratch_operand(carrier.id, t.clone());
                 if let ExprKind::OptChain { obj, .. } = &mut c.kind {
                     **obj = scratch;
                 }
-                let tmp = self.next_opt_tmp;
-                self.next_opt_tmp += 1;
-                crate::desugar::lower_carrier_option(&mut c, tmp);
+                crate::desugar::lower_carrier_option(&mut c);
                 let r = self.infer(&c);
                 self.pop_scope();
                 // A failed call has no value, as under `.`: `Unknown`, not `Option[Unknown]`,
@@ -812,7 +806,7 @@ impl Checker {
     /// are dropped: the operand's own were already reported.
     fn walk_unknown_carrier(&mut self, carrier: &Expr) {
         let mut c = carrier.clone();
-        let scratch = self.scratch_operand(Ty::Unknown);
+        let scratch = self.scratch_operand(carrier.id, Ty::Unknown);
         match &mut c.kind {
             ExprKind::OptChain { obj, .. } => **obj = scratch,
             ExprKind::NullCoalesce { lhs, .. } => **lhs = scratch,
@@ -845,9 +839,7 @@ impl Checker {
             | ExprKind::Recover(..)
             | ExprKind::ElseGuard { .. } => {}
         }
-        let tmp = self.next_opt_tmp;
-        self.next_opt_tmp += 1;
-        crate::desugar::lower_carrier_option(&mut c, tmp);
+        crate::desugar::lower_carrier_option(&mut c);
         let mark = self.diag_mark();
         self.infer(&c);
         self.diag_rollback(mark);
@@ -869,13 +861,11 @@ impl Checker {
             Ty::Option(..) => {
                 self.record_carrier(key, CarrierMode::Option, op_span, "??");
                 let mut c = carrier.clone();
-                let scratch = self.scratch_operand(t.clone());
+                let scratch = self.scratch_operand(carrier.id, t.clone());
                 if let ExprKind::NullCoalesce { lhs, .. } = &mut c.kind {
                     **lhs = scratch;
                 }
-                let tmp = self.next_opt_tmp;
-                self.next_opt_tmp += 1;
-                crate::desugar::lower_carrier_option(&mut c, tmp);
+                crate::desugar::lower_carrier_option(&mut c);
                 self.coalesce_join = true;
                 let r = self.infer(&c);
                 self.pop_scope();
@@ -884,13 +874,11 @@ impl Checker {
             Ty::Result(..) => {
                 self.record_carrier(key, CarrierMode::ResultCoalesce, op_span, "??");
                 let mut c = carrier.clone();
-                let scratch = self.scratch_operand(t.clone());
+                let scratch = self.scratch_operand(carrier.id, t.clone());
                 if let ExprKind::NullCoalesce { lhs, .. } = &mut c.kind {
                     **lhs = scratch;
                 }
-                let tmp = self.next_opt_tmp;
-                self.next_opt_tmp += 1;
-                crate::desugar::lower_carrier_result_coalesce(&mut c, tmp);
+                crate::desugar::lower_carrier_result_coalesce(&mut c);
                 self.coalesce_join = true;
                 let r = self.infer(&c);
                 self.pop_scope();

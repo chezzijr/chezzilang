@@ -1540,3 +1540,12 @@ fn an_unused_nested_fn_is_named_a_function() {
         "unused local: {all}"
     );
 }
+
+/// TICKET-300 -- a compiler temp (`$opt{id}`, `$optrecv{id}`) is never an unused-binding warning: the
+/// scan skips every private name. Red if the private-name test leaves `Scan::bind`.
+#[test]
+fn compiler_temps_of_an_optional_chain_are_never_warned() {
+    entry_no_warn(
+        "struct P:\n    y: int\n    fn put(self, n: int):\n        print(n)\n    fn get(self) -> int:\n        return self.y\nfn f() -> P?:\n    return ?P(y=1)\nfn main():\n    x: P? = ?P(y=2)\n    print(x?.y ?? 0)\n    print(f()?.y ?? 0)\n    x?.put(5)\n    f()?.put(6)\n    a := x?.get()\n    print(a ?? 0)\nmain()\n",
+    );
+}

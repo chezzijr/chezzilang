@@ -604,7 +604,7 @@ fn free_test_fn_is_tagged_and_recorded() {
 
 #[test]
 fn suite_is_discovered_with_thunk_and_methods() {
-    // A struct with a `test fn` method is a suite with a `__new_` thunk + recorded test methods.
+    // A struct with a `test fn` method is a suite with a `$new_` thunk + recorded test methods.
     let src = "struct S:\n    n: int = 7\n    test fn a(self):\n        assert self.n == 7\n    fn before_each(self):\n        return\n";
     let module = parser::parse(lexer::tokenize(src).unwrap()).unwrap();
     let program = crate::compiler::compile_module_standalone(&module).unwrap();

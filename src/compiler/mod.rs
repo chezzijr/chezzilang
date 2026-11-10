@@ -341,11 +341,6 @@ struct Compiler {
     /// [`Self::compile_expr`].
     wraps: crate::checker::WrapTable,
     /// TICKET-054 review fix — which call arguments must widen int→float AT THE CALL SITE (a
-    /// W7-43 — counter for the fresh `__optN` temp names the Option lowering mints, mirroring the
-    /// checker's own. Frame-local and `__`-prefixed (unwritable by user code), so uniqueness within
-    /// one compilation is all that is ever needed — and this makes it true by construction rather
-    /// than by argument.
-    next_opt_tmp: usize,
     /// M24 — the witness slot tags (`crate::checker::witness_tag`) the NEXT
     /// [`Self::compile_fn_body`] declares as trailing `$w:<tag>` params, in declaration order. DECLARATION only: a nested body's REACH is read off the
     /// frame it is emitting into ([`FnComp::witness_ref`]), never from here, so this cannot drift
@@ -604,7 +599,6 @@ impl Compiler {
             fall_off: crate::checker::FallOffTable::new(),
             ret_coerce: crate::checker::RetCoerceTable::new(),
             wraps: crate::checker::WrapTable::new(),
-            next_opt_tmp: 0,
             witness_locals: Vec::new(),
             pending_witnesses: Vec::new(),
             imported_fns: HashMap::new(),
@@ -1149,7 +1143,7 @@ impl Compiler {
         fields: &[crate::ast::Field],
         span: Span,
     ) -> Result<ProtoId, CompileError> {
-        let mut fc = FnComp::new(format!("__new_{name}"), 0, false);
+        let mut fc = FnComp::new(crate::ast::private_name(&format!("new_{name}")), 0, false);
         for f in fields {
             match &f.default {
                 Some(d) => {

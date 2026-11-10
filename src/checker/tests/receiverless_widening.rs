@@ -1623,7 +1623,7 @@ fn sorted_debug<K: std::fmt::Debug, V: std::fmt::Debug>(m: &HashMap<K, V>) -> Ve
 /// TICKET-157 -- the nested-fn return memo (`Checker::ret_memo`) must be INVISIBLE: the same program
 /// through the same entry point with `memo_enabled` off renders identical diagnostics AND identical
 /// resolved side tables. The tables are what `DiagMark` deliberately does not snapshot (`carriers`,
-/// `call_plans`, `witnesses`, `next_opt_tmp`), so only this comparison sees a memo that drops a
+/// `call_plans`, `witnesses`), so only this comparison sees a memo that drops a
 /// write one of them needed. A memo entry served in the wrong context (a stale finalize-pass type, a
 /// pin the skipped walk would have written) makes one of the eleven programs render differently.
 #[test]
