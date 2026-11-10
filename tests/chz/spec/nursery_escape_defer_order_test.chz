@@ -173,3 +173,43 @@ test fn body_defer_fault_above_an_implicit_nursery_is_reported():
         !e: assert e.message().contains("body cleanup failed")
         ?_: assert false
     assert log.get() == "CO"
+
+
+fn fault_order(log: Shared[str]):
+    ready := Channel[int](1)
+    hold := Channel[int]()
+    defer:
+        log.update(fn(s: str) -> str: s + "O")
+    parallel:
+        defer:
+            log.update(fn(s: str) -> str: s + "B")
+        spawn child(log, ready, hold)
+        _ := ready.recv()
+        panic("boom")
+
+
+# TICKET-299 (wave 24 F2): a fault leaves a `parallel:` level as an escape does, wherever the
+# `recover:` sits: the level's defers, then its cancelled children's, then the enclosing ones.
+test fn a_fault_caught_by_the_caller_runs_body_then_child_then_owner_defers():
+    log := Shared("")
+    r := recover:
+        fault_order(log)
+    assert "{r}" == "!boom"
+    assert log.get() == "BCO"
+
+
+test fn a_fault_caught_in_the_same_frame_runs_body_then_child_then_recover_defers():
+    log := Shared("")
+    ready := Channel[int](1)
+    hold := Channel[int]()
+    r := recover:
+        defer:
+            log.update(fn(s: str) -> str: s + "K")
+        parallel:
+            defer:
+                log.update(fn(s: str) -> str: s + "B")
+            spawn child(log, ready, hold)
+            _ := ready.recv()
+            panic("boom")
+    assert "{r}" == "!boom"
+    assert log.get() == "BCK"
