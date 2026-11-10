@@ -35,6 +35,25 @@ fn files_with_ext(dir: &Path, ext: &str, out: &mut Vec<PathBuf>) {
     }
 }
 
+/// The source line of each `/` or `/=` operator in `src`, from the lexer: a `/` in string text (a
+/// path) or a comment is no operator, and one inside a string hole (`"{a / b}"`) is.
+fn division_lines(src: &str) -> BTreeSet<u32> {
+    let toks = chezzi::lexer::tokenize(src).unwrap_or_else(|e| panic!("lex: {e:?}"));
+    let mut lines = BTreeSet::new();
+    chezzi::lexer::each_token(&toks, &mut |tok, _| {
+        if let chezzi::lexer::Token::Slash | chezzi::lexer::Token::SlashEq = tok.kind {
+            lines.insert(tok.span.line);
+        }
+    });
+    lines
+}
+
+#[test]
+fn a_division_is_an_operator_token_not_a_slash_char() {
+    let src = "a := x / y\nb := \"q/\" + r\"*/\"\nc := \"{f(\"/a\")}\"\n# a/b\nd := \"{t / 2}\"\ne /= 2\n";
+    assert_eq!(division_lines(src), BTreeSet::from([1, 5, 6]));
+}
+
 #[test]
 fn no_chz_test_divides_two_wall_clock_samples() {
     let mut files = Vec::new();
@@ -50,11 +69,10 @@ fn no_chz_test_divides_two_wall_clock_samples() {
         if !text.contains("time.monotonic()") {
             continue;
         }
-        for (i, line) in text.lines().enumerate() {
-            let code = line.trim_start();
-            if !code.starts_with('#') && code.contains('/') {
-                bad.push(format!("{}:{}: {}", path.display(), i + 1, code.trim_end()));
-            }
+        let lines: Vec<&str> = text.lines().collect();
+        for line in division_lines(&text) {
+            let code = lines.get(line as usize - 1).map_or("", |l| l.trim());
+            bad.push(format!("{}:{line}: {code}", path.display()));
         }
     }
     assert!(
