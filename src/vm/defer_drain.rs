@@ -63,12 +63,6 @@ pub(super) enum DrainCont {
     Level { top: usize, then: LevelThen },
     /// `Op::LeaveDeferScope` / `Op::DrainHandlerDefers`: the fault is the op's.
     Op,
-    /// A recover-scoped `?` that escapes a `parallel:` body ran the body's `defer`s; `parked` is
-    /// the body fault an earlier run of the `?` parked with.
-    TryBody {
-        span: Span,
-        parked: Option<RuntimeError>,
-    },
     /// A recover-scoped `?` ran its recover block's `defer`s; `body` is the body's fault and `ip`
     /// the recover's exit.
     TryRecover {
@@ -90,10 +84,7 @@ impl DrainCont {
         match self {
             DrainCont::Unwind(_) | DrainCont::Catch(_) => true,
             DrainCont::Level { then, .. } => then.unwinds(),
-            DrainCont::Return { .. }
-            | DrainCont::Op
-            | DrainCont::TryBody { .. }
-            | DrainCont::TryRecover { .. } => false,
+            DrainCont::Return { .. } | DrainCont::Op | DrainCont::TryRecover { .. } => false,
         }
     }
 }
@@ -163,7 +154,6 @@ impl Vm {
                 Some(e) => Err(e),
                 None => Ok(()),
             },
-            DrainCont::TryBody { span, parked } => self.try_escape(span, err.or(parked)),
             DrainCont::TryRecover { ip, body } => self.try_recover(ip, body, err),
             DrainCont::Unwind(u) => self.unwind_drained(*u, err),
             DrainCont::Catch(c) => self.catch_drained(*c, err),

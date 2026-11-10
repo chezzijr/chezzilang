@@ -30,6 +30,12 @@ pub(super) enum LevelThen {
     /// A `recover:` that caught a fault leaves a level the fault left inside its recover block
     /// ([`Vm::reclaim_caught`]).
     Catch(Box<Caught>),
+    /// A recover-scoped `?` ([`Vm::try_levels`]) leaves the levels opened inside its recover block;
+    /// `err`: the fault in hand, `span`: the `?`.
+    Try {
+        span: Span,
+        err: Option<RuntimeError>,
+    },
 }
 
 impl LevelThen {
@@ -37,7 +43,7 @@ impl LevelThen {
     /// ([`Vm::on_step_fault`]).
     pub(super) fn unwinds(&self) -> bool {
         match self {
-            LevelThen::Return { .. } => false,
+            LevelThen::Return { .. } | LevelThen::Try { .. } => false,
             LevelThen::Unwind(_) | LevelThen::Catch(_) => true,
         }
     }
@@ -496,6 +502,17 @@ impl Vm {
             }
             LevelThen::Unwind(u) => self.unwind_level_drained(*u, err),
             LevelThen::Catch(c) => self.catch_level_drained(top, *c, err),
+            LevelThen::Try { span, err: prior } => {
+                // A hard halt in a body defer cuts the cleanup: it unwinds, which leaves the rest.
+                let mut err = match err.or(prior) {
+                    Some(e) => Some(self.cleanup_halt(e)?),
+                    None => None,
+                };
+                if self.escape_level_parks(top, &mut err) {
+                    return Ok(());
+                }
+                self.try_levels(span, err)
+            }
         }
     }
 

@@ -327,15 +327,15 @@ impl Vm {
                 // A `?` directly inside a `recover:` block (a handler installed in THIS frame)
                 // short-circuits to that boundary (try-block style): the `Err`/`None` value becomes
                 // the recover's result. Function-scoped `?` (no same-frame handler) falls through.
-                // The escaped `parallel:` body's defers (ORDERING in `try_escape`), drained before
-                // the handler pops so the TICKET-287 park can still rewind this `?`. A re-run finds
-                // them consumed and takes back the fault the first run parked with.
+                // Every `parallel:` level opened inside the recover block is left first
+                // (`try_levels`), before the handler pops so the TICKET-287 park can still rewind
+                // this `?`. A re-run finds the drained levels gone and takes back the fault the
+                // first run parked with.
                 if let Some(h) = self.same_frame_handler()
                     && self.nurseries.len() > h.nursery_len
                 {
-                    let floor = self.nursery_defer_floors[h.nursery_len].defers;
                     let parked = self.take_escape_park();
-                    return self.drain_then(floor, DrainCont::TryBody { span, parked });
+                    return self.try_levels(span, parked);
                 }
                 return self.try_escape(span, None);
             }
@@ -358,8 +358,24 @@ impl Vm {
             .filter(|h| h.frame_len == frame_len)
     }
 
-    /// The `?` of `do_try` after the escaped `parallel:` body's defers ran (`body_defers`: their
-    /// fault). The propagated value is on top of the stack.
+    /// A recover-scoped `?` leaves the `parallel:` levels opened inside its recover block,
+    /// innermost first ([`Vm::leave_level`]), then [`Vm::try_escape`] (TICKET-299). `err`: the
+    /// fault in hand (a body `defer`'s, or the one an earlier run of the `?` parked with).
+    pub(super) fn try_levels(
+        &mut self,
+        span: Span,
+        err: Option<RuntimeError>,
+    ) -> Result<(), RuntimeError> {
+        match self.same_frame_handler() {
+            Some(h) if self.nurseries.len() > h.nursery_len => {
+                self.leave_level(LevelThen::Try { span, err })
+            }
+            Some(_) | None => self.try_escape(span, err),
+        }
+    }
+
+    /// The `?` of `do_try` once no level of its recover block is open (`body_defers`: the fault the
+    /// levels' body `defer`s and children ended with). The propagated value is on top of the stack.
     pub(super) fn try_escape(
         &mut self,
         span: Span,
@@ -367,19 +383,6 @@ impl Vm {
     ) -> Result<(), RuntimeError> {
         let v = *self.stack.last().expect("the propagated value");
         let frame_len = self.frames.len();
-        let same_frame = self.same_frame_handler();
-        // TICKET-287 — a fiber-owned nursery that is not done parks this fiber, as
-        // `park_escaped_abort` does for `return`. A body defer fault parks with it.
-        if let Some(h) = same_frame
-            && let Some(origin) = self.park_abort_origin(h.nursery_len)
-        {
-            if let Some(e) = body_defers {
-                self.store_escape_park(e);
-            }
-            self.rewind_op();
-            self.join_suspend = Some(origin);
-            return Ok(());
-        }
         if let Some(h) = self.handlers.pop_if(|h| h.frame_len == frame_len) {
             self.stack.truncate(h.stack_len);
             self.push(v); // the recover's value slot, rooted across the drains below
@@ -391,34 +394,18 @@ impl Vm {
                 .unwrap()
                 .defer_markers
                 .truncate(h.markers_len);
-            // TASK B — a recover-scoped `?` jumps past the `JoinNursery` of any `parallel:`
-            // opened inside the recover block: cancel its tasks HERE
-            // (before the handler binds its result and execution continues), so a recover-caught
-            // `?` reports IDENTICALLY-AND-AS-EARLY as an uncaught one: during the `?` unwind,
-            // before the recover's value is produced. Without this the nursery lingered until the
-            // whole frame returned (the report then trailed `print("recovered")`).
-            //
-            // ORDERING: the escaped `parallel:` BODY's own defers must run BEFORE the nursery
-            // reclaim, and the recover block's defers AFTER it — the body's defers drain as the
-            // `?` unwinds out of the body, and only then does the nursery report; the recover
-            // block's defers run later, at the recover boundary. So: drain the
-            // body defers down to the outermost escaped nursery's floor, report, then drain the
-            // remaining (recover-block) defers down to the handler's install-time floor. A body
-            // defer fault is held and superseded by any later recover-block defer fault.
-            let mut body_defer_err = body_defers;
-            if let Some(e) = body_defer_err.take() {
-                body_defer_err = Some(self.cleanup_halt(e)?);
-            }
-            // TICKET-147 — the propagated `Err` is the recover's value; a body defer fault
-            // supersedes it, and an aborted nursery's child fault fills that gap.
-            let child = self.drain_escaped_nursery(h.nursery_len);
-            body_defer_err = body_defer_err.or(child);
-            // Drain the recover block's own defers before binding the result (`try_recover`).
+            // TASK B / TICKET-299 — the `?` jumped past the `JoinNursery` of every `parallel:`
+            // opened inside the recover block; `try_levels` already left each one (its body
+            // `defer`s, then its cancelled children), so a recover-caught `?` reports as early as
+            // an uncaught one: before the recover's value is produced. The recover block's own
+            // defers run now, at the recover boundary, after the levels' (`body_defers` is held and
+            // superseded by a later recover-block defer fault; TICKET-147: a body defer fault
+            // supersedes the propagated `Err`, a child fault fills that gap).
             return self.drain_then(
                 h.defer_len,
                 DrainCont::TryRecover {
                     ip: h.ip,
-                    body: body_defer_err,
+                    body: body_defers,
                 },
             );
         }
