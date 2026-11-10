@@ -200,7 +200,7 @@ impl Vm {
         if let Some(op) = self.pending.take() {
             if op.p.is_queued()
                 && self.deadline_halt(span).is_ok()
-                && !(self.native_reentry == 0 && self.halt_requested().is_some())
+                && !(!self.block_ctx().reentered() && self.halt_requested().is_some())
             {
                 // A stray wake: still queued — re-park on the same offer.
                 self.pending = Some(op);

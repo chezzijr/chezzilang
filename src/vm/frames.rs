@@ -394,7 +394,7 @@ impl Vm {
                     // A task that holds a box guard (its closure is a frame) is preempted like any
                     // other: a fiber that waits for its guard parks (Go preempts a goroutine that
                     // holds a `sync.Mutex`).
-                    if self.mn.is_some() && self.native_reentry == 0 {
+                    if self.block_ctx().parks() {
                         self.yield_now = true;
                         return Ok(());
                     } else {

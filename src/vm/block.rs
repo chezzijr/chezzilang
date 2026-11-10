@@ -49,6 +49,25 @@ impl BlockCtx {
     pub(super) fn judged(self) -> bool {
         matches!(self, BlockCtx::OwnThread { judged: true, .. })
     }
+
+    /// May this fiber snapshot-park here: an M:N worker shell with no host frame under it?
+    /// (TICKET-298, SD4: THE reader; do not re-derive it from `mn` and `native_reentry`.)
+    pub(super) fn parks(self) -> bool {
+        match self {
+            BlockCtx::Park => true,
+            BlockCtx::Demote | BlockCtx::Builder { .. } | BlockCtx::OwnThread { .. } => false,
+        }
+    }
+
+    /// Is a host (Rust) frame under the running code: a native callback, a synchronous drain, a
+    /// generator resume or a box closure? (TICKET-298, SD4: THE reader of `native_reentry > 0`.)
+    pub(super) fn reentered(self) -> bool {
+        match self {
+            BlockCtx::Park => false,
+            BlockCtx::Demote => true,
+            BlockCtx::Builder { reentered } | BlockCtx::OwnThread { reentered, .. } => reentered,
+        }
+    }
 }
 
 /// What a blocking op waits for.
@@ -1198,10 +1217,10 @@ impl Vm {
     /// TICKET-194 — THE cancellation check an op makes before it waits. An op calls it only after
     /// its own ready check failed: a send with room, a recv with a value ready, a ready `wait:` arm
     /// or a free update guard completes and is never cut here (owner decision:
-    /// only a wait or a loop back-edge is a cancellation point). `native_reentry == 0` gates it, as it gates the park: inside a
-    /// callback the host stack cannot unwind.
+    /// only a wait or a loop back-edge is a cancellation point). `!BlockCtx::reentered` gates it, as
+    /// it gates the park: inside a callback the host stack cannot unwind.
     pub(super) fn wait_halt(&mut self, span: Span) -> Result<(), RuntimeError> {
-        if self.native_reentry == 0
+        if !self.block_ctx().reentered()
             && let Some(e) = self.take_halt(span)
         {
             return Err(e);
@@ -1287,6 +1306,23 @@ mod tests {
         ("Nursery", "PD HI HIHI", false),
         ("Extern", "II II IIII", true),
     ];
+
+    /// SD4 (TICKET-298): `parks` is true for `Park` alone, and `reentered` is the host-frame bit
+    /// each context was derived from (`Park` has none, `Demote` always has one).
+    #[test]
+    fn parks_and_reentered_read_every_context() {
+        for c in contexts() {
+            let (parks, reentered) = match c {
+                BlockCtx::Park => (true, false),
+                BlockCtx::Demote => (false, true),
+                BlockCtx::Builder { reentered } | BlockCtx::OwnThread { reentered, .. } => {
+                    (false, reentered)
+                }
+            };
+            assert_eq!(c.parks(), parks, "parks of {c:?}");
+            assert_eq!(c.reentered(), reentered, "reentered of {c:?}");
+        }
+    }
 
     #[test]
     fn every_cell_matches_the_table() {

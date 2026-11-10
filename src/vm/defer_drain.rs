@@ -226,7 +226,7 @@ impl Vm {
     /// caller (`native_reentry > 0`): its Rust frame holds the loop, so a drain runs to completion
     /// on the Rust stack.
     pub(super) fn drains_on_frames(&self) -> bool {
-        self.native_reentry == 0
+        !self.block_ctx().reentered()
     }
 
     /// The innermost drain's trampoline frame, when the dispatch loop entered at `base_level` owns
