@@ -1233,12 +1233,8 @@ main()
     );
 }
 
-#[test]
-fn parallel_body_fault_defers_run_before_join_in_callee_frame() {
-    // TICKET-299 (wave 24 F2). A faulting `parallel:` body drains its `defer`s BEFORE the children
-    // are cancelled and joined, in every frame shape. Same-frame `recover:` already did; a caller's
-    // `recover:` drained the nursery first, so the deferred `recv` deadlocked.
-    let src = r#"
+/// TICKET-299 (wave 24 F2): the callee-frame `recover:` shape of the owner's repro.
+const CALLEE_RECOVER_REPRO: &str = r#"
 fn feeder(c: Channel[int]):
     for i in 0..3:
         c.send(i * 100)
@@ -1254,5 +1250,239 @@ fn main():
         body(Channel[int](0))
     print("callee -> {r2}")
 main()"#;
-    assert_golden_out(src, "got 0\ngot 100\ngot 200\ncallee -> !body boom\n");
+const CALLEE_RECOVER_WANT: &str = "got 0\ngot 100\ngot 200\ncallee -> !body boom\n";
+
+#[test]
+fn parallel_body_fault_defers_run_before_join_in_callee_frame() {
+    // TICKET-299 (wave 24 F2). A faulting `parallel:` body drains its `defer`s BEFORE the children
+    // are cancelled and joined, in every frame shape. Same-frame `recover:` already did; a caller's
+    // `recover:` drained the nursery first, so the deferred `recv` deadlocked.
+    assert_golden_out(CALLEE_RECOVER_REPRO, CALLEE_RECOVER_WANT);
+}
+
+/// TICKET-299 (wave 24 F2, owner option B): the exit x `recover:`-placement x worker-count grid of
+/// a two-level `parallel:`. Inner level: body defer `B`, child `C`; outer level: body defer `b`,
+/// child `c`; recover-block defer `K`. A child's defer waits on a gate its level's body defer sends
+/// on, so the order is causal: a level that cancels and joins before its body defers deadlocks or
+/// hangs (5 s watchdog per cell), and no cell races. Every cell must print `B C b c`, then `K`,
+/// except `Return` x `SameFrame|Nested`: `return` cannot leave a `recover:` block, so those two
+/// programs must be type rejects.
+#[derive(Clone, Copy, Debug)]
+enum Exit {
+    Panic,
+    Index,
+    ChildFault,
+    Try,
+    Return,
+    Break,
+    Continue,
+    Cancel,
+}
+const EXITS: [Exit; 8] = [
+    Exit::Panic,
+    Exit::Index,
+    Exit::ChildFault,
+    Exit::Try,
+    Exit::Return,
+    Exit::Break,
+    Exit::Continue,
+    Exit::Cancel,
+];
+/// `HashHook` and `JsonDefault` make the `Caller` program's call from inside a native that calls
+/// back with `native_reentry == 1`: a struct `hash` hook run by a `Map` insert (`vm/hash.rs`
+/// `declared_hash`) and a field default run by `json.decode` (`vm/json_decode.rs`
+/// `run_decode_default`). There every drain runs on the Rust stack (`drains_on_frames() == false`)
+/// and every abort waits inline (parks are off under re-entry).
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Place {
+    NoRecover,
+    SameFrame,
+    Caller,
+    Nested,
+    HashHook,
+    JsonDefault,
+}
+const PLACES: [Place; 6] = [
+    Place::NoRecover,
+    Place::SameFrame,
+    Place::Caller,
+    Place::Nested,
+    Place::HashHook,
+    Place::JsonDefault,
+];
+const LEAVE_HEAD: &str = "import std.time\nimport std.json as json\nup: Channel[int] = Channel[int](2)\ng1: Channel[int] = Channel[int](1)\ng2: Channel[int] = Channel[int](1)\nready: Channel[int] = Channel[int](1)\nfn kid(tag: str, gate: Channel[int]):\n    defer:\n        _ := gate.recv()\n        print(tag)\n    up.send(1)\n    while true:\n        time.sleep_ms(1)\nfn bad() -> int!str:\n    return !\"q\"\nfn boom():\n    panic(\"child boom\")\nfn faulty():\n    _ := ready.recv()\n    panic(\"sib\")\n";
+const LEAVE_SPIN: &str = "while true:\n    time.sleep_ms(1)";
+/// TICKET-299: a same-frame `recover:` catches a child fault (the owner's cut is
+/// `Cut::Delivered`) while a level is open. The level leaves first (`B C`), then the recover block's
+/// defer (`K`); after the catch the cut is cleared, so a later `recover:` catches and a later level joins.
+const DELIVERED_CUT: &str = "import std.time\nup: Channel[int] = Channel[int](2)\ng1: Channel[int] = Channel[int](1)\nfn kid(tag: str, gate: Channel[int]):\n    defer:\n        _ := gate.recv()\n        print(tag)\n    up.send(1)\n    while true:\n        time.sleep_ms(1)\nfn boom():\n    panic(\"child boom\")\nfn noop():\n    pass\nfn main():\n    r := recover:\n        defer:\n            print(\"K\")\n        parallel:\n            spawn kid(\"C\", g1)\n            _ := up.recv()\n            defer:\n                print(\"B\")\n                g1.send(1)\n            spawn boom()\n            while true:\n                time.sleep_ms(1)\n    print(\"first -> {r}\")\n    r2 := recover:\n        panic(\"second\")\n    print(\"second -> {r2}\")\n    parallel:\n        spawn noop()\n    print(\"joined\")\nmain()\n";
+const DELIVERED_CUT_WANT: &str = "B\nC\nK\nfirst -> !child boom\nsecond -> !second\njoined\n";
+fn leave_indent(text: &str, n: usize) -> String {
+    let pad = " ".repeat(n);
+    text.lines().map(|l| format!("{pad}{l}\n")).collect()
+}
+/// The two levels, with `exit` as the inner level's last statement.
+fn leave_levels(exit: &str) -> String {
+    let head = "parallel:\n    spawn kid(\"c\", g2)\n    _ := up.recv()\n    defer:\n        print(\"b\")\n        g2.send(1)\n    parallel:\n        spawn kid(\"C\", g1)\n        _ := up.recv()\n        defer:\n            print(\"B\")\n            g1.send(1)\n";
+    format!("{head}{}", leave_indent(exit, 8))
+}
+fn leave_program(exit: Exit, place: Place) -> String {
+    let levels = match exit {
+        Exit::Panic => leave_levels("panic(\"p\")"),
+        Exit::Index => leave_levels("xs := [1]\nprint(xs[5])"),
+        Exit::ChildFault => leave_levels(&format!("spawn boom()\n{LEAVE_SPIN}")),
+        Exit::Try => leave_levels("x := bad()?\nprint(x)"),
+        Exit::Return => leave_levels("return"),
+        Exit::Break => format!(
+            "for _ in 0..1:\n{}",
+            leave_indent(&leave_levels("break"), 4)
+        ),
+        Exit::Continue => format!(
+            "for _ in 0..1:\n{}",
+            leave_indent(&leave_levels("continue"), 4)
+        ),
+        Exit::Cancel => leave_levels(&format!("ready.send(1)\n{LEAVE_SPIN}")),
+    };
+    // A function-scoped `?` needs a result type; a recover-scoped one (same frame, nested) does not.
+    let (ret, tail, call) = match exit {
+        Exit::Try => (" -> int!str", "return ?0\n", "_ := body()"),
+        Exit::Panic
+        | Exit::Index
+        | Exit::ChildFault
+        | Exit::Return
+        | Exit::Break
+        | Exit::Continue
+        | Exit::Cancel => ("", "", "body()"),
+    };
+    let body = format!(
+        "fn body(){ret}:\n{}{}",
+        leave_indent(&levels, 4),
+        leave_indent(tail, 4)
+    );
+    let k = leave_indent("r := recover:\n    defer:\n        print(\"K\")\n", 4);
+    let run = match place {
+        Place::NoRecover => format!("{body}fn run():\n    {call}\n"),
+        Place::Caller => format!("{body}fn run():\n{k}        {call}\n"),
+        Place::SameFrame => format!("fn run():\n{k}{}", leave_indent(&levels, 8)),
+        Place::Nested => format!(
+            "fn run():\n{k}        if true:\n{}",
+            leave_indent(&levels, 12)
+        ),
+        Place::HashHook => format!(
+            "{body}struct Key:\n    n: int\n    fn hash(self) -> int:\n        {call}\n        return self.n\n    fn eq(self, other: Key) -> bool:\n        return self.n == other.n\nfn run():\n{k}        m: Map[Key, int] = {{}}\n        m[Key(1)] = 1\n"
+        ),
+        Place::JsonDefault => format!(
+            "{body}fn mk() -> int:\n    {call}\n    return 0\nstruct Cfg:\n    name: str\n    v: int = mk()\nfn run():\n{k}        _ := json.decode[Cfg](r'{{\"name\":\"x\"}}')\n"
+        ),
+    };
+    // A cancel cell runs the placement inside `victim`, which a faulting sibling cancels.
+    let main = match exit {
+        Exit::Cancel => {
+            "fn victim():\n    run()\nfn main():\n    r0 := recover:\n        parallel:\n            spawn victim()\n            spawn faulty()\n    print(\"end\")\n"
+        }
+        Exit::Panic
+        | Exit::Index
+        | Exit::ChildFault
+        | Exit::Try
+        | Exit::Return
+        | Exit::Break
+        | Exit::Continue => "fn main():\n    run()\n    print(\"end\")\n",
+    };
+    format!("{LEAVE_HEAD}{run}{main}main()\n")
+}
+type LeaveOut = (String, String, Result<(), crate::vm::RunError>, Option<i32>);
+/// Runs `src` from a file with a 5 s watchdog: its output, or `None` when it hung.
+fn leave_run(src: &str) -> Option<LeaveOut> {
+    let t = crate::test_support::TmpDir::new();
+    let entry = t.write("main.chz", src);
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(run_file_with(&entry, crate::native::HostConfig::default()));
+    });
+    match rx.recv_timeout(std::time::Duration::from_secs(5)) {
+        Ok(r) => Some(r),
+        Err(_) => {
+            std::mem::forget(t); // the hung run still reads its file
+            None
+        }
+    }
+}
+/// The checker's messages for `src` (this harness runs the compiler without the checker).
+fn leave_check_errors(src: &str) -> String {
+    let t = crate::test_support::TmpDir::new();
+    let entry = t.write("main.chz", src);
+    let graph = crate::resolver::build_graph(&entry).expect("resolve");
+    match crate::checker::check_graph(&graph) {
+        Ok(_) => String::new(),
+        Err(errs) => errs
+            .iter()
+            .map(|e| e.message.clone())
+            .collect::<Vec<_>>()
+            .join("; "),
+    }
+}
+#[test]
+fn parallel_level_leave_order_at_every_exit_and_recover_site() {
+    if crate::vm::rerun_in_child(
+        module_path!(),
+        "parallel_level_leave_order_at_every_exit_and_recover_site",
+    ) {
+        return;
+    }
+    struct Workers(#[allow(dead_code)] std::sync::MutexGuard<'static, ()>);
+    impl Drop for Workers {
+        fn drop(&mut self) {
+            crate::vm::set_worker_count(crate::vm::test_baseline_worker_count());
+        }
+    }
+    let _workers = Workers(
+        crate::vm::TEST_WORKER_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()),
+    );
+    let mut red = Vec::new();
+    for t in [1usize, 2] {
+        crate::vm::set_worker_count(t);
+        for exit in EXITS {
+            for place in PLACES {
+                // `return` cannot leave a `recover:` block: the checker rejects these two programs.
+                if let (Exit::Return, Place::SameFrame | Place::Nested) = (exit, place) {
+                    let why = leave_check_errors(&leave_program(exit, place));
+                    if !why.contains("is not allowed inside a recover block") {
+                        red.push(format!("T={t} {exit:?}/{place:?}: not rejected: {why:?}"));
+                    }
+                    continue;
+                }
+                let Some((out, ..)) = leave_run(&leave_program(exit, place)) else {
+                    red.push(format!("T={t} {exit:?}/{place:?}: hung"));
+                    continue;
+                };
+                let got: String = out
+                    .lines()
+                    .filter(|l| *l != "end")
+                    .map(|l| format!("{l}\n"))
+                    .collect();
+                let want = if place == Place::NoRecover {
+                    "B\nC\nb\nc\n"
+                } else {
+                    "B\nC\nb\nc\nK\n"
+                };
+                if got != want {
+                    red.push(format!("T={t} {exit:?}/{place:?}: {got:?}"));
+                }
+            }
+        }
+        for (name, src, want) in [
+            ("repro", CALLEE_RECOVER_REPRO, CALLEE_RECOVER_WANT),
+            ("delivered_cut", DELIVERED_CUT, DELIVERED_CUT_WANT),
+        ] {
+            match leave_run(src) {
+                Some((out, ..)) if out == want => {}
+                Some((out, ..)) => red.push(format!("T={t} {name}: {out:?}")),
+                None => red.push(format!("T={t} {name}: hung")),
+            }
+        }
+    }
+    eprintln!("red count: {}", red.len());
+    assert!(red.is_empty(), "red cells: {red:#?}");
 }
