@@ -133,6 +133,7 @@ impl Parser {
             | Token::True
             | Token::False
             | Token::NoneKw
+            | Token::SelfKw
             | Token::Where
             | Token::Plus
             | Token::Minus
@@ -278,6 +279,7 @@ impl Parser {
             | t @ Token::True
             | t @ Token::False
             | t @ Token::NoneKw
+            | t @ Token::SelfKw
             | t @ Token::Where
             | t @ Token::Plus
             | t @ Token::Minus
@@ -344,47 +346,13 @@ impl Parser {
         )))
     }
 
-    /// The error for an expression at `:=` that `try_parse_walrus_target` did not take: the one
-    /// keyword-name error for a literal keyword (`None`, `true`, `false`), else `otherwise`.
+    /// The error for an expression at `:=` that `try_parse_walrus_target` did not take; a keyword in
+    /// a name slot never reaches here.
     pub(super) fn bind_target_error(&self, target: Expr, otherwise: &str) -> ParseError {
-        let kw = match target.kind {
-            ExprKind::NoneLit => Some(Token::NoneKw),
-            ExprKind::Bool(true) => Some(Token::True),
-            ExprKind::Bool(false) => Some(Token::False),
-            ExprKind::Ident(_)
-            | ExprKind::Int(_)
-            | ExprKind::Float(_)
-            | ExprKind::Str(_)
-            | ExprKind::Interp(_)
-            | ExprKind::Bytes(_)
-            | ExprKind::RawStr(_)
-            | ExprKind::Pass
-            | ExprKind::List(..)
-            | ExprKind::Tuple(_)
-            | ExprKind::Map(_)
-            | ExprKind::Set(_)
-            | ExprKind::Comprehension { .. }
-            | ExprKind::Unary { .. }
-            | ExprKind::Binary { .. }
-            | ExprKind::Compare { .. }
-            | ExprKind::Range { .. }
-            | ExprKind::Call { .. }
-            | ExprKind::Field { .. }
-            | ExprKind::Index { .. }
-            | ExprKind::Try(_)
-            | ExprKind::OptChain { .. }
-            | ExprKind::NullCoalesce { .. }
-            | ExprKind::Closure { .. }
-            | ExprKind::Match { .. }
-            | ExprKind::IfElse { .. }
-            | ExprKind::Recover(..)
-            | ExprKind::ElseGuard { .. } => None,
-        };
-        let mut e = kw
-            .and_then(|t| self.keyword_name_error(&t))
-            .unwrap_or_else(|| self.err(otherwise.to_string()));
-        e.span = target.span;
-        e
+        ParseError {
+            message: otherwise.to_string(),
+            span: target.span,
+        }
     }
 
     /// Expect an integer literal (used for the `end` of a range pattern `start..end`).
@@ -443,6 +411,7 @@ impl Parser {
             | Token::True
             | Token::False
             | Token::NoneKw
+            | Token::SelfKw
             | Token::Where
             | Token::Plus
             | Token::Minus
@@ -567,6 +536,7 @@ impl Parser {
                 | Token::True
                 | Token::False
                 | Token::NoneKw
+                | Token::SelfKw
                 | Token::Where
                 | Token::Plus
                 | Token::Minus
@@ -659,6 +629,7 @@ impl Parser {
             | Token::True
             | Token::False
             | Token::NoneKw
+            | Token::SelfKw
             | Token::Where
             | Token::Plus
             | Token::Minus
@@ -853,6 +824,7 @@ impl Parser {
                 | k @ Token::True
                 | k @ Token::False
                 | k @ Token::NoneKw
+                | k @ Token::SelfKw
                 | k @ Token::Where
                 | k @ Token::Plus
                 | k @ Token::Minus
@@ -946,6 +918,7 @@ impl Parser {
                 | Token::True
                 | Token::False
                 | Token::NoneKw
+                | Token::SelfKw
                 | Token::Where
                 | Token::Plus
                 | Token::Minus
@@ -1081,6 +1054,7 @@ pub(super) fn describe(tok: &Token) -> String {
         | other @ True
         | other @ False
         | other @ NoneKw
+        | other @ SelfKw
         | other @ Where
         | other @ StarEq
         | other @ SlashEq

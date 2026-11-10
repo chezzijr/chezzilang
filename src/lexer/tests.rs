@@ -2015,6 +2015,7 @@ fn question_run_after_every_token_grid() {
             Token::True
                 | Token::False
                 | Token::NoneKw
+                | Token::SelfKw
                 | Token::RParen
                 | Token::RBracket
                 | Token::RBrace

@@ -84,6 +84,9 @@ impl Checker {
     /// TICKET-281 — the one answer to "which arm does the bare type name `n` take here". Both type
     /// resolvers read it: `resolve_type_at` adds diagnostics and hover, `resolve_ty_ro_d` adds none.
     pub(super) fn named_arm(&self, n: &str) -> NamedArm {
+        if let Some(t) = self.self_denotes(n) {
+            return NamedArm::SelfTy(t.clone());
+        }
         // Only keywords are reserved: a type parameter in scope, then a type this module declares
         // or imports, shadow a builtin of the same name.
         let user_first = self.declares_type_here(n);
@@ -98,11 +101,6 @@ impl Checker {
         }
         if param {
             return NamedArm::Param;
-        }
-        if n == "Self"
-            && let Some(t) = &self.current_self_ty
-        {
-            return NamedArm::SelfTy(t.clone());
         }
         if !user_first && let Some(b) = self.builtin_type_named(n) {
             if let Some(t) = b.plain_ty() {

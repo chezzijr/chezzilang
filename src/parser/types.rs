@@ -171,7 +171,11 @@ impl Parser {
             return self.parse_type_postfix(ty);
         }
         let name_span = self.cur_span();
-        let name = self.expect_ident()?;
+        let name = if self.eat(&Token::SelfKw) {
+            crate::lexer::SELF_KW.to_string()
+        } else {
+            self.expect_ident()?
+        };
         // A module-qualified type `module.Type` (mirrors how `module.func()` is reached): after the
         // first ident, a `.` introduces the type's name in the bound module. A longer path
         // (`pkg.deep.Point`) is the full path of an imported module (TICKET-175): the LAST segment is
@@ -245,7 +249,7 @@ impl Parser {
                 // `T!` defaults the error type to `Error` (resolved later by the checker).
                 if matches!(
                     self.peek(),
-                    Token::Ident(_) | Token::LParen | Token::Fn | Token::NoneKw
+                    Token::Ident(_) | Token::LParen | Token::Fn | Token::NoneKw | Token::SelfKw
                 ) {
                     let err = self.parse_type()?;
                     ty = Type::Generic(private_name("Result"), vec![ty, err], Span::default());

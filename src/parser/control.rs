@@ -332,6 +332,7 @@ impl Parser {
             | t @ Token::True
             | t @ Token::False
             | t @ Token::NoneKw
+            | t @ Token::SelfKw
             | t @ Token::Where
             | t @ Token::Plus
             | t @ Token::Minus

@@ -232,6 +232,7 @@ impl Parser {
             | Token::True
             | Token::False
             | Token::NoneKw
+            | Token::SelfKw
             | Token::Where
             | Token::Plus
             | Token::Star
@@ -496,6 +497,7 @@ impl Parser {
                 | Token::True
                 | Token::False
                 | Token::NoneKw
+                | Token::SelfKw
                 | Token::Where
                 | Token::Plus
                 | Token::Minus
@@ -853,6 +855,7 @@ impl Parser {
             Token::True => ExprKind::Bool(true),
             Token::False => ExprKind::Bool(false),
             Token::NoneKw => ExprKind::NoneLit,
+            Token::SelfKw => ExprKind::Ident(crate::lexer::SELF_KW.to_string()),
             Token::Ident(name) => ExprKind::Ident(name),
             Token::LParen => {
                 // `()` is an error; `(e)` is grouping; `(e,)` and `(e1, e2, …)` are tuples.
@@ -1193,6 +1196,7 @@ fn infix_op(tok: &Token) -> Option<(InfixOp, u8, u8)> {
         | Token::True
         | Token::False
         | Token::NoneKw
+        | Token::SelfKw
         | Token::Where
         | Token::Assign
         | Token::Walrus

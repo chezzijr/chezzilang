@@ -79,6 +79,8 @@ pub enum Token {
     False,
     /// `None`. Named `NoneKw`: a variant `None` would shadow `Option::None` under `use Token::*`.
     NoneKw,
+    /// `Self`: inside a method, the enclosing type (TICKET-300). Named `SelfKw` so `use Token::*` does not shadow `Self`.
+    SelfKw,
     /// `where` — the generic-bound clause keyword (`fn f[T]() where T: Comparable`). A full keyword
     /// (corpus-safe: no `.chz` uses `where` as a bare identifier). Introduces a comma-separated list
     /// of `IDENT (: bound (+ bound)*)` entries after a fn/native-fn signature; the checker merges
@@ -566,6 +568,10 @@ impl fmt::Display for LexError {
 /// the node the parser builds from the token and never test this spelling.
 pub const NONE: &str = "None";
 
+/// The spelling of the `Self` keyword: inside a method, the enclosing type. Its `KEYWORDS` row is the
+/// one owner of the fact that no declaration takes the name.
+pub const SELF_KW: &str = "Self";
+
 /// The single source of truth for the language's keyword surface: every reserved word paired with
 /// the [`Token`] it lexes to. `keyword()` looks itself up here, and the editor tooling (the VSCode
 /// TextMate grammar generator and the LSP semantic-token lengths) derives the keyword set from this
@@ -607,6 +613,7 @@ pub const KEYWORDS: &[(&str, Token)] = &[
     ("true", Token::True),
     ("false", Token::False),
     (NONE, Token::NoneKw),
+    (SELF_KW, Token::SelfKw),
     ("where", Token::Where),
 ];
 
@@ -736,7 +743,9 @@ impl Token {
             | Return | If | Else | Elif | For | While | In | Break | Continue | Pass | Struct
             | Enum | Protocol | Type | Match | Recover | Defer | Assert | Test | Spawn
             | Parallel | Wait | Yield | Import | Extern | Native | From | As | Const | And | Or
-            | Not | True | False | NoneKw | Where | Newline | Indent | Dedent | Eof => return None,
+            | Not | True | False | NoneKw | SelfKw | Where | Newline | Indent | Dedent | Eof => {
+                return None;
+            }
         })
     }
 }
@@ -2229,7 +2238,7 @@ fn ends_operand(t: &Token, before: bool) -> bool {
     match t {
         Question => before,
         Int(_) | IntMinMagnitude | Float(_) | Str(_) | Bytes(_) | RawStr(_) | Ident(_) | True
-        | False | NoneKw | RParen | RBracket | RBrace => true,
+        | False | NoneKw | SelfKw | RParen | RBracket | RBrace => true,
         Fn | Return | If | Else | Elif | For | While | In | Break | Continue | Pass | Struct
         | Enum | Protocol | Type | Match | Recover | Defer | Assert | Test | Spawn | Parallel
         | Wait | Yield | Import | Extern | Native | From | As | Const | And | Or | Not | Where

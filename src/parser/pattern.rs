@@ -167,6 +167,7 @@ impl Parser {
                         | Token::True
                         | Token::False
                         | Token::NoneKw
+                        | Token::SelfKw
                         | Token::Where
                         | Token::Plus
                         | Token::Minus
@@ -276,6 +277,7 @@ impl Parser {
             | Token::Or
             | Token::Not
             | Token::NoneKw
+            | Token::SelfKw
             | Token::Where
             | Token::Plus
             | Token::Star
@@ -420,6 +422,15 @@ impl Parser {
         let target = if self.check(&Token::LParen) {
             // A one-name group `(x)` is that name, as in CPython.
             self.parse_paren_list(Self::parse_bind_target)?
+        } else if self.walrus_keyword.is_some() && self.keyword_name_error(self.peek()).is_some() {
+            // `try_parse_walrus_target` is reading: remember the keyword, report it only if the
+            // list ends at `:=`.
+            let t = self.toks[self.pos].clone();
+            if let Some(seen) = self.walrus_keyword.as_mut() {
+                seen.get_or_insert(t);
+            }
+            self.advance();
+            Pattern::Wildcard
         } else {
             let span = self.cur_span();
             let name = self.expect_ident()?;
@@ -463,16 +474,26 @@ impl Parser {
     /// possibly grouped, `(x)`) or a top-level comma list; every other shape restores `pos`, `depth` and `fold_depth` and
     /// returns `None`, so the expression path reports the error (`bind_target_error`).
     pub(super) fn try_parse_walrus_target(&mut self) -> PResult<Option<Pattern>> {
-        if !matches!(self.peek(), Token::Ident(_) | Token::LParen) {
+        if !matches!(self.peek(), Token::Ident(_) | Token::LParen)
+            && self.keyword_name_error(self.peek()).is_none()
+        {
             return Ok(None);
         }
         let save = self.pos;
         let save_depth = self.depth;
         let save_fold = self.fold_depth;
-        if let Ok((mut elems, comma)) = self.parse_bind_target_list(&Token::Walrus)
+        self.walrus_keyword = Some(None);
+        let read = self.parse_bind_target_list(&Token::Walrus);
+        let keyword = self.walrus_keyword.take().flatten();
+        if let Ok((mut elems, comma)) = read
             && self.check(&Token::Walrus)
             && (comma || !matches!(elems[0], Pattern::Tuple(_)))
         {
+            if let Some(k) = keyword {
+                let mut e = self.keyword_name_error(&k.kind).expect("a keyword");
+                e.span = k.span;
+                return Err(e);
+            }
             self.advance(); // ':='
             let target = if comma {
                 Pattern::Tuple(elems)

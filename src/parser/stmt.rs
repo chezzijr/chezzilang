@@ -83,6 +83,7 @@ impl Parser {
             | Token::True
             | Token::False
             | Token::NoneKw
+            | Token::SelfKw
             | Token::Where
             | Token::Plus
             | Token::Minus
@@ -207,6 +208,7 @@ impl Parser {
             | Token::True
             | Token::False
             | Token::NoneKw
+            | Token::SelfKw
             | Token::Where
             | Token::Plus
             | Token::Minus
@@ -380,6 +382,7 @@ impl Parser {
             | Token::True
             | Token::False
             | Token::NoneKw
+            | Token::SelfKw
             | Token::Where
             | Token::Plus
             | Token::Minus
@@ -635,6 +638,7 @@ impl Parser {
             | Token::True
             | Token::False
             | Token::NoneKw
+            | Token::SelfKw
             | Token::Where
             | Token::Plus
             | Token::Minus

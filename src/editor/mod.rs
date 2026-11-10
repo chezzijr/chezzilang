@@ -353,6 +353,7 @@ fn token_at(source: &str, line0: usize, char_col: usize) -> Option<(u32, u32)> {
             | other @ Token::True
             | other @ Token::False
             | other @ Token::NoneKw
+            | other @ Token::SelfKw
             | other @ Token::Where
             | other @ Token::Plus
             | other @ Token::Minus
@@ -566,6 +567,7 @@ fn semantic_tokens_inner(source: &str) -> Vec<SemTok> {
             | other @ Token::True
             | other @ Token::False
             | other @ Token::NoneKw
+            | other @ Token::SelfKw
             | other @ Token::Where
             | other @ Token::Plus
             | other @ Token::Minus

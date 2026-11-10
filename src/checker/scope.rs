@@ -369,7 +369,7 @@ impl Checker {
     /// type (a second declaration is `type 'A' is already defined`), so the kind order is total.
     pub(super) fn type_head(&self, head: &Expr) -> Option<TypeHead> {
         match &head.kind {
-            ExprKind::Ident(n) => self.bare_type_head(n),
+            ExprKind::Ident(n) => self.self_type_head(n).or_else(|| self.bare_type_head(n)),
             ExprKind::Field { obj, name, .. } => match obj.kind.as_ident() {
                 Some(m) => self.qualified_type_head(m, name),
                 None => None,
@@ -436,9 +436,72 @@ impl Checker {
             native_handle: false,
         })
     }
+    /// TICKET-300 -- THE one answer to "what does Self denote here": the enclosing type of the method
+    /// being checked; None outside one or for any other name. Self is a keyword, so no declaration
+    /// takes the spelling, and every position reads this first.
+    pub(super) fn self_denotes(&self, n: &str) -> Option<&Ty> {
+        if n == crate::lexer::SELF_KW {
+            self.current_self_ty.as_ref()
+        } else {
+            None
+        }
+    }
+    /// TICKET-300 -- the type head `Self` names in a method of a struct or an enum (`Self(..)`,
+    /// `Self.m()`, `Self.A`).
+    pub(super) fn self_type_head(&self, n: &str) -> Option<TypeHead> {
+        let (kind, key) = match self.self_denotes(n)? {
+            Ty::Struct(k, _) => (TypeHeadKind::Struct, k.clone()),
+            Ty::Enum(k, _) => (TypeHeadKind::Enum, k.clone()),
+            Ty::Int
+            | Ty::Float
+            | Ty::Bool
+            | Ty::Str
+            | Ty::Bytes
+            | Ty::ByteArray
+            | Ty::Nil
+            | Ty::List(..)
+            | Ty::Map(..)
+            | Ty::Set(..)
+            | Ty::Func { .. }
+            | Ty::Tuple(..)
+            | Ty::Param(..)
+            | Ty::Result(..)
+            | Ty::Option(..)
+            | Ty::Channel(..)
+            | Ty::Shared(..)
+            | Ty::Atomic(..)
+            | Ty::AtomicInt
+            | Ty::RwShared(..)
+            | Ty::Executor
+            | Ty::Socket
+            | Ty::Listener
+            | Ty::Writer
+            | Ty::Reader
+            | Ty::Ptr
+            | Ty::Width(..)
+            | Ty::Protocol(..)
+            | Ty::Module(..)
+            | Ty::Unknown
+            | Ty::Var(..) => return None,
+        };
+        Some(TypeHead {
+            kind,
+            name: key.clone(),
+            key,
+            spelled: n.to_string(),
+            pinned: None,
+            native_handle: false,
+        })
+    }
     /// U10: THE answer to "does bare `name`, read as a value, name a type". An alias is a type
     /// whatever its body; `Self` is the enclosing type of an inherent method.
     pub(super) fn bare_type_read(&self, name: &str) -> Option<TypeRead> {
+        if let Some(th) = self.self_type_head(name) {
+            return Some(TypeRead::Head(th));
+        }
+        if self.self_denotes(name).is_some() {
+            return Some(TypeRead::SelfType);
+        }
         if let Some(th) = self.bare_type_head(name) {
             return Some(TypeRead::Head(th));
         }
@@ -447,9 +510,6 @@ impl Checker {
         }
         if self.aliases.contains_key(name) || self.imported_alias_tys.contains_key(name) {
             return Some(TypeRead::Alias(name.to_string()));
-        }
-        if name == "Self" && self.current_self_ty.is_some() {
-            return Some(TypeRead::SelfType);
         }
         (BuiltinType::global(name).is_some() || self.bound_builtin(name).is_some())
             .then(|| TypeRead::Builtin(name.to_string()))

@@ -255,6 +255,10 @@ struct Parser {
     /// keeps the recursive front-end walkers off the stack cliff; see that constant for why an
     /// ambient, decremented-on-loop-exit counter cannot do the job.
     fold_depth: usize,
+    /// TICKET-300 -- `Some` while `try_parse_walrus_target` reads; holds the first keyword token met in a
+    /// name slot. A primary keyword (`Self`, `None`, `true`) parses as an operand, so only the token says
+    /// it is not a name.
+    walrus_keyword: Option<Option<crate::lexer::Tok>>,
     /// Doc-comment side table: source-line → stripped comment text, for every comment-only line.
     /// Empty for `parse` (so every existing caller gets `doc = None`); populated by `parse_with_docs`
     /// from the lexer side-channel. Consulted by `doc_above` at each declaration's keyword line.
@@ -290,6 +294,7 @@ impl Parser {
             pos: 0,
             depth: 0,
             fold_depth: 0,
+            walrus_keyword: None,
             docs: std::collections::HashMap::new(),
             native_enums,
             bang_eq: None,

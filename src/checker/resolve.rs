@@ -111,6 +111,11 @@ impl Checker {
     }
 
     fn classify_ident(&self, e: &Expr, n: &str) -> Option<Resolution> {
+        if let Some(th) = self.self_type_head(n)
+            && th.kind == TypeHeadKind::Struct
+        {
+            return Some(Resolution::StructCtor(th.key));
+        }
         // A default provider `desugar` synthesized (`$def$…`), unspellable by a user.
         if n.starts_with(crate::base::provider_name::PROVIDER_PREFIX)
             && (e.id.0 == crate::ast::NodeId::SYNTH.0 || !self.functions.contains_key(n))

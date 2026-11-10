@@ -150,7 +150,8 @@
                | "IMPORT" <dottedPath> "AS" "IDENT" "NEWLINE"
                | "IMPORT" <importNames> "FROM" <dottedPath> "NEWLINE"
 <importNames> ::= <importName> | <importName> "COMMA" <importNames>
-# `None` is a keyword, not a name: `import None from m` is rejected.
+# `None` is a keyword, not a name: `import None from m` is rejected. `Self` is a keyword too: no declaration
+# takes the name; it reads as the enclosing type inside a method.
 <importName>  ::= "IDENT" | "IDENT" "AS" "IDENT"
 <dottedPath>  ::= "IDENT" | "IDENT" "DOT" <dottedPath>
 
@@ -568,7 +569,7 @@
 # reachable elsewhere only via import (qualified `m.Type` or bare after `import Type from m`). A
 # longer path (`pkg.deep.Point`) names the module by its full path: the last segment is the type,
 # and the rest must be a module imported un-aliased in this file (`import pkg.deep`, TICKET-175).
-<type>     ::= "IDENT" | "NONEKW" | "IDENT" "LBRACKET" <typeList> "RBRACKET"
+<type>     ::= "IDENT" | "NONEKW" | "SELFKW" | "IDENT" "LBRACKET" <typeList> "RBRACKET"
              | "IDENT" "DOT" <dottedPath> | "IDENT" "DOT" <dottedPath> "LBRACKET" <typeList> "RBRACKET"
              | "FN" "LPAREN" "RPAREN" "ARROW" <type>
              | "FN" "LPAREN" <fnParamList> "RPAREN" "ARROW" <type>
@@ -759,7 +760,7 @@
 # NO escape processing (`\n` is backslash-n, `\` is a literal backslash) and NO `{expr}` interpolation
 # (braces are literal) — so the lexer never looks for a hole in it. Its type is plain `str`.
 # The short form cannot contain its closing quote; the triple form embeds lone quotes (e.g. JSON).
-<primary> ::= "INT" | "FLOAT" | "STR" | "BYTES" | "RAWSTR" | "TRUE" | "FALSE" | "NONEKW" | "IDENT"
+<primary> ::= "INT" | "FLOAT" | "STR" | "BYTES" | "RAWSTR" | "TRUE" | "FALSE" | "NONEKW" | "SELFKW" | "IDENT"
             | "LPAREN" <expr> "RPAREN"
             | "RECOVER" "COLON" <expr>
             | "LPAREN" <expr> "COMMA" "RPAREN"
