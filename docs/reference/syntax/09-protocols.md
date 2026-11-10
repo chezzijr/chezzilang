@@ -61,8 +61,10 @@ struct Doc2:
   `cannot apply + to W and W (method 'add' parameter 1 is named 'o', but Add declares 'other')`. `==`
   dispatches a user `eq` by shape, whatever the operand is called.
 
-**`Self` in a struct/enum method.** `Self` is usable in an inherent method's signature and body (param
-type, return type, local annotation) and names the enclosing type: `fn dup(self) -> Self` in
+**`Self` in a struct/enum method.** `Self` is a keyword (no binder, field, variant or type may be
+spelled `Self`). It is usable in an inherent method's signature and body (param type, return type,
+local annotation) and names the enclosing type; `Self(...)`, `Self.m()` and `Self.Variant` are values
+of it: `fn dup(self) -> Self` in
 `struct P` returns a `P`; for `Box[T]` it carries the receiver's type args. A `-> Self` method that
 returns another type is a type error. Outside a method (a free-fn parameter, a struct field, a
 top-level annotation) it is `unknown type 'Self'`.

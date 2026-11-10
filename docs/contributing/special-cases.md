@@ -204,8 +204,8 @@ A bare tuple: `a, b := 1, 2` and `a, b = b, a` work; `x := 1, 2`, `return a, b` 
 box's contents print it `(int,)` / `(false,)` / `Shared((1,))` through one helper, `tuple_text`.
 `x := 1,` stays an error (CPython makes a 1-tuple).
 
-`Self` is a type only: `-> Self` works; `Self(1)`, `Self.mk()` and a pattern `Self.A` do not (Rust
-accepts all three).
+`Self` is a keyword (TICKET-300). In a struct or enum method `-> Self`, `Self(1)`, `Self.mk()` and
+`Self.A` work; a pattern `Self.A` does not (Rust accepts it).
 
 Boundary blocks: one table, `boundary::RULES` (`checker/boundary.rs`), says what may cross
 `spawn:`, `defer:`, `recover:` and a generator body, and every check reads it. Each rejection reads

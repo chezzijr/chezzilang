@@ -77,7 +77,9 @@ workspace crates, the blocking-point table (`block::wait_steps`) and the boundar
    `docs/contributing/special-cases.md` "Owner design decisions (2026-11-09)". Report, order and
    repros: `~/.claude/plans/2026-11-09-bug-hunt-w24/report.md`. Ready to file: F5, F6, F7,
    F4 (the `copy` part), F1 and F3 except their open questions (F1 Q3/Q4, F3 Q4). F8 waits on three
-   owner answers.
+   owner answers. F3 (a name's meaning has one decider) is TICKET-300: `Self` is a keyword, the
+   compiler's temps are private `$` names, a binder hides a full module path in the checker alone
+   (desugar has no scope model), and a bracketed call always has a recorded reading.
 1. **TICKET-266, a `never` return type.** `exit` and `panic` declare `-> never`, and a call of that
    type leaves its block (Rust `-> !`). It deletes the `panic("unreachable")` lines after `os.exit`.
    Escalated; branch `ticket/266` kept.

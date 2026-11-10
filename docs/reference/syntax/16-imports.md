@@ -115,6 +115,7 @@ name, an import alias), with one message:
 ```
 None := 5              # error: expected identifier, found reserved keyword 'None' (a keyword cannot be used as a name)
 for true in [1, 2]:    # error: expected identifier, found reserved keyword 'true' (a keyword cannot be used as a name)
+Self := 5              # error: expected identifier, found reserved keyword 'Self' (a keyword cannot be used as a name)
 ```
 
 So `None` always means the absent value (or "returns nothing"), and no enum has a variant `None`. A
@@ -201,7 +202,9 @@ b := std.concurrency.Shared(0)    # Python reading: the full path of the same mo
   error (`std` is a namespace): write `import std.math`.
 - **`as` binds only the alias.** After `import pkg.deep as d`, `pkg.deep.X` is an error that names `d`.
 - **Shadowing.** A local, a parameter, a type parameter or any module-level name spelled like the path
-  head hides the full path (as in Python).
+  head hides the full path (as in Python). Every binder counts: a bare `match` capture, an `else`
+  error name and a nested `fn` name hide it like a `:=` does. The type-checker decides this once
+  (`Checker::head_name`); desugar and the compiler read its answer.
 - **Same last segment.** `import a.math` plus `import b.math` is legal: `a.math.f()` and `b.math.f()`
   work, and a bare `math.f()` is `'math' is ambiguous` with a hint to `import a.math as am`. The pair
   still binds the name `math` once, so a third binding (`math := 3`, `fn math`) is `'math' is already
