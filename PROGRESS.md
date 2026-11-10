@@ -41,6 +41,10 @@ synchronous hard-halt drains (`--max-heap`, `--timeout`) keep the `deferring` ex
 callbacks still re-enter (`gaps.md` W23-1, narrowed). Grid: `tests/callback_park_grid.rs`.
 A guard wait and `Executor.shutdown()` park too, and a guard holder is preempted: every op of
 `tests/blocking_context_grid.rs` but `stdin` runs with `demotes=0`.
+A guard holder a deadlock cut (a family cut, `Executor.cancel`, a lock cycle, a re-entry) releases
+its `Shared`/`RwShared` guard `CUT`, and a `CUT` box refuses every later acquire for the rest of
+the run (Go's never-unlocked `Mutex`). A guard re-entry and a lock cycle are a fatal `deadlock`
+that `recover:` does not catch. Grid: `tests/cut_release_grid.rs`.
 
 The checker has a non-fatal warning channel (`Severity::Warning`, `"severity"` in `--errors=json`,
 `DiagnosticSeverity::WARNING` in the LSP). It has five rules:
@@ -72,12 +76,14 @@ workspace crates, the blocking-point table (`block::wait_steps`) and the boundar
 ## What is next
 
 0. **Bug hunt wave 24 (2026-11-09): file one ticket per family.** 8 families, each with a P0 cell
-   (F1 a cancelled cleanup's guard gives a waiter a half-done value; F2 `parallel:` defer order
-   (landed, TICKET-299); F3 to F8 design inconsistencies). Owner decisions:
+   (F1 a cancelled cleanup's guard gives a waiter a half-done value, landed as TICKET-298 except
+   its open questions Q3/Q4; F2 `parallel:` defer order (landed, TICKET-299); F3 to F8 design
+   inconsistencies). Owner decisions:
    `docs/contributing/special-cases.md` "Owner design decisions (2026-11-09)". Report, order and
    repros: `~/.claude/plans/2026-11-09-bug-hunt-w24/report.md`. Ready to file: F5, F6, F7,
-   F4 (the `copy` part), F1 and F3 except their open questions (F1 Q3/Q4, F3 Q4). F8 waits on three
-   owner answers. F3 (a name's meaning has one decider) is TICKET-300: `Self` is a keyword, the
+   F4 (the `copy` part) and F3 except its open question (F3 Q4). F1 Q3 (which tasks a report lists
+   at a join) and Q4 (a cancel of a holder outside a `defer` publishes its partial change) stay
+   open. F8 waits on three owner answers. F3 (a name's meaning has one decider) is TICKET-300: `Self` is a keyword, the
    compiler's temps are private `$` names, a binder hides a full module path in the checker alone
    (desugar has no scope model), and a bracketed call always has a recorded reading.
 1. **TICKET-266, a `never` return type.** `exit` and `panic` declare `-> never`, and a call of that

@@ -15,12 +15,6 @@ import Broadcast from std.concurrency.broadcast
 import memoize1 from std.memoize
 import std.time as time
 
-fn msg_of[T](r: T!Error, where_: str) -> str:
-    match r:
-        ?_: assert false, where_ + " must fault"
-        !e: return e.message()
-    return ""
-
 test fn shared_get_then_a_write_is_seen_by_the_box():
     s := Shared({"k": 0})
     x := s.get()
@@ -110,28 +104,9 @@ test fn a_guard_waiter_behind_a_holder_that_waits_on_a_channel_is_no_deadlock():
                     ch.send(3)
     assert s.get() == 30
 
-fn reenter(s: Shared[int], x: int) -> int:
-    s.update(inc)
-    return x
-
-test fn a_same_box_reentry_faults_with_the_update_guard_text():
-    s := Shared(1)
-    r := recover: s.update(fn(x): reenter(s, x))
-    fault := msg_of(r, "re-entry")
-    assert fault.contains("already holds the update guard on this Shared box"), fault
-    assert s.get() == 1
-
-fn write_inside(r: RwShared[int], x: int) -> int:
-    r.write(inc)
-    return x
-
-# Q2: a write inside the same task's read waits for that read: a certain deadlock, a fault.
-test fn a_write_inside_a_read_of_the_same_box_faults():
-    r := RwShared(1)
-    res := recover: r.read(fn(x): write_inside(r, x))
-    fault := msg_of(res, "write in read")
-    assert fault.contains("already holds the read guard on this RwShared box"), fault
-    assert r.get() == 1
+# A same-box re-entry, a write inside a read and a nested read past a waiting writer are fatal
+# deadlocks since TICKET-298: `recover:` cannot catch them, so `tests/cut_release_grid.rs`
+# (`a_recovered_reentry_or_lock_cycle_is_fatal`) holds them.
 
 fn read_inside(r: RwShared[int], x: int) -> int:
     return x + r.read(fn(y): y)
@@ -223,38 +198,6 @@ test fn a_reader_behind_a_waiting_writer_reads_after_it():
         spawn writer_after(r, go, wsig)
         spawn reader_after(r, wsig, seen)
     assert seen.recv() == ?10
-    assert r.get() == 10
-
-fn read_again(r: RwShared[int], go: Channel[bool], wsig: Channel[bool], n: int) -> int:
-    go.send(true)
-    _ := wsig.recv() else: panic("wsig closed")
-    time.sleep_ms(30)
-    return n + r.read(fn(m): m)
-
-fn writer_signal(r: RwShared[int], go: Channel[bool], wsig: Channel[bool]):
-    _ := go.recv() else: panic("go closed")
-    wsig.send(true)
-    r.write(fn(n): n * 10)
-
-fn outcome_of(r: int!Error) -> str:
-    match r:
-        ?_: return "ok"
-        !e: return e.message()
-
-# A nested read past a waiting writer that waits for this task's outer read is a certain cycle
-# (Go `nestedread/main.go`: `fatal error: all goroutines are asleep - deadlock!`): it faults at once.
-test fn a_nested_read_past_a_waiting_writer_faults():
-    r := RwShared(1)
-    go := Channel[bool](1)
-    wsig := Channel[bool](1)
-    out := Channel[str](1)
-    parallel:
-        spawn:
-            res := recover: r.read(fn(n): read_again(r, go, wsig, n))
-            out.send(outcome_of(res))
-        spawn writer_signal(r, go, wsig)
-    got := out.recv() else: panic("out closed")
-    assert got.contains("a lock cycle"), got
     assert r.get() == 10
 
 fn slow_write(n: int) -> int:

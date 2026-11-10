@@ -329,8 +329,9 @@ to completion (they are still cancellable by their *own* nursery's faults).
 nursery it aborted) that panics does not vanish: the nursery join, or `Executor.cancel()`, raises
 it (Go and asyncio surface it too). It ranks BELOW every ordinary fault and above a `deadlock` abort —
 the cancel's root cause is the more useful report (asyncio `TaskGroup` lists
-`['boom', 'cleanup failed']`, root cause first). A stuck cleanup's `deadlock` verdict stays swallowed
-when a sibling's real fault is the cause. The same ranking holds for a nursery OWNER cut by its
+`['boom', 'cleanup failed']`, root cause first). When a sibling's real fault is the cause, a stuck
+cleanup's `deadlock` verdict is swallowed, unless the cleanup holds a `Shared` or `RwShared` guard
+(see below). The same ranking holds for a nursery OWNER cut by its
 child's fault: the owner reports the child's fault, and its own `defer` fault or stuck cleanup ranks
 below it (Go prints `panic: boom`), unless a `--timeout` / `--max-heap` halt lands in that cleanup. A
 party's own fault keeps Go's rule: a `defer` that faults while it unwinds supersedes it.
@@ -359,7 +360,10 @@ worker).
 something that can never arrive (`ch.recv()` no one will ever answer) leaves the program quiesced, and
 the deadlock detector fires. If a sibling's fault cancelled the task, *that* fault is reported — the
 stuck cleanup's own error is swallowed with its cancelled task, and likewise when the stuck cleanup
-belongs to an owner whose child faulted. The same holds for a `defer` that runs on the `main` thread —
+belongs to an owner whose child faulted. A stuck cleanup that holds a `Shared` or `RwShared` guard
+is a fatal deadlock, and the report lists it at its wait. Its guard is released cut, so no task
+takes that box again for the rest of the run (Go blocks every `Lock` of a `Mutex` nobody unlocks).
+A cleanup of a cancelled task that re-enters its own guard is a fatal deadlock too. The same holds for a `defer` that runs on the `main` thread —
 a `defer` in `main`, at module top level, or in a `parallel:` body (on fall-through it runs AFTER the join; on a cancel it runs BEFORE the cancelled children are joined): a
 cleanup that can never complete faults `deadlock` (fatal) instead of hanging. A pending `os.exit` from
 another party outranks that verdict (Go: the exit status). A cleanup a live task WILL feed is not
@@ -372,7 +376,8 @@ owner's unwind goes on, in every context (`main`, a `spawn`, a callback, an `Exe
 `defer`s run, a `recover:` catches the fault, and the fault is the report (Go prints
 `panic: index out of range`). A job's fault stays in its Task. A stuck `defer` of the owner itself
 still faults `deadlock`, as Go's does. The verdict cuts only the stuck cleanups of the cancelled
-family, as that family's cancel, and latches nothing: every other task stays where it is, and a
+family, as that family's cancel, and latches nothing (a cleanup that holds a guard is the exception
+above): every other task stays where it is, and a
 later wait is judged again. The same holds when a child's fault cancels the family after its owner
 reached the join: the child's fault is the report, and a `recover:` around the owner catches it.
 So a `recv` after the `recover:` that a live task feeds gets its value, and one that nothing

@@ -68,14 +68,15 @@ against other tasks (a `get`-then-`set` races). `set` and `get` take the same gu
 
 | from inside `s.update(f)` / `rw.write(f)` / `rw.read(f)` | behaviour |
 |---|---|
-| `s.get()` / `s.read(g)` / `s.set(x)` / `s.update(g)` — same `Shared` box | **faults**: `"deadlock: this task already holds the update guard on this Shared box ..."` (Go: `Lock` in `Lock` deadlocks) |
-| `rw.get()` / `rw.read(g)` / `rw.set(x)` / `rw.write(g)` — same `RwShared`, inside its `write` | **faults** the same way |
-| `rw.set(x)` / `rw.write(g)` — same `RwShared`, inside its `read` | **faults**: `"deadlock: this task already holds the read guard on this RwShared box ..."` (Go: `Lock` in `RLock` deadlocks) |
-| `rw.get()` / `rw.read(g)` — same `RwShared`, inside its `read` | legal while no writer waits; past a waiting writer **faults** with `a lock cycle` (Go: a recursive `RLock` with a writer queued deadlocks) |
+| `s.get()` / `s.read(g)` / `s.set(x)` / `s.update(g)` — same `Shared` box | **fatal deadlock**: `"deadlock: this task already holds the update guard on this Shared box ..."` (Go: `Lock` in `Lock` deadlocks) |
+| `rw.get()` / `rw.read(g)` / `rw.set(x)` / `rw.write(g)` — same `RwShared`, inside its `write` | **fatal** the same way |
+| `rw.set(x)` / `rw.write(g)` — same `RwShared`, inside its `read` | **fatal deadlock**: `"deadlock: this task already holds the read guard on this RwShared box ..."` (Go: `Lock` in `RLock` deadlocks) |
+| `rw.get()` / `rw.read(g)` — same `RwShared`, inside its `read` | legal while no writer waits; past a waiting writer it is a **fatal deadlock** with `a lock cycle` (Go: a recursive `RLock` with a writer queued deadlocks) |
 | `print(s)` | legal: a print takes no guard and shows the value as it is |
 
 A cross-task `set`/`update`/`write` on the SAME box from a *different*, healthy task BLOCKS behind the
-guard. Only a real wait-for cycle (same-task re-entry, or a longer AB-BA cycle across boxes) faults.
+guard. Only a real wait-for cycle (same-task re-entry, or a longer AB-BA cycle across boxes) is a
+fatal deadlock: no `recover:` catches it.
 
 ### `RwShared[T]` — cross-task read-write cell (many readers OR one writer)
 `get() -> T` · `set(x: T) -> None` · `read(f: fn(T) -> R) -> R` (shared read guard; returns `f`'s

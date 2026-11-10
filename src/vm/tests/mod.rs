@@ -178,6 +178,7 @@ fn recv_waiter(core: &Arc<ChannelCore>, cancel: Vec<Arc<AtomicBool>>) -> Waiter 
         fiber: true,
         scope: None,
         cut: false,
+        holds_guard: false,
     }
 }
 

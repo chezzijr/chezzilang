@@ -27,7 +27,7 @@ means user code also imports `RwShared` from `std.concurrency` (`import RwShared
 `import std.concurrency.collection` binds only that submodule.
 
 **Reentrancy:** like raw `RwShared`, a `write` closure that re-enters the **same** box's update guard
-FAULTS instead of hanging or losing the inner write. Every collection method is flat (no nested
+is a fatal DEADLOCK (exit status 1, no `recover:` catches it) instead of hanging or losing the inner write. Every collection method is flat (no nested
 locking), so user code hits this only if it calls a writer from inside another writer's closure over
 the same box. The looping readers (`for_each`, `fold`, `for_each_entry`, `fold_entries`) never hold the
 lock across the callback, so a callback may read or write the same collection; the walk is not one
@@ -75,7 +75,7 @@ and inserts are O(1) expected (the stored map keeps the heap map's hash index). 
 | `.fold(init, f)` | `(R, fn(R, E) -> R) -> R` | Reduces in insertion order; `R` is inferred from `init`. |
 | `.snapshot()` | `() -> Set[E]` | **concurrent read** returning a shallow **copy** of the whole set. |
 
-A writer called from a user `hash`/`eq` that re-enters the same box faults like `write` does: each
+A writer called from a user `hash`/`eq` that re-enters the same box is a fatal deadlock, as in `write`: each
 writer takes the update guard that `set`/`write` take.
 
 **`ConcurrentCounter[K: Hashable]`**: thread-safe frequency table over `RwShared[Map[K, int]]`.

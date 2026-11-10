@@ -22,8 +22,8 @@ use std::time::Duration;
 ///
 /// `state` bits: [`WRITER`] (a writer holds the box), the count of writers that wait
 /// ([`WW_ONE`] units, Go writer preference: while it is not zero a new reader waits), and the
-/// count of readers that hold the box (the low 31 bits), and [`CUT`]: a deadlock verdict's cut of
-/// the last holder freed the box, which is no progress for a task that waits for it. `writer` is the task token of the writer
+/// count of readers that hold the box (the low 31 bits), and [`CUT`]: a cut released a holder, so
+/// every acquire refuses the box. `writer` is the task token of the writer
 /// (0 = none), read only on a failed acquire to find a same-task re-entry. A reader is anonymous
 /// here; the task that reads keeps its own list (`Vm::held_reads`). `sleepers` counts the tasks that
 /// wait on the registry condvar for this box, so a release wakes them only when one exists.
@@ -48,10 +48,9 @@ const WRITER: u64 = 1 << 63;
 const WW_ONE: u64 = 1 << 32;
 const WW_MASK: u64 = 0x7fff_ffff << 32;
 const R_MASK: u64 = 0x7fff_ffff;
-/// The box is free because a verdict cut its holder ([`UpdateGuard::release_cut`]). Set only with
-/// the transition to free (no [`WRITER`], no reader), cleared by every take: a waiter refuses the
-/// box while it is set (the holder is a blocked task of the verdict, as Go's never-released
-/// `Mutex`), a fresh acquire takes it.
+/// The box is free because a cut released its holder ([`UpdateGuard::mark_cut`]). Set with the
+/// transition to free and never cleared: every acquire refuses the box for the rest of the run, as
+/// Go blocks every `Lock` of a `Mutex` nobody unlocks (TICKET-298, owner answer 1(a)).
 const CUT: u64 = 1 << 31;
 
 impl BoxLock {
@@ -114,11 +113,11 @@ impl BoxLock {
 
     /// One acquire attempt with no wait. `counted`: this writer is one of the waiting writers
     /// (it holds a [`WaitTicket`]), so the waiting count does not keep it out and the take moves it
-    /// from waiting to holding. `waiter`: the take is a waiter's, so a [`CUT`] box is no progress.
-    fn try_take(&self, mode: GuardMode, me: u64, counted: bool, waiter: bool) -> bool {
+    /// from waiting to holding. A [`CUT`] box refuses every take.
+    fn try_take(&self, mode: GuardMode, me: u64, counted: bool) -> bool {
         let mut s = self.state.load(Ordering::Relaxed);
         loop {
-            if waiter && s & CUT != 0 {
+            if s & CUT != 0 {
                 return false;
             }
             let next = match mode {
@@ -131,7 +130,7 @@ impl BoxLock {
                 }
                 GuardMode::Read if s & (WRITER | WW_MASK) == 0 && s & R_MASK != R_MASK => s + 1,
                 GuardMode::Write | GuardMode::Read => return false,
-            } & !CUT;
+            };
             match self
                 .state
                 .compare_exchange_weak(s, next, Ordering::Acquire, Ordering::Relaxed)
@@ -150,7 +149,7 @@ impl BoxLock {
     /// Whether an acquire in `mode` by a (counted) waiter could succeed now. SeqCst: with the
     /// waiter's `sleepers` increment before it and the releaser's SeqCst RMW then `sleepers` load,
     /// it is a Dekker pair, so either the waiter sees the release or the releaser sees the waiter.
-    /// A [`CUT`] box is not free for a waiter.
+    /// A [`CUT`] box is never free.
     fn looks_free(&self, mode: GuardMode) -> bool {
         let s = self.state.load(Ordering::SeqCst);
         if s & CUT != 0 {
@@ -162,10 +161,10 @@ impl BoxLock {
         }
     }
 
-    /// [`UpdateGuard::release_cut`]'s release: free the box and mark it [`CUT`] in the same RMW. A
-    /// write release admits no waiting reader; a read release marks the cut only when it frees
-    /// the box. It wakes nobody: no waiter can take a `CUT` box, and a woken parked waiter would
-    /// be runnable, which the verdict reads as progress.
+    /// [`UpdateGuard::mark_cut`]'s release: free the box and mark it [`CUT`] in the same RMW. A
+    /// write release admits no waiting reader; a read release marks the cut even while another
+    /// reader holds the box. It wakes nobody: no waiter can take a `CUT` box, and a woken parked
+    /// waiter would be runnable, which the verdict reads as progress.
     fn release_cut(&self, mode: GuardMode) {
         if mode == GuardMode::Write {
             self.writer.store(0, Ordering::Relaxed);
@@ -174,8 +173,7 @@ impl BoxLock {
         loop {
             let next = match mode {
                 GuardMode::Write => (s & !WRITER) | CUT,
-                GuardMode::Read if s & R_MASK == 1 => (s - 1) | CUT,
-                GuardMode::Read => s - 1,
+                GuardMode::Read => (s - 1) | CUT,
             };
             match self
                 .state
@@ -312,7 +310,7 @@ pub enum GuardCycle {
 pub struct UpdateGuard {
     lock: Arc<BoxLock>,
     mode: GuardMode,
-    /// A deadlock verdict cut the holder: the drop is [`UpdateGuard::release_cut`]'s release.
+    /// A cut released the holder ([`UpdateGuard::mark_cut`]): the drop is [`BoxLock::release_cut`]'s release.
     cut: bool,
 }
 
@@ -322,11 +320,17 @@ impl UpdateGuard {
         &self.lock
     }
 
-    /// The release of a holder a deadlock verdict cut: the box is free, marked [`CUT`] in the
-    /// same RMW, so no waiter takes it as progress. A write release admits no waiting reader; a
-    /// read release marks the cut only when it frees the box. Wakes nobody.
-    pub fn release_cut(mut self) {
+    /// Mark this guard cut: its drop frees the box and marks it [`CUT`] in the same RMW, so no
+    /// acquire ever takes the box again. A write release admits no waiting reader. Wakes nobody.
+    pub fn mark_cut(&mut self) {
         self.cut = true;
+    }
+}
+
+/// Mark every guard of `guards` cut ([`UpdateGuard::mark_cut`]); the caller drops them.
+pub fn cut_all(guards: &mut [UpdateGuard]) {
+    for g in guards {
+        g.mark_cut();
     }
 }
 
@@ -516,7 +520,7 @@ impl WaitTicket {
                 cut: false,
             });
         }
-        if self.lock.try_take(mode, me, self.live, true) {
+        if self.lock.try_take(mode, me, self.live) {
             // A counted writer's take moved it from waiting to holding.
             self.live = false;
             self.unregister();
@@ -558,7 +562,7 @@ pub const GUARD_DEMOTE_BUDGET: Duration = Duration::from_millis(5);
 /// a same-task re-entry, then waits through a [`WaitTicket`].
 pub fn try_update_guard(key: GuardKey<'_>, me: u64) -> Option<UpdateGuard> {
     // Not `then_some`: its argument is built eagerly, and a dropped guard releases a hold.
-    if key.lock.try_take(key.mode, me, false, false) {
+    if key.lock.try_take(key.mode, me, false) {
         Some(UpdateGuard {
             lock: Arc::clone(key.lock),
             mode: key.mode,

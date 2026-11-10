@@ -267,6 +267,12 @@ impl Fiber {
         self.ctx.drains.is_empty()
     }
 
+    /// Does this parked fiber hold a box guard? Such a fiber is never cut as its family's cancel
+    /// (`cut_as_family`, `sched_core.rs`).
+    pub(super) fn holds_guard(&self) -> bool {
+        !self.ctx.held_guards.is_empty()
+    }
+
     /// The park gap re-check's cancel half: `scope_tripped` (this fiber's scope cancel, or an
     /// ancestor's) or a nursery this fiber owns, for a fiber that honours a cancel.
     pub(super) fn cancel_wakes(&self, scope_tripped: bool) -> bool {

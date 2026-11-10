@@ -1030,6 +1030,7 @@ fn a_demoted_wait_with_every_arm_closed_vetoes_the_deadlock_verdict() {
         fiber: true,
         scope: None,
         cut: false,
+        holds_guard: false,
     });
     a.q.lock().unwrap().closed = true;
     b.q.lock().unwrap().closed = true;
@@ -1059,6 +1060,7 @@ fn a_demoted_wait_with_one_arm_closed_vetoes_the_deadlock_verdict() {
         fiber: true,
         scope: None,
         cut: false,
+        holds_guard: false,
     });
     assert!(
         sched.is_deadlocked(&c),

@@ -85,8 +85,8 @@ c := bch.cap()             # capacity: 2 here; 0 for a rendezvous Channel[T](0);
 
   | fault | recoverable? |
   |---|---|
-  | value and operation faults (index, overflow, `panic`, IO, call depth, a `Shared` guard re-entry) | yes |
-  | scheduler and whole-program faults (deadlock, `os.exit`, `--max-heap`/`--timeout`) | no |
+  | value and operation faults (index, overflow, `panic`, IO, call depth) | yes |
+  | scheduler and whole-program faults (deadlock, a `Shared`/`RwShared` guard re-entry and a lock cycle included; `os.exit`, `--max-heap`/`--timeout`) | no |
 
   A `deadlock` that a `defer` meets while a fault unwinds supersedes that fault, and it stays fatal
   in every context (`main`, a `spawn`, a callback, an `Executor` job): no `recover:` binds it.
@@ -102,10 +102,12 @@ c := bch.cap()             # capacity: 2 here; 0 for a rendezvous Channel[T](0);
   report). Main locking a `Shared` guard that a stuck job holds is listed as `waiting for the Shared
   guard` at its own `update`, as Go lists `goroutine 1 [sync.Mutex.Lock]`. A `parallel:` body that
   waits at `s.update` is listed at that line. Main at a join (`shutdown()`, the end of a
-  `parallel:` block) is not listed: the tasks it waits for are. A cleanup that meets the
-  verdict is fatal too: no further `defer` runs, no `recover:` catches the unwind it ran in (a `?`
-  inside `recover:` included), and the cause it was cleaning up after keeps the report. How the
-  verdict is judged without false faults:
+  `parallel:` block) is not listed: the tasks it waits for are. A cleanup of a task nobody
+  cancelled that meets the verdict is fatal: no further `defer` runs, and no `recover:` catches the
+  unwind it ran in (a `?` inside `recover:` included). A stuck cleanup of a cancelled task is cut as
+  its family's cancel, and the cause it was cleaning up after keeps the report.
+  A stuck cleanup that holds a `Shared` or `RwShared` guard is a fatal deadlock, and the report
+  lists it at its wait. How the verdict is judged without false faults:
   [`concurrency-runtime.md`](../../design/concurrency-runtime.md#the-deadlock-verdict).
 
   A deadlock message raised inside a native callback that cannot park at all is an ordinary

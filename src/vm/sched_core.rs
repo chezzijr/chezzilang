@@ -3,6 +3,13 @@
 
 use super::*;
 
+/// May the verdict cut a stuck cleanup as its family's cancel (`aborting`: its scope is an
+/// aborting family's)? Never a guard holder: its cut is fatal and the report lists it
+/// (TICKET-298).
+fn cut_as_family(aborting: bool, holds_guard: bool) -> bool {
+    aborting && !holds_guard
+}
+
 impl SchedCore {
     /// Fault every still-parked fiber (across ALL scopes) with the deadlock error, cut every
     /// blocked-in-place waiter (`verdict_cut`) and latch `terminate` unless a demoted fiber is still
@@ -92,7 +99,7 @@ impl SchedCore {
     fn verdict_victim(&mut self, f: Fiber, err: &RuntimeError) {
         if f.honours_cancel() {
             self.record_deadlocked(f, err);
-        } else if self.aborting(f.scope_id) {
+        } else if cut_as_family(self.aborting(f.scope_id), f.holds_guard()) {
             self.cut_parked(f, VerdictCut::Family);
         } else {
             self.cut_parked(f, VerdictCut::Sched);
@@ -133,12 +140,19 @@ impl SchedCore {
             .collect();
         let mut any = false;
         for w in self.waiters.values_mut() {
-            if w.fiber && w.scope.is_some_and(|s| cancelled.contains(&s)) {
+            if w.fiber
+                && cut_as_family(
+                    w.scope.is_some_and(|s| cancelled.contains(&s)),
+                    w.holds_guard,
+                )
+            {
                 w.cut = true;
                 any = true;
             }
         }
-        let stuck = |f: &Fiber| !f.honours_cancel() && cancelled.contains(&f.scope_id);
+        let stuck = |f: &Fiber| {
+            !f.honours_cancel() && cut_as_family(cancelled.contains(&f.scope_id), f.holds_guard())
+        };
         let buckets: Vec<(usize, Vec<ParkedEntry>)> = self.parked.drain().collect();
         let mut cut = Vec::new();
         for (key, v) in buckets {
@@ -229,10 +243,9 @@ impl SchedCore {
         // be attached to the GC (see `RootRegistry::roots`).
         let mut ctx = f.ctx.into_inner();
         // The verdict cut this holder: the guards its frames hold (innermost last) are freed as
-        // cut, no progress for a task that waits for them (`core::UpdateGuard::release_cut`).
-        while let Some(g) = ctx.held_guards.pop() {
-            g.release_cut();
-        }
+        // cut, and no acquire takes the box again (`core::UpdateGuard::mark_cut`).
+        super::core::cut_all(&mut ctx.held_guards);
+        ctx.held_guards.clear();
         // A fiber parked at a wait is one entry of the run's listing, with its frames; an owner
         // parked at a join is not (its blocked children stand in its place).
         let scope_err = match (f.park_site, &self.scopes[sid].deadlock_err) {

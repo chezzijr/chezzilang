@@ -585,6 +585,22 @@ impl QuiesceState {
         }
     }
 
+    /// TICKET-298 — a holder's cut at a wait is a fatal deadlock: latch the run's verdict at the
+    /// holder's own wait `msg`/`at`, unless a verdict is already latched (it never un-latches).
+    /// Takes the `deadlock` cell alone and no lock under it, so a caller may hold a `SchedCore`
+    /// lock (`Vm::in_place_cut`): P -> A -> D, and D is a leaf (see `decide_since`).
+    pub(super) fn latch_holder_cut(&self, msg: &str, at: Span) {
+        {
+            let mut cell = self.deadlock.lock().unwrap_or_else(|e| e.into_inner());
+            if cell.decided {
+                return;
+            }
+            cell.decided = true;
+            cell.report = Some((msg.to_string(), at));
+        }
+        self.run_halt_hint.store(true, Ordering::Release);
+    }
+
     pub(super) fn has_job_fault(&self) -> bool {
         self.job_fault
             .lock()

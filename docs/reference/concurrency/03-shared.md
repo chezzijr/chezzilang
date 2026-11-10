@@ -62,11 +62,14 @@ the box waits.
 **Re-entry and faults.**
 
 - `get` / `read` / `set` / `update` of a `Shared` from inside that box's own `update` or `read`
-  closure fault with `already holds the update guard` (Go: `Lock` inside `Lock` is `fatal error: all
-  goroutines are asleep - deadlock!`). A `print` of the box takes no guard (Go's `fmt` takes no lock):
-  it shows the box's value as it is.
-- A fault inside the closure is raised in the caller, `recover:` catches it, the box keeps serving
-  and the state is what the closure left.
+  closure are a fatal `deadlock` with `already holds the update guard`: exit status 1, and no
+  `recover:` catches it (Go: `Lock` inside `Lock` is `fatal error: all goroutines are asleep -
+  deadlock!`). A `print` of the box takes no guard (Go's `fmt` takes no lock): it shows the box's
+  value as it is.
+- A fault inside the closure is raised in the caller, `recover:` catches it (except a re-entry or a
+  lock cycle, which is fatal), the box keeps serving and the state is what the closure left.
+- A holder cut by a deadlock releases its guard cut: a cut box refuses every later acquire for the
+  rest of the run (Go: a `Mutex` nobody unlocks blocks every later `Lock`).
 - A slow closure blocks every user of the box and holds its worker (the Elixir `Agent` warning
   applies: keep it short). A child of a `parallel:` inside the closure that reads or writes the
   **same** box can never be served (the closure holds the box until the nursery joins), so the run
@@ -90,7 +93,7 @@ same one-value box behind a read-write guard.
 |---|---|---|
 | lock | one user at a time | many readers or one writer |
 | `update` / `write` | closure runs on the live value, in place | the same, exclusive |
-| `read(f)` | `f` runs on the live value under the guard; readers queue | `f` runs on the live value under the read guard; readers run in parallel; a `write` inside it faults |
+| `read(f)` | `f` runs on the live value under the guard; readers queue | `f` runs on the live value under the read guard; readers run in parallel; a `write` inside it is a fatal deadlock |
 | `get()` | the live value, by handle | the live value, by handle |
 | pick it when | you mostly write, or read a small part of a big value (`read`) | reads dominate and readers must not queue |
 
@@ -269,16 +272,17 @@ cycle text. A `print` takes no guard. The fast path is one atomic operation on t
 the wait-for graph is read only on a contended acquire, so a cycle that passes through a read guard
 (readers are anonymous in the lock word) is left to the run's deadlock verdict.
 
-> **Reentrancy fault (same class as `Shared.update`):** a closure passed to `write` (or `set`) that
+> **Reentrancy deadlock (same class as `Shared.update`):** a closure passed to `write` (or `set`) that
 > re-acquires the **same** `RwShared`'s update guard — `write` or `set` inside `write` — is a
-> length-1 wait-for cycle and **faults** (`"already holds the update guard"`), instead of hanging or
-> silently losing the inner write. A cross-box wait-for cycle (two boxes each written from inside the
-> other's closure) faults the same way; two tasks that merely contend for different boxes are not a
-> cycle and complete normally. `get` / `read` of the box from inside its **own `write`** closure fault
-> the same way. M3.3 (Q2): `write` or `set` nested in the same task's **`read`** waits for that read,
-> a certain deadlock (Go `RLock(); Lock()`), so it faults with `already holds the read guard on this
-> RwShared box`. `get` / `read` nested in `read` are legal while no writer waits; past a waiting
-> writer they fault (`a lock cycle`). The re-entry text names the box kind (`Shared` or `RwShared`).
+> length-1 wait-for cycle and is a fatal `deadlock` (`"already holds the update guard"`), instead of
+> hanging or silently losing the inner write. A cross-box wait-for cycle (two boxes each written from
+> inside the other's closure) is fatal the same way; two tasks that merely contend for different
+> boxes are not a cycle and complete normally. `get` / `read` of the box from inside its **own
+> `write`** closure is fatal the same way. M3.3 (Q2): `write` or `set` nested in the same task's
+> **`read`** waits for that read, a certain deadlock (Go `RLock(); Lock()`), so it is a fatal
+> deadlock with `already holds the read guard on this RwShared box`. `get` / `read` nested in `read`
+> are legal while no writer waits; past a waiting writer they are a fatal `a lock cycle` deadlock.
+> The re-entry text names the box kind (`Shared` or `RwShared`).
 
 > **A guard wait in a task parks, as a goroutine's `sync.Mutex` wait does.** A contended
 > `set`/`update`/`write` in a spawned task or an Executor job retries for a few microseconds, then

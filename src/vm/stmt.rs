@@ -148,6 +148,7 @@ impl Vm {
     /// the join at `CHEZZI_THREADS=1`. What the aborted nurseries' children ended with is not
     /// reported: the verdict's fault stands, and its cut tasks are in the run's listing.
     pub(super) fn unwind_no_defer(&mut self, target_frame_len: usize) {
+        self.cut_held_guards(None);
         self.unwind_deferred_escaped(target_frame_len, true, false);
     }
 
@@ -173,6 +174,8 @@ impl Vm {
     /// 3. a [`Cut::Cancelled`] party lets a real cleanup fault replace the `cancelled` sentinel and,
     ///    on a cancel funnel (`report_escaped`), latches `cancel_unwind_faulted` so
     ///    `classify_mn_outcome` reports `CancelledFault`; a deadlock-marked one stays swallowed;
+    ///    a guard holder's cut already latched the run's verdict, so that run still ends fatal
+    ///    (`Vm::cut_held_guards`);
     /// 4. an own fault keeps Go's rule: the `defer`'s fault supersedes it.
     ///
     /// A drain with no cause to rank (`Op::DrainHandlerDefers`, `return_levels`,
@@ -253,7 +256,8 @@ impl Vm {
             } else if run_defers && let Some(e) = self.drain_deferred(fi, 0) {
                 err = Some(e);
             }
-            self.pop_unwound_frame(!run_defers);
+            self.cut_if_fatal([err.as_ref(), escaped_err.as_ref()]);
+            self.pop_unwound_frame();
         }
         (err, escaped_err)
     }
@@ -279,10 +283,10 @@ impl Vm {
     }
 
     /// Drop the top frame of an unwind, after its `defer`s, with the `recover:` handlers it
-    /// installed. `cut`: a deadlock verdict cut this task ([`Vm::drop_ret`]).
-    pub(super) fn pop_unwound_frame(&mut self, cut: bool) {
+    /// installed. A guard the frame holds releases as [`Vm::cut_held_guards`] marked it.
+    pub(super) fn pop_unwound_frame(&mut self) {
         let frame = self.frames.pop().unwrap();
-        self.drop_ret(frame.ret, frame.base, cut);
+        self.drop_ret(frame.ret, frame.base);
         if frame.counted {
             self.call_depth -= 1;
         }

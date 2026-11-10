@@ -14,40 +14,9 @@ fn msg_of[T](r: T!Error, where_: str) -> str:
         !e: return e.message()
     return ""
 
-# ---- rule 3: an AB-BA cycle in ONE task faults; both boxes keep serving ----
-
-fn into_a(a: Shared[int], y: int) -> int:
-    a.update(fn(z): z + 1)
-    return y
-
-fn a_then_b_then_a(a: Shared[int], b: Shared[int], x: int) -> int:
-    b.update(fn(y): into_a(a, y))
-    return x
-
-test fn ab_ba_cycle_in_one_task_faults_and_both_boxes_keep_serving():
-    a := Shared(1)
-    b := Shared(2)
-    r := recover: a.update(fn(x): a_then_b_then_a(a, b, x))
-    fault := msg_of(r, "AB-BA")
-    assert fault.contains("already holds the update guard"), fault
-    a.update(fn(x): x + 1)
-    b.update(fn(x): x + 1)
-    assert a.get() == 2 and b.get() == 3
-
-fn rinto_a(a: RwShared[int], y: int) -> int:
-    a.write(fn(z): z + 1)
-    return y
-
-fn ra_then_b_then_a(a: RwShared[int], b: RwShared[int], x: int) -> int:
-    b.write(fn(y): rinto_a(a, y))
-    return x
-
-test fn rwshared_ab_ba_cycle_in_one_task_faults():
-    a := RwShared(1)
-    b := RwShared(2)
-    r := recover: a.write(fn(x): ra_then_b_then_a(a, b, x))
-    assert msg_of(r, "AB-BA").contains("already holds the update guard")
-    assert a.get() == 1 and b.get() == 2
+# ---- rule 3: an AB-BA cycle in ONE task is a fatal deadlock ----
+# TICKET-298: `recover:` cannot catch it, so `tests/cut_release_grid.rs`
+# (`a_recovered_reentry_or_lock_cycle_is_fatal`) holds it.
 
 # ---- rule 5: what a closure may do inside the box ----
 

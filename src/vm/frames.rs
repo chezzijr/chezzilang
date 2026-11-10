@@ -801,6 +801,12 @@ impl Vm {
         self.frames.len() - self.drains.len()
     }
 
+    /// Drop the top frame of unwind `u`, through [`Vm::cut_if_fatal`].
+    fn pop_unwinding(&mut self, u: &Unwind) {
+        self.cut_if_fatal([Some(&u.rte), u.defer_err.as_ref(), u.escaped_err.as_ref()]);
+        self.pop_unwound_frame();
+    }
+
     /// Run the unwind `u` on from the top frame, frame by frame: leave each of the frame's
     /// `parallel:` levels (its body `defer`s, then the abort, innermost first; TICKET-299), abort
     /// the frame's implicit nursery ([`Vm::escaped_floor`]), run its remaining `defer`s, drop it. The dispatch loop runs a
@@ -854,7 +860,7 @@ impl Vm {
             if let Some(e) = self.drain_deferred(fi, 0) {
                 u.defer_err = Some(e);
             }
-            self.pop_unwound_frame(false);
+            self.pop_unwinding(&u);
         }
         match u.then {
             UnwindThen::Fault {
@@ -880,7 +886,7 @@ impl Vm {
         drained: Option<RuntimeError>,
     ) -> Result<(), RuntimeError> {
         u.defer_err = drained.or(u.defer_err);
-        self.pop_unwound_frame(false);
+        self.pop_unwinding(&u);
         self.unwind_on(u)
     }
 

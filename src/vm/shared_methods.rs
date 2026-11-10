@@ -151,8 +151,7 @@ impl Vm {
     ) -> Result<Value, RuntimeError> {
         let base = self.stack.len() - BOX_SLOTS;
         let h = self.stack[base].as_obj().expect("a box slot holds the box");
-        // A closure a verdict cut releases its guard as a cut one.
-        let cut = r.as_ref().is_err_and(|e| e.is_deadlock);
+        self.cut_if_fatal([r.as_ref().err()]);
         let out = r.map(|r| match call {
             BoxCall::Update => {
                 self.shared_core(h).v.set(r);
@@ -165,23 +164,46 @@ impl Vm {
             BoxCall::Read | BoxCall::RwRead => r,
         });
         self.stack.truncate(base);
-        self.box_release(call, cut);
+        self.box_release(call);
         out
     }
 
-    /// Release the innermost guard a box-closure frame holds (LIFO: box frames nest). `cut`: a
-    /// deadlock verdict cut the holder ([`core::UpdateGuard::release_cut`]).
-    pub(super) fn box_release(&mut self, call: BoxCall, cut: bool) {
+    /// THE cut of this task's held guards: each releases `CUT`. A cut at a wait latches the run's
+    /// deadlock verdict there, so the cut is fatal even for a cancelled task (TICKET-298, owner
+    /// answer 2(b)).
+    pub(super) fn cut_held_guards(&mut self, site: Option<(&'static str, Span)>) {
+        if self.held_guards.is_empty() {
+            return;
+        }
+        super::core::cut_all(&mut self.held_guards);
+        if let Some((wait, at)) = site {
+            self.quiesce.latch_holder_cut(wait, at);
+        }
+    }
+
+    /// THE funnel from the fatal marker (`RuntimeError::is_deadlock`, DEC-135) to the guards: a
+    /// frame that drops while it holds a deadlock-marked fault cuts every held guard first. A fault
+    /// is stamped at seven sites and crosses from a child by value, so the funnel sits at the four
+    /// frame drops that hold a fault (`box_done`, `return_finish`, `unwind_deferred_escaped`,
+    /// `Vm::pop_unwinding`), and a new source needs no call of its own (TICKET-298).
+    pub(super) fn cut_if_fatal<'a>(
+        &mut self,
+        faults: impl IntoIterator<Item = Option<&'a RuntimeError>>,
+    ) {
+        if faults.into_iter().flatten().any(|e| e.is_deadlock) {
+            self.cut_held_guards(None);
+        }
+    }
+
+    /// Release the innermost guard a box-closure frame holds (LIFO: box frames nest). The guard
+    /// releases as cut when [`Vm::cut_held_guards`] marked it.
+    pub(super) fn box_release(&mut self, call: BoxCall) {
         let guard = self.held_guards.pop().expect("a box frame holds a guard");
         if call.mode() == GuardMode::Read {
             let read = self.held_reads.pop();
             debug_assert_eq!(read, Some(Arc::as_ptr(guard.lock()) as usize));
         }
-        if cut {
-            guard.release_cut();
-        } else {
-            drop(guard);
-        }
+        drop(guard);
     }
 
     /// Run a box method `f` with its popped receiver `h` and `args` rooted on the operand stack.

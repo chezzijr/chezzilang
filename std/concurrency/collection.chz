@@ -21,7 +21,7 @@
 # from the first method call). `c.inner` is the box.
 #
 # REENTRANCY: like raw `RwShared`, a closure passed to `inner.write` must not re-enter the SAME box
-# (that faults with `already holds the update guard`). Every method here is flat, and a walk's
+# (that is a fatal deadlock: `already holds the update guard`). Every method here is flat, and a walk's
 # callback runs with no lock held, so it may call any method of the collection it walks.
 #
 # NOT PROVIDED: a concurrent queue is already `Channel[T]`; an atomic scalar is already `Atomic`.

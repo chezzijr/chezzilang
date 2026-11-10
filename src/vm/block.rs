@@ -605,6 +605,8 @@ pub(super) struct Waiter {
     pub(super) scope: Option<usize>,
     /// the verdict cut this waiter ([`SchedCore::cut_aborting_families`])
     pub(super) cut: bool,
+    /// the waiter holds a box guard, so the verdict never cuts it as its family's cancel
+    pub(super) holds_guard: bool,
 }
 
 impl Waiter {
@@ -703,12 +705,14 @@ impl Vm {
 
     pub(super) fn in_place_cut(&mut self, c: &SchedCore, tok: Option<u64>) -> bool {
         if c.cut_in_place() {
+            self.cut_held_guards(self.wait_site);
             return true;
         }
         if !c.waiter_cut(tok) {
             return false;
         }
         self.cut_as_cancel();
+        self.cut_held_guards(self.wait_site);
         true
     }
 
@@ -736,6 +740,7 @@ impl Vm {
             return Ok(());
         };
         drop(self.pending.take());
+        self.cut_held_guards(park_site);
         let site = match how {
             super::sched_types::VerdictCut::Family => {
                 self.cut_as_cancel();
@@ -774,6 +779,7 @@ impl Vm {
                     fiber: true,
                     scope: self.fiber_scope,
                     cut: false,
+                    holds_guard: !self.held_guards.is_empty(),
                 })),
                 Account::Inflight => {
                     sched.inflight.fetch_add(1, Ordering::Relaxed);

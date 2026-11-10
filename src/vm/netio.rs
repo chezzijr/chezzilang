@@ -220,7 +220,20 @@ impl Vm {
             }
         };
         let kind = key.lock.kind;
-        result.map_err(|cycle| match cycle {
+        result.map_err(|cycle| self.guard_cycle_err(cycle, kind, span))
+    }
+
+    /// THE fault of a lock cycle or a re-entry: a fatal deadlock, decided here, so it cuts this
+    /// task's held guards before any frame drops one (a `defer` re-entry reaches `return_finish`,
+    /// which pops the box frame first). A cancelled task's cleanup fault is swallowed (DEC-147), so
+    /// its cut latches the run's verdict at this wait; an uncancelled task's fault reports itself
+    /// (TICKET-298).
+    fn guard_cycle_err(&mut self, cycle: GuardCycle, kind: &str, span: Span) -> RuntimeError {
+        let site = self
+            .is_cancelled()
+            .then(|| (super::deadlock::Wait::guard(kind).phrase(), span));
+        self.cut_held_guards(site);
+        match cycle {
             GuardCycle::SelfHeld => self.err(
                 reentry_text("update", kind, "set/update/write", "update/write"),
                 span,
@@ -232,7 +245,8 @@ impl Vm {
                     .to_string(),
                 span,
             ),
-        })
+        }
+        .deadlock()
     }
 
     /// The `Park` half of [`Vm::take_update_guard`]: a wait that does not end at once is a
@@ -318,8 +332,8 @@ impl Vm {
         self.block_halts(span)?;
         // The sched-wide verdict cut this in-place waiter: it ends here with its own wait instead
         // of taking the guard. Both stages leave on it at once (stage 1 no longer spins to its
-        // budget first). A verdict's cut of the holder is the lock's own `CUT` (the box is no
-        // progress for a waiter, `core::UpdateGuard::release_cut`).
+        // budget first). A cut of the holder is the lock's own `CUT` (the box is no progress for a
+        // waiter, `core::UpdateGuard::mark_cut`).
         if let Some(sched) = self.mn.as_ref().map(Arc::clone)
             && self.in_place_cut(&sched.lock(), reg.tok())
         {

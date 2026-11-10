@@ -1177,6 +1177,7 @@ impl MnSched {
                     fiber: false,
                     scope: None,
                     cut: false,
+                    holds_guard: false,
                 });
             }
             // TICKET-103 — the whole family, in this same acquisition: an unmarked continuation keeps

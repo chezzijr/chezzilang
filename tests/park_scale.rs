@@ -181,12 +181,17 @@ fn main():
 main()
 ";
 
-const DEFER_CUT_ERR: &str = "runtime error (main.chz:20:13): boom
-  at <spawned task> (called at main.chz:18:9)
+/// TICKET-298 (owner answer 2(b)): the stuck `defer` holds the guard, so the verdict does not cut it
+/// as its family's cancel. It is a fatal deadlock that lists the holder at its wait.
+const DEFER_CUT_ERR: &str =
+    "runtime error (main.chz:6:10): deadlock: 1 task is blocked and cannot proceed
+  task 1: recv() on an empty channel at main.chz:6:10
+    at hold (called at main.chz:13:19)
+    at <spawned task> (called at main.chz:12:9)
 ";
 
 #[test]
-fn stuck_guard_wait_in_a_cancelled_defer_is_cut() {
+fn a_guard_holder_stuck_in_a_cancelled_defer_is_a_fatal_deadlock() {
     for t in ["1", "2", "4"] {
         let (code, out, err, _) = run("dcut", DEFER_CUT, t);
         assert_eq!(
@@ -296,9 +301,9 @@ fn nested_verdict_lists_a_parked_guard_waiter() {
     }
 }
 
-/// A test that deadlocks while it holds a module-global `Shared` leaves the box for the next test:
-/// the verdict-cut holder's release marks the box cut, and a fresh `update` takes it. The base
-/// binary's text (`96d3d719`) at T=1, 2 and 4.
+/// A test that deadlocks while it holds a module-global `Shared` leaves the box cut for the rest of
+/// the run: a later test fn that touches it fails with a deadlock at its own `update` (owner answer
+/// 1(a), TICKET-298; Go blocks every `Lock` of a `Mutex` nobody unlocked). The text at T=1, 2 and 4.
 const CUT_THEN_TEST: &str = "import Shared from std.concurrency
 s := Shared[int](0)
 fn inc(v: int) -> int:
@@ -320,13 +325,14 @@ const CUT_THEN_TEST_OUT: &str =
 blocked and cannot proceed
   task 1: recv() on an empty channel at main_test.chz:7:11
     at stuck (called at main_test.chz:11:5)
-PASS updates_after (main_test.chz)
+ERROR updates_after (main_test.chz:13:5) deadlock: 1 task is blocked and cannot proceed
+  task 1: waiting for the Shared guard at main_test.chz:13:5
 
-2 test(s): 1 passed, 0 failed, 1 errored
+2 test(s): 0 passed, 0 failed, 2 errored
 ";
 
 #[test]
-fn a_test_after_a_cut_holder_takes_the_guard() {
+fn a_test_after_a_cut_holder_cannot_take_the_guard() {
     for t in ["1", "2", "4"] {
         let dir = std::env::temp_dir().join(format!("chz-park-cuttest-{t}-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("temp dir");

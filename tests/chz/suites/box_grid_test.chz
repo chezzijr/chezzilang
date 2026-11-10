@@ -140,14 +140,6 @@ fn fault_after_push(xs: List[int]) -> List[int]:
     xs.push(1 / z)
     return xs
 
-fn set_then(s: Shared[int], x: int) -> int:
-    s.set(0)
-    return x
-
-fn update_then(s: Shared[int], x: int) -> int:
-    s.update(fn(y): y + 1)
-    return x
-
 fn push_first(xss: List[List[int]]) -> List[List[int]]:
     xss[0].push(1)
     return xss
@@ -294,24 +286,9 @@ test fn shared_captured_local_read_is_fine():
     assert s.get() == 13
     assert s.read(fn(x): x + ks[0]) == 14
 
-test fn shared_get_inside_its_own_update_faults():
-    s := Shared(10)
-    r := recover: s.update(fn(x): x + s.get())
-    fault := msg_of(r, "self get")
-    assert fault.contains("already holds the update guard"), fault
-    assert s.get() == 10
-
-test fn shared_read_set_update_inside_its_own_update_fault():
-    s := Shared(10)
-    r1 := recover: s.update(fn(x): x + s.read(fn(y): y))
-    assert msg_of(r1, "self read").contains("already holds the update guard")
-    r2 := recover: s.update(fn(x): set_then(s, x))
-    assert msg_of(r2, "self set").contains("already holds the update guard")
-    r3 := recover: s.update(fn(x): update_then(s, x))
-    assert msg_of(r3, "self update").contains("already holds the update guard")
-    r4: int! = recover: s.read(fn(x): x + s.get())
-    assert msg_of(r4, "get in read").contains("already holds the update guard")
-    assert s.get() == 10
+# A re-entry of the box's own guard (`get`, `read`, `set`, `update` inside `update`/`read`) is a fatal
+# deadlock since TICKET-298: `recover:` cannot catch it, so `tests/cut_release_grid.rs`
+# (`a_recovered_reentry_or_lock_cycle_is_fatal`) holds it.
 
 # M3.3: a print reads the box's one slot and takes no guard (Go's `fmt` takes no lock), so a box
 # prints inside its own `update`.
@@ -428,22 +405,10 @@ test fn shared_capture_stored_into_the_state_is_the_captured_object():
 #
 # `write` / `set` run like `Shared.update` / `set` (under the write guard, in place). `read(f)` and
 # `get()` take the read guard and work on the live value: a mutation inside `read` reaches the box,
-# and a `write` nested in it faults (M3.3, Q2).
-
-fn rset_then(s: RwShared[int], x: int) -> int:
-    s.set(0)
-    return x
-
-fn rwrite_then(s: RwShared[int], x: int) -> int:
-    s.write(fn(y): y + 1)
-    return x
+# and a `write` nested in it is a fatal deadlock (M3.3, Q2; TICKET-298).
 
 fn rshow_self(s: RwShared[int], x: int) -> int:
     print(s)
-    return x
-
-fn rwrite_from_read(s: RwShared[int], x: int) -> int:
-    s.write(fn(y): y + x)
     return x
 
 RLATE := RwShared(10)
@@ -557,28 +522,16 @@ test fn rwshared_read_closure_writes_its_capture():
     assert s.read(fn(x): keep(seen, x)) == 10
     assert seen == [10]
 
-test fn rwshared_get_read_set_write_inside_its_own_write_fault():
+# Q2 (M3.3): a `write` inside the same task's `read` is a certain deadlock (Go `readwrite/main.go`),
+# fatal since TICKET-298: `tests/cut_release_grid.rs` holds it. A read nested in a read is Go's
+# recursive `RLock` (`a_read_inside_a_read_of_the_same_box_is_legal`, `shared_handle_test.chz`).
+
+# A print takes no guard, so a `RwShared` prints inside its own `write` (kept from the deleted
+# `rwshared_get_read_set_write_inside_its_own_write_fault`).
+test fn rwshared_print_of_itself_inside_its_own_write_prints_the_value():
     s := RwShared(10)
-    r0 := recover: s.write(fn(x): x + s.get())
-    assert msg_of(r0, "self get").contains("already holds the update guard")
-    r1 := recover: s.write(fn(x): x + s.read(fn(y): y))
-    assert msg_of(r1, "self read").contains("already holds the update guard")
-    r2 := recover: s.write(fn(x): rset_then(s, x))
-    assert msg_of(r2, "self set").contains("already holds the update guard")
-    r3 := recover: s.write(fn(x): rwrite_then(s, x))
-    assert msg_of(r3, "self write").contains("already holds the update guard")
     s.write(fn(x): rshow_self(s, x))
     assert s.get() == 10
-
-# Q2 (M3.3): a `write` inside the same task's `read` waits for that read, a certain deadlock (Go
-# `readwrite/main.go`: `fatal error: all goroutines are asleep - deadlock!`), so it faults. A read
-# nested in a read is Go's recursive `RLock`.
-test fn rwshared_write_nested_in_read_faults():
-    s := RwShared(10)
-    r := recover: s.read(fn(x): rwrite_from_read(s, x))
-    assert msg_of(r, "write in read").contains("already holds the read guard on this RwShared box")
-    assert s.get() == 10
-    assert s.read(fn(x): x + s.get()) == 20
 
 test fn rwshared_get_result_is_the_live_value():
     s: RwShared[List[int]] = RwShared([1])

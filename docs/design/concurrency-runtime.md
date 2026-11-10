@@ -121,8 +121,8 @@ count. Every cell with a cut feeder of a plain channel is a deadlock fault.
 
 **A fiber's guard wait parks (2026-11-08), as a goroutine's `sync.Mutex` wait does.** A contended
 `set`/`update`/`write` in a fiber (the `Park` cell) retries its take a few times (a few
-microseconds, as Go spins), then files its wait-for edge (`GuardGraph::waiting`, so AB-BA still
-faults `a lock cycle`), lists its sched with the box (`BoxLock::park_waiter`) and parks
+microseconds, as Go spins), then files its wait-for edge (`GuardGraph::waiting`, so AB-BA
+is still a fatal `a lock cycle` deadlock), lists its sched with the box (`BoxLock::park_waiter`) and parks
 (`ParkedEntry::Guard`). Its `WaitTicket` travels in the task's `FiberCtx` (`Vm::guard_ticket`), so a
 parked writer stays counted (writer preference) and a parked reader keeps its admission; the rewound
 method call re-runs and takes the box through that ticket. A release (`release_write`, the last
@@ -131,15 +131,15 @@ wake that finds the sched's core lock held hops to the timer thread). The verdic
 waiter the same question as an in-place one (`core::wait_may_end`). 200 waiters at `--threads=2`:
 `demotes=0` (`tests/park_scale.rs`; base 199).
 
-A holder that a deadlock verdict cut never released its guard, as a deadlocked goroutine never
-unlocks its `sync.Mutex`: its release (any release on the verdict's fault: the deadlock unwind, a cut `defer`, a closure
+A holder that a deadlock cut never released its guard, as a deadlocked goroutine never
+unlocks its `sync.Mutex`: its release (any release the cut marks: the deadlock unwind, a cut `defer`, a closure
 that is not a frame; or the verdict's drop of a parked holder's context, `record_deadlocked`) frees the box with the `CUT` bit of its lock word
-set (`UpdateGuard::release_cut`). A waiter, parked or in place, does not take a `CUT` box, so it
-stays blocked and the next verdict lists it; a cut write release admits no waiting reader and wakes
-nobody, and a waiting writer that leaves wakes the box's waiters only when the box looks free (a
-woken parked waiter is runnable, which the verdict reads as progress). Any take
-clears the bit, and a fresh acquire may take the box, so a `chezzi test` after a deadlocked test
-still uses a module-global `Shared`.
+set (`UpdateGuard::mark_cut`, set by `Vm::cut_held_guards` or `Vm::cut_if_fatal`). No task takes a `CUT` box again
+for the rest of the run, a waiter, a fresh acquire and a later `chezzi test` fn alike (Go blocks every `Lock` of a
+`Mutex` nobody unlocks, TICKET-298), so a waiter stays blocked and the next verdict lists it; a cut write release
+admits no waiting reader and wakes nobody, and a waiting writer that leaves wakes the box's waiters only when the
+box looks free (a woken parked waiter is runnable, which the verdict reads as progress). A test fn that touches a
+box a deadlocked test left cut errors with a deadlock at its own `update`.
 
 The other contexts wait in place (`main`, the builder, an eager job, a fiber inside a nested native
 callback). Such a waiter waits for the guard to come FREE holding no width permit, then takes the
