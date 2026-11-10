@@ -1066,6 +1066,11 @@ fn self_keyword_cells() -> Vec<Cell> {
         ("import_as", "import lib as Self\nprint(1)\n"),
         ("field", "struct P:\n    Self: int\nprint(1)\n"),
         ("variant", "enum E:\n    Self\nprint(1)\n"),
+        ("typed_let", "Self: int = 1\nprint(1)\n"),
+        (
+            "typed_let_in_fn",
+            "fn main():\n    Self: int = 1\n    print(1)\nmain()\n",
+        ),
     ];
     for (tag, src) in decls {
         cells.push(files(

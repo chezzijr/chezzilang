@@ -449,7 +449,7 @@ impl Parser {
         // typed let: `name: Type = value`
         if matches!(
             self.peek(),
-            Token::Ident(_) | Token::True | Token::False | Token::NoneKw
+            Token::Ident(_) | Token::True | Token::False | Token::NoneKw | Token::SelfKw
         ) && self.peek_at(1) == &Token::Colon
         {
             // Capture the binding-name token span (parallel to `names`) for decl-site hover.

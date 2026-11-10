@@ -107,7 +107,7 @@ its std module: `Add`, `Sub`, `Mul`, `Div`, `Mod`, `Neg`, `BitAnd`, `BitOr`, `Bi
   `fs.exists(b"x")` and `fs.exists(p)` all work. See [`stdlib.md`](../stdlib/01-builtins.md).
 - A new protocol that does not back syntax belongs in its owning module, imported by its consumers.
 
-**A keyword cannot be bound, by any form.** `None`, `true`, `false` and the other keywords are rejected
+**A keyword cannot be bound, by any form.** `None`, `Self`, `true`, `false` and the other keywords are rejected
 wherever a name is declared (a `:=` or typed binding, a destructuring target, a parameter, a loop or
 comprehension variable, an `else` or `wait`-arm binder, a fn, type, field, variant or generic-parameter
 name, an import alias), with one message:
