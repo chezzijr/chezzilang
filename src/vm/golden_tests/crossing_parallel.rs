@@ -1448,7 +1448,7 @@ fn parallel_level_leave_order_at_every_exit_and_recover_site() {
                 // `return` cannot leave a `recover:` block: the checker rejects these two programs.
                 if let (Exit::Return, Place::SameFrame | Place::Nested) = (exit, place) {
                     let why = leave_check_errors(&leave_program(exit, place));
-                    if !why.contains("is not allowed inside a recover block") {
+                    if !(why.contains("'return'") && why.contains("recover block")) {
                         red.push(format!("T={t} {exit:?}/{place:?}: not rejected: {why:?}"));
                     }
                     continue;
