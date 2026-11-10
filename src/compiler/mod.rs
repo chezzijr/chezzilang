@@ -349,14 +349,6 @@ struct Compiler {
     /// M24 — the witness params for the NEXT `compile_fn_body`, set only at the module-level `fn`
     /// emit site (so a nested `fn` sharing a top-level fn's name can never inherit its arity).
     pending_witnesses: Vec<String>,
-    /// M24 Task 3 — the CURRENT module's `from`-imported FUNCTION names: bound name (the `as` alias
-    /// when there is one) → `(declaring module index, declared name)`. Rebuilt per `compile_module`.
-    /// [`crate::checker::WitnessTable::fns`] is keyed by the DECLARING module, so a bare call to an
-    /// imported fn must be resolved through this before it can be read — with this module's own index
-    /// the entry is simply missing, which is how a cross-module witness call used to lower one
-    /// argument short. A name this module declares as a top-level `fn` is never in here (the checker
-    /// rejects that collision outright), so a local fn always wins by construction.
-    imported_fns: HashMap<String, (usize, String)>,
     /// String-interpolation fragment discriminators for the [`crate::checker::WitnessKey`] and
     /// [`crate::checker::CarrierKey`]: the
     /// whole-string span + the fragment's 0-based ordinal, maintained (save/restore) around each
@@ -601,7 +593,6 @@ impl Compiler {
             wraps: crate::checker::WrapTable::new(),
             witness_locals: Vec::new(),
             pending_witnesses: Vec::new(),
-            imported_fns: HashMap::new(),
             kw_frag_ctx: crate::lexer::Span::default(),
             kw_frag_ord: 0,
         }
@@ -858,7 +849,6 @@ impl Compiler {
         // qualified `geo.Point(...)` resolves to the right module's runtime key.
         self.current_module_idx = module_idx;
         self.imported_modules.clear();
-        self.imported_fns.clear();
         for imp in imports {
             match &imp.import {
                 Import::Module { path, alias, .. } => {
@@ -871,18 +861,8 @@ impl Compiler {
                 }
                 // The resolver never resolves a variant import, so none reaches here.
                 Import::Variants { .. } => {}
-                Import::From { names, .. } => {
-                    if let Some(tidx) = self.program.module_index(&imp.target) {
-                        for (member, alias) in names {
-                            let bind = alias.clone().unwrap_or_else(|| member.clone());
-                            // Remember where every from-imported member was DECLARED, so a call
-                            // site can read the callee's witness arity out of the checker's
-                            // declaring-module-keyed table (M24 Task 3). A bind that is only a
-                            // type is never a witness callee.
-                            self.imported_fns.insert(bind, (tidx, member.clone()));
-                        }
-                    }
-                }
+                // A from-import's callee is answered by its recorded Resolution.
+                Import::From { .. } => {}
             }
         }
         // Compile struct methods first, recording their proto ids + this module as their home.

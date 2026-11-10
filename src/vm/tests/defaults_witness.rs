@@ -1452,3 +1452,70 @@ fn extern_qualified_width_alias_param_runs() {
     );
     assert_eq!(vm_out, "7\n");
 }
+
+/// TICKET-300 -- a nested body's call to a plain fn through a full module path (`a.b.plain(x)`)
+/// reads the checker's recorded Resolution, so the closure captures no witness. Red while a
+/// field-headed callee keeps every witness.
+#[test]
+fn a_nested_full_path_call_to_a_plain_fn_captures_no_witness() {
+    let dir = std::env::temp_dir().join(format!("chezzi_t300_wit_{}", std::process::id()));
+    std::fs::create_dir_all(dir.join("a")).expect("mkdir");
+    std::fs::write(
+        dir.join("a/b.chz"),
+        "fn plain(x: int) -> int:\n    return x + 1\n",
+    )
+    .expect("write");
+    let main = dir.join("main.chz");
+    let src = format!(
+        "import a.b\n{W_PRELUDE}fn outer[T: Default](x: int) -> int:\n    c := T.default()\n    \
+         f := fn(): a.b.plain(x)\n    return f() + c.n\nprint(outer[Counter](1))\n"
+    );
+    std::fs::write(&main, src).expect("write");
+    let graph = crate::resolver::build_graph(&main).expect("graph");
+    let program = crate::compiler::compile_graph(&graph).expect("compile");
+    let caps: Vec<Vec<String>> = program
+        .protos
+        .iter()
+        .filter(|p| p.name == "<closure>" && p.capture_names.iter().any(|n| n == "x"))
+        .map(|p| p.capture_names.clone())
+        .collect();
+    assert_eq!(caps.len(), 1, "one closure proto captures x");
+    assert!(
+        !caps[0].iter().any(|n| n.starts_with("$w:")),
+        "a full-path call to a plain fn reaches no witness: {:?}",
+        caps[0]
+    );
+}
+
+/// TICKET-300 -- the other side of the line: a nested body's call through a full module path to a
+/// fn that DOES take a witness (`a.b.build(v)`) keeps the witness, so the program runs. Fails
+/// with "no type witness in scope to forward" if `call_may_take_witnesses` answers no for it.
+#[test]
+fn a_nested_full_path_call_to_a_witness_fn_keeps_the_witness() {
+    let dir = std::env::temp_dir().join(format!("chezzi_t300_wit_keep_{}", std::process::id()));
+    std::fs::create_dir_all(dir.join("a")).expect("mkdir");
+    std::fs::write(
+        dir.join("a/b.chz"),
+        "protocol Default:\n    fn default() -> Self\n\
+         struct Counter:\n    n: int\n    fn default() -> Counter:\n        return Counter(0)\n\
+         fn build[T: Default](old: T) -> T:\n    return T.default()\n",
+    )
+    .expect("write");
+    let entry = dir.join("main.chz");
+    std::fs::write(
+        &entry,
+        "import a.b\nimport Counter, Default from a.b\n\
+         fn outer[T: Default](v: T) -> int:\n    f := fn(): a.b.build(v)\n    g := f()\n    \
+         return 14\nprint(outer(Counter(1)))\n",
+    )
+    .expect("write");
+    let graph = crate::resolver::build_graph(&entry).expect("resolve");
+    if let Err(errs) = crate::checker::check_graph(&graph) {
+        let _ = std::fs::remove_dir_all(&dir);
+        panic!("program must type-check, got: {errs:?}");
+    }
+    let (vo, _ve, vr, _vc) = run_file(&entry);
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(vr.is_ok(), "VM faulted: {vr:?}");
+    assert_eq!(vo, "14\n", "VM output");
+}

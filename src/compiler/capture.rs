@@ -457,6 +457,8 @@ pub(crate) struct MemberCall {
 /// `module.name` pair (every other callee shape — a method receiver, an indexed value, a closure
 /// result — records nothing and is invisible to the readers of this channel).
 pub(crate) struct CallSite {
+    /// The callee expression's node, whose recorded Resolution answers what the call names.
+    pub callee: crate::ast::NodeId,
     /// `Some(m)` for `m.f(…)`, `None` for a bare `f(…)`.
     pub module: Option<String>,
     /// The callee name `f`.
@@ -497,6 +499,17 @@ pub(super) fn record_call_site(
             }
             match &obj.kind {
                 ExprKind::Ident(m) if !bound.contains(m) => (Some(m.clone()), name.clone()),
+                // A dotted head (`a.b.f(..)`): the module spelling a full path binds. The compiler
+                // decides what it names from the callee's recorded Resolution.
+                ExprKind::Field { .. } => match crate::ast::dotted_path(obj) {
+                    Some(p) if !bound.contains(p.split('.').next().unwrap_or(&p)) => {
+                        (Some(p), name.clone())
+                    }
+                    Some(_) | None => {
+                        out.opaque_calls = true;
+                        return;
+                    }
+                },
                 ExprKind::Int(_)
                 | ExprKind::Float(_)
                 | ExprKind::Str(_)
@@ -517,7 +530,6 @@ pub(super) fn record_call_site(
                 | ExprKind::Compare { .. }
                 | ExprKind::Range { .. }
                 | ExprKind::Call { .. }
-                | ExprKind::Field { .. }
                 | ExprKind::Index { .. }
                 | ExprKind::Try(_)
                 | ExprKind::OptChain { .. }
@@ -566,6 +578,7 @@ pub(super) fn record_call_site(
         }
     };
     out.calls.push(CallSite {
+        callee: callee.id,
         module,
         name,
         closed_arg_heads: closed_arg_heads(args, named, type_args, bound),
@@ -701,7 +714,8 @@ pub(super) fn closed_expr(e: &Expr, bound: &HashSet<String>, heads: &mut Vec<Str
 
 /// M24-2 — can this nested body (closure, nested `fn`, `spawn:`/`defer:` block) REACH a witness for
 /// the enclosing frame's type param `t`? `free` is the body's already-computed free-name walk;
-/// `is_witness_fn` answers "could a call spelled `(module, name)` take hidden witness arguments?".
+/// `is_witness_fn` answers "could this recorded call take hidden witness arguments?" from the
+/// call's own recorded Resolution (`CallSite::callee`), never from its spelling.
 ///
 /// **The invariant: the compiler captures `$w:t` into a nested body whenever that body can reach a
 /// witness for `t`.** `$w:` is unspellable (`$` is not an identifier character), so a body reaches a
@@ -712,23 +726,22 @@ pub(super) fn closed_expr(e: &Expr, bound: &HashSet<String>, heads: &mut Vec<Str
 ///   receiver, an indexed head, a call result, a name bound inside the body): always yes;
 /// * `free.calls` — a classified `f(…)` / `head.f(…)`, put to `is_witness_fn`.
 ///
-/// `is_witness_fn` (`Compiler::call_may_take_witnesses`) answers NO in exactly ONE case: a BARE-IDENT
-/// callee `f(…)` whose resolved key is absent from [`crate::checker::WitnessTable::fns`] — i.e. a
-/// callee the compiler itself would thread no witness into at a real call site. A bare ident is the
-/// only head this walk resolves the way the emitter does, because a bare call carries no head to
-/// misread.
+/// `is_witness_fn` (`Compiler::call_may_take_witnesses`) reads the checker's recorded Resolution of
+/// the callee (TICKET-300). It answers NO in exactly ONE case: a call the checker resolved to a
+/// module-level fn (`f(…)`, `m.f(…)`, `a.b.f(…)`) whose declaring-module key is absent from
+/// [`crate::checker::WitnessTable::fns`] — a callee the compiler itself would thread no witness
+/// into at a real call site. The earlier version answered from the call's SPELLING and so kept every
+/// witness for any field-headed call.
 ///
-/// EVERY field-headed call `X.f(…)` answers yes, whatever `X` turns out to name — an imported module,
-/// a TYPE, a receiver value, or a module name shadowed by an enclosing binding. The walk cannot tell
-/// those apart (its `bound` set holds only names bound INSIDE the body, and it sees no type
-/// namespace), and a Task-5 MEMBER witness call is keyed on the method-name token, a coordinate it
-/// does not carry, while naming `T` only as a type ARGUMENT, which is not a free name. Two earlier
-/// cuts tried to classify the head and each shipped a check-ok/run-fault; not classifying it at all
-/// is what makes the disjunction exhaustive rather than merely untested.
+/// Every other field-headed call `X.f(…)` answers yes, whatever `X` turns out to name — a TYPE, a
+/// receiver value, a type parameter: the checker records no module fn for it, and a Task-5 MEMBER
+/// witness call is keyed on the method-name token, a coordinate this walk does not carry, while
+/// naming `T` only as a type ARGUMENT, which is not a free name. A call with no recorded Resolution
+/// (a SYNTH callee, or a body the checker did not resolve) answers yes too.
 ///
-/// The narrowing that remains is therefore modest and worth stating exactly: a nested body keeps
-/// every witness unless it does only arithmetic, indexing, literal/name work and bare calls to
-/// non-witness fns. Any `x.m(…)`, `a.b.c()`, `xs[i].m()`, `f()()` or `a?.m()` keeps them all.
+/// The narrowing is therefore: a nested body keeps every witness unless it does only arithmetic,
+/// indexing, literal/name work and calls the checker resolved to non-witness module fns. Any
+/// `x.m(…)`, `xs[i].m()`, `f()()` or `a?.m()` keeps them all.
 ///
 /// [`free_names_block`]/[`free_names_expr`] flatten every nested body's names AND calls into the
 /// enclosing walk, so a `t.default()` two levels down keeps the outer capture alive. Hence
@@ -740,14 +753,9 @@ pub(super) fn closed_expr(e: &Expr, bound: &HashSet<String>, heads: &mut Vec<Str
 pub(crate) fn nested_body_needs_witness(
     free: &FreeNames,
     t: &str,
-    is_witness_fn: &dyn Fn(Option<&str>, &str) -> bool,
+    is_witness_fn: &dyn Fn(&CallSite) -> bool,
 ) -> bool {
-    free.names.contains(t)
-        || free.opaque_calls
-        || free
-            .calls
-            .iter()
-            .any(|c| is_witness_fn(c.module.as_deref(), &c.name))
+    free.names.contains(t) || free.opaque_calls || free.calls.iter().any(is_witness_fn)
 }
 
 /// [`free_names_block`] for callers that want only the free-variable set.

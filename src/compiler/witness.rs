@@ -375,9 +375,9 @@ impl Compiler {
 
     /// M24 Task 3 — does the fn a call site NAMES take hidden trailing witness params?
     /// [`crate::checker::WitnessTable::fns`] is keyed by the module that DECLARES the fn, so the
-    /// call site's own index is only right for a local callee; a `from`-imported one resolves through
-    /// [`Self::imported_fns`] and a qualified one (`lib.reset(...)`) through the module bind. Callees
-    /// this cannot classify (a value, a method, a local shadow) answer `false` — and the stray-entry
+    /// call site's own index is only right for a local callee; the callee's recorded [`Resolution`]
+    /// names the declaring module for a `from`-imported fn and for a qualified one (`lib.reset(...)`).
+    /// Callees this cannot classify (a value, a method, a local shadow) answer `false` — and the stray-entry
     /// guard in [`Self::witness_srcs`] is what keeps such a miss loud instead of one `argc` short.
     fn callee_takes_witnesses(&self, callee: &Expr) -> Result<bool, CompileError> {
         Ok(self
@@ -391,50 +391,9 @@ impl Compiler {
     /// module-level fn.
     fn witness_fn_key(&self, callee: &Expr) -> Result<Option<(usize, String)>, CompileError> {
         Ok(match &callee.kind {
-            ExprKind::Ident(_) => match self.resolution(callee)? {
-                Resolution::Fn { module, name } => Some((*module, name.clone())),
-                Resolution::Local
-                | Resolution::Global { .. }
-                | Resolution::Builtin(_)
-                | Resolution::StructCtor(_)
-                | Resolution::Provider
-                | Resolution::ParamMethodFn { .. }
-                | Resolution::IndexCall
-                | Resolution::Variant { .. }
-                | Resolution::MethodFn { .. }
-                | Resolution::NativeStatic(_)
-                | Resolution::VariantFn { .. }
-                | Resolution::WitnessStatic(_)
-                | Resolution::ModuleMember { .. }
-                | Resolution::Module(_)
-                | Resolution::Member
-                | Resolution::PatBinding
-                | Resolution::PatStruct(_)
-                | Resolution::Decode(_) => None,
-            },
+            ExprKind::Ident(_) => Self::witness_key_of(self.resolution(callee)?, false),
             ExprKind::Field { name, .. } if !crate::ast::is_tuple_index(name) => {
-                match self.resolution(callee)? {
-                    Resolution::ModuleMember { module, name } | Resolution::Fn { module, name } => {
-                        Some((*module, name.clone()))
-                    }
-                    Resolution::Local
-                    | Resolution::Global { .. }
-                    | Resolution::Builtin(_)
-                    | Resolution::StructCtor(_)
-                    | Resolution::Provider
-                    | Resolution::ParamMethodFn { .. }
-                    | Resolution::IndexCall
-                    | Resolution::Variant { .. }
-                    | Resolution::MethodFn { .. }
-                    | Resolution::NativeStatic(_)
-                    | Resolution::VariantFn { .. }
-                    | Resolution::WitnessStatic(_)
-                    | Resolution::Module(_)
-                    | Resolution::Member
-                    | Resolution::PatBinding
-                    | Resolution::PatStruct(_)
-                    | Resolution::Decode(_) => None,
-                }
+                Self::witness_key_of(self.resolution(callee)?, true)
             }
             ExprKind::Int(_)
             | ExprKind::Float(_)
@@ -468,42 +427,51 @@ impl Compiler {
         })
     }
 
-    /// The module-resolution half of [`Self::witness_fn_key`], for a callee already reduced to the
-    /// `(module, name)` pair a [`CallSite`] carries. `None` for a qualified head that names no
-    /// imported module (a receiver value, or a type).
-    fn witness_fn_key_named(&self, module: Option<&str>, name: &str) -> Option<(usize, String)> {
-        match module {
-            None => Some(
-                self.imported_fns
-                    .get(name)
-                    .cloned()
-                    .unwrap_or((self.current_module_idx, name.to_string())),
-            ),
-            Some(m) => self
-                .imported_modules
-                .get(m)
-                .map(|&idx| (idx, name.to_string())),
+    /// The `(module index, fn name)` a callee's recorded [`Resolution`] names as a module-level fn,
+    /// the key [`crate::checker::WitnessTable::fns`] uses. `field` is true for a field-headed
+    /// callee, the only shape whose `ModuleMember` is a call on a module (`lib.reset(..)`).
+    fn witness_key_of(r: &Resolution, field: bool) -> Option<(usize, String)> {
+        match r {
+            Resolution::Fn { module, name } => Some((*module, name.clone())),
+            Resolution::ModuleMember { module, name } if field => Some((*module, name.clone())),
+            Resolution::ModuleMember { .. }
+            | Resolution::Local
+            | Resolution::Global { .. }
+            | Resolution::Builtin(_)
+            | Resolution::StructCtor(_)
+            | Resolution::Provider
+            | Resolution::ParamMethodFn { .. }
+            | Resolution::IndexCall
+            | Resolution::Variant { .. }
+            | Resolution::MethodFn { .. }
+            | Resolution::NativeStatic(_)
+            | Resolution::VariantFn { .. }
+            | Resolution::WitnessStatic(_)
+            | Resolution::Module(_)
+            | Resolution::Member
+            | Resolution::PatBinding
+            | Resolution::PatStruct(_)
+            | Resolution::Decode(_) => None,
         }
     }
 
-    /// M24-2 — could a call the free-name walk recorded as `name(…)` / `head.name(…)` take hidden
-    /// witness arguments? The [`nested_body_needs_witness`] lookup.
+    /// M24-2 -- could this call, which the free-name walk recorded, take hidden witness arguments?
+    /// The [`nested_body_needs_witness`] lookup. It reads the callee's recorded [`Resolution`]
+    /// (TICKET-300), never its spelling.
     ///
-    /// A FIELD-HEADED call always answers yes. What the head `X` in `X.name(…)` denotes — an imported
-    /// module, a struct/enum TYPE, a receiver value, or a module name shadowed by an enclosing
-    /// binding — is a question about the enclosing scopes and the type namespace that this syntactic
-    /// walk does not carry, and two rounds of guessing at it each shipped a check-ok/run-fault (a
-    /// shadowing param, then a type named like an imported module). Answering yes for every head
-    /// retires the whole class by construction: there is no head shape left to classify.
-    ///
-    /// So a NO comes only from a BARE-IDENT callee, resolved through the real
-    /// [`crate::checker::WitnessTable::fns`] table — a call the compiler itself would thread no
-    /// witness into at a real call site.
-    fn call_may_take_witnesses(&self, module: Option<&str>, name: &str) -> bool {
-        module.is_some()
-            || self
-                .witness_fn_key_named(None, name)
-                .is_some_and(|k| self.witnesses.fns.contains_key(&k))
+    /// A miss keeps every witness (a SYNTH callee, or a body the checker did not resolve). A
+    /// field-headed call answers no only when the checker resolved it to a module fn the witness
+    /// table does not list; every other head (a type, a receiver, a type parameter) keeps the
+    /// witness, as before. A bare call answers no when it resolved to a module fn the table does
+    /// not list, or to anything that is not a module fn.
+    fn call_may_take_witnesses(&self, c: &CallSite) -> bool {
+        match self.resolutions.get(&(self.current_module_idx, c.callee.0)) {
+            None => true,
+            Some(r) => match Self::witness_key_of(r, c.module.is_some()) {
+                Some(k) => self.witnesses.fns.contains_key(&k),
+                None => c.module.is_some(),
+            },
+        }
     }
 
     /// M24 Task 4 — append the enclosing frame's hidden `$w:T` bindings to a nested body's capture
@@ -532,7 +500,7 @@ impl Compiler {
                     // whose type param `witness_tag_param` reads back.
                     Some(tag) => free.is_none_or(|f| {
                         let t = crate::checker::witness_tag_param(tag);
-                        nested_body_needs_witness(f, t, &|m, n| self.call_may_take_witnesses(m, n))
+                        nested_body_needs_witness(f, t, &|c| self.call_may_take_witnesses(c))
                     }),
                     None => false,
                 })
