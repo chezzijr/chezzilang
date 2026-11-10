@@ -2,6 +2,7 @@
 //! escape, M:N and eager nurseries.
 //! Split out of `src/vm/sched.rs`. `super::*` is the parent module.
 
+use super::frames::Unwind;
 use super::sched::JoinCover;
 use super::sched::NestedDrainerSlot;
 use super::sched::SpawnHead;
@@ -24,6 +25,8 @@ pub(super) struct LevelFloor {
 pub(super) enum LevelThen {
     /// `return` and function-scoped `?` ([`Vm::return_levels`]); `err`: the fault in hand.
     Return { err: Option<RuntimeError> },
+    /// A fault or cancel unwind ([`Vm::unwind_on`]) leaves the top level of the frame it is at.
+    Unwind(Box<Unwind>),
 }
 
 impl LevelThen {
@@ -32,6 +35,7 @@ impl LevelThen {
     pub(super) fn unwinds(&self) -> bool {
         match self {
             LevelThen::Return { .. } => false,
+            LevelThen::Unwind(_) => true,
         }
     }
 }
@@ -464,6 +468,14 @@ impl Vm {
         self.drain_then(floor.defers, DrainCont::Level { top, then })
     }
 
+    /// [`Vm::leave_level`]'s drain on the Rust stack, for an unwind that runs `defer`s there; the
+    /// latest fault of the level's body `defer`s.
+    pub(super) fn leave_level_now(&mut self, fi: usize) -> Option<RuntimeError> {
+        let floor = self.nursery_defer_floors[self.nurseries.len() - 1];
+        self.frames[fi].defer_markers.truncate(floor.markers);
+        self.drain_deferred(fi, floor.defers)
+    }
+
     /// [`Vm::leave_level`] after level `top`'s body `defer`s ran (`err`: their latest fault).
     pub(super) fn level_drained(
         &mut self,
@@ -479,6 +491,7 @@ impl Vm {
                 }
                 self.return_levels(err)
             }
+            LevelThen::Unwind(u) => self.unwind_level_drained(*u, err),
         }
     }
 

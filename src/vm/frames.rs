@@ -758,9 +758,10 @@ impl Vm {
             _ => base_level,
         };
         // A genuine fault (not a B3.4 cancel / `std.os.exit`, both handled above) cancels-and-
-        // reports each unwound frame's escaped nurseries — emitted PER FRAME, BEFORE that
-        // frame's `defer`s (each nursery reports as the body unwinds, then the frame's defers
-        // run). `unwind_deferred` does the interleaving; this covers BOTH the uncaught arm
+        // reports each unwound frame's escaped nurseries — emitted PER FRAME: each `parallel:`
+        // level runs its body `defer`s, then is aborted, innermost first (TICKET-299); then the
+        // frame's implicit nursery is aborted and its remaining `defer`s run. `unwind_deferred`
+        // does the interleaving; this covers BOTH the uncaught arm
         // (no handler) and the frames discarded above a catching `recover:`.
         // TICKET-152 (W14-37): a FATAL deadlock drops its frames without running their
         // `defer`s, as Go's all-goroutines-asleep abort does (parked siblings already run
@@ -790,8 +791,9 @@ impl Vm {
         self.frames.len() - self.drains.len()
     }
 
-    /// Run the unwind `u` on from the top frame, frame by frame: report the frame's escaped
-    /// nurseries ([`Vm::escaped_floor`]), run its `defer`s, drop it. The dispatch loop runs a
+    /// Run the unwind `u` on from the top frame, frame by frame: leave each of the frame's
+    /// `parallel:` levels (its body `defer`s, then the abort, innermost first; TICKET-299), abort
+    /// the frame's implicit nursery ([`Vm::escaped_floor`]), run its remaining `defer`s, drop it. The dispatch loop runs a
     /// frame's `defer`s as a drain ([`Vm::drain_then`], [`DrainCont::Unwind`] resumes here after
     /// it); under a synchronous native caller they run on the Rust stack. At a fiber's outermost
     /// loop it parks at a fiber-owned nursery that is not done ([`FaultPark::Unwind`]) and
@@ -800,6 +802,27 @@ impl Vm {
         let park = u.parks();
         while self.frames.len() > u.target {
             let fi = self.frames.len() - 1;
+            // TICKET-299: a `parallel:` level of the frame runs its body `defer`s, then its abort,
+            // innermost first (`Vm::leave_level`); the frame's implicit nursery and `defer`s follow.
+            if self.nurseries.len() > self.level_floor(fi) {
+                let top = self.nurseries.len() - 1;
+                if self.drains_on_frames()
+                    && self.frames[fi].deferred.len() > self.nursery_defer_floors[top].defers
+                {
+                    return self.leave_level(LevelThen::Unwind(Box::new(u)));
+                }
+                if let Some(e) = self.leave_level_now(fi) {
+                    u.defer_err = Some(e);
+                }
+                if park && let Some(origin) = self.park_abort_origin(top) {
+                    self.join_suspend = Some(origin);
+                    self.fault_park = Some(FaultPark::Unwind(u));
+                    return Ok(());
+                }
+                let child = self.drain_escaped_nursery(top);
+                u.escaped_err = u.escaped_err.or(child);
+                continue;
+            }
             let floor = self.escaped_floor(fi);
             // TICKET-287 — a fiber-owned escaped nursery that is not done stops the unwind BEFORE
             // this frame's abort and `defer`s.
@@ -843,6 +866,17 @@ impl Vm {
     ) -> Result<(), RuntimeError> {
         u.defer_err = drained.or(u.defer_err);
         self.pop_unwound_frame(false);
+        self.unwind_on(u)
+    }
+
+    /// [`Vm::unwind_on`] after a level's body `defer`s ran on a drain (`drained`: their latest
+    /// fault): go on at the same frame, which now parks at or aborts that level.
+    pub(super) fn unwind_level_drained(
+        &mut self,
+        mut u: Unwind,
+        drained: Option<RuntimeError>,
+    ) -> Result<(), RuntimeError> {
+        u.defer_err = drained.or(u.defer_err);
         self.unwind_on(u)
     }
 

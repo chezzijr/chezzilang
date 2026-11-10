@@ -211,8 +211,13 @@ impl Vm {
     ///
     /// The synchronous unwind: a hard halt's, a fatal deadlock's, and a bypass inside a nested loop.
     /// A fault's or a cancel's unwind runs its `defer`s on the dispatch loop ([`Vm::unwind_on`]);
-    /// both report each frame's escaped nurseries above [`Vm::escaped_floor`] before its `defer`s
-    /// and drop it with [`Vm::pop_unwound_frame`]. A drain
+    /// both leave each of a frame's `parallel:` levels (its body `defer`s, then the abort,
+    /// innermost first; TICKET-299), report the frame's other escaped nurseries above
+    /// [`Vm::escaped_floor`] before its remaining `defer`s and drop it with
+    /// [`Vm::pop_unwound_frame`]. A hard halt in a task that is not cancelled passes
+    /// `report_escaped == false` (TICKET-135): it runs every `defer` of the frame, the levels' body
+    /// `defer`s innermost first, and joins no level. A hard halt in a cancelled task
+    /// (`worker_loop.rs`, the offloaded-sleep halt arm) passes `true` and leaves each level here. A drain
     /// trampoline met on the way ends its drain ([`Vm::drop_drain_frame`]): the fault its records
     /// raised ranks as a `defer` fault of this unwind.
     pub(super) fn unwind_deferred_escaped(
@@ -225,6 +230,18 @@ impl Vm {
         let mut escaped_err: Option<RuntimeError> = None;
         while self.frames.len() > target_frame_len {
             let fi = self.frames.len() - 1;
+            // TICKET-299: each `parallel:` level of the frame runs its body `defer`s, then is aborted,
+            // innermost first (DEC-152: none of it on a fatal deadlock).
+            if report_escaped && run_defers {
+                while self.nurseries.len() > self.level_floor(fi) {
+                    let top = self.nurseries.len() - 1;
+                    if let Some(e) = self.leave_level_now(fi) {
+                        err = Some(e);
+                    }
+                    let child = self.drain_escaped_nursery(top);
+                    escaped_err = escaped_err.or(child);
+                }
+            }
             if report_escaped {
                 let child = self.drain_escaped_nursery(self.escaped_floor(fi));
                 escaped_err = escaped_err.or(child);
