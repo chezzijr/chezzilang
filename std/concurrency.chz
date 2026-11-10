@@ -33,8 +33,7 @@
 # A closure given to `update` / `read` is an ordinary call in the caller's task: its captures are
 # the caller's bindings. It may block (a channel wait, a sleep); the guard stays with the task.
 # `get` / `read` / `set` / `update` of a box from inside that box's own `update` / `read` closure
-# is a fatal deadlock (`already holds the update guard`); no `recover:` catches it. A slow closure
-# blocks every other user of the box.
+# is a fatal deadlock (`already holds the update guard`), uncatchable by `recover:`. A slow closure blocks it.
 # `StructuralEq` -- the SEALED bound an `Atomic[T]` payload parameter must carry (TICKET-250). A type
 # satisfies it only when `==` on it is structural: it reaches no type that has the `eq` hook. The
 # checker answers that itself, so the body is empty. `Atomic.cas` compares stored values
