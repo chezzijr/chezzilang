@@ -1318,19 +1318,19 @@ fn null_coalesce_operand_error_is_reported_exactly_once() {
 
 #[test]
 fn opt_chain_on_non_option_does_not_leak_temp_name() {
-    // `x?.f` on a non-Option is an error, but the desugared match's internal `__opt` binding must
-    // NOT leak into a spurious "unknown name '__opt…'" cascade.
+    // `x?.f` on a non-Option is an error, but the desugared match's internal `$opt` binding must
+    // NOT leak into a spurious "unknown name '$opt…'" cascade.
     let errs = check_desugared("x := 5\ny := x?.f\n");
     assert!(!errs.is_empty(), "non-option opt-chain should error");
     assert!(
         !errs.iter().any(|e| e
             .message
-            .contains(crate::ast::CarrierTemp::Payload.prefix())),
+            .contains(&crate::ast::CarrierTemp::Payload.prefix())),
         "internal temp name leaked into a diagnostic: {errs:?}"
     );
 }
 
-/// A call under `?.` that fails reports what `.` reports, once: no `__opt` temp in the message
+/// A call under `?.` that fails reports what `.` reports, once: no `$opt` temp in the message
 /// (the receiver is not printed) and no "returns no value" / index cascade after it. A void call
 /// with a bad argument still reports the argument once (TICKET-239).
 #[test]
@@ -1358,7 +1358,7 @@ fn a_failed_optchain_call_reports_once_and_names_no_temp() {
             || !errs[0].message.contains(needle)
             || errs[0]
                 .message
-                .contains(crate::ast::CarrierTemp::Payload.prefix())
+                .contains(&crate::ast::CarrierTemp::Payload.prefix())
         {
             failed.push(format!("{body}=> wanted one {needle:?}, got {errs:?}"));
         }
@@ -1444,7 +1444,7 @@ fn carrier_operand_scratch_name_never_leaks_into_a_diagnostic() {
         assert!(
             !errs.iter().any(|e| e
                 .message
-                .contains(crate::ast::CarrierTemp::Operand.prefix())),
+                .contains(&crate::ast::CarrierTemp::Operand.prefix())),
             "operand-scratch name leaked into a diagnostic: {errs:?}"
         );
     }

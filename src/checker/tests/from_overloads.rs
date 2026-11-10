@@ -802,7 +802,7 @@ fn slot_pick_grid() {
             failures.push(format!("reject `{cell}`: wanted {needle:?}, got {errs:?}"));
         } else if errs.iter().any(|e| {
             e.message
-                .contains(crate::ast::CarrierTemp::Payload.prefix())
+                .contains(&crate::ast::CarrierTemp::Payload.prefix())
         }) {
             failures.push(format!("reject `{cell}`: an internal name leaks: {errs:?}"));
         }

@@ -15,12 +15,19 @@ impl CarrierTemp {
     /// Every kind of carrier binder.
     const ALL: [CarrierTemp; 2] = [CarrierTemp::Operand, CarrierTemp::Payload];
 
-    /// The spelling every binder of this kind starts with (a test asks a message for it).
-    pub fn prefix(self) -> &'static str {
+    /// The kind's stem, before the private sigil and the number.
+    fn stem(self) -> &'static str {
         match self {
-            CarrierTemp::Payload => "$opt",
-            CarrierTemp::Operand => "$optrecv",
+            CarrierTemp::Payload => "opt",
+            CarrierTemp::Operand => "optrecv",
         }
+    }
+
+    /// The spelling every binder of this kind starts with (a test asks a message for it). The
+    /// sigil comes from [`crate::ast::private_name`], the one owner of the private scheme, so
+    /// `Scan::bind` (which skips every [`crate::ast::is_private_name`]) skips every temp.
+    pub fn prefix(self) -> String {
+        crate::ast::private_name(self.stem())
     }
 
     /// The binder of this kind for the carrier whose node is `id`. The number is the carrier's
@@ -34,7 +41,7 @@ impl CarrierTemp {
     /// [`CarrierTemp::name`] builds (prefix + digits) is one: a user's `$options` is not.
     pub fn of(name: &str) -> Option<CarrierTemp> {
         Self::ALL.into_iter().find(|k| {
-            name.strip_prefix(k.prefix())
+            name.strip_prefix(k.prefix().as_str())
                 .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
         })
     }
@@ -63,6 +70,8 @@ mod tests {
         }
         for k in CarrierTemp::ALL {
             assert_eq!(CarrierTemp::of(&k.name(crate::ast::NodeId(7))), Some(k));
+            // `Scan::bind` skips every private name, so every temp must be one.
+            assert!(crate::ast::is_private_name(&k.name(crate::ast::NodeId(7))));
         }
     }
 }

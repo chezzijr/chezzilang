@@ -253,8 +253,9 @@ check-OK-then-broken program, and a JIT would trust the static type.
   namespace.** The gate is checker-only name resolution; a pure type/ctor also needs the `bind_import`
   skip, so cover it with a test that runs.
 - **Qualified paths are a Go/Python hybrid** (TICKET-175). An un-aliased `import std.net` binds
-  `net.Socket` and `std.net.Socket`: a synthetic dotted-alias import plus one scope-aware fold in
-  desugar. Struct patterns stay two-level.
+  `net.Socket` and `std.net.Socket`: a synthetic dotted-alias import; the checker decides the head
+  (`Checker::head_name` / `full_module_path`, which a binder hides) and desugar has no scope model.
+  Struct patterns stay two-level.
 - **A native type under `module.Type` needs three additive touch points:** the checker
   `Type::Qualified` arm, the compiler field-callee arm emitting the same opcode, the `bind_import` skip.
 - **Builtins are bodyless `native` decls in `std/*.chz`, front-end only.** A native decl cannot express
