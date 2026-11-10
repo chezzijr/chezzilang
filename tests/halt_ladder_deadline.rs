@@ -13,19 +13,27 @@ fn run_timeout_test(name: &str, src: &str) -> String {
 /// Runs `chezzi test --show-output --timeout=<timeout_ms>` on `src` under `timeout 30` (a hung run
 /// is killed and prints no summary line) and returns stdout + stderr.
 fn run_test_file(name: &str, src: &str, timeout_ms: &str) -> String {
+    run_test_file_at(name, src, &format!("--timeout={timeout_ms}"), None)
+}
+
+/// [`run_test_file`] with any halt `flag` (`--timeout=N`, `--max-heap=N`) and, when `threads` is
+/// `Some`, that `CHEZZI_THREADS` worker count.
+fn run_test_file_at(name: &str, src: &str, flag: &str, threads: Option<&str>) -> String {
     let dir = std::env::temp_dir().join(format!("chz-t286-{name}-{}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("temp dir");
     let path = dir.join(format!("{name}_test.chz"));
     std::fs::write(&path, src).expect("write program");
-    let out = Command::new("timeout")
-        .arg("30")
+    let mut cmd = Command::new("timeout");
+    cmd.arg("30")
         .arg(env!("CARGO_BIN_EXE_chezzi"))
         .arg("test")
         .arg("--show-output")
-        .arg(format!("--timeout={timeout_ms}"))
-        .arg(&path)
-        .output()
-        .expect("spawn chezzi");
+        .arg(flag)
+        .arg(&path);
+    if let Some(t) = threads {
+        cmd.env("CHEZZI_THREADS", t);
+    }
+    let out = cmd.output().expect("spawn chezzi");
     let _ = std::fs::remove_dir_all(&dir);
     format!(
         "{}{}",
@@ -190,4 +198,147 @@ fn a_child_in_a_host_call_does_not_cut_the_next_test_after_a_timeout() {
             && got.contains("2 test(s): 1 passed, 0 failed, 0 errored, 1 timed out"),
         "the run must end, with a_first timed out and b_sleep_ok passing; got:\n{got}"
     );
+}
+
+/// TICKET-299 (wave 24 F2): a `--timeout` hard halt inside the inner of two `parallel:` levels.
+/// The halt unwinds synchronously with no level abort (TICKET-135 keeps `report` false for a
+/// hard halt): every body `defer` runs, innermost first, and no child is joined, so a child's
+/// `defer` output is not asserted (measured: `C` at `CHEZZI_THREADS=1` only).
+const J_LEVELS: &str = r#"import std.time
+fn kid(tag: str, up: Channel[int], gate: Channel[int]):
+    defer:
+        _ := gate.recv()
+        print(tag)
+    up.send(1)
+    while true:
+        time.sleep_ms(1)
+test fn a_timeout_inside_the_inner_level():
+    up := Channel[int](2)
+    g1 := Channel[int](1)
+    g2 := Channel[int](1)
+    parallel:
+        spawn kid("c", up, g2)
+        _ := up.recv()
+        defer:
+            print("b")
+            g2.send(1)
+        parallel:
+            spawn kid("C", up, g1)
+            _ := up.recv()
+            defer:
+                print("B")
+                g1.send(1)
+            while true:
+                time.sleep_ms(1)
+test fn b_after():
+    print("after")
+"#;
+
+#[test]
+fn a_hard_halt_inside_two_levels_runs_both_body_defers_innermost_first() {
+    for t in ["1", "2"] {
+        let out = run_test_file_at("t299_levels", J_LEVELS, "--timeout=300", Some(t));
+        assert!(
+            out.contains("a_timeout_inside_the_inner_level")
+                && out.contains("test exceeded --timeout (300ms)\n    B\n    b\n"),
+            "T={t}: the halt runs B, then b: {out}"
+        );
+        assert!(
+            out.contains("PASS b_after"),
+            "T={t}: the next test runs: {out}"
+        );
+    }
+}
+
+/// TICKET-299 (wave 24 F2): a hard halt in a CANCELLED task, inside two `parallel:` levels.
+/// `faulty`'s fault cancels `victim`; `victim` leaves its inner level (body `defer`s `B1`, then
+/// `B2`) and `B1` halts. The kids park on `hold`, so only a level abort ends them; their `defer`
+/// waits on the gate the level's `B2` / `b` sends on. `@HALT@` and `@CHECK@` are whole lines.
+const J_CANCELLED: &str = r#"import std.time
+import Shared from std.concurrency
+hold: Channel[int] = Channel[int]()
+fn note(log: Shared[str], s: str):
+    log.update(fn(t: str) -> str: t + s)
+fn kid(tag: str, log: Shared[str], up: Channel[int], gate: Channel[int]):
+    defer:
+        _ := gate.recv()
+        note(log, tag)
+    up.send(1)
+    _ := hold.recv()
+fn victim(log: Shared[str], go: Channel[int]):
+    up := Channel[int](2)
+    g1 := Channel[int](1)
+    g2 := Channel[int](1)
+    parallel:
+        spawn kid("c", log, up, g2)
+        _ := up.recv()
+        defer:
+            note(log, "b")
+            g2.send(1)
+        parallel:
+            spawn kid("C", log, up, g1)
+            _ := up.recv()
+            defer:
+                note(log, "B2")
+                g1.send(1)
+            defer:
+                note(log, "B1")
+@HALT@
+            go.send(1)
+            while true:
+                time.sleep_ms(1)
+fn faulty(go: Channel[int]):
+    _ := go.recv()
+    panic("sib")
+test fn a_halt_in_a_cancelled_task():
+    log := Shared("")
+    go := Channel[int](1)
+    r := recover:
+        parallel:
+            spawn victim(log, go)
+            spawn faulty(go)
+    assert "{r}" == "!sib", "{r}"
+@CHECK@
+test fn b_after():
+    print("after")
+"#;
+/// `--timeout`: the offloaded sleep ends with the halt while `victim` is cancelled, so the
+/// worker loop's hard-halt arm unwinds through `unwind_deferred_escaped` with
+/// `report_escaped && run_defers` and leaves both levels there. The run-wide halt also ends the
+/// kids, so their letters are stripped (measured: `C` in 1 of 7 T=2 runs).
+const TIMEOUT_HALT: &str = "                time.sleep_ms(60000)";
+const TIMEOUT_CHECK: &str =
+    "    assert log.get().replace(\"C\", \"\").replace(\"c\", \"\") == \"B1B2b\", log.get()";
+/// `--max-heap`: only `victim` allocates, so the halt stays the running drain's fault and the
+/// level leave goes on: `B2`, the inner abort (`C`), `b`, the outer abort (`c`).
+const HEAP_HALT: &str = "                xs: List[str] = []\n                i := 0\n                while true:\n                    xs.push(\"{i} abcdefghijklmnopqrstuvwxyz0123456789abcd\")\n                    i += 1";
+const HEAP_CHECK: &str = "    assert log.get() == \"B1B2Cbc\", log.get()";
+
+#[test]
+fn a_hard_halt_in_a_cancelled_task_leaves_its_levels_body_defers_first() {
+    for t in ["1", "2"] {
+        for (name, flag, halt, check) in [
+            (
+                "t299_cancel_timeout",
+                "--timeout=300",
+                TIMEOUT_HALT,
+                TIMEOUT_CHECK,
+            ),
+            (
+                "t299_cancel_heap",
+                "--max-heap=20000000",
+                HEAP_HALT,
+                HEAP_CHECK,
+            ),
+        ] {
+            let src = J_CANCELLED
+                .replace("@HALT@", halt)
+                .replace("@CHECK@", check);
+            let out = run_test_file_at(name, &src, flag, Some(t));
+            assert!(
+                out.contains("PASS a_halt_in_a_cancelled_task") && out.contains("PASS b_after"),
+                "T={t} {flag}: {out}"
+            );
+        }
+    }
 }
