@@ -77,15 +77,15 @@ workspace crates, the blocking-point table (`block::wait_steps`) and the boundar
 
 0. **Bug hunt wave 24 (2026-11-09): file one ticket per family.** 8 families, each with a P0 cell
    (F1 a cancelled cleanup's guard gives a waiter a half-done value, landed as TICKET-298 except
-   its open questions Q3/Q4; F2 `parallel:` defer order (landed, TICKET-299); F3 to F8 design
-   inconsistencies). Owner decisions:
-   `docs/contributing/special-cases.md` "Owner design decisions (2026-11-09)". Report, order and
-   repros: `~/.claude/plans/2026-11-09-bug-hunt-w24/report.md`. Ready to file: F5, F6, F7,
-   F4 (the `copy` part) and F3 except its open question (F3 Q4). F1 Q3 (which tasks a report lists
-   at a join) and Q4 (a cancel of a holder outside a `defer` publishes its partial change) stay
-   open. F8 waits on three owner answers. F3 (a name's meaning has one decider) is TICKET-300: `Self` is a keyword, the
-   compiler's temps are private `$` names, a binder hides a full module path in the checker alone
-   (desugar has no scope model), and a bracketed call always has a recorded reading.
+   its open questions Q3/Q4; F2 `parallel:` defer order (landed, TICKET-299); F3 a name's meaning
+   has one decider (landed, TICKET-300, except its open question Q4: `Self` is a keyword, the
+   compiler's temps are private `$` names, a binder hides a full module path in the checker alone,
+   and a bracketed call always has a recorded reading); F4 to F8 design inconsistencies). Owner
+   decisions: `docs/contributing/special-cases.md` "Owner design decisions (2026-11-09)". Report,
+   order and repros: `~/.claude/plans/2026-11-09-bug-hunt-w24/report.md`. Ready to file: F5, F6,
+   F7 and F4 (the `copy` part). Open: F1 Q3 (which tasks a report lists at a join), F1 Q4 (a
+   cancel of a holder outside a `defer` publishes its partial change) and F3 Q4. F8 waits on three
+   owner answers.
 1. **TICKET-266, a `never` return type.** `exit` and `panic` declare `-> never`, and a call of that
    type leaves its block (Rust `-> !`). It deletes the `panic("unreachable")` lines after `os.exit`.
    Escalated; branch `ticket/266` kept.
