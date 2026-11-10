@@ -52,11 +52,12 @@ impl MnSched {
         // verdict, and the join lists every one in task order.
         let cut_end = matches!(&outcome, TaskOutcome::Fault { err, .. } if err.is_deadlock)
             && (c.cut_in_place() || self.is_deadlocked(&c));
-        // A deadlock-marked job fault is the verdict's end when a verdict decided it. A lock cycle or
-        // a re-entry (TICKET-298) is deadlock-marked with no verdict behind it: that fault reports
-        // itself, so `publish_job_fault` ends the run with it.
-        let verdict_end = matches!(&outcome, TaskOutcome::Fault { err, .. } if err.is_deadlock)
-            && (cut_end || self.quiesce.run_halt() == RunHalt::Deadlock);
+        // A deadlock-marked job fault is the verdict's end when a verdict decided it
+        // (`RuntimeError::is_verdict`). A lock cycle or a re-entry (TICKET-298) reports itself, so
+        // `publish_job_fault` ends the run with it.
+        let verdict_end = cut_end
+            || matches!(&outcome, TaskOutcome::Fault { err, .. }
+                if err.is_verdict(self.quiesce.run_halt()));
         let job_fault = self.publish_job_fault(&c, scope_id, &outcome, verdict_end);
         // The outcome the worker handed in, before the W7-26r conversion below: that conversion
         // trips the scope's own flag, for a backlog only.

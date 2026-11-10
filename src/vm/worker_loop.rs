@@ -1081,7 +1081,7 @@ impl Vm {
                     // fault output ordering is a separate, pre-existing nondeterminism (see the
                     // single-producer case covered by the test
                     // `parallel_faulting_task_flushes_partial_output_3engine`).
-                    cut |= err.blocked.is_some();
+                    cut |= err.is_verdict(self.quiesce.run_halt());
                     if first_hard_fault.is_none() && (executor_hard_halt(&err) || err.is_deadlock) {
                         first_hard_fault = Some((err.clone(), trace.clone()));
                     }
@@ -1092,7 +1092,7 @@ impl Vm {
                     }
                 }
                 TaskOutcome::Deadlocked { err, out, stderr } => {
-                    cut |= err.blocked.is_some();
+                    cut |= err.is_verdict(self.quiesce.run_halt());
                     // The M:N deadlock detector recorded EVERY still-parked fiber with this synthetic
                     // outcome (`flag_deadlock`). Unlike a real `Fault`, ALL parked buffers flush at
                     // their task-order slot (no `is_none()` gate) — so with two-or-more parked fibers

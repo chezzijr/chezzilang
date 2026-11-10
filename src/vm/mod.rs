@@ -73,8 +73,12 @@ use crate::{lexer, parser};
 /// A wall-clock trip is non-deterministic, so this is always `false` off the `chezzi test --timeout`
 /// path — which is the only place that sets a deadline at all.
 ///
-/// `is_deadlock` marks a scheduler deadlock verdict (TICKET-135, D1). The `run_until` Err funnel
-/// makes `recover:` transparent to it, and it is re-stamped after every unwind.
+/// `is_deadlock` marks a FATAL deadlock fault (TICKET-135, D1): the `run_until` Err funnel makes
+/// `recover:` transparent to it, and it is re-stamped after every unwind. Two kinds of fault carry
+/// it. A scheduler verdict's fault is cut at a wait ([`deadlock::cut`], so `blocked` is `Some`) or
+/// stamped while the run's verdict is latched ([`quiesce::RunHalt::Deadlock`]). A lock cycle or a
+/// re-entry (`Vm::guard_cycle_err`, TICKET-298) is fatal with no verdict behind it: it reports
+/// itself. [`RuntimeError::is_verdict`] is THE reader of that split; do not re-derive it.
 ///
 /// `is_panic` marks a fault raised by `panic(...)`; `run_until`'s catch never relocates it to the
 /// user's call into std (TICKET-148).
@@ -93,6 +97,15 @@ pub struct RuntimeError {
 }
 
 impl RuntimeError {
+    /// THE owner of "a scheduler verdict decided this fault", against a lock cycle or a re-entry
+    /// that reports itself (see [`RuntimeError::is_deadlock`]): a deadlock-marked fault is a
+    /// verdict's when it carries a verdict's cut (`blocked`) or `halt` says the run's verdict is
+    /// latched. A verdict's fault ends the run through the verdict (`MnSched::finish_with`, the
+    /// nursery join's listing cut); a self-reporting one ends it with its own text (TICKET-298).
+    pub(super) fn is_verdict(&self, halt: RunHalt) -> bool {
+        self.is_deadlock && (self.blocked.is_some() || halt == RunHalt::Deadlock)
+    }
+
     /// Stamp the over-memory marker onto this error (see [`RuntimeError::is_over_memory`]). Used to
     /// force the marker back on after an unwind, where a `defer` that faults mid-unwind would
     /// otherwise replace the marked error with an unmarked one.

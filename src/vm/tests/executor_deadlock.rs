@@ -2560,3 +2560,36 @@ fn a_job_that_adopts_its_childs_exit_keeps_the_childs_output() {
         "job_child_exits: out={out:?} code=Some(3) (the reader ran after the job took the slot)"
     );
 }
+
+/// `RuntimeError::is_verdict` is THE reader of "a verdict decided this deadlock-marked fault"
+/// (TICKET-298). Each side of its line: a lock cycle or re-entry (`.deadlock()`, no cut, no latched
+/// verdict) reports itself; a cut (`blocked`) or a latched verdict makes it a verdict's. It fails if
+/// the `blocked` term or the `halt` term is dropped, or if `is_deadlock` is not required.
+#[test]
+fn is_verdict_splits_a_verdict_fault_from_a_self_reporting_one() {
+    use super::deadlock::Wait;
+    let plain = RuntimeError::default();
+    let self_reporting = RuntimeError::default().deadlock();
+    let cut = self_reporting.at_site(Wait::Nursery.phrase(), Span::RUNTIME);
+    for halt in [
+        RunHalt::Running,
+        RunHalt::Fault,
+        RunHalt::Exit,
+        RunHalt::Deadlock,
+    ] {
+        let latched = halt == RunHalt::Deadlock;
+        assert!(
+            !plain.is_verdict(halt),
+            "a plain fault is no verdict ({halt:?})"
+        );
+        assert_eq!(
+            self_reporting.is_verdict(halt),
+            latched,
+            "self-reporting ({halt:?})"
+        );
+        assert!(
+            cut.is_verdict(halt),
+            "a verdict's cut is a verdict ({halt:?})"
+        );
+    }
+}
