@@ -1479,8 +1479,8 @@ impl Vm {
     pub(super) fn op_enter_nursery(&mut self, span: Span) {
         self.nurseries.push(Vec::new());
         self.mn_scopes.push(None); // lockstep — set Some(scope_id) only if early-enlisted
-        // TASK B — capture this parallel body's defer floor so a recover-scoped `?` can run
-        // the body's defers before the nursery reclaim (see `nursery_defer_floors`).
+        // TICKET-299 — capture this parallel body's defer floor so every exit but fall-through
+        // can run the body's defers before the nursery reclaim (`Vm::leave_level`, `nursery_defer_floors`).
         let floor = self
             .frames
             .last()

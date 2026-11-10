@@ -360,7 +360,7 @@ something that can never arrive (`ch.recv()` no one will ever answer) leaves the
 the deadlock detector fires. If a sibling's fault cancelled the task, *that* fault is reported — the
 stuck cleanup's own error is swallowed with its cancelled task, and likewise when the stuck cleanup
 belongs to an owner whose child faulted. The same holds for a `defer` that runs on the `main` thread —
-a `defer` in `main`, at module top level, or in a `parallel:` body (which runs AFTER the join): a
+a `defer` in `main`, at module top level, or in a `parallel:` body (on fall-through it runs AFTER the join; on a cancel it runs BEFORE the cancelled children are joined): a
 cleanup that can never complete faults `deadlock` (fatal) instead of hanging. A pending `os.exit` from
 another party outranks that verdict (Go: the exit status). A cleanup a live task WILL feed is not
 judged. Nor is a wait on a socket: the other end may still write, so a cleanup that reads a socket

@@ -1063,9 +1063,10 @@ pub struct Vm {
     mn_scopes: Vec<Option<usize>>,
     /// TASK B — parallel to [`Vm::nurseries`] (same length, pushed/popped in lockstep): the value of
     /// the current frame's `deferred.len()` captured when each nursery was entered (`EnterNursery`),
-    /// i.e. the defer floor of that `parallel:` body. A recover-scoped `?` escaping a `parallel:`
-    /// must run the body's defers (those at `deferred[floor..]`) BEFORE reclaiming the nursery and
-    /// only THEN run the recover block's own defers.
+    /// i.e. the defer floor of that `parallel:` body (plus its defer-scope marker count). Every
+    /// exit but fall-through (`return`, `?`, `break`/`continue`, a fault, a cancel) reads it in
+    /// `Vm::leave_level` / `Vm::leave_level_now`: the body's defers (those at `deferred[floor..]`)
+    /// run BEFORE the nursery is reclaimed, and only THEN the enclosing blocks' defers.
     nursery_defer_floors: Vec<LevelFloor>,
     /// TICKET-048 — parallel to [`Vm::nurseries`] (same length, pushed and popped in lockstep): the
     /// source span of the construct that OPENED each nursery — the `parallel:` keyword, or the first
