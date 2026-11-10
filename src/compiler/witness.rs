@@ -442,6 +442,7 @@ impl Compiler {
             | Resolution::Provider
             | Resolution::ParamMethodFn { .. }
             | Resolution::IndexCall
+            | Resolution::TypeArgsCall
             | Resolution::Variant { .. }
             | Resolution::MethodFn { .. }
             | Resolution::NativeStatic(_)

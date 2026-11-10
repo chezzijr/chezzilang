@@ -4,6 +4,7 @@ use super::*;
 
 mod assert_lowering;
 mod back_edge;
+mod bracket_reading;
 mod capture_layout;
 mod capture_prepass;
 mod carrier_lowering;

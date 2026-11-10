@@ -1380,6 +1380,9 @@ pub enum Resolution {
     /// Recorded on a CALL node: this call indexes its callee with the call's `bracket`, then calls
     /// the element (`fs[k](10)`, `Op::GetIndex` + `Op::Call`).
     IndexCall,
+    /// Recorded on a CALL node with a bracket: the bracket is the callee's type arguments
+    /// (`f[int](1)`), DEC-210's other reading. The compiler never lowers the bracket.
+    TypeArgsCall,
     /// An enum variant, by the enum's runtime key (`Op::NewEnum`).
     Variant { enum_key: String, variant: String },
     /// A struct or enum method named through its type path (`Bx[int].make`, `Pt.getx`): called,

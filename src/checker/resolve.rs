@@ -8,7 +8,7 @@
 //! derives the opcode from the position.
 //!
 //! [`Checker::commit_resolution`] is private here and has exactly four callers: `resolve_path`,
-//! `record_pattern_head`, `record_index_call` and `record_decode`. A new path form adds a rule to
+//! `record_pattern_head`, `record_bracket_reading` and `record_decode`. A new path form adds a rule to
 //! `classify_path`; never add a `commit_resolution` call elsewhere or a `record_*` helper outside
 //! this file.
 
@@ -281,10 +281,21 @@ impl Checker {
         self.commit_resolution(id, r, span);
     }
 
-    /// Record that the call `call_id` reads its bracket as an index, then calls the element
-    /// (`fs[k](10)`, DEC-210). Written on the CALL node, which is no path.
-    pub(super) fn record_index_call(&mut self, call_id: crate::ast::NodeId, span: Span) {
-        self.commit_resolution(call_id, Resolution::IndexCall, span);
+    /// Record which reading the call `call_id` takes of its one-arg bracket (DEC-210): the index,
+    /// then the call of the element (`fs[k](10)`), or the callee's type arguments (`f[int](1)`).
+    /// Written on the CALL node, which is no path.
+    pub(super) fn record_bracket_reading(
+        &mut self,
+        call_id: crate::ast::NodeId,
+        index: bool,
+        span: Span,
+    ) {
+        let r = if index {
+            Resolution::IndexCall
+        } else {
+            Resolution::TypeArgsCall
+        };
+        self.commit_resolution(call_id, r, span);
     }
 
     /// Build `target`'s decode descriptor and record it on `id` as `Resolution::Decode`. `false`

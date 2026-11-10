@@ -172,7 +172,8 @@ impl Compiler {
     /// `fs[k](10)`: when the checker chose the bracket's index reading (`Resolution::IndexCall`),
     /// push the indexed element -- the head through its own recorded resolution, then the bracket,
     /// then `GetIndex` -- and answer `true`; the caller then calls that value. The one reader of
-    /// `IndexCall`, for an eager call, a `defer` target and a `spawn` target alike.
+    /// `IndexCall`, for an eager call, a `defer` target and a `spawn` target alike. A bracketed call
+    /// the checker recorded no reading for is `internal:` (TICKET-300): no fallback.
     pub(super) fn compile_index_call_head(
         &mut self,
         fc: &mut FnComp,
@@ -181,18 +182,39 @@ impl Compiler {
         bracket: Option<&Expr>,
         span: Span,
     ) -> Result<bool, CompileError> {
-        if !matches!(
-            self.resolutions.get(&(self.current_module_idx, call_id.0)),
-            Some(Resolution::IndexCall)
-        ) {
-            return Ok(false);
-        }
         let Some(ix) = bracket else {
-            return Err(CompileError {
-                message: "internal: an index-call has no bracket expression".to_string(),
-                span,
-            });
+            return Ok(false);
         };
+        match self.resolutions.get(&(self.current_module_idx, call_id.0)) {
+            Some(Resolution::IndexCall) => {}
+            Some(Resolution::TypeArgsCall) => return Ok(false),
+            None
+            | Some(
+                Resolution::Local
+                | Resolution::Global { .. }
+                | Resolution::Fn { .. }
+                | Resolution::Builtin(_)
+                | Resolution::StructCtor(_)
+                | Resolution::Provider
+                | Resolution::ParamMethodFn { .. }
+                | Resolution::Variant { .. }
+                | Resolution::MethodFn { .. }
+                | Resolution::NativeStatic(_)
+                | Resolution::VariantFn { .. }
+                | Resolution::WitnessStatic(_)
+                | Resolution::ModuleMember { .. }
+                | Resolution::Module(_)
+                | Resolution::Member
+                | Resolution::PatBinding
+                | Resolution::PatStruct(_)
+                | Resolution::Decode(_),
+            ) => {
+                return Err(CompileError {
+                    message: "internal: no bracket reading recorded for this call -- the type-checker and the backend disagree".to_string(),
+                    span,
+                });
+            }
+        }
         self.compile_expr(fc, callee)?;
         self.compile_expr(fc, ix)?;
         fc.emit(Op::GetIndex, span);
@@ -335,6 +357,7 @@ impl Compiler {
                 | other @ Resolution::Global { .. }
                 | other @ Resolution::Provider
                 | other @ Resolution::IndexCall
+                | other @ Resolution::TypeArgsCall
                 | other @ Resolution::Module(_)
                 | other @ Resolution::PatBinding
                 | other @ Resolution::PatStruct(_)
@@ -469,6 +492,7 @@ impl Compiler {
                 | Resolution::Provider
                 | Resolution::ParamMethodFn { .. }
                 | Resolution::IndexCall
+                | Resolution::TypeArgsCall
                 | Resolution::MethodFn { .. }
                 | Resolution::NativeStatic(_)
                 | Resolution::WitnessStatic(_)

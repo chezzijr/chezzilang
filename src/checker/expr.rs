@@ -180,10 +180,11 @@ impl Checker {
             && let Some(ix) = self.call_ctx.as_ref().and_then(|c| c.bracket.clone())
         {
             let mark = self.errors.len();
-            if self.bracket_is_index(callee, res.as_ref()) {
-                if let Some(id) = self.call_ctx.as_ref().map(|c| c.id) {
-                    self.record_index_call(id, span);
-                }
+            let index = self.bracket_is_index(callee, res.as_ref());
+            if let Some(id) = self.call_ctx.as_ref().map(|c| c.id) {
+                self.record_bracket_reading(id, index, span);
+            }
+            if index {
                 let callee_ty = self.index_value_since(callee, &ix, true, mark);
                 return self.apply_value_call(None, None, callee_ty, args, named, span);
             }
@@ -652,6 +653,7 @@ impl Checker {
             | Resolution::Provider
             | Resolution::ParamMethodFn { .. }
             | Resolution::IndexCall
+            | Resolution::TypeArgsCall
             | Resolution::Variant { .. }
             | Resolution::MethodFn { .. }
             | Resolution::NativeStatic(_)

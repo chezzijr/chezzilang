@@ -286,6 +286,7 @@ impl Compiler {
                     | other @ Resolution::StructCtor(_)
                     | other @ Resolution::Provider
                     | other @ Resolution::IndexCall
+                    | other @ Resolution::TypeArgsCall
                     | other @ Resolution::WitnessStatic(_)
                     | other @ Resolution::PatBinding
                     | other @ Resolution::PatStruct(_)
@@ -637,6 +638,7 @@ impl Compiler {
             | other @ Resolution::Provider
             | other @ Resolution::ParamMethodFn { .. }
             | other @ Resolution::IndexCall
+            | other @ Resolution::TypeArgsCall
             | other @ Resolution::MethodFn { .. }
             | other @ Resolution::NativeStatic(_)
             | other @ Resolution::WitnessStatic(_)
