@@ -1018,6 +1018,9 @@ struct Checker {
     /// only `c`. Read only by the diagnostics for a full path that does not resolve (`a.b.X` after an
     /// aliased import, or naming an unimported module); never a binding itself.
     import_paths: Vec<(Vec<String>, String, bool)>,
+    /// The names an un-aliased one-segment `import h` binds in the current module; such a head does not
+    /// hide the full path `h.x` (DEC-175).
+    package_heads: std::collections::HashSet<String>,
     /// A bare name two un-aliased imports both bind (`import a.math` + `import b.math`) → the two
     /// dotted paths (TICKET-175). The name is unbound; a use of it reports the ambiguity, and both
     /// full paths stay usable.

@@ -116,6 +116,7 @@ impl Checker {
             json_module: None,
             range_key: crate::resolver::RANGE_STRUCT.to_string(),
             import_paths: Vec::new(),
+            package_heads: std::collections::HashSet::new(),
             ambiguous_binds: HashMap::new(),
             nameless_imports: std::collections::HashSet::new(),
             import_binds: HashMap::new(),

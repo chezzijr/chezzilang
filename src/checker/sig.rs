@@ -433,8 +433,9 @@ pub(super) fn bare_head_name(kind: &ExprKind) -> Option<&str> {
 }
 
 /// M24-5b — the `(module, type)` a dotted callee's head spells, peeling the same turbofish carrier
-/// (`module.Enum[T]` is an `Index` over the `Field`).
-pub(super) fn qualified_head_names(kind: &ExprKind) -> Option<(&str, &str)> {
+/// (`module.Enum[T]` is an `Index` over the `Field`). Returns the head expression and the type name;
+/// the caller names the module through `Checker::head_name`.
+pub(super) fn qualified_head_names(kind: &ExprKind) -> Option<(&Expr, &str)> {
     let field = match kind {
         ExprKind::Index { obj, .. } => &obj.kind,
         k @ ExprKind::Int(_)
@@ -468,10 +469,7 @@ pub(super) fn qualified_head_names(kind: &ExprKind) -> Option<(&str, &str)> {
         | k @ ExprKind::ElseGuard { .. } => k,
     };
     match field {
-        ExprKind::Field { obj, name, .. } => match obj.kind.as_ident() {
-            Some(m) => Some((m, name)),
-            None => None,
-        },
+        ExprKind::Field { obj, name, .. } => Some((obj, name)),
         ExprKind::Int(_)
         | ExprKind::Float(_)
         | ExprKind::Str(_)

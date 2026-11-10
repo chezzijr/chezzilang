@@ -826,10 +826,10 @@ impl Checker {
         // `module.Point(…)` — the head is the MODULE and the member the type.
         // A reserved native handle (`net.Socket`) has a `struct_defs` entry for its method table but
         // no constructor; `infer_call` skips it the same way, so its own diagnostic stays single.
-        if let ExprKind::Ident(mname) = &obj.kind
-            && !self.module_owns_builtin(mname, name)
+        if let Some(mname) = self.head_name(obj)
+            && !self.module_owns_builtin(&mname, name)
             && self
-                .qualified_type_head(mname, name)
+                .qualified_type_head(&mname, name)
                 .is_some_and(|th| th.pinned.is_none() && matches!(th.kind, TypeHeadKind::Struct))
         {
             return true;
@@ -842,23 +842,24 @@ impl Checker {
         // `chezzi run` refused ("module 'std.concurrency' has no member 'Shared'"). Type-only
         // native names (`net.Socket`) are excluded: `infer_call` gives them their own, better
         // message ("has no constructor"), and doubling it would say less.
-        if let ExprKind::Ident(mname) = &obj.kind
-            && !self.head_is_value(mname)
+        if let Some(mname) = self.head_name(obj)
+            && !self.head_is_value(&mname)
             && BuiltinType::from_name(name).is_some_and(BuiltinType::has_opcode_ctor)
-            && let Some(mid) = self.imported_modules.get(mname)
+            && let Some(mid) = self.imported_modules.get(&*mname)
             && let Some(sig) = self.module_sigs.get(mid)
             && sig.builtins.contains(name)
         {
             return true;
         }
         // `module.Enum.Variant(…)` / `module.Enum[T].Variant(…)`
-        if let Some((mname, ename)) = qualified_head_names(&obj.kind)
+        if let Some((head, ename)) = qualified_head_names(&obj.kind)
+            && let Some(mname) = self.head_name(head)
             && let Some(TypeHead {
                 kind: TypeHeadKind::Enum,
                 key,
                 pinned: None,
                 ..
-            }) = self.qualified_type_head(mname, ename)
+            }) = self.qualified_type_head(&mname, ename)
             && self.variants.contains_key(&(key, name.clone()))
         {
             return true;

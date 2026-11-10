@@ -269,6 +269,17 @@ impl Compiler {
                             expr.span,
                         );
                     }
+                    // A full module path (`a.b` of `import a.b`) no binding hides: the checker
+                    // recorded the module on this node; it loads by the bound dotted name.
+                    Resolution::Module(_) => {
+                        let Some(path) = crate::ast::dotted_path(expr) else {
+                            return Err(CompileError {
+                                message: "internal: a module path is no dotted name".to_string(),
+                                span: expr.span,
+                            });
+                        };
+                        self.emit_load(fc, &path, expr.span);
+                    }
                     other @ Resolution::Local
                     | other @ Resolution::Global { .. }
                     | other @ Resolution::Builtin(_)
@@ -276,7 +287,6 @@ impl Compiler {
                     | other @ Resolution::Provider
                     | other @ Resolution::IndexCall
                     | other @ Resolution::WitnessStatic(_)
-                    | other @ Resolution::Module(_)
                     | other @ Resolution::PatBinding
                     | other @ Resolution::PatStruct(_)
                     // U10: the checker rejects a payload variant read as a value.

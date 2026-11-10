@@ -143,6 +143,7 @@ impl Checker {
         self.type_params.clear();
         self.imported_modules.clear();
         self.import_paths.clear();
+        self.package_heads.clear();
         self.import_binds.clear();
         self.imported_alias_tys.clear();
         self.imported_alias_ctypes.clear();
@@ -531,6 +532,9 @@ impl Checker {
                 if !full && path.len() >= 2 {
                     self.import_paths
                         .push((path.clone(), name.clone(), alias.is_none()));
+                }
+                if alias.is_none() && path.len() == 1 {
+                    self.package_heads.insert(name.clone());
                 }
                 if bare {
                     self.declare(&name, Ty::Module(name.clone()));

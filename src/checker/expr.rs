@@ -199,8 +199,8 @@ impl Checker {
         // The rule table leaves it unnamed (its entry is the descriptor, DEC-214).
         if res.is_none()
             && let ExprKind::Field { obj, name, .. } = &callee.kind
-            && let ExprKind::Ident(m) = &obj.kind
-            && self.json_decode_member(m, name)
+            && let Some(m) = self.head_name(obj)
+            && self.json_decode_member(&m, name)
         {
             let sig = super::infer_access::json_decode_sig();
             if args.len() != sig.params.len()
@@ -350,18 +350,18 @@ impl Checker {
             // `module.Struct(args)` / `module.Alias(args)`: a struct constructed through a
             // whole-module import (TICKET-172 for the exported alias, with its pinned arguments).
             Some(Resolution::StructCtor(key)) => {
-                let ExprKind::Ident(mname) = &obj.kind else {
+                let Some(mname) = self.head_name(obj) else {
                     self.infer_all(args);
                     return Ty::Unknown;
                 };
                 let spelled = format!("{mname}.{name}");
-                if let Some(target @ Ty::Struct(..)) = self.qualified_alias_ty(mname, name) {
+                if let Some(target @ Ty::Struct(..)) = self.qualified_alias_ty(&mname, name) {
                     return self
                         .infer_alias_ctor_call(&target, &spelled, args, targs, span, expected);
                 }
                 let Some(info) = self
                     .imported_modules
-                    .get(mname)
+                    .get(&*mname)
                     .and_then(|mid| self.module_sigs.get(mid))
                     .and_then(|sig| sig.struct_defs.get(name))
                     .cloned()
@@ -430,10 +430,10 @@ impl Checker {
                 // `mod.Alias(x)` ctor — falls through to `infer_method_call` (its original error),
                 // not this native-specific message.
                 if let Some(Resolution::ModuleMember { .. }) = res
-                    && let ExprKind::Ident(mname) = &obj.kind
+                    && let Some(mname) = self.head_name(obj)
                     && self
                         .imported_modules
-                        .get(mname)
+                        .get(&*mname)
                         .and_then(|mid| self.module_sigs.get(mid))
                         .is_some_and(|sig| sig.builtins.contains(name))
                 {

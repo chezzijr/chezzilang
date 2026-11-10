@@ -30,14 +30,18 @@ impl Checker {
     }
 
     pub(super) fn infer_field(&mut self, e: &Expr, obj: &Expr, name: &str, name_span: Span) -> Ty {
+        // A full module path (`a.b` of `import a.b`) that no binding hides names the module.
+        if let Some(p) = self.full_module_path(e) {
+            return self.infer_ident(e, &p, e.span);
+        }
         // A full module path that did not resolve (TICKET-175): the receiver `obj` is the BARE first
         // segment of an imported dotted module path (`pkg`), never a bound name, and `name` is the
-        // NEXT segment. Desugar already folded every full path of an un-aliased import into one
-        // dotted name, so what reaches here is an aliased import's path (`import pkg.deep as d` binds
-        // only `d`) or a prefix no import binds (`std.concurrency` of `import
+        // NEXT segment. `full_module_path` already took every full path of an un-aliased import whose
+        // head no binding hides, so what reaches here is an aliased import's path (`import pkg.deep as
+        // d` binds only `d`) or a prefix no import binds (`std.concurrency` of `import
         // std.concurrency.collection`). The trailing name isn't visible here, hence `<Name>`.
         if let ExprKind::Ident(head) = &obj.kind
-            && self.lookup(head).is_none()
+            && matches!(self.head_binding(head), HeadBinding::Unbound)
             && !self.imported_modules.contains_key(head)
         {
             let matches: Vec<(String, String, bool)> = self
@@ -142,9 +146,9 @@ impl Checker {
                     // the compiler lowers a field-read to a plain field load. The method named
                     // through its TYPE (`Bx[int].get`, receiver first) is the value form.
                     if info.methods.contains_key(name) {
-                        let recv = match obj.kind.as_ident() {
-                            Some(n) if crate::ast::CarrierTemp::of(n).is_none() => n.as_str(),
-                            Some(_) | None => "x",
+                        let recv = match self.head_name(obj) {
+                            Some(n) if crate::ast::CarrierTemp::of(&n).is_none() => n.into_owned(),
+                            Some(_) | None => "x".to_string(),
                         };
                         self.error(
                             name_span,
@@ -182,8 +186,8 @@ impl Checker {
                 }
                 // TICKET-187: a generic member read as a value pins or is rejected, exactly like a
                 // bare read — its rigid `T` must never reach the caller's scope.
-                if let ExprKind::Ident(m) = &obj.kind
-                    && let Some((display, sig)) = self.generic_module_fn(m, name)
+                if let Some(m) = self.head_name(obj)
+                    && let Some((display, sig)) = self.generic_module_fn(&m, name)
                     && let Some(ty) = self.generic_fn_value_ty(
                         e.id,
                         &display,
@@ -203,8 +207,8 @@ impl Checker {
                 match member {
                     Some(Some(ty)) => ty,
                     _ => {
-                        if let ExprKind::Ident(m) = &obj.kind
-                            && let Some(read) = self.qualified_type_read(m, name)
+                        if let Some(m) = self.head_name(obj)
+                            && let Some(read) = self.qualified_type_read(&m, name)
                         {
                             self.type_not_value(&read, name_span);
                         } else {
@@ -1344,10 +1348,8 @@ impl Checker {
         name: &str,
         name_span: Span,
     ) -> Option<Ty> {
-        let ExprKind::Ident(m) = &obj.kind else {
-            return None;
-        };
-        if !self.json_decode_member(m, name) {
+        let m = self.head_name(obj)?;
+        if !self.json_decode_member(&m, name) {
             return None;
         }
         // The compiler loads the module head as a value.

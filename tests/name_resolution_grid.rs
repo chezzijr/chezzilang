@@ -116,6 +116,21 @@ const KINDS: &[Kind] = &[
         arg: 1,
         binds: Binds::Own,
     },
+    // TICKET-300: a compiler-temp spelling is an ordinary user name.
+    Kind {
+        tag: "temp_spelled",
+        name: "__opt1",
+        decl: "",
+        arg: 4,
+        binds: Binds::Nothing,
+    },
+    Kind {
+        tag: "temp_spelled_recv",
+        name: "__optrecv1",
+        decl: "",
+        arg: 4,
+        binds: Binds::Nothing,
+    },
 ];
 
 const LIB: &str = "struct T:\n    x: int\nfn f(n: int) -> str:\n    return \"L{n}\"\nfn h(n: int) -> str:\n    return \"B{n}\"\n";
@@ -192,7 +207,10 @@ binders!(
     WaitRecv,
     NestedFn,
     ToplevelFn,
-    ImportAlias
+    ImportAlias,
+    MatchCapture,
+    ElseErr,
+    StmtElseErr
 );
 
 impl Binder {
@@ -209,6 +227,9 @@ impl Binder {
             Binder::NestedFn => "nested_fn",
             Binder::ToplevelFn => "toplevel_fn",
             Binder::ImportAlias => "import_alias",
+            Binder::MatchCapture => "match_capture",
+            Binder::ElseErr => "else_err",
+            Binder::StmtElseErr => "stmt_else_err",
         }
     }
 
@@ -224,7 +245,10 @@ impl Binder {
             | Binder::ClosureParam
             | Binder::ComprehensionVar
             | Binder::WaitRecv
-            | Binder::NestedFn => false,
+            | Binder::NestedFn
+            | Binder::MatchCapture
+            | Binder::ElseErr
+            | Binder::StmtElseErr => false,
         }
     }
 }
@@ -270,6 +294,11 @@ fn bind(binder: Binder, n: &str, p: &Pos) -> Option<String> {
         Binder::ImportAlias => {
             (p.tag == "member").then(|| format!("import lib as {n}\nprint({r})\n"))
         }
+        Binder::MatchCapture => {
+            (p.tag != "call").then(|| format!("match {e}:\n    {n}: print({r})\n"))
+        }
+        // Only the full-path cells bind an `else` error name.
+        Binder::ElseErr | Binder::StmtElseErr => None,
     }
 }
 
@@ -318,6 +347,8 @@ fn grid() -> Vec<Cell> {
     cells.extend(typed_use_cells());
     cells.extend(head_shape_cells());
     cells.extend(t187_cells());
+    cells.extend(full_path_cells());
+    cells.extend(self_keyword_cells());
     cells
 }
 
@@ -603,7 +634,11 @@ fn field_bind(binder: Binder, n: &str, ty: &str, e: &str, r: &str, ctx: &str) ->
             one_expr().map(|x| format!("print([{x} for {n} in [{e}]][0])\n"))
         }
         // A fn is no value binder of a field read.
-        Binder::NestedFn | Binder::ToplevelFn => None,
+        Binder::NestedFn
+        | Binder::ToplevelFn
+        | Binder::MatchCapture
+        | Binder::ElseErr
+        | Binder::StmtElseErr => None,
     }
 }
 
@@ -901,6 +936,169 @@ fn t187_cells() -> Vec<Cell> {
             Expect::Prints("user".into()),
         ),
     ]
+}
+
+/// TICKET-300 (P4-1): `import a.b` binds the module path `a.b`; a binder named `a` hides it, so
+/// `a.b.K` reads the binder's field chain (Go `fmt := 1; fmt.Println` fails: the local wins).
+const FULL_HEAD: &str = "import a.b\nstruct B:\n    K: int\nstruct A:\n    b: B\n    fn message(self) -> str:\n        return \"e\"\n";
+
+/// A program that binds `a` with `binder` and reads `a.b.K`; `V` is `A(b=B(K=9))`.
+fn full_path_body(b: Binder) -> &'static str {
+    match b {
+        Binder::Param => "fn g(a: A) -> int:\n    return a.b.K\nprint(g(A(b=B(K=9))))\n",
+        Binder::Local => "fn g() -> int:\n    a := A(b=B(K=9))\n    return a.b.K\nprint(g())\n",
+        Binder::ToplevelLet => "a := A(b=B(K=9))\nprint(a.b.K)\n",
+        Binder::ForVar => "for a in [A(b=B(K=9))]:\n    print(a.b.K)\n",
+        Binder::MatchBinding => "match ?A(b=B(K=9)):\n    ?a: print(a.b.K)\n    None: print(0)\n",
+        Binder::ClosureParam => "print((fn(a: A) -> int: a.b.K)(A(b=B(K=9))))\n",
+        Binder::ComprehensionVar => "print([a.b.K for a in [A(b=B(K=9))]][0])\n",
+        Binder::WaitRecv => {
+            "fn g() -> int:\n    ch := Channel[A](1)\n    ch.send(A(b=B(K=9)))\n    out := 0\n    wait:\n        a := ch.recv():\n            a := a else: panic(\"ch closed\")\n            out = a.b.K\n    return out\nprint(g())\n"
+        }
+        Binder::NestedFn => {
+            "fn g() -> int:\n    fn a() -> int:\n        return 1\n    return a.b.K\nprint(g())\n"
+        }
+        Binder::ToplevelFn => "fn a() -> int:\n    return 1\nprint(a.b.K)\n",
+        Binder::ImportAlias => "import lib as a\nprint(a.b.K)\n",
+        Binder::MatchCapture => "match A(b=B(K=9)):\n    a: print(a.b.K)\n",
+        Binder::ElseErr => {
+            "fn f() -> int!A:\n    return !A(b=B(K=9))\nfn g() -> int:\n    x := f() else a:\n        return a.b.K\n    return x\nprint(g())\n"
+        }
+        Binder::StmtElseErr => {
+            "fn f() -> None!A:\n    return !A(b=B(K=9))\nfn g():\n    f() else a:\n        print(a.b.K)\n        return\ng()\n"
+        }
+    }
+}
+
+fn full_path_expect(b: Binder) -> Expect {
+    match b {
+        Binder::NestedFn | Binder::ToplevelFn => {
+            Expect::Rejects("type fn() -> int has no field 'b'")
+        }
+        Binder::ImportAlias => Expect::Rejects("module 'a' has no member 'b'"),
+        Binder::Param
+        | Binder::Local
+        | Binder::ToplevelLet
+        | Binder::ForVar
+        | Binder::MatchBinding
+        | Binder::ClosureParam
+        | Binder::ComprehensionVar
+        | Binder::WaitRecv
+        | Binder::MatchCapture
+        | Binder::ElseErr
+        | Binder::StmtElseErr => Expect::Prints("9".into()),
+    }
+}
+
+fn full_path_cells() -> Vec<Cell> {
+    let mut cells = Vec::new();
+    for &b in Binder::ALL {
+        cells.push(files(
+            &format!("full_path/{}", b.tag()),
+            &[
+                ("main.chz", &format!("{FULL_HEAD}{}", full_path_body(b))),
+                ("a/b.chz", "K := 5\n"),
+                ("lib.chz", LIB),
+            ],
+            full_path_expect(b),
+        ));
+    }
+    let plain = [
+        ("no_binder", "print(a.b.K)\n", "5"),
+        (
+            "match_capture_expr",
+            "y := match A(b=B(K=9)):\n    a: a.b.K\nprint(y)\n",
+            "9",
+        ),
+        (
+            "match_capture_guard",
+            "match A(b=B(K=9)):\n    a if true: print(a.b.K)\n    _: print(0)\n",
+            "9",
+        ),
+    ];
+    for (tag, body, out) in plain {
+        cells.push(files(
+            &format!("full_path/{tag}"),
+            &[
+                ("main.chz", &format!("{FULL_HEAD}{body}")),
+                ("a/b.chz", "K := 5\n"),
+                ("lib.chz", LIB),
+            ],
+            Expect::Prints(out.into()),
+        ));
+    }
+    // `std.json.decode[int]` as a value: the head is a full module path, not a bound name.
+    cells.push(files(
+        "full_path/json_decode_value",
+        &[(
+            "main.chz",
+            "import std.json\nf := std.json.decode[int]\nx := f(\"3\") else: panic(\"bad\")\nprint(x + 1)\n",
+        )],
+        Expect::Prints("4".into()),
+    ));
+    cells
+}
+
+/// TICKET-300 (SA-2): `Self` is a keyword. No declaration or binder takes the name; inside a
+/// method it reads as the enclosing type, in a type and in a value position.
+fn self_keyword_cells() -> Vec<Cell> {
+    let mut cells = Vec::new();
+    for &b in Binder::ALL {
+        for p in positions(&KINDS[0]) {
+            let Some(body) = bind(b, "Self", &p) else {
+                continue;
+            };
+            cells.push(files(
+                &format!("self_kw/{}/{}", b.tag(), p.tag),
+                &[("main.chz", &format!("{S_DECL}{body}")), ("lib.chz", LIB)],
+                Expect::Rejects("reserved keyword 'Self'"),
+            ));
+        }
+    }
+    let decls = [
+        ("struct", "struct Self:\n    x: int\nprint(1)\n"),
+        ("enum", "enum Self:\n    A\nprint(1)\n"),
+        ("fn", "fn Self() -> int:\n    return 1\nprint(1)\n"),
+        (
+            "protocol",
+            "protocol Self:\n    fn m(self) -> int\nprint(1)\n",
+        ),
+        ("import_as", "import lib as Self\nprint(1)\n"),
+        ("field", "struct P:\n    Self: int\nprint(1)\n"),
+        ("variant", "enum E:\n    Self\nprint(1)\n"),
+    ];
+    for (tag, src) in decls {
+        cells.push(files(
+            &format!("self_kw/decl_{tag}"),
+            &[("main.chz", src), ("lib.chz", LIB)],
+            Expect::Rejects("reserved keyword 'Self'"),
+        ));
+    }
+    let values = [
+        (
+            "value_struct",
+            "struct P:\n    x: int\n    fn mk() -> Self:\n        return Self(x=1)\n    fn two() -> int:\n        return Self.mk().x + 1\nprint(P.two())\n",
+            "2",
+        ),
+        (
+            "value_enum",
+            "enum E:\n    A\n    B\n    fn other(self) -> E:\n        return Self.B\nprint(E.A.other() == E.B)\n",
+            "true",
+        ),
+        (
+            "value_ignores_a_local",
+            "struct P:\n    x: int\n    fn mk() -> Self:\n        P := 3\n        return Self(x=P)\nprint(P.mk().x)\n",
+            "3",
+        ),
+    ];
+    for (tag, src, out) in values {
+        cells.push(files(
+            &format!("self_kw/{tag}"),
+            &[("main.chz", src)],
+            Expect::Prints(out.into()),
+        ));
+    }
+    cells
 }
 
 fn run_cell(root: &Path, idx: usize, c: &Cell) -> Result<(), String> {

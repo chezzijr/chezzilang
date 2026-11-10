@@ -801,6 +801,14 @@ impl Checker {
         matches!(self.head_binding(name), HeadBinding::TypeParam)
     }
 
+    /// The name of the in-scope type parameter the head expression `e` spells, if it is one.
+    pub(super) fn type_param_head<'e>(&self, e: &'e Expr) -> Option<&'e str> {
+        e.kind
+            .as_ident()
+            .map(String::as_str)
+            .filter(|n| self.shadowing_type_param(n))
+    }
+
     /// The one answer to "does a `Ty::Param` named `n` stand as a concrete type here": an in-scope
     /// type param ([`Self::shadowing_type_param`]) that is not one of `call_free`, the still-unbound
     /// params of the call being inferred (a HOF callee's free `U` spelled like the caller's `U`).

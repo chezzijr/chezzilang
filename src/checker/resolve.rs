@@ -77,6 +77,10 @@ impl Checker {
                     })
             }
             ExprKind::Field { obj, name, .. } if !crate::ast::is_tuple_index(name) => {
+                // A full module path (`a.b` of `import a.b`) no binding hides names the module.
+                if let Some(p) = self.full_module_path(e) {
+                    return Some(self.value_head_resolution(&p));
+                }
                 self.classify_field(obj, name)
             }
             ExprKind::Int(_)
@@ -178,23 +182,23 @@ impl Checker {
     }
 
     fn classify_field(&self, obj: &Expr, name: &str) -> Option<Resolution> {
-        if let ExprKind::Ident(t) = &obj.kind {
-            // Through a type parameter: a bound's instance method is a path value; anything else
-            // is the static-witness call (`T.make()`), which reports a miss itself.
-            if self.shadowing_type_param(t) {
-                return Some(match self.param_member_fn(t, name) {
-                    Some(pf) => pf.res?,
-                    None => Resolution::WitnessStatic(t.clone()),
-                });
-            }
+        // Through a type parameter: a bound's instance method is a path value; anything else
+        // is the static-witness call (`T.make()`), which reports a miss itself.
+        if let Some(t) = self.type_param_head(obj) {
+            return Some(match self.param_member_fn(t, name) {
+                Some(pf) => pf.res?,
+                None => Resolution::WitnessStatic(t.to_string()),
+            });
+        }
+        if let Some(t) = self.head_name(obj) {
             // std.json's decode: its entry is the descriptor `record_decode` writes (DEC-214).
-            if self.json_decode_member(t, name) {
+            if self.json_decode_member(&t, name) {
                 return None;
             }
-            if let Some(r) = self.qualified_ctor(t, name) {
+            if let Some(r) = self.qualified_ctor(&t, name) {
                 return Some(r);
             }
-            if self.module_fn(t, name).is_some()
+            if self.module_fn(&t, name).is_some()
                 && let Resolution::ModuleMember { module, name } = self.member_resolution(obj, name)
             {
                 return Some(Resolution::Fn { module, name });

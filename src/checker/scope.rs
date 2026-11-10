@@ -347,6 +347,63 @@ impl Checker {
             None => HeadBinding::Unbound,
         }
     }
+    /// TICKET-300 -- the bound name of the full module path `e` spells (`a.b` of `import a.b`), when
+    /// no binding hides its head: THE one answer to "is this Field chain a module path" (DEC-175, kept
+    /// on `head_binding`). The compiler loads the module by the same dotted spelling
+    /// (`ast::dotted_path`).
+    pub(super) fn full_module_path(&self, e: &Expr) -> Option<String> {
+        let p = crate::ast::dotted_path(e)?;
+        let head = p.split('.').next().unwrap_or(&p);
+        (self.full_path_head_free(head) && matches!(self.scopes[0].get(&p), Some(Ty::Module(_))))
+            .then_some(p)
+    }
+    /// Does nothing hide `head` as the first segment of a full module path? A local or a type
+    /// parameter does; so does any module-level name (precomputed, so a declaration below the read
+    /// counts), except the name an un-aliased one-segment `import head` binds (DEC-175).
+    fn full_path_head_free(&self, head: &str) -> bool {
+        match self.head_binding(head) {
+            HeadBinding::Local | HeadBinding::TypeParam => false,
+            HeadBinding::Module | HeadBinding::Global | HeadBinding::Unbound => {
+                !self.globals.contains_key(head) || self.package_heads.contains(head)
+            }
+        }
+    }
+    /// The spelling the head expression `e` names: an Ident's own name, or the bound name of a full
+    /// module path no binding hides. Every head site that read `obj.kind.as_ident()` reads this.
+    pub(super) fn head_name<'e>(&self, e: &'e Expr) -> Option<std::borrow::Cow<'e, str>> {
+        match &e.kind {
+            ExprKind::Ident(n) => Some(std::borrow::Cow::Borrowed(n.as_str())),
+            ExprKind::Field { .. } => self.full_module_path(e).map(std::borrow::Cow::Owned),
+            ExprKind::Int(_)
+            | ExprKind::Float(_)
+            | ExprKind::Str(_)
+            | ExprKind::Interp(_)
+            | ExprKind::Bytes(_)
+            | ExprKind::RawStr(_)
+            | ExprKind::Bool(_)
+            | ExprKind::NoneLit
+            | ExprKind::Pass
+            | ExprKind::List(..)
+            | ExprKind::Tuple(_)
+            | ExprKind::Map(_)
+            | ExprKind::Set(_)
+            | ExprKind::Comprehension { .. }
+            | ExprKind::Unary { .. }
+            | ExprKind::Binary { .. }
+            | ExprKind::Compare { .. }
+            | ExprKind::Range { .. }
+            | ExprKind::Call { .. }
+            | ExprKind::Index { .. }
+            | ExprKind::Try(_)
+            | ExprKind::OptChain { .. }
+            | ExprKind::NullCoalesce { .. }
+            | ExprKind::Closure { .. }
+            | ExprKind::Match { .. }
+            | ExprKind::IfElse { .. }
+            | ExprKind::Recover(..)
+            | ExprKind::ElseGuard { .. } => None,
+        }
+    }
     /// Does a binding hide the type named `name` at a type-head site (`T.m()`, `E.V`)? Every
     /// binding does, a module-scope one and a whole-module import included (CPython rebinding).
     pub(super) fn head_hides_type(&self, name: &str) -> bool {
@@ -370,8 +427,8 @@ impl Checker {
     pub(super) fn type_head(&self, head: &Expr) -> Option<TypeHead> {
         match &head.kind {
             ExprKind::Ident(n) => self.self_type_head(n).or_else(|| self.bare_type_head(n)),
-            ExprKind::Field { obj, name, .. } => match obj.kind.as_ident() {
-                Some(m) => self.qualified_type_head(m, name),
+            ExprKind::Field { obj, name, .. } => match self.head_name(obj) {
+                Some(m) => self.qualified_type_head(&m, name),
                 None => None,
             },
             ExprKind::Int(_)

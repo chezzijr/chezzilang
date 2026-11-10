@@ -248,13 +248,11 @@ impl Checker {
             }
             ExprKind::Field { obj, name, .. } => {
                 // A type parameter shadows a module or type of that name here, as in a call.
-                if let ExprKind::Ident(t) = &obj.kind
-                    && self.shadowing_type_param(t)
-                {
+                if let Some(t) = self.type_param_head(obj) {
                     return self.param_member_fn(t, name);
                 }
-                if let ExprKind::Ident(m) = &obj.kind
-                    && let Some((display, sig)) = self.module_fn(m, name)
+                if let Some(m) = self.head_name(obj)
+                    && let Some((display, sig)) = self.module_fn(&m, name)
                 {
                     return Some(PathFn::of_fn(display, sig));
                 }
@@ -645,10 +643,8 @@ impl Checker {
                 let ExprKind::Field { obj: m, name, .. } = &head.kind else {
                     return None;
                 };
-                let ExprKind::Ident(mn) = &m.kind else {
-                    return None;
-                };
-                if !self.json_decode_member(mn, name) {
+                let mn = self.head_name(m)?;
+                if !self.json_decode_member(&mn, name) {
                     return None;
                 }
                 self.infer(m);

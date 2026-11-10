@@ -822,6 +822,77 @@ pub fn is_full_path_bind(name: &str) -> bool {
     name.contains('.')
 }
 
+/// The dotted spelling of a Field chain over an Ident head (`a.b.K` -> `"a.b.K"`); `None` for any
+/// other shape, and for an Ident alone.
+pub fn dotted_path(e: &Expr) -> Option<String> {
+    fn spelling(e: &Expr) -> Option<String> {
+        match &e.kind {
+            ExprKind::Ident(h) => Some(h.clone()),
+            ExprKind::Field { obj, name, .. } => Some(format!("{}.{name}", spelling(obj)?)),
+            ExprKind::Int(_)
+            | ExprKind::Float(_)
+            | ExprKind::Str(_)
+            | ExprKind::Interp(_)
+            | ExprKind::Bytes(_)
+            | ExprKind::RawStr(_)
+            | ExprKind::Bool(_)
+            | ExprKind::NoneLit
+            | ExprKind::Pass
+            | ExprKind::List(..)
+            | ExprKind::Tuple(_)
+            | ExprKind::Map(_)
+            | ExprKind::Set(_)
+            | ExprKind::Comprehension { .. }
+            | ExprKind::Unary { .. }
+            | ExprKind::Binary { .. }
+            | ExprKind::Compare { .. }
+            | ExprKind::Range { .. }
+            | ExprKind::Call { .. }
+            | ExprKind::Index { .. }
+            | ExprKind::Try(_)
+            | ExprKind::OptChain { .. }
+            | ExprKind::NullCoalesce { .. }
+            | ExprKind::Closure { .. }
+            | ExprKind::Match { .. }
+            | ExprKind::IfElse { .. }
+            | ExprKind::Recover(..)
+            | ExprKind::ElseGuard { .. } => None,
+        }
+    }
+    match &e.kind {
+        ExprKind::Field { .. } => spelling(e),
+        ExprKind::Ident(_)
+        | ExprKind::Int(_)
+        | ExprKind::Float(_)
+        | ExprKind::Str(_)
+        | ExprKind::Interp(_)
+        | ExprKind::Bytes(_)
+        | ExprKind::RawStr(_)
+        | ExprKind::Bool(_)
+        | ExprKind::NoneLit
+        | ExprKind::Pass
+        | ExprKind::List(..)
+        | ExprKind::Tuple(_)
+        | ExprKind::Map(_)
+        | ExprKind::Set(_)
+        | ExprKind::Comprehension { .. }
+        | ExprKind::Unary { .. }
+        | ExprKind::Binary { .. }
+        | ExprKind::Compare { .. }
+        | ExprKind::Range { .. }
+        | ExprKind::Call { .. }
+        | ExprKind::Index { .. }
+        | ExprKind::Try(_)
+        | ExprKind::OptChain { .. }
+        | ExprKind::NullCoalesce { .. }
+        | ExprKind::Closure { .. }
+        | ExprKind::Match { .. }
+        | ExprKind::IfElse { .. }
+        | ExprKind::Recover(..)
+        | ExprKind::ElseGuard { .. } => None,
+    }
+}
+
 /// The four import forms (syntax.md §12).
 ///
 /// `PartialEq` is hand-written (NOT derived) so the bound-NAME spans are EQUALITY-NEUTRAL (mirrors

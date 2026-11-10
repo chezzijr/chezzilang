@@ -1,6 +1,7 @@
 //! Syntactic desugaring, run inside [`crate::resolver::build_graph`] before the checker: synthesize
-//! default providers ([`synthesize_providers`]), fold Python full module paths (`fold_full_path`, DEC-175), and bound
-//! `fn` nesting ([`MAX_FN_NESTING`], DEC-109).
+//! default providers ([`synthesize_providers`]), lower carriers, and bound `fn` nesting
+//! ([`MAX_FN_NESTING`], DEC-109). It has no scope model: which name a spelling means is the
+//! checker's decision (`Checker::head_binding`, `Checker::full_module_path`), never a walk here.
 //!
 //! **This pass does not bind call arguments.** Which declaration a call binds against, and which
 //! slot each named, omitted or variadic argument fills, is the checker's decision alone
@@ -15,13 +16,12 @@
 //! default chains compose to any depth. See [`Dflt`] and [`SlotSpec`].
 
 use crate::ast::{
-    Block, Chunk, DeferTarget, Expr, ExprKind, Import, MatchExprArm, Module, OptCall, Pattern,
-    Span, SpawnTarget, Stmt, StmtKind, Type, TypeParam, WaitArmKind,
+    Block, Chunk, DeferTarget, Expr, ExprKind, MatchExprArm, Module, OptCall, Pattern, Span,
+    SpawnTarget, Stmt, StmtKind, Type, TypeParam, WaitArmKind,
 };
-use crate::base::module_id::ModuleId;
 use crate::base::provider_name::{Slot, provider_label, provider_name};
 use crate::resolver::{ModuleGraph, ResolveError};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 /// How an omitted argument is materialised at a call site.
 ///
@@ -354,36 +354,14 @@ pub(crate) fn field_slots(
         .collect()
 }
 
-/// Desugar every module in place: synthesize default providers, fold full module paths, lower
-/// carriers, bound fn nesting. Errors carry the offending node's span. Call arguments are bound by
+/// Desugar every module in place: synthesize default providers, lower carriers, bound fn nesting. Errors carry the offending node's span. Call arguments are bound by
 /// the checker (`Checker::bind_call`), not here; default legality is the checker's too
 /// (`Checker::check_default_scope`, TICKET-201).
 pub fn run(graph: &mut ModuleGraph) -> Result<(), ResolveError> {
     // W7-51 — every non-inline default becomes a zero-arg `fn` in the module that DECLARES it.
     synthesize_providers(graph);
     for mi in 0..graph.modules.len() {
-        let mut aliases: HashMap<String, ModuleId> = HashMap::new();
-        for imp in &graph.modules[mi].imports {
-            if let Import::Module { path, alias, .. } = &imp.import {
-                let local = alias
-                    .clone()
-                    .or_else(|| path.last().cloned())
-                    .unwrap_or_default();
-                if !local.is_empty() {
-                    aliases.insert(local, imp.target.clone());
-                }
-            }
-        }
-        let module_names =
-            module_level_names(&graph.modules[mi].ast.stmts, &graph.modules[mi].imports);
-        let ctx = Ctx {
-            aliases: &aliases,
-            module_names: &module_names,
-        };
         let mut walker = Walker {
-            ctx,
-            scopes: Vec::new(),
-            type_params: Vec::new(),
             depth: 0,
             fn_depth: 0,
             builds_range: false,
@@ -409,16 +387,7 @@ pub fn run_standalone(module: &mut Module) -> Result<(), ResolveError> {
     // the test's lexer stamped; there is only one module, so any value is unique by construction.
     let file = module.stmts.first().map_or(0, |s| s.span.file);
     synthesize_providers_into(&mut module.stmts, file);
-    let aliases = HashMap::new();
-    let module_names = HashSet::new();
-    let ctx = Ctx {
-        aliases: &aliases,
-        module_names: &module_names,
-    };
     let mut walker = Walker {
-        ctx,
-        scopes: Vec::new(),
-        type_params: Vec::new(),
         depth: 0,
         fn_depth: 0,
         builds_range: false,
@@ -869,21 +838,7 @@ fn walk_idents_and_types(e: &Expr, f: &mut impl FnMut(&str), tf: &mut impl FnMut
     }
 }
 
-/// Per-module context for the full-path fold (all borrows outlive the mutable AST walk).
-struct Ctx<'a> {
-    /// Whole-module imports: bound name → target module.
-    aliases: &'a HashMap<String, ModuleId>,
-    /// This module's top-level names that hide a full module path's head (see
-    /// [`module_level_names`]). Precomputed, never read from walk position: a hoisted decl binds
-    /// before any statement runs.
-    module_names: &'a HashSet<String>,
-}
-
-struct Walker<'a> {
-    ctx: Ctx<'a>,
-    scopes: Vec<HashSet<String>>,
-    /// Per-scope type-parameter names, parallel to `scopes`; a type parameter shadows a module name.
-    type_params: Vec<HashSet<String>>,
+struct Walker {
     /// Current [`Walker::walk_expr`] recursion depth — see that method. This counter is what turns
     /// [`crate::parser::MAX_AST_DEPTH`] into a **global** bound instead of a per-`Parser` one.
     depth: usize,
@@ -914,7 +869,7 @@ struct Walker<'a> {
 /// depth), so the constant stays; lowering it to a performance bound needs a new measurement.
 pub const MAX_FN_NESTING: usize = 100;
 
-impl Walker<'_> {
+impl Walker {
     /// Enter one `fn` body (TICKET-109): count it, and reject it past [`MAX_FN_NESTING`] at its name.
     /// Every caller decrements `fn_depth` after walking the body. An `Err` aborts the whole walk, so
     /// that path needs no decrement.
@@ -932,90 +887,18 @@ impl Walker<'_> {
         Ok(())
     }
 
-    fn is_local(&self, name: &str) -> bool {
-        self.scopes.iter().any(|s| s.contains(name))
-    }
-
-    /// Fold a Python full module path (TICKET-175): in `pkg.deep.Point.zero`, the LONGEST prefix
-    /// whose dot-join is an imported module's bound name (`pkg.deep`, the resolver's synthetic
-    /// full-path bind) becomes one `Ident("pkg.deep")`, so checker and compiler see the same
-    /// `module.member` shape as `deep.Point.zero`. Runs at the OUTERMOST `Field` of a chain first
-    /// (the caller walks parents before children), so the longest prefix wins. A head that a local,
-    /// a parameter, a type parameter, or any module-level name shadows is left alone.
-    fn fold_full_path(&self, expr: &mut Expr) {
-        let mut segs: Vec<String> = Vec::new();
-        let mut cur = &*expr;
-        while let ExprKind::Field { obj, name, .. } = &cur.kind {
-            segs.push(name.clone());
-            cur = obj;
-        }
-        let ExprKind::Ident(head) = &cur.kind else {
-            return;
-        };
-        if segs.is_empty()
-            || head.contains('.')
-            || self.is_local(head)
-            || self.is_type_param(head)
-            || self.ctx.module_names.contains(head)
-        {
-            return;
-        }
-        let head_span = cur.span;
-        segs.push(head.clone());
-        segs.reverse();
-        // `segs` is now `[head, s1, s2, …]`; find the longest `head.s1…sk` that is a bound name.
-        let Some(k) = (2..=segs.len())
-            .rev()
-            .find(|&k| self.ctx.aliases.contains_key(&segs[..k].join(".")))
-        else {
-            return;
-        };
-        let joined = segs[..k].join(".");
-        let mut node = expr;
-        for _ in 0..segs.len() - k {
-            let ExprKind::Field { obj, .. } = &mut node.kind else {
-                return;
-            };
-            node = obj;
-        }
-        *node = ident_expr(&joined, head_span);
-    }
-
-    fn bind(&mut self, name: &str) {
-        if let Some(top) = self.scopes.last_mut() {
-            top.insert(name.to_string());
-        }
-    }
-
-    fn push_scope(&mut self) {
-        self.scopes.push(HashSet::new());
-        self.type_params.push(HashSet::new());
-    }
-
-    fn pop_scope(&mut self) {
-        self.scopes.pop();
-        self.type_params.pop();
-    }
-
-    /// Whether `name` is a type-parameter name in scope. A type parameter shadows a struct name.
-    fn is_type_param(&self, name: &str) -> bool {
-        self.type_params.iter().any(|s| s.contains(name))
-    }
-
-    /// Walk a block in its own lexical scope (sequential `let`s bind into this scope).
+    /// Walk a block's statements in order.
     fn walk_block(&mut self, stmts: &mut Block) -> Result<(), ResolveError> {
-        self.push_scope();
         for stmt in stmts.iter_mut() {
             self.walk_stmt(stmt)?;
         }
-        self.pop_scope();
         Ok(())
     }
 
     fn walk_stmt(&mut self, stmt: &mut Stmt) -> Result<(), ResolveError> {
         match &mut stmt.kind {
             StmtKind::Let {
-                target,
+                target: _,
                 ty: _,
                 value,
                 // `const` is not lowered here (compile-time-only; the checker enforces it) — ignore.
@@ -1023,9 +906,6 @@ impl Walker<'_> {
                 doc: _,
             } => {
                 self.walk_expr(value)?;
-                for (n, _) in target.binders() {
-                    self.bind(n);
-                }
             }
             StmtKind::Assign { target, value, op: _ } => {
                 self.walk_expr(target)?;
@@ -1044,14 +924,6 @@ impl Walker<'_> {
                 }
                 // Nested/top-level function body: params are a fresh scope.
                 self.enter_fn(&decl.name, decl.name_span)?;
-                self.push_scope();
-                self.type_params
-                    .last_mut()
-                    .unwrap()
-                    .extend(decl.type_params.iter().map(|t| t.name.clone()));
-                for p in &decl.params {
-                    self.bind(&p.name);
-                }
                 let skipped = self.fn_depth == 1
                     && self.skipped_fns.skips(&decl.name);
                 let builds_range = self.builds_range;
@@ -1059,11 +931,9 @@ impl Walker<'_> {
                 if skipped {
                     self.builds_range = builds_range;
                 }
-                self.pop_scope();
                 self.fn_depth -= 1;
             }
             StmtKind::Struct {
-                type_params,
                 fields,
                 methods,
                 ..
@@ -1083,18 +953,7 @@ impl Walker<'_> {
                         }
                     }
                     self.enter_fn(&m.name, m.name_span)?;
-                    self.push_scope();
-                    self.type_params.last_mut().unwrap().extend(
-                        type_params
-                            .iter()
-                            .chain(m.type_params.iter())
-                            .map(|t| t.name.clone()),
-                    );
-                    for p in &m.params {
-                        self.bind(&p.name);
-                    }
                     self.walk_block(&mut m.body)?;
-                    self.pop_scope();
                     self.fn_depth -= 1;
                 }
             }
@@ -1113,14 +972,9 @@ impl Walker<'_> {
             StmtKind::For { target, iter, body } => {
                 self.counting_iterand = crate::ast::counting_range(target, iter).is_some();
                 self.walk_expr(iter)?;
-                self.push_scope();
-                for (v, _) in target.binders() {
-                    self.bind(v);
-                }
                 for s in body.iter_mut() {
                     self.walk_stmt(s)?;
                 }
-                self.pop_scope();
             }
             StmtKind::While { cond, body } => {
                 self.walk_expr(cond)?;
@@ -1129,19 +983,12 @@ impl Walker<'_> {
             StmtKind::Match { scrutinee, arms } => {
                 self.walk_expr(scrutinee)?;
                 for arm in arms.iter_mut() {
-                    self.push_scope();
-                    bind_pattern(&arm.pattern, &mut |n| {
-                        if let Some(top) = self.scopes.last_mut() {
-                            top.insert(n);
-                        }
-                    });
                     if let Some(g) = &mut arm.guard {
                         self.walk_expr(g)?;
                     }
                     for s in arm.body.iter_mut() {
                         self.walk_stmt(s)?;
                     }
-                    self.pop_scope();
                 }
             }
             StmtKind::Return(Some(e)) => self.walk_expr(e)?,
@@ -1164,25 +1011,18 @@ impl Walker<'_> {
             },
             StmtKind::Wait { arms, else_block } => {
                 for arm in arms {
-                    // The arm body is its own scope; a `v := ch.recv()` bind lives in it.
-                    self.push_scope();
-                    // The guard runs before the arm binds: it cannot see the arm's binding.
                     if let Some(g) = &mut arm.guard {
                         self.walk_expr(g)?;
                     }
                     match &mut arm.kind {
-                        WaitArmKind::Recv { target, chan } => {
+                        WaitArmKind::Recv { target: _, chan } => {
                             self.walk_expr(chan)?;
-                            for (name, _) in target.binders() {
-                                self.bind(name);
-                            }
                         }
                         WaitArmKind::Send { call } => self.walk_expr(call)?,
                     }
                     for s in arm.body.iter_mut() {
                         self.walk_stmt(s)?;
                     }
-                    self.pop_scope();
                 }
                 if let Some(b) = else_block {
                     self.walk_block(b)?;
@@ -1190,11 +1030,7 @@ impl Walker<'_> {
             }
             // Enum method bodies (and param defaults) are rewritten exactly like a struct's; an enum
             // has no fields to splice.
-            StmtKind::Enum {
-                type_params,
-                methods,
-                ..
-            } => {
+            StmtKind::Enum { methods, .. } => {
                 for m in methods.iter_mut() {
                     for p in m.params.iter_mut() {
                         if let Some(d) = &mut p.default {
@@ -1202,29 +1038,14 @@ impl Walker<'_> {
                         }
                     }
                     self.enter_fn(&m.name, m.name_span)?;
-                    self.push_scope();
-                    self.type_params.last_mut().unwrap().extend(
-                        type_params
-                            .iter()
-                            .chain(m.type_params.iter())
-                            .map(|t| t.name.clone()),
-                    );
-                    for p in &m.params {
-                        self.bind(&p.name);
-                    }
                     self.walk_block(&mut m.body)?;
-                    self.pop_scope();
                     self.fn_depth -= 1;
                 }
             }
             // A `native struct`'s BODIED Chezzi methods ARE compiled to bytecode, so their bodies +
             // param defaults must be desugared exactly like an enum/struct method (default/named-arg
             // normalization, `ref` lowering). The bodyless `native fn` sigs alongside them have nothing.
-            StmtKind::NativeStruct {
-                type_params,
-                bodied_methods,
-                ..
-            } => {
+            StmtKind::NativeStruct { bodied_methods, .. } => {
                 let skip = self.skips_native_bodies;
                 for m in bodied_methods.iter_mut().filter(|_| !skip) {
                     for p in m.params.iter_mut() {
@@ -1233,18 +1054,7 @@ impl Walker<'_> {
                         }
                     }
                     self.enter_fn(&m.name, m.name_span)?;
-                    self.push_scope();
-                    self.type_params.last_mut().unwrap().extend(
-                        type_params
-                            .iter()
-                            .chain(m.type_params.iter())
-                            .map(|t| t.name.clone()),
-                    );
-                    for p in &m.params {
-                        self.bind(&p.name);
-                    }
                     self.walk_block(&mut m.body)?;
-                    self.pop_scope();
                     self.fn_depth -= 1;
                 }
             }
@@ -1296,7 +1106,6 @@ impl Walker<'_> {
     }
 
     fn walk_expr_inner(&mut self, expr: &mut Expr) -> Result<(), ResolveError> {
-        self.fold_full_path(expr);
         // Recurse into children first, so nested calls are normalized regardless of this node.
         match &mut expr.kind {
             ExprKind::Unary { expr: inner, .. } => self.walk_expr(inner)?,
@@ -1339,28 +1148,14 @@ impl Walker<'_> {
                 }
             }
             ExprKind::Try(inner) => self.walk_expr(inner)?,
-            ExprKind::Closure { params, body, .. } => {
-                self.push_scope();
-                for p in params.iter() {
-                    self.bind(&p.name);
-                }
-                self.walk_expr(body)?;
-                self.pop_scope();
-            }
+            ExprKind::Closure { body, .. } => self.walk_expr(body)?,
             ExprKind::Match { scrutinee, arms } => {
                 self.walk_expr(scrutinee)?;
                 for arm in arms.iter_mut() {
-                    self.push_scope();
-                    bind_pattern(&arm.pattern, &mut |n| {
-                        if let Some(top) = self.scopes.last_mut() {
-                            top.insert(n);
-                        }
-                    });
                     if let Some(g) = &mut arm.guard {
                         self.walk_expr(g)?;
                     }
                     self.walk_expr(&mut arm.body)?;
-                    self.pop_scope();
                 }
             }
             ExprKind::IfElse { cond, then, els } => {
@@ -1376,16 +1171,8 @@ impl Walker<'_> {
             ExprKind::Comprehension {
                 key, elem, clauses, ..
             } => {
-                // Clauses nest (first outermost): each clause's `iter` is walked in the scope of the
-                // earlier clauses' vars, then that clause's vars are bound for everything after it
-                // (later clauses' iters/guards, this clause's guards, and the key/element). One
-                // cumulative scope per clause; pop them all at the end.
                 for clause in clauses.iter_mut() {
                     self.walk_expr(&mut clause.iter)?;
-                    self.push_scope();
-                    for (v, _) in clause.target.binders() {
-                        self.bind(v);
-                    }
                     for g in clause.guards.iter_mut() {
                         self.walk_expr(g)?;
                     }
@@ -1394,9 +1181,6 @@ impl Walker<'_> {
                     self.walk_expr(k)?;
                 }
                 self.walk_expr(elem)?;
-                for _ in clauses.iter() {
-                    self.pop_scope();
-                }
             }
             ExprKind::Call {
                 callee,
@@ -1464,20 +1248,6 @@ impl Walker<'_> {
             | ExprKind::Pass => {}
         }
         Ok(())
-    }
-}
-
-/// Collect the binding names introduced by a `match` pattern.
-fn bind_pattern(pat: &Pattern, f: &mut impl FnMut(String)) {
-    match pat {
-        Pattern::Ident(n, _, _) => f(n.clone()),
-        Pattern::Variant { bindings, .. } | Pattern::Tuple(bindings) | Pattern::Or(bindings) => {
-            for b in bindings {
-                bind_pattern(b, f);
-            }
-        }
-        Pattern::Carrier { inner, .. } => bind_pattern(inner, f),
-        Pattern::Literal(_) | Pattern::Range { .. } | Pattern::Wildcard => {}
     }
 }
 
@@ -1817,88 +1587,6 @@ fn opt_call_kind(
     }
 }
 
-/// A module's top-level names that hide a full module path's head (TICKET-175): `let`, `fn` and
-/// extern fn names, type declarations, every `from` bind, and every whole-module bind except two.
-/// An un-aliased one-segment `import pkg` does not hide `pkg.deep` (it is the same package head),
-/// and the resolver's dotted synthetic bind is the full path itself.
-fn module_level_names(
-    stmts: &[Stmt],
-    imports: &[crate::base::module_id::ResolvedImport],
-) -> HashSet<String> {
-    let mut out = HashSet::new();
-    for s in stmts {
-        match &s.kind {
-            StmtKind::Let { target, .. } => out.extend(target.binder_names()),
-            StmtKind::Fn(d) => {
-                out.insert(d.name.clone());
-            }
-            StmtKind::Extern { fns, .. } => out.extend(fns.iter().map(|f| f.name.clone())),
-            StmtKind::Struct { name, .. }
-            | StmtKind::Enum { name, .. }
-            | StmtKind::TypeAlias { name, .. }
-            | StmtKind::Protocol { name, .. } => {
-                out.insert(name.clone());
-            }
-            StmtKind::Import(Import::Variants { names, .. }) => {
-                out.extend(
-                    names
-                        .iter()
-                        .map(|(n, a)| a.clone().unwrap_or_else(|| n.clone())),
-                );
-            }
-            StmtKind::Assign { .. }
-            | StmtKind::If { .. }
-            | StmtKind::For { .. }
-            | StmtKind::While { .. }
-            | StmtKind::Match { .. }
-            | StmtKind::Return(_)
-            | StmtKind::Yield(_)
-            | StmtKind::Defer(_)
-            | StmtKind::Parallel { .. }
-            | StmtKind::Spawn(_)
-            | StmtKind::Wait { .. }
-            | StmtKind::Break
-            | StmtKind::Continue
-            | StmtKind::Pass
-            | StmtKind::Import(_)
-            | StmtKind::Native(_)
-            | StmtKind::NativeStruct { .. }
-            | StmtKind::NativeEnum { .. }
-            | StmtKind::NativeType { .. }
-            | StmtKind::Assert { .. }
-            | StmtKind::Expr(_) => {}
-        }
-    }
-    for imp in imports {
-        match &imp.import {
-            Import::Module { path, alias, .. } => {
-                let Some(bound) = alias.clone().or_else(|| path.last().cloned()) else {
-                    continue;
-                };
-                if crate::ast::is_full_path_bind(&bound) || (alias.is_none() && path.len() == 1) {
-                    continue;
-                }
-                out.insert(bound);
-            }
-            // The resolver never resolves a variant import; the `stmts` loop above names it.
-            Import::Variants { .. } => {}
-            Import::From { names, .. } => {
-                out.extend(
-                    names
-                        .iter()
-                        .map(|(n, a)| a.clone().unwrap_or_else(|| n.clone())),
-                );
-            }
-        }
-    }
-    out
-}
-
-/// A bare identifier expression at `span`.
-fn ident_expr(name: &str, span: Span) -> Expr {
-    ident_expr_at(crate::ast::NodeId::fresh(), name, span)
-}
-
 fn ident_expr_at(id: crate::ast::NodeId, name: &str, span: Span) -> Expr {
     Expr {
         id,
@@ -1911,6 +1599,7 @@ fn ident_expr_at(id: crate::ast::NodeId, name: &str, span: Span) -> Expr {
 mod tests {
     use super::*;
     use crate::ast::ExprKind;
+    use crate::base::module_id::ModuleId;
     use crate::lexer;
     use crate::resolver::LoadedModule;
     use std::path::PathBuf;

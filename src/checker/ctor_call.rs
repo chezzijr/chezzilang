@@ -520,9 +520,9 @@ impl Checker {
     /// What `obj.name` names when `obj` is not a type head: a member of a whole-module import when
     /// `obj` is that import's name, else a member of a value.
     pub(super) fn member_resolution(&self, obj: &Expr, name: &str) -> Resolution {
-        if let ExprKind::Ident(m) = &obj.kind
-            && !self.head_is_value(m)
-            && let Some(mid) = self.imported_modules.get(m)
+        if let Some(m) = self.head_name(obj)
+            && !self.head_is_value(&m)
+            && let Some(mid) = self.imported_modules.get(&*m)
             && let Some(&module) = self.module_idx_of.get(mid)
         {
             return Resolution::ModuleMember {
