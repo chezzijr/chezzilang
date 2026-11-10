@@ -422,7 +422,7 @@ impl Parser {
         let target = if self.check(&Token::LParen) {
             // A one-name group `(x)` is that name, as in CPython.
             self.parse_paren_list(Self::parse_bind_target)?
-        } else if self.walrus_keyword.is_some() && Self::is_operand_keyword(self.peek()) {
+        } else if self.walrus_keyword.is_some() && crate::lexer::is_operand_keyword(self.peek()) {
             // `try_parse_walrus_target` is reading: remember the keyword, report it only if the
             // list ends at `:=`.
             let t = self.toks[self.pos].clone();
@@ -475,7 +475,7 @@ impl Parser {
     /// returns `None`, so the expression path reports the error (`bind_target_error`).
     pub(super) fn try_parse_walrus_target(&mut self) -> PResult<Option<Pattern>> {
         if !matches!(self.peek(), Token::Ident(_) | Token::LParen)
-            && !Self::is_operand_keyword(self.peek())
+            && !crate::lexer::is_operand_keyword(self.peek())
         {
             return Ok(None);
         }

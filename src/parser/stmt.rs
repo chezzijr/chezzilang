@@ -447,10 +447,8 @@ impl Parser {
         // (Computed for every simple-stmt; only consumed by the `Let` arms below.)
         let stmt_doc = self.doc_above(self.cur_span().line);
         // typed let: `name: Type = value`
-        if matches!(
-            self.peek(),
-            Token::Ident(_) | Token::True | Token::False | Token::NoneKw | Token::SelfKw
-        ) && self.peek_at(1) == &Token::Colon
+        if (matches!(self.peek(), Token::Ident(_)) || crate::lexer::is_operand_keyword(self.peek()))
+            && self.peek_at(1) == &Token::Colon
         {
             // Capture the binding-name token span (parallel to `names`) for decl-site hover.
             let name_span = self.cur_span();

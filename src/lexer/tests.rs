@@ -2092,3 +2092,22 @@ fn question_run_after_every_token_grid() {
         red.join("\n")
     );
 }
+
+/// TICKET-300 -- `is_operand_keyword` is true for the keywords that parse as operands and false for
+/// every other keyword and for a name. Red if it returns false for `Self`, or true for `if`.
+#[test]
+fn operand_keywords_are_the_keywords_that_end_an_operand() {
+    for t in [Token::NoneKw, Token::True, Token::False, Token::SelfKw] {
+        assert!(is_operand_keyword(&t), "{t:?} is an operand keyword");
+    }
+    for t in [
+        Token::If,
+        Token::Fn,
+        Token::Not,
+        Token::Match,
+        Token::Ident("x".into()),
+        Token::RParen,
+    ] {
+        assert!(!is_operand_keyword(&t), "{t:?} is not an operand keyword");
+    }
+}

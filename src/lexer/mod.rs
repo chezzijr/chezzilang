@@ -757,6 +757,14 @@ pub fn is_keyword(word: &str) -> bool {
     keyword(word).is_some()
 }
 
+/// Whether `t` is a keyword that parses as an operand (`None`, `true`, `false`, `Self`): a `KEYWORDS`
+/// row that `ends_operand` lists. The expression path cannot tell such a keyword from a name, so a
+/// name slot reads it from the token. Derived from both owners, so a new operand keyword joins it
+/// with no edit here.
+pub fn is_operand_keyword(t: &Token) -> bool {
+    KEYWORDS.iter().any(|(_, k)| k == t) && ends_operand(t, false)
+}
+
 fn keyword(word: &str) -> Option<Token> {
     KEYWORDS
         .iter()
