@@ -362,20 +362,6 @@ fn static_key(type_key: &str, method: &str) -> String {
     format!("{type_key}\u{1}{method}")
 }
 
-/// Decompose a validated send-arm call `chan.send(value)` into `(&chan, &value)`. The CHECKER has
-/// already rejected any other shape (`wait_send_arm_shape`), so a compiled program is guaranteed to
-/// match — an unexpected shape here is a checker/compiler drift bug, not user error.
-fn send_arm_parts(call: &Expr) -> (&Expr, &Expr) {
-    if let ExprKind::Call { callee, args, .. } = &call.kind
-        && let ExprKind::Field { obj, name, .. } = &callee.kind
-        && name == "send"
-        && args.len() == 1
-    {
-        return (obj, &args[0]);
-    }
-    unreachable!("send-arm call shape must be validated by the checker before compile");
-}
-
 /// M19 lever #2 — register an enum variant into BOTH program tables, assigning it the next dense
 /// `variant_id` (`variants_by_id.len()`, a global gap-free counter — the analogue of how `StructDef`
 /// gets its `tid` from `structs.len()`). Keeps `variants` (`(enum, variant)`→def) and `variants_by_id`
@@ -1376,7 +1362,9 @@ fn stmt_has_bare_spawn(s: &Stmt) -> bool {
             arms.iter().any(|a| {
                 let header = match &a.kind {
                     WaitArmKind::Recv { chan, .. } => expr_has_bare_spawn(chan),
-                    WaitArmKind::Send { call } => expr_has_bare_spawn(call),
+                    WaitArmKind::Send { chan, value } => {
+                        expr_has_bare_spawn(chan) || expr_has_bare_spawn(value)
+                    }
                 };
                 header
                     || a.guard.as_ref().is_some_and(expr_has_bare_spawn)

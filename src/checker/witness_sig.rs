@@ -74,16 +74,6 @@ impl Checker {
         prelude_fn(n).filter(|_| self.bound_builtin(n).is_none())
     }
 
-    /// Whether `module.name` (through a whole-module import) names a builtin type `module` owns.
-    pub(super) fn module_owns_builtin(&self, module: &str, name: &str) -> bool {
-        !self.head_is_value(module)
-            && self
-                .imported_modules
-                .get(module)
-                .and_then(|mid| self.module_sigs.get(mid))
-                .is_some_and(|sig| sig.builtins.contains(name))
-    }
-
     /// The builtin type a bare type name denotes here: a module-owned one this module bound (an
     /// import binds before a builtin of its name), else a global builtin.
     pub(super) fn builtin_type_named(&self, n: &str) -> Option<BuiltinType> {

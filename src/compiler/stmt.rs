@@ -374,9 +374,8 @@ impl Compiler {
                     self.compile_expr(fc, chan)?;
                     false
                 }
-                WaitArmKind::Send { call } => {
-                    let (obj, value) = send_arm_parts(call);
-                    self.compile_expr(fc, obj)?;
+                WaitArmKind::Send { chan, value } => {
+                    self.compile_expr(fc, chan)?;
                     self.compile_expr(fc, value)?;
                     true
                 }
@@ -644,7 +643,8 @@ impl Compiler {
                 } = &call.kind
                 else {
                     return Err(CompileError {
-                        message: "spawn requires a function or method call".to_string(),
+                        message: "internal: the parser builds a `spawn` target from a call only"
+                            .to_string(),
                         span,
                     });
                 };

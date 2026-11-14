@@ -252,16 +252,17 @@ fn parses_wait_with_bind_assign_discard_and_else() {
 
 #[test]
 fn parses_wait_bare_send_arm() {
-    // A bare `ch.send(v):` arm (no `:=`/`=`) parses to a lenient `Send{call}` — the checker
-    // validates the `.send()` shape, not the parser.
+    // A bare `ch.send(v):` arm (no `:=`/`=`) parses to `Send{chan, value}`: the parser decides
+    // the shape.
     let src = "wait:\n    v := ch.recv(): use(v)\n    out.send(7): done()\n";
     match only(src) {
         StmtKind::Wait { arms, else_block } => {
             assert_eq!(arms.len(), 2);
             assert!(matches!(arms[0].kind, WaitArmKind::Recv { .. }));
             match &arms[1].kind {
-                WaitArmKind::Send { call } => {
-                    assert!(matches!(&call.kind, ExprKind::Call { .. }));
+                WaitArmKind::Send { chan, value } => {
+                    assert!(matches!(&chan.kind, ExprKind::Ident(n) if n == "out"));
+                    assert!(matches!(&value.kind, ExprKind::Int(7)));
                 }
                 other => panic!("expected send arm, got {other:?}"),
             }
@@ -289,7 +290,42 @@ fn wait_arm_non_recv_rhs_rejected() {
     assert!(
         parse_err("wait:\n    v := f(): g()\n")
             .message
-            .contains("must `recv` from a channel")
+            .contains("a wait arm must be a recv (`v := ch.recv():`), a send (`ch.send(v):`)")
+    );
+}
+
+#[test]
+fn wait_arm_send_shape_is_a_parse_error() {
+    for (src, want) in [
+        (
+            "wait:\n    ch.send(): g()\n",
+            "`send` in a wait arm takes one argument",
+        ),
+        (
+            "wait:\n    ch.send(1, 2): g()\n",
+            "`send` in a wait arm takes one argument",
+        ),
+        (
+            "wait:\n    ch.send(v=1): g()\n",
+            "`send` in a wait arm takes one argument",
+        ),
+        (
+            "wait:\n    ch.try_send(1): g()\n",
+            "a wait arm must be a recv",
+        ),
+        ("wait:\n    f(): g()\n", "a wait arm must be a recv"),
+    ] {
+        let msg = parse_err(src).message;
+        assert!(msg.contains(want), "{src:?}: {msg}");
+    }
+}
+
+#[test]
+fn defer_non_call_rejected() {
+    assert!(
+        parse_err("defer x + 1\n").message.contains(
+            "defer requires a function or method call (`defer f(x)`) or a block (`defer:`)"
+        )
     );
 }
 

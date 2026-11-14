@@ -379,6 +379,8 @@ fn parser_rules_match_fns() {
         ("parallelStmt", "parse_parallel"),
         ("spawnStmt", "parse_spawn"),
         ("spawnCallStmt", "parse_spawn_call"),
+        ("taskCall", "parse_task_call"),
+        ("recvCall", "parse_recv_chan"),
         ("waitStmt", "parse_wait"),
         ("importStmt", "parse_import"),
         ("dottedPath", "parse_dotted_path"),
@@ -441,9 +443,6 @@ fn parser_rules_match_fns() {
         // `dottedPath` grammar; it only also returns the last-segment span for the import bound-name
         // hover) — a structural helper with no distinct grammar rule.
         "parse_dotted_path_spanned",
-        // `parse_recv_chan` parses the RHS of a recv `wait:` arm (the bare `chan.recv()`) — a
-        // structural helper of `parse_wait`, part of the `<waitArm>` rule, no distinct rule of its own.
-        "parse_recv_chan",
         // `parse_wait_arm_head` parses a wait arm whose head is an expression (a `=` recv arm or a
         // send arm); the `<waitArm>` rule is `parse_wait`'s.
         "parse_wait_arm_head",
@@ -758,11 +757,6 @@ const GRAMMAR_LOOSER: &[(&str, &str, &str)] = &[
         "param",
         "variadic parameters are not supported here",
         "context: a closure, extern or protocol param is never variadic",
-    ),
-    (
-        "plainStmt",
-        "spawn requires a function or method call",
-        "context: the call form of `spawn` takes a call, the BNF says <expr>",
     ),
     (
         "compoundStmt",

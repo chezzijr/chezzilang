@@ -630,19 +630,23 @@ fn a_literal_for_prints_what_the_same_range_bound_to_a_name_prints() {
 }
 
 #[test]
-fn a_literal_with_no_start_is_a_check_error_and_a_value_is_a_run_fault() {
-    let lit = write("nostart_lit.chz", "for i in ..5:\n    print(i)\n");
-    let (ok, text) = chezzi(&["check"], &lit, None);
-    assert!(
-        !ok && text.contains("a range with no start cannot be iterated"),
-        "{text}"
-    );
-    let val = write("nostart_val.chz", "r := ..5\nfor i in r:\n    print(i)\n");
-    let (ok, text) = chezzi(&["run"], &val, None);
-    assert!(
-        !ok && text.contains("a range with no start cannot be iterated"),
-        "{text}"
-    );
+fn a_literal_and_a_value_with_no_start_are_both_run_faults() {
+    // `Range.iter` in `std/prelude.chz` is the one owner of the rule: a literal checks clean and
+    // faults where a value does.
+    for (name, src) in [
+        ("nostart_lit.chz", "for i in ..5:\n    print(i)\n"),
+        ("nostart_val.chz", "r := ..5\nfor i in r:\n    print(i)\n"),
+    ] {
+        let f = write(name, src);
+        let (ok, text) = chezzi(&["check"], &f, None);
+        assert!(ok, "{name}: {text}");
+        let (ok, text) = chezzi(&["run"], &f, None);
+        assert!(
+            !ok && text.contains("runtime error (")
+                && text.contains("a range with no start cannot be iterated"),
+            "{name}: {text}"
+        );
+    }
 }
 
 #[test]

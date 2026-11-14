@@ -14,6 +14,7 @@ write a second copy next to it (CLAUDE.md "Derive, don't mirror").
 
 | Fact | Owner | Notes |
 |---|---|---|
+| Shape of a `wait` arm head (`v := ch.recv()`, `ch.send(v)`) and of a `spawn`/`defer` call target | `wait_arm_call` (`parser/stmt.rs`) for both arm directions, `parse_task_call` (`parser/stmt.rs`) for both keywords | wave 24 F6: a malformed head or a non-call target is a parse error, one text per malformation; the AST holds the decided shape (`WaitArmKind::Send { chan, value }`). `tests/operand_shape_grid.rs` |
 | Where a block ended (dedent, `else`, EOF) | `ended_at_block` (`parser/cursor.rs`) | Family A |
 | Where a block expression may start (value site) | `parse_value` (`parser/expr.rs`), `open_value` (`parser/expr.rs`) | U8 |
 | A comma list is a tuple (a trailing comma makes one element a 1-tuple) | `comma_tail` (`parser/cursor.rs`) | the value, type, match-pattern, binding-target, assignment and wait-arm lists read it; `end` names where a trailing comma may stand, and the statement-end value list (`parse_value_list` (`parser/pattern.rs`)) admits none (S2-7, TICKET-273) |
@@ -43,7 +44,7 @@ write a second copy next to it (CLAUDE.md "Derive, don't mirror").
 | Module slot facts (kind, fn decl, keyword labels) | `GlobalBinding` (`checker/globals.rs`), `labels_certain` (`checker/globals.rs`) | TICKET-186 |
 | Does a head name a user type, which kind | `type_head` (`checker/scope.rs`) | |
 | Builtin callable names, ids, lowering, first-classness | `Builtin` (`base/builtin.rs`) | `builtin_callee` (`checker/witness_sig.rs`) is the one reader that resolves a bare callee to an id; `prelude_fn` (`checker/mod.rs`) and `has_opcode_ctor` (`checker/builtin_type.rs`) are views of it. `Resolution::Builtin`, `Op::CallBuiltin`/`Op::LoadBuiltin`, `Obj::Builtin`, `FnKey::Builtin` carry the id, and `infer_builtin_call` (`checker/builtin_call.rs`), `compile_builtin_call` (`compiler/call.rs`), `do_builtin` (`vm/builtins.rs`) and `invoke_value` (`vm/call.rs`) match it exhaustively |
-| Builtin type names | `from_name` (`checker/builtin_type.rs`) | a module's own set is `ModuleSig::builtins`; a qualified `m.X` reads it (`module_owns_builtin` (`checker/witness_sig.rs`)) |
+| Builtin type names | `from_name` (`checker/builtin_type.rs`) | a module's own set is `ModuleSig::builtins`; a qualified `m.X` reads it (`qualified_ctor` (`checker/resolve.rs`)) |
 | Which std module owns a builtin type (`Shared`, `Socket`, `ptr`, `int32`, …); none for a global one | `owner` (`checker/builtin_type.rs`), `builtin_owner` (`checker/builtin_type.rs`) | an owned type is an ordinary member of its module: `module_builtins` (`checker/builtin_type.rs`) lists them |
 | What a bare builtin type name means in this module | `builtin_type_named` (`checker/witness_sig.rs`), `bound_builtin` (`checker/witness_sig.rs`) | a global row, or a module-owned one an import bound (alias included, `tests/module_member_grid.rs`) |
 | Names a program may not declare | `is_keyword`, and `is_operand_keyword` for the keywords that parse as operands (`None`, `true`, `false`, `Self`; derived from `KEYWORDS` and `ends_operand`), both in `lexer/mod.rs` | keywords only. A module binds each name once; a type and a value never share it (a top-level `:=` is a declaration): `clashes` (`checker/globals.rs`) over the `GlobalBinding` records `collect_module_globals` (`checker/globals.rs`) builds for every declaration and import, a native std module included (`checker/graph_pass.rs`). `GlobalBinding::clashes` also reports a second import of a name, once. `decide_bare_imports` (`checker/module_imports.rs`) decides which module imports bind no bare name. A name repeated in one binding target or parameter list: `reject_repeated_binders` (`parser/pattern.rs`), `parse_params_ext` (`parser/decl.rs`); in a match pattern, `first_duplicate_binder` (`checker/ty_util.rs`). `tests/redeclaration_grid.rs` runs every cell. Every other name a module declares or imports shadows the builtin of that name in the module (`tests/shadowing_grid.rs`); lookup tries this module's own declarations before builtins (`declares_type_here` (`checker/resolve_type.rs`), `classify_ident` (`checker/resolve.rs`), `protocol_key` (`checker/setup.rs`)) |
@@ -70,6 +71,8 @@ write a second copy next to it (CLAUDE.md "Derive, don't mirror").
 
 | Fact | Owner | Notes |
 |---|---|---|
+| A `spawn`/`defer` callee is a first-class callable (no constructor) | `check_task_call` (`checker/stmt.rs`), over the callee's resolution from `classify_path` (`checker/resolve.rs`) | wave 24 F6: one verdict for both keywords, read from the rule table, not the spelling |
+| A wait arm's channel is a `Channel` (recv and send) | `wait_channel_elem` (`checker/branch.rs`) | wave 24 F6: the compiler lowers each arm as a raw channel op, so a user type with a `recv`/`send` method is refused here |
 | Type lattice | `Ty` (`checker/ty.rs`) | |
 | Type variables, solving | `solve` (`checker/tyvar.rs`) | |
 | Is a fn value fully pinned | `pin_generic_fn_value` (`checker/ty_util.rs`) | |
@@ -111,6 +114,7 @@ write a second copy next to it (CLAUDE.md "Derive, don't mirror").
 
 | Fact | Owner | Notes |
 |---|---|---|
+| A range with a missing bound cannot be iterated or measured | `Range.iter` and `Range.len` in `std/prelude.chz` | wave 24 F6: a literal and a value fault alike at run time; the checker has no literal-only copy |
 | Value tag layout | `vm/value.rs` | |
 | Bytecode | `Op` (`base/op.rs`) | |
 | `==` between values | `values_equal_guarded` (`vm/equality.rs`) | |

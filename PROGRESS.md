@@ -82,7 +82,7 @@ workspace crates, the blocking-point table (`block::wait_steps`) and the boundar
    compiler's temps are private `$` names, a binder hides a full module path in the checker alone,
    and a bracketed call always has a recorded reading); F4 to F8 design inconsistencies). Owner
    decisions: `docs/contributing/special-cases.md` "Owner design decisions (2026-11-09)". Report,
-   order and repros: `~/.claude/plans/2026-11-09-bug-hunt-w24/report.md`. Ready to file: F5, F6
+   order and repros: `~/.claude/plans/2026-11-09-bug-hunt-w24/report.md`. Ready to file: F5
    and F4 (the `copy` part). Open: F1 Q3 (which tasks a report lists at a join), F1 Q4 (a
    cancel of a holder outside a `defer` publishes its partial change) and F3 Q4. F8 waits on three
    owner answers.
@@ -90,6 +90,11 @@ workspace crates, the blocking-point table (`block::wait_steps`) and the boundar
    `native::MODULES` registry, native struct layouts and `Json` variants generated from `std/*.chz`,
    `Kind::InterceptIo(IoOp)`/`InterceptNet(NetOp)`, `HandleKind`, `BoxKind`; a native struct value
    that lacks a layout field is an internal error, not a silent nil field.
+   F6 landed (2026-11-14): operand shapes are decided once. A malformed `wait` arm head and a
+   non-call `spawn`/`defer` target are parse errors, one text per malformation for both directions
+   and both keywords (`defer x` was a type error); one checker helper judges a wait arm's `Channel`
+   and one judges a task callee over its resolution; `(..5).len()` and `for i in ..5` fault at run
+   time from `Range.len` / `Range.iter`, as a range value does (they were check errors).
 1. **TICKET-266, a `never` return type.** `exit` and `panic` declare `-> never`, and a call of that
    type leaves its block (Rust `-> !`). It deletes the `panic("unreachable")` lines after `os.exit`.
    Escalated; branch `ticket/266` kept.

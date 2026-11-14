@@ -105,16 +105,22 @@ is always ready).
 `wait : NEWLINE INDENT <arm>+ DEDENT`. An arm is one of:
 
 - a **recv-arm** `<target> ( ":=" | "=" ) <chanExpr> ".recv()" ":" <block>` — the RHS **must** be a
-  `.recv()` on an expression of type `Channel[T]` (a non-`.recv()` RHS like `v := fn():` is a compile
+  `.recv()` on an expression of type `Channel[T]` (a non-`.recv()` RHS like `v := f():` is a parse
   error). The `<chanExpr>` can be any expression (`ch`, `chans[i]`, `get_chan()`, `timer(500)`),
   evaluated **once**. The target is `:=` (a fresh arm-scoped binding), `=` (assign an existing outer
   lvalue of type `T!RecvError` — arm bodies are lexical sub-scopes, not closures, so outer mutation
   is normal), or `_` (discard).
-- a **send-arm** — a *bare* `<chanExpr> ".send(" <value> ")" ":" <block>` (no `:=`/`=`). The grammar
-  accepts any bare `<expr> <block>`; the **checker** enforces the exact `chan.send(value)` shape with
-  `chan: Channel[T]`, `value: T` (a bare arm that isn't a `.send()` — e.g. `try_send`, an arbitrary
-  call — is rejected with the legal-forms error). A send-arm binds nothing.
+- a **send-arm** — a *bare* `<chanExpr> ".send(" <value> ")" ":" <block>` (no `:=`/`=`), with
+  `chan: Channel[T]`, `value: T`. A send-arm binds nothing.
 - `else:` — optional, at most one, and must be **last**.
+
+The **parser** decides an arm's shape, one error per malformation for both directions:
+`` `recv` in a wait arm takes no arguments `` / `` `send` in a wait arm takes one argument ``, and any
+other head (`try_recv`, `try_send`, an arbitrary call or value) is
+``a wait arm must be a recv (`v := ch.recv():`), a send (`ch.send(v):`), or `else` ``. The
+**checker** decides that the channel is a `Channel`, for both directions:
+`a wait arm must recv from or send to a Channel, found Box` (a user type with a `recv`/`send` method
+is not a channel).
 
 **Guards.** A recv-arm or send-arm may end its head with `if <guard>` before the `:` —
 `j := jobs.recv() if not paused:`, `n = c.recv() if ok:`, `_ := c.recv() if g:`,

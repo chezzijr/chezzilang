@@ -394,13 +394,14 @@ pub struct NativeDecl {
 }
 
 /// The target of a `defer` statement: a single call (`defer f(x)` / `defer obj.m(x)`) or an
-/// indented block (`defer:`). Mirrors [`SpawnTarget`]: form 1 sidesteps the single-expression
-/// closure limit for the common case; form 2 allows a multi-statement cleanup body that runs
-/// top-to-bottom at scope exit (LIFO relative to other `defer`s). Unlike `spawn`, the block runs in
-/// the same task, so its captured free variables are not read-only.
+/// indented block (`defer:`), the same two forms as [`SpawnTarget`]: form 1 sidesteps the
+/// single-expression closure limit for the common case; form 2 allows a multi-statement cleanup
+/// body that runs top-to-bottom at scope exit (LIFO relative to other `defer`s). Unlike `spawn`,
+/// the block runs in the same task, so its captured free variables are not read-only.
 #[derive(Debug, Clone, PartialEq, borsh::BorshSerialize, borsh::BorshDeserialize)]
 pub enum DeferTarget {
-    /// `defer f(args)` / `defer obj.m(args)` — the expression must be a call (checker-enforced).
+    /// `defer f(args)` / `defer obj.m(args)` — always an `ExprKind::Call`: the parser builds this
+    /// arm from a call only (`Parser::parse_task_call`).
     Call(Expr),
     /// `defer:` followed by an indented block.
     Block(Block),
@@ -411,15 +412,16 @@ pub enum DeferTarget {
 /// allows a multi-statement task body.
 #[derive(Debug, Clone, PartialEq, borsh::BorshSerialize, borsh::BorshDeserialize)]
 pub enum SpawnTarget {
-    /// `spawn f(args)` — the expression must be a call (parser-enforced).
+    /// `spawn f(args)` — always an `ExprKind::Call`: the parser builds this arm from a call only
+    /// (`Parser::parse_task_call`).
     Call(Expr),
     /// `spawn:` followed by an indented block.
     Block(Block),
 }
 
 /// One arm of a `wait:` — either a recv-arm `<target> (:= | =) <chan>.recv(): <body>` or a send-arm
-/// `<chan>.send(v): <body>`. The parser is lenient (a bare non-`:=`/`=` expr becomes a `Send{call}`);
-/// the CHECKER validates that a send-arm's `call` is exactly `chan.send(value)` with matching types.
+/// `<chan>.send(v): <body>`. The parser decides the arm's shape (any other head is a parse error);
+/// the checker decides that `chan` is a `Channel` and that the value fits it.
 /// An optional `if <guard>` after the head switches the arm off when false (§6d): the guard runs
 /// once on entry, before the arm's operands, and cannot see the arm's binding.
 #[derive(Debug, Clone, PartialEq, borsh::BorshSerialize, borsh::BorshDeserialize)]
@@ -438,8 +440,8 @@ pub struct WaitArm {
 pub enum WaitArmKind {
     /// `x := ch.recv():` / `y = ch.recv():` / `_ := ch.recv():` — `chan` is evaluated once.
     Recv { target: Pattern, chan: Expr },
-    /// `ch.send(v):` — `call` is the raw `ch.send(v)` Call expr; the checker decomposes + validates it.
-    Send { call: Expr },
+    /// `ch.send(v):` — `chan` then `value` are evaluated once, in that order.
+    Send { chan: Expr, value: Expr },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, borsh::BorshSerialize, borsh::BorshDeserialize)]
@@ -1815,7 +1817,10 @@ pub fn stmt_blocks<'a>(s: &'a Stmt, out: &mut Vec<&'a Block>) {
                 }
                 match &a.kind {
                     WaitArmKind::Recv { chan, .. } => expr_recover_blocks(chan, out),
-                    WaitArmKind::Send { call } => expr_recover_blocks(call, out),
+                    WaitArmKind::Send { chan, value } => {
+                        expr_recover_blocks(chan, out);
+                        expr_recover_blocks(value, out);
+                    }
                 }
                 out.push(&a.body);
             }
@@ -2052,7 +2057,10 @@ fn ids_in_stmt(s: &mut Stmt, f: &mut dyn FnMut(&mut NodeId, Span, u32)) {
                 }
                 match &mut a.kind {
                     WaitArmKind::Recv { chan, .. } => ids_in_expr(chan, f),
-                    WaitArmKind::Send { call } => ids_in_expr(call, f),
+                    WaitArmKind::Send { chan, value } => {
+                        ids_in_expr(chan, f);
+                        ids_in_expr(value, f);
+                    }
                 }
                 ids_in_block(&mut a.body, f);
             }

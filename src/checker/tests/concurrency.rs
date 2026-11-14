@@ -143,23 +143,6 @@ fn wait_send_arm_wrong_value_type_rejected() {
 }
 
 #[test]
-fn wait_bare_non_send_arm_rejected() {
-    // A bare arm that is not `ch.send(v)` (here `try_send`) lists the legal arm forms.
-    rejects(
-        "fn main():\n    ch := Channel[int](1)\n    wait:\n        ch.try_send(1): print(1)\nmain()\n",
-        "a wait arm must be a recv (`x := ch.recv()`), a send (`ch.send(v)`)",
-    );
-}
-
-#[test]
-fn wait_bare_arbitrary_expr_arm_rejected() {
-    rejects(
-        "fn f() -> int:\n    return 0\nfn main():\n    wait:\n        f(): print(1)\nmain()\n",
-        "a wait arm must be a recv",
-    );
-}
-
-#[test]
 fn wait_discard_and_else_ok() {
     ok(
         "fn main():\n    ch := Channel[int]()\n    wait:\n        _ := ch.recv(): print(1)\n        else: print(0)\nmain()\n",

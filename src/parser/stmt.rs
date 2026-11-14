@@ -11,6 +11,48 @@ use crate::lexer::{Span, Token};
 const WAIT_TUPLE_TARGET: &str =
     "a wait arm binds one value (T!RecvError); bind it, then unpack it in the body";
 
+/// A wait arm head that is neither a recv nor a send, the one text for both directions.
+pub(super) const WAIT_ARM_FORMS: &str =
+    "a wait arm must be a recv (`v := ch.recv():`), a send (`ch.send(v):`), or `else`";
+
+/// A wait arm's head call `<chan>.<method>(args)`, the one shape decider for both directions:
+/// `method` called on a receiver with exactly `N` positional arguments and no named ones gives
+/// `(chan, args)`. The same method with other arguments, and any other head, is a parse error.
+fn wait_arm_call<const N: usize>(head: Expr, method: &str) -> PResult<(Expr, [Expr; N])> {
+    let span = head.span;
+    if let ExprKind::Call {
+        callee,
+        args,
+        named,
+        type_args,
+        bracket: None,
+    } = head.kind
+        && type_args.is_empty()
+        && let ExprKind::Field { obj, name, .. } = callee.kind
+        && name == method
+    {
+        let want = if N == 0 {
+            "no arguments"
+        } else {
+            "one argument"
+        };
+        let err = ParseError {
+            message: format!("`{method}` in a wait arm takes {want}"),
+            span,
+        };
+        if !named.is_empty() {
+            return Err(err);
+        }
+        return <[Expr; N]>::try_from(args)
+            .map(|args| (*obj, args))
+            .map_err(|_| err);
+    }
+    Err(ParseError {
+        message: WAIT_ARM_FORMS.to_string(),
+        span,
+    })
+}
+
 impl Parser {
     pub(super) fn parse_module(&mut self) -> PResult<Module> {
         let mut stmts = Vec::new();
@@ -728,18 +770,33 @@ impl Parser {
         Ok(StmtKind::Assert { cond, msg })
     }
 
-    /// `defer:` block (form 2) or `defer <call>` (form 1). Mirrors `parse_spawn`: form 1 is
-    /// line-oriented (terminated here); form 2 is compound (its block ends at its own `Dedent`). The
-    /// call-only restriction on form 1 is enforced by the checker (context-sensitive).
+    /// `defer:` block (form 2) or `defer <call>` (form 1), the two forms of `spawn`: form 1 is
+    /// line-oriented (terminated here); form 2 is compound (its block ends at its own `Dedent`).
     fn parse_defer(&mut self) -> PResult<StmtKind> {
         self.expect(&Token::Defer)?;
         if self.check(&Token::Colon) {
             let body = self.parse_block()?;
             return Ok(StmtKind::Defer(DeferTarget::Block(body)));
         }
+        Ok(StmtKind::Defer(DeferTarget::Call(
+            self.parse_task_call("defer")?,
+        )))
+    }
+
+    /// The call of a `spawn <call>` / `defer <call>` statement, terminated here. Any other
+    /// expression is the one not-a-call error, the same for both keywords.
+    fn parse_task_call(&mut self, kw: &str) -> PResult<Expr> {
         let expr = self.parse_expr()?;
+        if !matches!(expr.kind, ExprKind::Call { .. }) {
+            return Err(ParseError {
+                message: format!(
+                    "{kw} requires a function or method call (`{kw} f(x)`) or a block (`{kw}:`)"
+                ),
+                span: expr.span,
+            });
+        }
         self.expect_stmt_end()?;
-        Ok(StmtKind::Defer(DeferTarget::Call(expr)))
+        Ok(expr)
     }
 
     /// `parallel:` — a nursery whose body is an indented (or inline) block. Compound: ends at its
@@ -757,24 +814,17 @@ impl Parser {
         Ok(StmtKind::Spawn(SpawnTarget::Block(body)))
     }
 
-    /// `spawn <call>`. A simple statement, terminated here; a non-call is rejected with a clear
-    /// message.
+    /// `spawn <call>`. A simple statement, terminated here.
     fn parse_spawn_call(&mut self) -> PResult<StmtKind> {
         self.expect(&Token::Spawn)?;
-        let expr = self.parse_expr()?;
-        if !matches!(expr.kind, ExprKind::Call { .. }) {
-            return Err(self.err(
-                "spawn requires a function or method call (`spawn f(x)`) or a block (`spawn:`)"
-                    .to_string(),
-            ));
-        }
-        self.expect_stmt_end()?;
-        Ok(StmtKind::Spawn(SpawnTarget::Call(expr)))
+        Ok(StmtKind::Spawn(SpawnTarget::Call(
+            self.parse_task_call("spawn")?,
+        )))
     }
 
     /// `wait:` — Chezzi's `select` (see [`StmtKind::Wait`]). Indented arms `<target> (:=|=)
-    /// <chan>.recv(): <body>`, with an optional non-blocking `else:` that must be the last arm. The
-    /// RHS must be a bare `.recv()` (no args); a non-`recv` RHS or `recv(args)` is a parse error.
+    /// <chan>.recv(): <body>` and `<chan>.send(v): <body>`, with an optional non-blocking `else:`
+    /// that must be the last arm. Any other arm head is a parse error (`wait_arm_call`).
     /// A recv or send arm takes an optional guard `if <expr>` before its `:`; `else` takes none.
     fn parse_wait(&mut self) -> PResult<StmtKind> {
         self.expect(&Token::Wait)?;
@@ -839,8 +889,7 @@ impl Parser {
     /// places is rejected, D2), or a bare send arm (`ch.send(v):`).
     /// A `=` arm binds a fresh `$waitN` and sets `assign_first` to the assignment `lhs = $waitN`
     /// for the arm body's first statement (TICKET-227), so the assigned value has a node (it can
-    /// wrap into a carrier target like any assignment). The parser stays lenient on a send arm: the
-    /// CHECKER validates it is exactly `chan.send(value)`.
+    /// wrap into a carrier target like any assignment).
     fn parse_wait_arm_head(
         &mut self,
         arm_span: Span,
@@ -868,7 +917,8 @@ impl Parser {
         }
         if !self.eat_in_line(&Token::Assign) {
             // Bare expr, no `:=`/`=` — a send arm.
-            return Ok(WaitArmKind::Send { call: lhs });
+            let (chan, [value]) = wait_arm_call(lhs, "send")?;
+            return Ok(WaitArmKind::Send { chan, value });
         }
         let target = if lhs.is_blank() {
             Pattern::Wildcard
@@ -909,87 +959,8 @@ impl Parser {
     /// The RHS of a recv `wait:` arm: a bare `<chan>.recv()` (no args). Returns the channel expr.
     fn parse_recv_chan(&mut self) -> PResult<Expr> {
         let rhs = self.parse_expr()?;
-        let rhs_span = rhs.span;
-        match rhs.kind {
-            ExprKind::Call {
-                callee,
-                args,
-                named,
-                ..
-            } if matches!(&callee.kind, ExprKind::Field { name, .. } if name == "recv") => {
-                if !args.is_empty() || !named.is_empty() {
-                    return Err(ParseError {
-                        message: "`recv` in a wait arm takes no arguments".to_string(),
-                        span: rhs_span,
-                    });
-                }
-                match callee.kind {
-                    ExprKind::Field { obj, .. } => Ok(*obj),
-                    ExprKind::Int(_)
-                    | ExprKind::Float(_)
-                    | ExprKind::Str(_)
-                    | ExprKind::Interp(_)
-                    | ExprKind::Bytes(_)
-                    | ExprKind::RawStr(_)
-                    | ExprKind::Bool(_)
-                    | ExprKind::NoneLit
-                    | ExprKind::Pass
-                    | ExprKind::Ident(_)
-                    | ExprKind::List(..)
-                    | ExprKind::Tuple(_)
-                    | ExprKind::Map(_)
-                    | ExprKind::Set(_)
-                    | ExprKind::Comprehension { .. }
-                    | ExprKind::Unary { .. }
-                    | ExprKind::Binary { .. }
-                    | ExprKind::Compare { .. }
-                    | ExprKind::Range { .. }
-                    | ExprKind::Call { .. }
-                    | ExprKind::Index { .. }
-                    | ExprKind::Try(_)
-                    | ExprKind::OptChain { .. }
-                    | ExprKind::NullCoalesce { .. }
-                    | ExprKind::Closure { .. }
-                    | ExprKind::Match { .. }
-                    | ExprKind::IfElse { .. }
-                    | ExprKind::Recover(..)
-                    | ExprKind::ElseGuard { .. } => unreachable!("guarded by the matches! above"),
-                }
-            }
-            ExprKind::Int(_)
-            | ExprKind::Float(_)
-            | ExprKind::Str(_)
-            | ExprKind::Interp(_)
-            | ExprKind::Bytes(_)
-            | ExprKind::RawStr(_)
-            | ExprKind::Bool(_)
-            | ExprKind::NoneLit
-            | ExprKind::Pass
-            | ExprKind::Ident(_)
-            | ExprKind::List(..)
-            | ExprKind::Tuple(_)
-            | ExprKind::Map(_)
-            | ExprKind::Set(_)
-            | ExprKind::Comprehension { .. }
-            | ExprKind::Unary { .. }
-            | ExprKind::Binary { .. }
-            | ExprKind::Compare { .. }
-            | ExprKind::Range { .. }
-            | ExprKind::Call { .. }
-            | ExprKind::Field { .. }
-            | ExprKind::Index { .. }
-            | ExprKind::Try(_)
-            | ExprKind::OptChain { .. }
-            | ExprKind::NullCoalesce { .. }
-            | ExprKind::Closure { .. }
-            | ExprKind::Match { .. }
-            | ExprKind::IfElse { .. }
-            | ExprKind::Recover(..)
-            | ExprKind::ElseGuard { .. } => Err(ParseError {
-                message: "a wait arm must `recv` from a channel (`v := ch.recv():`)".to_string(),
-                span: rhs_span,
-            }),
-        }
+        let (chan, []) = wait_arm_call(rhs, "recv")?;
+        Ok(chan)
     }
 
     fn parse_import(&mut self) -> PResult<Import> {

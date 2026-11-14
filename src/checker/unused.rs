@@ -264,7 +264,10 @@ impl Scan {
                                     s.bind(n, arm.span, Report::Never);
                                 }
                             }
-                            WaitArmKind::Send { call } => s.expr(call),
+                            WaitArmKind::Send { chan, value } => {
+                                s.expr(chan);
+                                s.expr(value);
+                            }
                         }
                         s.block_items(&arm.body);
                     });

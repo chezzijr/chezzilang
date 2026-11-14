@@ -513,99 +513,7 @@ impl Checker {
             StmtKind::Defer(DeferTarget::Call(e)) => {
                 // Block-scoped defer: any indented block — including the module body — is a defer
                 // scope, so top-level `defer` is legal (no `in_fn` requirement).
-                // `defer` targets a method call or a call to a first-class callable value (a user
-                // function/closure, or a name bound to one). Built-ins (`print`, `len`, …) and
-                // struct/enum constructors are not first-class values — wrap them in a function.
-                match &e.kind {
-                    ExprKind::Call { callee, .. } => match &callee.kind {
-                        // M24-5b — a dotted CONSTRUCTOR (`Color.Val(3)`, `lib.Point(3)`,
-                        // `concurrency.Shared(0)`) is a constructor like the bare `P(3)` below, so
-                        // it gets that rule and that message. A dotted STATIC METHOD (`H.build(3)`)
-                        // and an ordinary module FUNCTION (`math.abs(-3)`) are ordinary calls and
-                        // fall through to the accepting arm.
-                        ExprKind::Field { .. } if self.dotted_ctor_target(callee) => {
-                            self.error(
-                                e.span,
-                                "defer requires a function or method call (built-ins and \
-                                 constructors must be wrapped in a function)",
-                            );
-                        }
-                        ExprKind::Field { .. } => {} // method or static-method call
-                        ExprKind::Ident(name)
-                            if self.lookup(name).is_none()
-                                && !self.functions.contains_key(name)
-                                && !self.names_builtin_fn(name) =>
-                        {
-                            self.error(
-                                e.span,
-                                "defer requires a function or method call (built-ins and \
-                                 constructors must be wrapped in a function)",
-                            );
-                        }
-                        ExprKind::Int(_)
-                        | ExprKind::Float(_)
-                        | ExprKind::Str(_)
-                        | ExprKind::Interp(_)
-                        | ExprKind::Bytes(_)
-                        | ExprKind::RawStr(_)
-                        | ExprKind::Bool(_)
-                        | ExprKind::NoneLit
-                        | ExprKind::Pass
-                        | ExprKind::Ident(_)
-                        | ExprKind::List(..)
-                        | ExprKind::Tuple(_)
-                        | ExprKind::Map(_)
-                        | ExprKind::Set(_)
-                        | ExprKind::Comprehension { .. }
-                        | ExprKind::Unary { .. }
-                        | ExprKind::Binary { .. }
-                        | ExprKind::Compare { .. }
-                        | ExprKind::Range { .. }
-                        | ExprKind::Call { .. }
-                        | ExprKind::Index { .. }
-                        | ExprKind::Try(_)
-                        | ExprKind::OptChain { .. }
-                        | ExprKind::NullCoalesce { .. }
-                        | ExprKind::Closure { .. }
-                        | ExprKind::Match { .. }
-                        | ExprKind::IfElse { .. }
-                        | ExprKind::Recover(..)
-                        | ExprKind::ElseGuard { .. } => {} // a name bound to a callable, or an arbitrary value-producing callee
-                    },
-                    ExprKind::Int(_)
-                    | ExprKind::Float(_)
-                    | ExprKind::Str(_)
-                    | ExprKind::Interp(_)
-                    | ExprKind::Bytes(_)
-                    | ExprKind::RawStr(_)
-                    | ExprKind::Bool(_)
-                    | ExprKind::NoneLit
-                    | ExprKind::Pass
-                    | ExprKind::Ident(_)
-                    | ExprKind::List(..)
-                    | ExprKind::Tuple(_)
-                    | ExprKind::Map(_)
-                    | ExprKind::Set(_)
-                    | ExprKind::Comprehension { .. }
-                    | ExprKind::Unary { .. }
-                    | ExprKind::Binary { .. }
-                    | ExprKind::Compare { .. }
-                    | ExprKind::Range { .. }
-                    | ExprKind::Field { .. }
-                    | ExprKind::Index { .. }
-                    | ExprKind::Try(_)
-                    | ExprKind::OptChain { .. }
-                    | ExprKind::NullCoalesce { .. }
-                    | ExprKind::Closure { .. }
-                    | ExprKind::Match { .. }
-                    | ExprKind::IfElse { .. }
-                    | ExprKind::Recover(..)
-                    | ExprKind::ElseGuard { .. } => {
-                        self.error(e.span, "defer requires a function or method call")
-                    }
-                }
-                // Type-check the call (and its args); the result is discarded, like an expr stmt.
-                self.infer(e);
+                self.check_task_call("defer", e);
             }
             StmtKind::Defer(DeferTarget::Block(body)) => {
                 // A nested scope that shares the enclosing bindings' cells. It compiles to its own
@@ -627,71 +535,7 @@ impl Checker {
                 // nursery-depth gate. The function-boundary rule (a task can't outlive the function
                 // that spawned it) is enforced at runtime by the per-function implicit nursery.
                 match target {
-                    SpawnTarget::Call(e) => {
-                        // `spawn` targets a method call or a call to a first-class callable (a user
-                        // function/closure, a name bound to one, or a first-class builtin fn value —
-                        // `print`/`ord`/`chr`/`panic`). Other built-ins
-                        // and struct/enum constructors are not first-class values — wrap them in a
-                        // function. Mirrors `defer`'s guard so the two features agree.
-                        if let ExprKind::Call { callee, .. } = &e.kind {
-                            match &callee.kind {
-                                // M24-5b — a dotted CONSTRUCTOR (user or native) belongs with the
-                                // bare-constructor rule below; a dotted STATIC METHOD is an
-                                // ordinary call.
-                                ExprKind::Field { .. } if self.dotted_ctor_target(callee) => {
-                                    self.error(
-                                        e.span,
-                                        "spawn requires a function or method call (built-ins and \
-                                         constructors must be wrapped in a function)",
-                                    );
-                                }
-                                ExprKind::Field { .. } => {} // method or static-method call
-                                ExprKind::Ident(name)
-                                    if self.lookup(name).is_none()
-                                        && !self.functions.contains_key(name)
-                                        && !self.names_builtin_fn(name) =>
-                                {
-                                    self.error(
-                                        e.span,
-                                        "spawn requires a function or method call (built-ins and \
-                                         constructors must be wrapped in a function)",
-                                    );
-                                }
-                                ExprKind::Int(_)
-                                | ExprKind::Float(_)
-                                | ExprKind::Str(_)
-                                | ExprKind::Interp(_)
-                                | ExprKind::Bytes(_)
-                                | ExprKind::RawStr(_)
-                                | ExprKind::Bool(_)
-                                | ExprKind::NoneLit
-                                | ExprKind::Pass
-                                | ExprKind::Ident(_)
-                                | ExprKind::List(..)
-                                | ExprKind::Tuple(_)
-                                | ExprKind::Map(_)
-                                | ExprKind::Set(_)
-                                | ExprKind::Comprehension { .. }
-                                | ExprKind::Unary { .. }
-                                | ExprKind::Binary { .. }
-                                | ExprKind::Compare { .. }
-                                | ExprKind::Range { .. }
-                                | ExprKind::Call { .. }
-                                | ExprKind::Index { .. }
-                                | ExprKind::Try(_)
-                                | ExprKind::OptChain { .. }
-                                | ExprKind::NullCoalesce { .. }
-                                | ExprKind::Closure { .. }
-                                | ExprKind::Match { .. }
-                                | ExprKind::IfElse { .. }
-                                | ExprKind::Recover(..)
-                                | ExprKind::ElseGuard { .. } => {}
-                            }
-                        }
-                        // Full type-check of the call (callee, arity, args) — the single source of
-                        // type diagnostics for the sub-expressions.
-                        self.infer(e);
-                    }
+                    SpawnTarget::Call(e) => self.check_task_call("spawn", e),
                     SpawnTarget::Block(body) => {
                         // A task is its own child proto with no caller: `boundary::RULES` says what
                         // may cross it. `current_ret`/`in_fn_body` stay: `check_return` stops at
@@ -733,6 +577,55 @@ impl Checker {
                 }
             }
         }
+    }
+
+    /// `spawn <call>` / `defer <call>`: the call's callee must be a first-class callable (a user
+    /// fn, a closure, a name bound to one, a method, a static method, a module fn or a first-class
+    /// builtin fn value such as `print`). A constructor and a builtin with no fn value build a value
+    /// and throw it away: wrap them in a function. The verdict reads the callee's resolution (the
+    /// one rule table, `classify_path`), not its spelling; a callee that is not a path (`fs[0]`,
+    /// `(fn(): …)`, `f()`) is a value call. The parser made sure `call` is a call.
+    fn check_task_call(&mut self, kw: &str, call: &Expr) {
+        if let ExprKind::Call { callee, .. } = &call.kind {
+            let first_class = match self.classify_path(callee) {
+                Some(
+                    Resolution::StructCtor(_)
+                    | Resolution::Variant { .. }
+                    | Resolution::VariantFn { .. },
+                ) => false,
+                Some(Resolution::Builtin(b)) => b.first_class(),
+                None
+                | Some(
+                    Resolution::Local
+                    | Resolution::Global { .. }
+                    | Resolution::Fn { .. }
+                    | Resolution::Provider
+                    | Resolution::ParamMethodFn { .. }
+                    | Resolution::IndexCall
+                    | Resolution::TypeArgsCall
+                    | Resolution::MethodFn { .. }
+                    | Resolution::NativeStatic(_)
+                    | Resolution::WitnessStatic(_)
+                    | Resolution::ModuleMember { .. }
+                    | Resolution::Module(_)
+                    | Resolution::Member
+                    | Resolution::PatBinding
+                    | Resolution::PatStruct(_)
+                    | Resolution::Decode(_),
+                ) => true,
+            };
+            if !first_class {
+                self.error(
+                    call.span,
+                    format!(
+                        "{kw} requires a function or method call (built-ins and constructors \
+                         must be wrapped in a function)"
+                    ),
+                );
+            }
+        }
+        // Type-check the call (callee, arity, args); the result is discarded, like an expr stmt.
+        self.infer(call);
     }
 
     /// Best-effort source span for a function declaration (FnDecl has no span of its own): the first

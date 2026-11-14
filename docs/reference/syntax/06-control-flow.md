@@ -53,8 +53,9 @@ A range is a value of type `Range` (the struct of `std/prelude.chz`, in scope in
 - Readable fields: `start: int?`, `end: int?`, `step: int = 1`, `inclusive: bool = false`.
 - `for i in 5..:` runs until a `break` (at the top of `int` it faults with `integer overflow in Add`).
   `3 in 5..` and `xs[5..]` work. `List.from_iter(5..)` runs until memory ends.
-- A range with no start (`..5`, `..`) cannot be iterated: `a range with no start cannot be iterated`
-  (a check error for a literal, a fault for a value).
+- A range with no start (`..5`, `..`) cannot be iterated: `a range with no start cannot be iterated`,
+  a run-time fault of `Range.iter` for a literal and a value alike. `(..5).len()` faults the same way
+  (`len() needs a range with a start and an end`).
 - `a()..b()` runs `a()` first, in every position.
 - `for i in a..b` over a literal range is a counter loop (no allocation). Iterating a range value
   (`for i in r`) costs about 3.3x as much ([`benchmarks.md`](../../contributing/benchmarks.md)).

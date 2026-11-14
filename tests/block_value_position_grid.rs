@@ -201,11 +201,13 @@ fn rows() -> Vec<Row> {
         ),
         ("value list", &["exprList"], 0, "a, b := 1, {F}\n"),
         ("assert operand", &["assertStmt"], 0, "assert {F}\n"),
+        // `defer` and `spawn` take a call (a non-call is a parse error), so the value sits in an
+        // argument.
         (
-            "defer operand",
+            "defer call argument",
             &["deferStmt"],
             4,
-            "fn f():\n    defer {F}\nf()\n",
+            "fn w(a: Any):\n    pass\nfn f():\n    defer w({F})\nf()\n",
         ),
         ("if condition", &["ifStmt"], 0, "if {F}:\n    pass\n"),
         (
@@ -269,6 +271,12 @@ fn rows() -> Vec<Row> {
             &["waitArm"],
             4,
             "wait:\n    v := ch.recv(): {F}\n    else: pass\n",
+        ),
+        (
+            "wait send value",
+            &["sendCall"],
+            4,
+            "wait:\n    ch.send({F}): pass\n    else: pass\n",
         ),
     ];
     for (name, rules, indent, template) in rest {

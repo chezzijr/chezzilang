@@ -95,7 +95,10 @@ pub(crate) fn collect_frame_binds(stmts: &[Stmt], out: &mut impl Extend<String>)
                             collect_frame_binds_expr(chan, out);
                             out.extend(target.binder_names());
                         }
-                        WaitArmKind::Send { call } => collect_frame_binds_expr(call, out),
+                        WaitArmKind::Send { chan, value } => {
+                            collect_frame_binds_expr(chan, out);
+                            collect_frame_binds_expr(value, out);
+                        }
                     }
                     collect_frame_binds(&arm.body, out);
                 }
@@ -201,7 +204,10 @@ pub(super) fn find_boundary_free_block(stmts: &[Stmt], out: &mut HashSet<String>
                     }
                     match &arm.kind {
                         WaitArmKind::Recv { chan, .. } => find_boundary_free_expr(chan, out),
-                        WaitArmKind::Send { call } => find_boundary_free_expr(call, out),
+                        WaitArmKind::Send { chan, value } => {
+                            find_boundary_free_expr(chan, out);
+                            find_boundary_free_expr(value, out);
+                        }
                     }
                     find_boundary_free_block(&arm.body, out);
                 }
@@ -866,7 +872,10 @@ pub(crate) fn free_names_block(stmts: &[Stmt], bound: &HashSet<String>, out: &mu
                             free_names_expr(chan, &b, out);
                             b2.extend(target.binder_names());
                         }
-                        WaitArmKind::Send { call } => free_names_expr(call, &b, out),
+                        WaitArmKind::Send { chan, value } => {
+                            free_names_expr(chan, &b, out);
+                            free_names_expr(value, &b, out);
+                        }
                     }
                     free_names_block(&arm.body, &b2, out);
                 }

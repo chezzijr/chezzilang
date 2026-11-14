@@ -712,7 +712,8 @@ impl Compiler {
         } = &call.kind
         else {
             return Err(CompileError {
-                message: "defer requires a function or method call".to_string(),
+                message: "internal: the parser builds a `defer` target from a call only"
+                    .to_string(),
                 span,
             });
         };

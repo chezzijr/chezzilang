@@ -21,49 +21,10 @@ impl Checker {
                 WaitArmKind::Recv { target, chan } => {
                     // The binding is what `chan.recv()` returns (`T!RecvError`): the sig harvested
                     // from `std/prelude.chz`, the same lookup a `.recv()` call makes.
-                    let got = match self.infer(chan) {
-                        Ty::Channel(e) => self
-                            .native_handle_method("Channel", "recv", &[*e])
-                            .map_or(Ty::Unknown, |sig| sig.ret),
-                        Ty::Unknown => Ty::Unknown,
-                        other @ Ty::Int
-                        | other @ Ty::Float
-                        | other @ Ty::Bool
-                        | other @ Ty::Str
-                        | other @ Ty::Bytes
-                        | other @ Ty::ByteArray
-                        | other @ Ty::Nil
-                        | other @ Ty::List(_)
-                        | other @ Ty::Map(..)
-                        | other @ Ty::Set(_)
-                        | other @ Ty::Func { .. }
-                        | other @ Ty::Tuple(_)
-                        | other @ Ty::Struct(..)
-                        | other @ Ty::Enum(..)
-                        | other @ Ty::Param(_)
-                        | other @ Ty::Result(..)
-                        | other @ Ty::Option(_)
-                        | other @ Ty::Shared(_)
-                        | other @ Ty::Atomic(_)
-                        | other @ Ty::AtomicInt
-                        | other @ Ty::RwShared(_)
-                        | other @ Ty::Executor
-                        | other @ Ty::Socket
-                        | other @ Ty::Listener
-                        | other @ Ty::Writer
-                        | other @ Ty::Reader
-                        | other @ Ty::Ptr
-                        | other @ Ty::Width(_)
-                        | other @ Ty::Protocol(..)
-                        | other @ Ty::Module(_)
-                        | other @ Ty::Var(_) => {
-                            self.error(
-                                chan.span,
-                                format!("a wait arm must recv from a Channel, found {other}"),
-                            );
-                            Ty::Unknown
-                        }
-                    };
+                    let got = self
+                        .wait_channel_elem(chan)
+                        .and_then(|e| self.native_handle_method("Channel", "recv", &[e]))
+                        .map_or(Ty::Unknown, |sig| sig.ret);
                     let mut leaves = Vec::new();
                     self.bind_subpattern(
                         target,
@@ -73,7 +34,24 @@ impl Checker {
                     );
                     self.declare_target_leaves(&leaves, chan.span);
                 }
-                WaitArmKind::Send { call } => self.check_wait_send(call),
+                WaitArmKind::Send { chan, value } => {
+                    // The value meets `send`'s parameter, harvested from `std/prelude.chz`: the
+                    // same check a plain `ch.send(v)` makes.
+                    match self
+                        .wait_channel_elem(chan)
+                        .and_then(|e| self.native_handle_method("Channel", "send", &[e]))
+                    {
+                        Some(sig) => self.check_args(
+                            "send",
+                            &sig.params,
+                            std::slice::from_ref(value),
+                            arm.span,
+                        ),
+                        None => {
+                            self.infer_value(value);
+                        }
+                    }
+                }
             }
             for stmt in &arm.body {
                 self.check_stmt(stmt);
@@ -85,90 +63,51 @@ impl Checker {
         }
     }
 
-    /// A send-`wait:` arm must be exactly `chan.send(value)` with `chan: Channel[T]` and `value: T`.
-    /// Anything else (`try_send`, a non-`send` call, a bare non-call expr) is rejected with the list
-    /// of legal arm forms — the parser is lenient, so this is the sole gate on send-arm shape. When
-    /// the shape IS `chan.send(value)`, inferring the call reuses the ordinary channel-`send` checks
-    /// (element-type match + sendability) so a send arm and a plain `ch.send(v)` type-check identically.
-    fn check_wait_send(&mut self, call: &Expr) {
-        // Decompose the required shape `<recv>.send(<1 positional arg>)`, no named args.
-        if let ExprKind::Call {
-            callee,
-            args,
-            named,
-            ..
-        } = &call.kind
-            && let ExprKind::Field { obj, name, .. } = &callee.kind
-            && name == "send"
-            && args.len() == 1
-            && named.is_empty()
-        {
-            // The receiver MUST be a `Channel[T]`. A user type that merely HAS a `send` method
-            // would type-check clean, but the compiler lowers a send-arm as a raw channel op and
-            // `op_wait_poll` calls `channel_core` on the handle — a non-channel receiver hits an
-            // `unreachable!` VM panic (the checker-superset-of-compiler soundness class). Gate it
-            // here, mirroring the recv-arm's `Ty::Channel(e)` guard, before the ordinary call infer.
-            // Infer the receiver for its TYPE only — snapshot + truncate its errors, because the
-            // `self.infer(call)` below re-infers the same `obj` sub-expression and would re-report
-            // them, doubling a diagnostic (e.g. an undefined receiver → two "undefined variable"s).
-            // Mirrors the RwShared `read` recovery-only re-inference idiom.
-            let mark = self.diag_mark();
-            let recv_ty = self.infer(obj);
-            self.diag_rollback(mark);
-            match recv_ty {
-                Ty::Channel(_) | Ty::Unknown => {}
-                other @ Ty::Int
-                | other @ Ty::Float
-                | other @ Ty::Bool
-                | other @ Ty::Str
-                | other @ Ty::Bytes
-                | other @ Ty::ByteArray
-                | other @ Ty::Nil
-                | other @ Ty::List(_)
-                | other @ Ty::Map(..)
-                | other @ Ty::Set(_)
-                | other @ Ty::Func { .. }
-                | other @ Ty::Tuple(_)
-                | other @ Ty::Struct(..)
-                | other @ Ty::Enum(..)
-                | other @ Ty::Param(_)
-                | other @ Ty::Result(..)
-                | other @ Ty::Option(_)
-                | other @ Ty::Shared(_)
-                | other @ Ty::Atomic(_)
-                | other @ Ty::AtomicInt
-                | other @ Ty::RwShared(_)
-                | other @ Ty::Executor
-                | other @ Ty::Socket
-                | other @ Ty::Listener
-                | other @ Ty::Writer
-                | other @ Ty::Reader
-                | other @ Ty::Ptr
-                | other @ Ty::Width(_)
-                | other @ Ty::Protocol(..)
-                | other @ Ty::Module(_)
-                | other @ Ty::Var(_) => {
-                    self.error(
-                        obj.span,
-                        format!("a wait send arm must send to a Channel, found {other}"),
-                    );
-                    return;
-                }
+    /// The element type of a wait arm's channel, for both directions: `None` when `chan` is not a
+    /// `Channel` (reported here) or its type is unknown (reported where it was found). The compiler
+    /// lowers every arm as a raw channel op, so a user type with a `recv`/`send` method is refused.
+    fn wait_channel_elem(&mut self, chan: &Expr) -> Option<Ty> {
+        match self.infer(chan) {
+            Ty::Channel(e) => Some(*e),
+            Ty::Unknown => None,
+            other @ Ty::Int
+            | other @ Ty::Float
+            | other @ Ty::Bool
+            | other @ Ty::Str
+            | other @ Ty::Bytes
+            | other @ Ty::ByteArray
+            | other @ Ty::Nil
+            | other @ Ty::List(_)
+            | other @ Ty::Map(..)
+            | other @ Ty::Set(_)
+            | other @ Ty::Func { .. }
+            | other @ Ty::Tuple(_)
+            | other @ Ty::Struct(..)
+            | other @ Ty::Enum(..)
+            | other @ Ty::Param(_)
+            | other @ Ty::Result(..)
+            | other @ Ty::Option(_)
+            | other @ Ty::Shared(_)
+            | other @ Ty::Atomic(_)
+            | other @ Ty::AtomicInt
+            | other @ Ty::RwShared(_)
+            | other @ Ty::Executor
+            | other @ Ty::Socket
+            | other @ Ty::Listener
+            | other @ Ty::Writer
+            | other @ Ty::Reader
+            | other @ Ty::Ptr
+            | other @ Ty::Width(_)
+            | other @ Ty::Protocol(..)
+            | other @ Ty::Module(_)
+            | other @ Ty::Var(_) => {
+                self.error(
+                    chan.span,
+                    format!("a wait arm must recv from or send to a Channel, found {other}"),
+                );
+                None
             }
-            // Receiver is a channel — infer the whole call to surface element-type/arg errors (and the
-            // receiver's own errors, reported exactly once here) so a send arm and a plain
-            // `ch.send(v)` type-check identically.
-            self.infer(call);
-            return;
         }
-        // Not `chan.send(value)` — surface any nested-expr errors, then list the legal arm forms.
-        self.infer(call);
-        self.error(
-            call.span,
-            "a wait arm must be a recv (`x := ch.recv()`), a send (`ch.send(v)`), a timer, \
-             or `else`"
-                .to_string(),
-        );
     }
 
     pub(super) fn check_match(&mut self, scrutinee: &Expr, arms: &[crate::ast::MatchArm]) {

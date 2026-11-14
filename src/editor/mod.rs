@@ -861,7 +861,10 @@ fn overlay_stmt(stmt: &crate::ast::Stmt, map: &mut std::collections::HashMap<(us
                 }
                 match &a.kind {
                     WaitArmKind::Recv { chan, .. } => overlay_expr(chan, map),
-                    WaitArmKind::Send { call } => overlay_expr(call, map),
+                    WaitArmKind::Send { chan, value } => {
+                        overlay_expr(chan, map);
+                        overlay_expr(value, map);
+                    }
                 }
                 overlay_block(&a.body, map);
             }

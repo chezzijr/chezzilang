@@ -1055,14 +1055,6 @@ fn defer_at_top_level_ok() {
 }
 
 #[test]
-fn defer_non_call_rejected() {
-    rejects(
-        "fn w():\n    defer 1 + 2\n",
-        "defer requires a function or method call",
-    );
-}
-
-#[test]
 fn defer_builtin_accepted() {
     // The universe builtin FUNCTIONS print/ord/chr/panic are first-class values now — a bare
     // `defer print(...)` (etc.) is accepted (no wrapping needed).

@@ -1018,7 +1018,10 @@ impl Walker {
                         WaitArmKind::Recv { target: _, chan } => {
                             self.walk_expr(chan)?;
                         }
-                        WaitArmKind::Send { call } => self.walk_expr(call)?,
+                        WaitArmKind::Send { chan, value } => {
+                            self.walk_expr(chan)?;
+                            self.walk_expr(value)?;
+                        }
                     }
                     for s in arm.body.iter_mut() {
                         self.walk_stmt(s)?;

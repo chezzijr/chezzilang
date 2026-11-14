@@ -295,7 +295,10 @@ for path in paths:
     use(f)
 ```
 
-**What `defer` (and `spawn`) can call.**
+**What `defer` (and `spawn`) can call.** The target is a call: `defer x`, `defer 1 + 2` and
+`defer xs.push` are parse errors,
+``defer requires a function or method call (`defer f(x)`) or a block (`defer:`) `` (`spawn` says the
+same with its own name).
 
 - A method call, or a call to a first-class callable value (a function, a closure, or a name bound to one).
 - The four universe builtins `print`, `ord`, `chr` and `panic` are first-class: `defer print("done")`
@@ -304,7 +307,8 @@ for path in paths:
   `List`, `Map`, `Channel`, `Range`, …), user struct/enum constructors, and every dotted spelling of
   one: `defer E.A(3)`, `defer E[int].A(3)`, `defer lib.Col.Val(3)`, `defer lib.Pt(3)`,
   `defer concurrency.Shared(0)` (also `RwShared`/`Atomic`/`AtomicInt`/`Executor`, aliased imports
-  too). `chezzi check` rejects them with the message of `defer Shared(0)`. Wrap one:
+  too). `chezzi check` rejects them, one message for `defer` and `spawn`: `defer requires a function
+  or method call (built-ins and constructors must be wrapped in a function)`. Wrap one:
   `fn log(m: str): print(m)` then `defer log("done")`.
 - `time.timer` is a function: `defer time.timer(10)` is legal.
 - A module function is a legal target, and a module name is a namespace, not a receiver:

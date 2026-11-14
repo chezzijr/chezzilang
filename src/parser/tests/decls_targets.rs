@@ -4,6 +4,7 @@
 
 use super::cursor::describe;
 use super::cursor::describe_unexpected;
+use super::stmt::WAIT_ARM_FORMS;
 use super::*;
 
 /// `unexpected` reads without an article; `found` keeps it. A string literal in `describe`
@@ -92,6 +93,9 @@ fn block_end_grid() {
         Reject,
         /// The block head is no whole value (U8): [`BLOCK_VALUE`] on the head's line.
         BlockValue,
+        /// The wait arm head is a whole value but no `ch.send(v)` call: [`WAIT_ARM_FORMS`] on
+        /// the head's line.
+        ArmForms,
     }
     const ARMS: &[&str] = &["    1: 10", "    _: 20"];
     // (head, body lines one level deeper than the statement)
@@ -243,7 +247,8 @@ fn block_end_grid() {
         // an operand, an else branch, or a value no position starts (U8)
         _ if matches!(kind, 2 | 4 | 5 | 6) => Want::BlockValue,
         "assert " | "a, " | "wait arm" if kind != 3 => Want::BlockValue,
-        "field" | "a, " | "wait arm" => Want::Reject,
+        "wait arm" => Want::ArmForms,
+        "field" | "a, " => Want::Reject,
         "outer arm" | "statement arm" if arm.is_some() => Want::Split,
         "outer arm" | "statement arm" => Want::Reject,
         _ if STARTS_A_LINE.contains(&tok) => Want::Split,
@@ -274,6 +279,10 @@ fn block_end_grid() {
                         || msg != BLOCK_VALUE)
                         .then(|| format!("error on line {line}, not {head_line}: {msg}")),
                     (Want::BlockValue, Ok(_)) => Some("parsed".to_string()),
+                    (Want::ArmForms, Err((line, msg))) => (line != head_line
+                        || msg != WAIT_ARM_FORMS)
+                        .then(|| format!("error on line {line}, not {head_line}: {msg}")),
+                    (Want::ArmForms, Ok(_)) => Some("parsed".to_string()),
                     (Want::Reject, Err((line, _))) if line == at + 1 => None,
                     (Want::Reject, Err((line, msg))) => {
                         Some(format!("error on line {line}, not {}: {msg}", at + 1))

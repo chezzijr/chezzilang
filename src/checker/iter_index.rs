@@ -4,9 +4,6 @@
 
 use super::pattern::BindMode;
 use super::proto::HookMiss;
-use super::setup::{TypeHead, TypeHeadKind};
-use super::sig::bare_head_name;
-use super::sig::qualified_head_names;
 use super::*;
 
 impl Checker {
@@ -518,23 +515,6 @@ impl Checker {
         out
     }
 
-    /// TICKET-253 — the two faults of `Range`'s own methods, reported early when the checker sees the
-    /// range LITERAL as the direct iterand or `.len()` receiver: iterating a range with no start, and
-    /// `len` of a range with a missing bound. A range VALUE reaches the same rules at run time, from
-    /// `Range.iter` and `Range.len` in `std/prelude.chz` (the one source of the two messages).
-    pub(super) fn range_literal_fault(&mut self, e: &Expr, needs_end: bool) {
-        let ExprKind::Range { start, end, .. } = &e.kind else {
-            return;
-        };
-        if needs_end {
-            if start.is_none() || end.is_none() {
-                self.error(e.span, "len() needs a range with a start and an end");
-            }
-        } else if start.is_none() {
-            self.error(e.span, "a range with no start cannot be iterated");
-        }
-    }
-
     /// The names a loop target binds over `iter`, each with its name span and type. The element
     /// type has one source, `iterable_elem`; the one binder (`bind_subpattern`, target mode)
     /// matches the target against it, so `for a, (b, c) in xs` unpacks a tuple element of any
@@ -544,7 +524,6 @@ impl Checker {
         target: &Pattern,
         iter: &Expr,
     ) -> Vec<(String, Span, Ty)> {
-        self.range_literal_fault(iter, false);
         let m = self.tyvar_mark();
         let it = self.infer(iter);
         let it = self.close_operand(m, it);
@@ -792,78 +771,5 @@ impl Checker {
         }
         let map = struct_param_map(info, targs);
         Some(info.fields.iter().map(|(_, t)| subst(t, &map)).collect())
-    }
-
-    /// M24-5b — is this `defer`/`spawn` target's dotted callee a CONSTRUCTOR rather than a call?
-    /// `defer Color.Val(3)` builds a value and throws it away, exactly like the bare `defer P(3)`
-    /// the same rule already rejects — a variant constructor IS a constructor — so it earns that
-    /// rule's message and, crucially, its PHASE: the compiler has no receiver value for it, and a
-    /// refusal that lives there is a program `chezzi check` calls clean and only `chezzi run`
-    /// refuses. A dotted STATIC METHOD (`H.build(3)`, `B[int].make(3)`, `lib.Holder.build(3)`) is an
-    /// ordinary call and is NOT rejected — it lowers through the eager-args wrapper, and Go accepts
-    /// its analogue (`defer pkg.F(x)`).
-    ///
-    /// The spellings mirror `infer_call`'s constructor arms — ALL of them, so one concept gets one
-    /// verdict: bare `Enum.Variant` and its two turbofish carriers, qualified `module.Enum.Variant`
-    /// (turbofished too), the qualified struct constructor `module.Point(…)`, and the
-    /// qualified NATIVE constructor `concurrency.Shared(…)` / `time.timer(…)`.
-    pub(super) fn dotted_ctor_target(&self, callee: &Expr) -> bool {
-        let ExprKind::Field { obj, name, .. } = &callee.kind else {
-            return false;
-        };
-        // `Enum.Variant(…)` / `Enum[T].Variant(…)`
-        if let Some(ename) = bare_head_name(&obj.kind)
-            && let Some(TypeHead {
-                kind: TypeHeadKind::Enum,
-                key,
-                pinned: None,
-                ..
-            }) = self.bare_type_head(ename)
-            && self.variants.contains_key(&(key, name.clone()))
-        {
-            return true;
-        }
-        // `module.Point(…)` — the head is the MODULE and the member the type.
-        // A reserved native handle (`net.Socket`) has a `struct_defs` entry for its method table but
-        // no constructor; `infer_call` skips it the same way, so its own diagnostic stays single.
-        if let Some(mname) = self.head_name(obj)
-            && !self.module_owns_builtin(&mname, name)
-            && self
-                .qualified_type_head(&mname, name)
-                .is_some_and(|th| th.pinned.is_none() && matches!(th.kind, TypeHeadKind::Struct))
-        {
-            return true;
-        }
-        // `concurrency.Shared(…)` — a qualified opcode constructor, the same concept as the bare
-        // `Shared(0)` the `Ident` arm already refuses. `BuiltinType::has_opcode_ctor` is the one set
-        // both this and `qualified_ctor` read: the head is the MODULE and the member a builtin type
-        // its owning std module lists in `sig.builtins`. Without this the compiler lowers it to a module-MEMBER load — a
-        // reserved ctor is not a module member — so `chezzi check` passed a program only
-        // `chezzi run` refused ("module 'std.concurrency' has no member 'Shared'"). Type-only
-        // native names (`net.Socket`) are excluded: `infer_call` gives them their own, better
-        // message ("has no constructor"), and doubling it would say less.
-        if let Some(mname) = self.head_name(obj)
-            && !self.head_is_value(&mname)
-            && BuiltinType::from_name(name).is_some_and(BuiltinType::has_opcode_ctor)
-            && let Some(mid) = self.imported_modules.get(&*mname)
-            && let Some(sig) = self.module_sigs.get(mid)
-            && sig.builtins.contains(name)
-        {
-            return true;
-        }
-        // `module.Enum.Variant(…)` / `module.Enum[T].Variant(…)`
-        if let Some((head, ename)) = qualified_head_names(&obj.kind)
-            && let Some(mname) = self.head_name(head)
-            && let Some(TypeHead {
-                kind: TypeHeadKind::Enum,
-                key,
-                pinned: None,
-                ..
-            }) = self.qualified_type_head(&mname, ename)
-            && self.variants.contains_key(&(key, name.clone()))
-        {
-            return true;
-        }
-        false
     }
 }

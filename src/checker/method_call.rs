@@ -30,9 +30,6 @@ impl Checker {
         // else (a struct/enum method call ignores it, as before).
         hint: Option<&Ty>,
     ) -> Ty {
-        if method == "len" {
-            self.range_literal_fault(obj, true);
-        }
         let obj_ty = self.infer(obj);
         // `x.into[T]()`: a conversion keyed by its target, picked by the `[T]` or the annotation.
         if let Some(ty) =

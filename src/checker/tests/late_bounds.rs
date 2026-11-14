@@ -823,31 +823,15 @@ fn nested_subscripts_type_each_index_once() {
 }
 
 #[test]
-fn a_literal_range_with_no_start_cannot_be_iterated() {
-    rejects(
-        "for i in ..5:\n    print(i)\n",
-        "a range with no start cannot be iterated",
-    );
-    rejects(
-        "xs := [i for i in ..5]\n",
-        "a range with no start cannot be iterated",
-    );
-    // A value reaches the same rule at run time, not at check time.
+fn a_literal_range_with_a_missing_bound_checks_like_a_value() {
+    // `Range.iter` / `Range.len` in `std/prelude.chz` refuse a missing bound at run time, for a
+    // literal and a value alike (`tests/operand_shape_grid.rs` runs the faults).
+    ok("for i in ..5:\n    print(i)\n");
+    ok("xs := [i for i in ..5]\n");
+    ok("n := (5..).len()\n");
+    ok("n := (..5).len()\n");
     ok("r := ..5\nxs := 3 in r\n");
-    // A literal with a start iterates, however open its end.
     ok("for i in 2..:\n    break\n");
-}
-
-#[test]
-fn len_of_a_literal_range_with_a_missing_bound_is_a_check_error() {
-    rejects(
-        "n := (5..).len()\n",
-        "len() needs a range with a start and an end",
-    );
-    rejects(
-        "n := (..5).len()\n",
-        "len() needs a range with a start and an end",
-    );
     ok("n := (2..5).len()\n");
 }
 

@@ -33,6 +33,9 @@ main()
   anywhere and joins at the body's `return`/end (the top level joins at program exit). `return`,
   fall-through and `?` are join points; the function's `defer`s run after the join. A task cannot
   outlive the function that spawned it.
+- **The call form takes a call**, as `defer` does (one rule and one message for both, see
+  [`12-errors.md`](12-errors.md) "What `defer` (and `spawn`) can call"): `spawn x` is a parse error,
+  ``spawn requires a function or method call (`spawn f(x)`) or a block (`spawn:`) ``.
 - **`return`, `break` and `continue` inside a `spawn:` block are compile errors**
   (`'return' is not allowed inside a spawn block: a spawned task has no caller to return to`;
   `'break' is not allowed inside a spawn block: a spawned task runs outside the loop`), also in an `if`/`for`/`match`/`wait:` arm in the block. Send the value on a
