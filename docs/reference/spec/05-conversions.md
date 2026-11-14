@@ -26,7 +26,9 @@ There is no `bool` conversion (Go, Rust): test the value with `x != 0` or `s.len
 is already a type error). A `bool` is not a number (`true + 1` is a type error); convert it with
 `int.from(b)` or `float.from(b)`. There is no `float.from(int)`: an `int` past 2^53 does not
 round-trip (rustc: `f64: From<i64>` is E0277); write `n.to_float()`. There is no `str.from(x)`:
-write `"{x}"`.
+write `"{x}"`. Every builtin type name heads a static call, so a missing one reads as on `int`:
+`bool.zz(1)`, `int8.zz(1)` (after `import int8 from std.ffi`) and `B.zz(1)` for `type B = bool` are
+*type 'bool' has no static method 'zz'* (with its own name).
 
 | Old call | Type error help |
 |----------|-----------------|
@@ -153,8 +155,9 @@ a := Rat.from(3)       # the int overload: Rat(3, 1)
 b := Rat.from("ab")    # the str overload: Rat(2, 3)
 ```
 
-- `Type.from(x)` runs the one overload whose parameter takes the type of `x` (an `int?` overload
-  takes `3` and `None`). There is no widening: `Rat.from(1.5)` is *type Rat has no from for float
+- `Type.from(x)` runs the one overload whose parameter takes `x`, with `x` checked under each
+  overload's parameter as one `from` checks it (an `int?` overload takes `3` and `None`, and
+  `R.from([1])` on `from(x: List[int?])` and `from(x: str)` runs the `List[int?]` one). There is no widening: `Rat.from(1.5)` is *type Rat has no from for float
   (it has: int, str)*. An argument that fits two overloads (`[]` against `List[int]` and `List[str]`)
   is *type annotations needed*.
 - `Rat.from[S](x)` names the source instead: `Rat.from[str]("ab")` runs the `str` overload, on a
@@ -162,7 +165,9 @@ b := Rat.from("ab")    # the str overload: Rat(2, 3)
   fills the type's param: `Box.from[int](3)` on `fn from(x: T) -> Box[T]` is a `Box[int]`. `Rat.from[float](3)` is *type
   Rat has no from for float (it has: int, str)*. The `[S]` is the protocol slot, not a method type
   argument; on a plain method (no protocol keys it) a `[X]` stays *method 'make' takes no type
-  argument(s)*.
+  argument(s)*. Read as a value, `Rat.from[int]` is that overload's fn (Rust
+  `<Rat as From<i32>>::from`): `[1].map(Rat.from[int])`, `g := Rat.from[int]`, on a set or on one
+  `from`; `Rat.from[float]` is *type Rat has no from for float (it has: int, str)*.
 - Each overload takes one parameter named `x`, of a concrete type (not a type parameter), and declares
   its return type: `Self` for `from`, `Self!E` for `try_from`. Any other is *an overloaded from
   returns Self, found int*; a fallible `from` is *an overloaded from returns Self, found Rat!str; a
@@ -181,15 +186,21 @@ b := Rat.from("ab")    # the str overload: Rat(2, 3)
   declared twice are *method '…' is already defined*.
 - A trace, `<fn …>` and every message call an overload `from`.
 - A free `S` in `[S, T: From[S]]` is not inferred from an overloaded type: pin it.
-- A bound picks too, by the direct call's rule: `fn make[S, T: From[S]](x: S) -> T` called as
-  `r: Rat = make("ab")` runs the `str` overload, and `make([])` on a type with `str` and `List[int]`
-  overloads runs the `List[int]` one (Rust's `make(vec![])` infers `Vec<i32>` the same way). A source
-  that fits two overloads (`[]` against `List[int]` and `List[str]`) is *type Rat does not satisfy
-  From (type annotations needed: …)*. The declaration order never matters.
-- As a value, `Rat.from` names several fns, so its position's fn type picks one:
+- A bound is met by the declared signature, exactly (Rust `impl From<i32>`): `from(x: int)` meets
+  `From[int]`, and `from(x: int?)` meets `From[int?]` but not `From[int]`, which is *type Rat does
+  not satisfy From (method 'from' has the wrong signature)*, for one `from` or several. A direct
+  call is an ordinary call: `Rat.from(3)` on `from(x: int?)` wraps its argument as any `int?`
+  parameter does. On a set the bound's source picks the overload: `fn make[S, T: From[S]](x: S) ->
+  T` called as `r: Rat = make("ab")` runs the `str` overload, and `make([])` on a type with `str`
+  and `List[int]` overloads runs the `List[int]` one (Rust's `make(vec![])` infers `Vec<i32>` the
+  same way). A source that fits two overloads (`[]` against `List[int]` and `List[str]`) is *type
+  Rat does not satisfy From (type annotations needed: …)*. The declaration order never matters.
+- As a value, `Rat.from` names several fns, so its position's fn type picks one, the overload
+  whose fn type the position takes (as for one `from`, `fn(int?) -> R` is no `fn(int) -> R`):
   `f: fn(int) -> Rat = Rat.from` is the `int` overload (an annotated binding, a parameter, a
   return, a typed list element), and so does a generic slot's param type: `[1, 2].map(Rat.from)`
-  is the `int` overload. With no fn type there, `g := Rat.from` and
+  is the `int` overload; an open return (`.map`'s `U`) takes any. With no fn type there,
+  `g := Rat.from` and
   `print(Rat.from)` are *type annotations needed: Rat.from has 2 overloads (int, str)*, as
   Rust's `let g = Rat::from;` is `E0283`. A type with one `from` reads as a value as before. A
   later-param key picks by that param: `f: fn(int, str) -> M = M.build` (`Build[S]`'s
@@ -230,7 +241,11 @@ n := r.try_into[int]()     # an error value: 1/2 is not an int
   r.try_into()?` the `-> int!`); with no carrier target of that payload it picks as a plain
   annotation. `[T]` wins over the annotation, so `x: int = r.into[str]()` is the
   assignment's *cannot assign str to variable of type int*. With neither, `x := r.into()` is *into
-  on Rat needs a target type: write `.into[T]()`* (no message names the receiver); a target with
+  on Rat needs a target type: write `.into[T]()`* (no message names the receiver), and so is an
+  expected type that names no target: `print(r.into())` (`print` takes `Any`), an open type var
+  (`id(r.into())`); `[r].map(Rat.into)` is *type annotations needed: Rat.into has 2 overloads
+  (float, str)*. A `?.` call picks the same way: `d: str? = q?.into()` and `e: float = q?.into() ??
+  0.0` (`q: Rat?`); a target with
   no overload is *type Rat has no into for int (it has: float, str)*, the one error of the call.
   `Rat.into[float](r)` (or `s: str = Rat.into(r)`) is the same call through the type.
 - One `into` is a plain method, as one `from`: `r.into()` calls it, `[r].map(Rat.into)` reads it, it

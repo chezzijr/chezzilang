@@ -82,8 +82,8 @@ workspace crates, the blocking-point table (`block::wait_steps`) and the boundar
    compiler's temps are private `$` names, a binder hides a full module path in the checker alone,
    and a bracketed call always has a recorded reading); F4 to F8 design inconsistencies). Owner
    decisions: `docs/contributing/special-cases.md` "Owner design decisions (2026-11-09)". Report,
-   order and repros: `~/.claude/plans/2026-11-09-bug-hunt-w24/report.md`. Ready to file: F5
-   and F4 (the `copy` part). Open: F1 Q3 (which tasks a report lists at a join), F1 Q4 (a
+   order and repros: `~/.claude/plans/2026-11-09-bug-hunt-w24/report.md`. Ready to file: F4 (the
+   `copy` part). Open: F1 Q3 (which tasks a report lists at a join), F1 Q4 (a
    cancel of a holder outside a `defer` publishes its partial change) and F3 Q4. F8 waits on three
    owner answers.
    F7 landed (2026-11-14): each native seam fact has one owner (`docs/contributing/owners.md`): the
@@ -95,6 +95,13 @@ workspace crates, the blocking-point table (`block::wait_steps`) and the boundar
    and both keywords (`defer x` was a type error); one checker helper judges a wait arm's `Channel`
    and one judges a task callee over its resolution; `(..5).len()` and `for i in ..5` fault at run
    time from `Range.len` / `Range.iter`, as a range value does (they were check errors).
+   F5 landed (2026-11-14): one `pick_input` picks every conversion overload (an argument checked
+   under each key, so `R.from([1])` on `from(x: List[int?])` works with 2+ overloads; `[X]`; an
+   annotation target, which `Any` and an open `U` do not name; a value's fn type by assignability);
+   `Rat.from[int]` is a value; `r?.into()` keeps its annotation; every builtin type name heads a
+   static call (`bool.zz(1)`: *no static method*). Owner decision (2026-11-14): a bound is met by
+   the declared signature, exact (`from(x: int?)` meets `From[int?]`, not `From[int]`); a direct
+   call's argument wraps as at any call.
 1. **TICKET-266, a `never` return type.** `exit` and `panic` declare `-> never`, and a call of that
    type leaves its block (Rust `-> !`). It deletes the `panic("unreachable")` lines after `os.exit`.
    Escalated; branch `ticket/266` kept.

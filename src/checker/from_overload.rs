@@ -417,12 +417,17 @@ impl Checker {
     /// The protocol-slot methods of the type `th` names: a struct's, an enum's, or a builtin's
     /// native struct's (`int.from`).
     fn head_table(&self, th: &TypeHead) -> Option<&Overloads> {
-        match th.kind {
-            TypeHeadKind::Enum => self.enum_overloads_of(&th.key),
-            TypeHeadKind::Struct if th.native_handle => {
-                self.container_seeds.get(&th.key).map(|i| &i.overloads)
-            }
-            TypeHeadKind::Struct => self.struct_shape(&th.key).map(|i| &i.overloads),
+        self.overloads_at(th.kind, &th.key, th.native_handle)
+    }
+
+    /// THE overload-table lookup, by the type's kind and key (`native`: a builtin's native struct,
+    /// keyed by the builtin's name). A type head ([`Self::head_table`]) and a type
+    /// ([`Self::nominal_overloads`]) both read it.
+    fn overloads_at(&self, kind: TypeHeadKind, key: &str, native: bool) -> Option<&Overloads> {
+        match kind {
+            TypeHeadKind::Enum => self.enum_overloads_of(key),
+            TypeHeadKind::Struct if native => self.container_seeds.get(key).map(|i| &i.overloads),
+            TypeHeadKind::Struct => self.struct_shape(key).map(|i| &i.overloads),
             TypeHeadKind::Protocol => None,
         }
     }
@@ -458,43 +463,13 @@ impl Checker {
 
     /// The protocol-slot methods of the struct or enum `ty`, or of a builtin's native struct.
     pub(super) fn nominal_overloads(&self, ty: &Ty) -> Option<&Overloads> {
-        match ty {
-            Ty::Struct(k, _) => self.struct_shape(k).map(|i| &i.overloads),
-            Ty::Enum(k, _) => self.enum_overloads_of(k),
-            Ty::Int
-            | Ty::Float
-            | Ty::Bool
-            | Ty::Str
-            | Ty::Bytes
-            | Ty::ByteArray
-            | Ty::List(_)
-            | Ty::Map(..)
-            | Ty::Set(_) => Self::native_witness_key(ty)
-                .and_then(|k| self.container_seeds.get(k))
-                .map(|i| &i.overloads),
-            Ty::Nil
-            | Ty::Func { .. }
-            | Ty::Tuple(_)
-            | Ty::Param(_)
-            | Ty::Result(..)
-            | Ty::Option(_)
-            | Ty::Channel(_)
-            | Ty::Shared(_)
-            | Ty::Atomic(_)
-            | Ty::AtomicInt
-            | Ty::RwShared(_)
-            | Ty::Executor
-            | Ty::Socket
-            | Ty::Listener
-            | Ty::Writer
-            | Ty::Reader
-            | Ty::Ptr
-            | Ty::Width(_)
-            | Ty::Protocol(..)
-            | Ty::Module(_)
-            | Ty::Unknown
-            | Ty::Var(_) => None,
+        if let Ty::Struct(k, _) = ty {
+            return self.overloads_at(TypeHeadKind::Struct, k, false);
         }
+        if let Ty::Enum(k, _) = ty {
+            return self.overloads_at(TypeHeadKind::Enum, k, false);
+        }
+        self.overloads_at(TypeHeadKind::Struct, BuiltinType::of(ty)?.name(), true)
     }
 
     /// THE witness pick, read by conformance and by the witness record alike: the overload of
@@ -536,12 +511,14 @@ impl Checker {
     }
 
     /// The direct call `Type.name(args)` on an overloaded `name`: the index of the one overload in
-    /// `set` whose param at `slot` (the type's stored slot, `Param(i)`) the argument for that param
-    /// [`Self::fits`]: the `i`th positional argument, or the keyword argument named as the param.
-    /// The call passes every param of the requirement. No overload fits (no widening, Rust
-    /// `E0277`), or more than one fits (Rust `E0283`), is an error that lists the overloads;
-    /// `None` then, and the arguments are inferred for their own errors.
-    pub(super) fn pick_overload(
+    /// `set` that takes the argument for the param at `slot` (the type's stored slot, `Param(i)`),
+    /// bound as the call binds it ([`Self::bind_sig`] against the first overload: every overload
+    /// has the requirement's params). The call passes every param of the requirement: a binding
+    /// that leaves the slot's param out is *an overloaded mk is picked by argument 'x': it is
+    /// missing*, a wrong count *an overloaded from takes 1 argument, found 0*. No overload fits (no
+    /// widening, Rust `E0277`), or more than one fits (Rust `E0283`), is an error that lists the
+    /// overloads; `None` then, and the arguments are inferred for their own errors.
+    fn pick_overload(
         &mut self,
         set: &[FnSig],
         slot: OverloadSlot,
@@ -550,84 +527,95 @@ impl Checker {
         args: &[Expr],
         span: Span,
     ) -> Option<usize> {
-        let named: Vec<(String, Expr)> = self
-            .call_ctx
-            .as_ref()
-            .map(|c| c.named.clone())
-            .unwrap_or_default();
         let i = match slot {
             OverloadSlot::Param(i) => i,
             OverloadSlot::Ret => 0,
         };
-        let arity = set.first().map_or(1, |s| s.params.len()).max(i + 1);
-        let labels: Vec<String> = (0..arity)
-            .map(|j| {
-                set.first()
-                    .and_then(|s| s.slots.as_ref())
-                    .and_then(|sl| sl.get(j))
-                    .and_then(|sl| sl.name.clone())
-                    .unwrap_or_else(|| "x".to_string())
-            })
-            .collect();
-        let arg = if args.len() + named.len() != arity
-            || named.iter().any(|(n, _)| !labels.contains(n))
-        {
-            None
-        } else if let Some(a) = args.get(i) {
-            Some(a.clone())
-        } else {
-            named
-                .iter()
-                .find(|(n, _)| *n == labels[i])
-                .map(|(_, a)| a.clone())
-        };
+        let mut sig = set.first()?.clone();
+        if sig.slots.is_none() && sig.native.is_none() {
+            let n = sig.params.len();
+            let slots = super::expr::callable_slots(&sig.labels, sig.min_params, n, sig.variadic);
+            sig.slots = Some(slots);
+        }
+        let label = |j: usize| sig.slots.as_ref()?.get(j)?.name.clone();
+        let labels: Vec<String> = (0..sig.params.len()).filter_map(label).collect();
+        let at = label(i).unwrap_or_else(|| "x".to_string());
+        let named: Vec<String> = self
+            .call_ctx
+            .as_ref()
+            .map(|c| c.named.iter().map(|(n, _)| n.clone()).collect())
+            .unwrap_or_default();
+        let (arity, n) = (sig.params.len().max(i + 1), args.len() + named.len());
+        let mark = self.diag_mark();
+        let bound = self.bind_sig(&sig, name, args, 0, span);
+        let arg = bound.filter(|_| n == arity).and_then(|b| b.get(i).cloned());
         let Some(arg) = arg else {
-            self.infer_all(args);
-            self.consume_named();
-            let n = args.len() + named.len();
-            let msg = match named.iter().find(|(n, _)| !labels.contains(n)) {
-                Some((k, _)) => {
-                    let known: Vec<&str> = labels.iter().map(String::as_str).collect();
-                    super::expr::unknown_named_arg(k, &known)
-                }
-                None if n == arity => {
-                    let l = &labels[i];
-                    format!("an overloaded {name} is picked by argument '{l}': it is missing")
-                }
-                None => {
+            // An unknown keyword keeps the binding's own error; any other miss is the pick's.
+            if named.iter().all(|k| labels.contains(k)) {
+                self.diag_rollback(mark);
+                self.infer_all(args);
+                self.consume_named();
+                let msg = if n == arity {
+                    format!("an overloaded {name} is picked by argument '{at}': it is missing")
+                } else {
                     let s = if arity == 1 { "" } else { "s" };
                     format!("an overloaded {name} takes {arity} argument{s}, found {n}")
-                }
-            };
-            self.error(span, msg);
+                };
+                self.error(span, msg);
+            }
             return None;
         };
-        let saved = std::mem::replace(&mut self.generic_arg_prepass, true);
-        let t = self.probe_ty(&arg);
-        self.generic_arg_prepass = saved;
-        let fitting = self.fitting_overloads(set, slot, &t, false);
-        if let [k] = fitting.as_slice() {
-            return Some(*k);
-        }
+        let msg = match self.pick_input(set, slot, tname, name, PickInput::Arg(&arg)) {
+            Ok(k) => return Some(k),
+            Err(msg) => msg,
+        };
         let before = self.errors.len();
         self.infer_all(args);
         self.consume_named();
-        if !fitting.is_empty() && t.is_unknown() && self.errors.len() > before {
+        if self.errors.len() > before && self.probe_ty(&arg).is_unknown() {
             // The argument's own error already explains it.
             return None;
         }
-        self.error(
-            span,
-            overload_misfit(set, slot, &fitting, tname, name, Some(&t)),
-        );
+        self.error(span, msg);
         None
     }
 
+    /// The [`PickInput::Arg`] reading: the overloads whose key at `slot` takes the argument `arg`
+    /// checked under that key, as the call binds it (a bare literal takes its type from the slot:
+    /// `[1]` is a `List[int?]` under `from(x: List[int?])`, as one decl checks it), and the
+    /// argument's own type, for the misfit message. Each candidate's check is a trial: its
+    /// diagnostics and bindings are rolled back. An argument with no type of its own (its own
+    /// error) fits every overload, and the caller reports that error alone.
+    fn arg_fitting(&mut self, set: &[FnSig], slot: OverloadSlot, arg: &Expr) -> (Vec<usize>, Ty) {
+        let saved = std::mem::replace(&mut self.generic_arg_prepass, true);
+        let t = self.probe_ty(arg);
+        let fitting = if t.is_unknown() {
+            self.fitting_overloads(set, slot, &t, false)
+        } else {
+            (0..set.len())
+                .filter(|&k| {
+                    let Some(key) = slot.key(&set[k]).cloned() else {
+                        return false;
+                    };
+                    let mark = self.diag_mark();
+                    let under = self.infer_arg(arg, Some(&key));
+                    let clean = self.errors.len() == mark.errors;
+                    let fits = clean && self.fits(&key, &under);
+                    self.diag_rollback(mark);
+                    fits
+                })
+                .collect()
+        };
+        self.generic_arg_prepass = saved;
+        (fitting, t)
+    }
+
     /// The overloaded `name` read as a value (`f: fn(int) -> Rat = Rat.from`), keyed at the type's
-    /// stored `slot`: the index of the one overload whose param at the slot [`Self::fits`] the
-    /// param at that index of the position's fn type (the `expected_hint`), which takes the
-    /// requirement's arity. No fn type there, or one that does not pick exactly one, is an
-    /// error that lists the overloads (Rust `E0283`: `let g = Rat::from;` needs an annotation).
+    /// stored `slot`: the one overload whose fn type is assignable to the position's fn type (the
+    /// `expected_hint`), which takes the requirement's arity ([`PickInput::FnType`]). An open type
+    /// var there (`.map`'s `fn(int) -> U`) names nothing and takes every overload. No fn type there,
+    /// or one that does not pick exactly one, is an error that lists the overloads (Rust `E0283`:
+    /// `let g = Rat::from;` needs an annotation).
     pub(super) fn pick_overload_value(
         &mut self,
         set: &[FnSig],
@@ -636,30 +624,166 @@ impl Checker {
         name: &str,
         span: Span,
     ) -> Option<usize> {
+        let want = self.expected_hint.as_ref().map(|h| h.ty.clone());
+        let picked = self.pick_input(set, slot, tname, name, PickInput::FnType(want));
+        self.report_pick(picked, span)
+    }
+
+    /// Report a failed [`Self::pick_input`] at `span`: the index of the pick, else `None`.
+    fn report_pick(&mut self, picked: Result<usize, String>, span: Span) -> Option<usize> {
+        match picked {
+            Ok(k) => Some(k),
+            Err(msg) => {
+                self.error(span, msg);
+                None
+            }
+        }
+    }
+
+    /// THE pick of a protocol-slot overload: the index of the one overload in `set` that takes
+    /// `input` at `slot`, else the misfit message ([`overload_misfit`]). Every reader of a pick (a
+    /// direct call, `[X]`, an annotation target, a value's fn type, `T.from[X]` read as a value)
+    /// comes here; a bound's witness reads the same relation ([`Self::witness_overload`]).
+    pub(super) fn pick_input(
+        &mut self,
+        set: &[FnSig],
+        slot: OverloadSlot,
+        tname: &str,
+        name: &str,
+        input: PickInput,
+    ) -> Result<usize, String> {
+        let (fitting, shown) = match input {
+            PickInput::Target(t, payload) => {
+                (self.fitting_overloads(set, slot, &t, payload), Some(t))
+            }
+            PickInput::Arg(arg) => {
+                let (fitting, t) = self.arg_fitting(set, slot, arg);
+                (fitting, Some(t))
+            }
+            PickInput::FnType(want) => self.fn_type_fitting(set, slot, want),
+        };
+        match fitting.as_slice() {
+            [k] => Ok(*k),
+            _ => Err(overload_misfit(
+                set,
+                slot,
+                &fitting,
+                tname,
+                name,
+                shown.as_ref(),
+            )),
+        }
+    }
+
+    /// The [`PickInput::FnType`] reading: the overloads whose fn type the position's fn type
+    /// `want` takes by assignability (a free type param or var of `want` is open: it takes any
+    /// type), and the type at `want`'s slot for the misfit message (`None` when it is open, or
+    /// there is no fn type of the requirement's arity: every overload then fits).
+    fn fn_type_fitting(
+        &self,
+        set: &[FnSig],
+        slot: OverloadSlot,
+        want: Option<Ty>,
+    ) -> (Vec<usize>, Option<Ty>) {
         // The value's fn type takes the requirement's params (a `Ret` slot's method only `self`).
         let arity = match slot {
             OverloadSlot::Param(_) => set.first().map_or(1, |s| s.params.len()),
             OverloadSlot::Ret => 1,
         };
-        let want = match self.expected_hint.as_ref().map(|h| h.ty.clone()) {
-            Some(Ty::Func { params, ret, .. }) if params.len() == arity => match slot {
-                OverloadSlot::Param(i) => params.into_iter().nth(i),
-                OverloadSlot::Ret => Some(*ret),
-            },
-            _ => None,
+        let Some(want) =
+            want.filter(|w| matches!(w, Ty::Func { params, .. } if params.len() == arity))
+        else {
+            return ((0..set.len()).collect(), None);
         };
-        let fitting = match &want {
-            Some(t) => self.fitting_overloads(set, slot, t, false),
-            None => (0..set.len()).collect(),
+        // A free type param of the position (not one of the enclosing fn's) is open.
+        let open = std::cell::RefCell::new(HashMap::new());
+        ty_all_holes(&want, &|h| {
+            if let Ty::Param(n) = h
+                && !self.rigid_param(n, &[])
+            {
+                open.borrow_mut().insert(n.clone(), Ty::Unknown);
+            }
+            true
+        });
+        let want = subst(&want, &open.into_inner());
+        let Ty::Func {
+            params,
+            ret,
+            labels,
+            variadic,
+        } = &want
+        else {
+            return ((0..set.len()).collect(), None);
         };
-        if let [k] = fitting.as_slice() {
-            return Some(*k);
+        let at = match slot {
+            OverloadSlot::Param(i) => params.get(i).cloned(),
+            OverloadSlot::Ret => Some((**ret).clone()),
         }
-        self.error(
-            span,
-            overload_misfit(set, slot, &fitting, tname, name, want.as_ref()),
-        );
-        None
+        .filter(|t| self.names_target(t));
+        let fitting = (0..set.len())
+            .filter(|&k| {
+                // A `Ret` slot's method takes only the receiver: the position's own param.
+                let cand = match slot {
+                    OverloadSlot::Param(_) => fn_value_ty(&set[k]),
+                    OverloadSlot::Ret => Ty::Func {
+                        params: params.clone(),
+                        ret: Box::new(set[k].ret.clone()),
+                        labels: labels.clone(),
+                        variadic: *variadic,
+                    },
+                };
+                let m = self.tyvars.borrow().mark();
+                let ok = self.assignable(&want, &cand);
+                self.tyvars.borrow_mut().rollback(m);
+                ok
+            })
+            .collect();
+        (fitting, at)
+    }
+
+    /// `Type.name[X]` read as a value, where `name` is a protocol slot of the type (Rust
+    /// `<Rat as From<i32>>::from`): the `[X]` picks the overload ([`Self::pick_slot`], on a set or
+    /// on one decl), and the value is that overload's fn. `None` when `head` is no such member, or
+    /// the method declares type params of its own (the `[X]` is then theirs).
+    pub(super) fn slot_applied_value(
+        &mut self,
+        head: &Expr,
+        args: &[crate::ast::Type],
+        args_span: Span,
+    ) -> Option<Ty> {
+        let ExprKind::Field {
+            obj,
+            name,
+            name_span,
+        } = &head.kind
+        else {
+            return None;
+        };
+        let (th, head_args) = self.peel_type_path(obj)?;
+        let lone_slot = self.head_slot(&th, name)?;
+        let one = self.type_member_fn_at(&th, head_args.clone(), name, None)?;
+        if one.sig.type_params.len() > one.head_params {
+            return None;
+        }
+        let x: Vec<Ty> = args
+            .iter()
+            .map(|t| self.resolve_type(t, args_span))
+            .collect();
+        let tname = th.spelled.clone();
+        let (set, slot, overloaded) = match self.head_overloads(&th, name) {
+            Some((set, slot)) => (set, slot, true),
+            None => (vec![one.sig], lone_slot, false),
+        };
+        let k = match self.pick_slot(&set, slot, &tname, name, &x, None, &[], *name_span) {
+            Some(k) => k,
+            None => return Some(Ty::Unknown),
+        };
+        let pick = overloaded.then(|| {
+            self.record_overload_call(name, slot, &set[k], *name_span, *name_span);
+            k
+        });
+        let pf = self.type_member_fn_at(&th, head_args, name, pick)?;
+        Some(self.path_fn_value_ty(obj.id, pf, None, *name_span))
     }
 
     /// Is `e` a read of an overloaded `Type.name` as a value (`Rat.from` with 2+ overloads)?
@@ -834,11 +958,10 @@ impl Checker {
         };
         let msg = match t {
             Ok((t, payload)) => {
-                let fitting = self.fitting_overloads(set, slot, &t, payload);
-                if let [k] = fitting.as_slice() {
-                    return Some(*k);
+                match self.pick_input(set, slot, tname, name, PickInput::Target(t, payload)) {
+                    Ok(k) => return Some(k),
+                    Err(msg) => msg,
                 }
-                overload_misfit(set, slot, &fitting, tname, name, Some(&t))
             }
             Err(msg) => msg,
         };
@@ -854,9 +977,9 @@ impl Checker {
     /// r.into() ?? 7` picks `into(self) -> int?`); else the hint itself when an overload returns
     /// it, else a carrier hint's payload (`n: int! = k.try_into()` picks `try_into(self) -> int!`;
     /// a plain `int` wraps into `int!`), else the hint, for the misfit message. `None` with no
-    /// hint or an unknown one.
+    /// hint or one that names no target ([`Self::names_target`]: `print`'s `Any`, an open `T`).
     fn hint_target(&self, set: &[FnSig], hint: Option<&Ty>) -> Option<(Ty, bool)> {
-        let h = hint.filter(|h| !h.is_unknown())?;
+        let h = hint.filter(|h| self.names_target(h))?;
         let slot = OverloadSlot::Ret;
         if self.call_ctx.as_ref().is_some_and(|c| c.payload_hint)
             && !self.fitting_overloads(set, slot, h, true).is_empty()
@@ -870,6 +993,15 @@ impl Checker {
             return Some((payload.clone(), false));
         }
         Some((h.clone(), false))
+    }
+
+    /// Does an expected type name a conversion target? [`hint_fixes`] (not `Unknown`, not a
+    /// protocol such as `print`'s `Any`), and no open type var: a callee's free `U` or an inference
+    /// var takes any target, so it names none (Rust `E0283`). The enclosing fn's own `T` is a type.
+    fn names_target(&self, t: &Ty) -> bool {
+        hint_fixes(t)
+            && !matches!(t, Ty::Var(_))
+            && !matches!(t, Ty::Param(n) if !self.rigid_param(n, &[]))
     }
 
     /// The one method `name` of `ty` (a struct, an enum or a builtin scalar's native struct), as a
@@ -959,6 +1091,17 @@ fn slot_reqs(
         }
     }
     out
+}
+
+/// What a protocol-slot pick ([`Checker::pick_input`]) reads at the slot.
+pub(super) enum PickInput<'a> {
+    /// A type at the slot, `[X]` or an annotation's target; `true` reads a target's carrier
+    /// payload ([`OverloadSlot::payload_key`]).
+    Target(Ty, bool),
+    /// The argument for the slot's param, checked under each overload's key.
+    Arg(&'a Expr),
+    /// The position's fn type, for a read as a value (`None`: no expected type there).
+    FnType(Option<Ty>),
 }
 
 /// The ok type of a `T!E` return, else the return itself.

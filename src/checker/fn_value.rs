@@ -321,16 +321,32 @@ impl Checker {
         out
     }
 
-    /// A builtin type the prelude declares as a `native struct` (`List`, `bytes`), as the head of a
-    /// member path only (`List.from_iter(xs)`): read alone it stays a builtin type name, never a
-    /// value. A binding of the name hides it, as it hides a user type.
+    /// Every builtin type name ([`Self::bare_type_read`]'s `Builtin`: `List`, `bool`, an imported
+    /// `int8`), and an alias of one, as the head of a member path only (`List.from_iter(xs)`,
+    /// `bool.zz(1)`, which is *type 'bool' has no static method 'zz'*): read alone it stays a
+    /// builtin type name, never a value. The key is the builtin's own name, under which its
+    /// prelude `native struct` (if any) keeps its methods. A binding of the name hides it, as it
+    /// hides a user type.
     fn builtin_type_head(&self, name: &str) -> Option<TypeHead> {
-        if !self.container_seeds.contains_key(name) || self.head_hides_type(name) {
-            return None;
-        }
+        let key = match self.bare_type_read(name)? {
+            TypeRead::Builtin(n) => self.bound_builtin(&n).unwrap_or(&n).to_string(),
+            TypeRead::Alias(_) => {
+                let body = match self.aliases.get(name) {
+                    Some(b) => self.resolve_ty_ro(b),
+                    None => self.imported_alias_tys.get(name)?.clone(),
+                };
+                // A C width is its own type here, not its scalar: `int8` has no `int.from`.
+                if let Ty::Width(_) = body {
+                    body.to_string()
+                } else {
+                    BuiltinType::of(&body)?.name().to_string()
+                }
+            }
+            TypeRead::Head(_) | TypeRead::Variant(_) | TypeRead::SelfType => return None,
+        };
         Some(TypeHead {
             kind: TypeHeadKind::Struct,
-            key: name.to_string(),
+            key,
             name: name.to_string(),
             spelled: name.to_string(),
             pinned: None,
@@ -625,6 +641,11 @@ impl Checker {
                 | Resolution::NativeStatic(_)
                 | Resolution::ParamMethodFn { .. }),
             ) => {
+                // `Rat.from[int]`: the `[X]` of a protocol slot names the overload (Rust
+                // `<Rat as From<i32>>::from`), not a method type argument.
+                if let Some(t) = self.slot_applied_value(head, &app.args, app.args_span) {
+                    return Some(t);
+                }
                 let pf = self.path_fn(head)?;
                 if pf.sig.type_params.len() == pf.head_params {
                     return None;

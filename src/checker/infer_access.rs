@@ -726,6 +726,9 @@ impl Checker {
                     }
                     crate::desugar::lower_carrier_option_void(&mut c);
                     let mark = self.diag_mark();
+                    // The attempt is a trial: the caller's expected type stays for the value
+                    // form (`d: str? = r?.into()` picks by it).
+                    let hint = (self.expected_hint.clone(), self.hint_owner);
                     // A call that types `Unknown` (its own error: a failed pick) is not void:
                     // the `pass` arm alone makes the match `Nil`. The value form keeps that one
                     // error, with no "returns no value" after it.
@@ -739,6 +742,7 @@ impl Checker {
                         return Ty::Nil;
                     }
                     self.diag_rollback(mark);
+                    (self.expected_hint, self.hint_owner) = hint;
                 }
                 self.record_carrier(key, CarrierMode::Option, span, "?.");
                 let mut c = carrier.clone();
@@ -747,6 +751,10 @@ impl Checker {
                     **obj = scratch;
                 }
                 crate::desugar::lower_carrier_option(&mut c);
+                // The value is a `T?`: a payload hint (`r?.into() ?? 0.0`) names its `T`.
+                if let Some(h) = self.expected_hint.take_if(|h| h.payload) {
+                    self.expected_hint = Some(Hint::plain(Ty::Option(Box::new(h.ty))));
+                }
                 let r = self.infer(&c);
                 self.pop_scope();
                 // A failed call has no value, as under `.`: `Unknown`, not `Option[Unknown]`,

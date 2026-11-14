@@ -111,7 +111,10 @@ impl Checker {
             _ => {
                 let set: Vec<FnSig> = cands
                     .iter()
-                    .map(|c| FnSig::plain(c.params.clone(), c.ret.clone()))
+                    .map(|c| FnSig {
+                        labels: msig.labels.clone(),
+                        ..FnSig::plain(c.params.clone(), c.ret.clone())
+                    })
                     .collect();
                 // No receiver type stores a slot here: the bound's protocol keys it.
                 let Some(slot) = self.requirement_slot(&bound.name, method) else {
@@ -123,7 +126,8 @@ impl Checker {
                     );
                     return Ty::Unknown;
                 };
-                let Some(k) = self.pick_overload(&set, slot, tname, method, args, span) else {
+                let Some(k) = self.pick_slot(&set, slot, tname, method, &[], None, args, span)
+                else {
                     return Ty::Unknown;
                 };
                 cands[k].clone()

@@ -801,12 +801,16 @@ fn native_cells(out: &mut Vec<Cell>) {
     out.push(main_only(
         "native_bare",
         "import Reader from std.io\ng := Reader.close",
-        Expect::Rejects("'Reader' is a type, not a value"),
+        Expect::Rejects(
+            "'close' is a method of the native type 'Reader' -- a native method is not a value",
+        ),
     ));
     out.push(main_only(
         "native_alias",
         "import std.io\ntype W = io.Writer\nf := W.close",
-        Expect::Rejects("'W' is a type, not a value"),
+        Expect::Rejects(
+            "'close' is a method of the native type 'W' -- a native method is not a value",
+        ),
     ));
     out.push(main_only(
         "native_call",
