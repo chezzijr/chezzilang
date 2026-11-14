@@ -32,6 +32,10 @@ Size of that shape at audit time:
 | capabilities decided in more than one place, with the places disagreeing | 11 of 15 (iterable, indexable, index-assign, sliceable, membership, equatable, stringable, addable, "has method m", callable as a value, copyable) |
 | capabilities with one decider | 4 (orderable, hashable, truthy, sendable; M3.5 deleted sendable) |
 
+Since the audit, wave 24 F4 (2026-11-14) gave "has method m" and copyable one decider each: a type's
+method set is its declaration (`Checker::declares_member`) plus its intrinsic methods
+(`Checker::intrinsic_method`), and `copy` exists only when declared.
+
 ## Unifying rules
 
 Each rule removes a cluster of special cases. "Decision" says whether the owner must choose language
@@ -44,7 +48,7 @@ day's binary.
 | U2 | A hook is the method that satisfies the builtin protocol; a declared type with methods is one kind (struct and enum alike) | Family D of wave 23, enum half-hooks, `List.from_iter(s)` for a bounded parameter | TICKET-250 (done) | no |
 | U3 | A receiver is the first parameter of a method and nothing else | the `self` universal cast (P0) | TICKET-250 (note added) | no (owner: `self` is the special word) |
 | U4 | An un-hinted `?x` is a carrier from creation; a wrapper holds its operand | Families B and C of wave 23 | TICKET-248, TICKET-247 (landed) | no |
-| U5 | An operator accepts a type exactly when the type satisfies the operator's protocol; builtin types declare their protocols like user types | `in`/`Contains`, `+`/`Add`, `==`/`Eq`, display/`Stringable`, sibling-type holes | TICKET-257 (landed); re-run 2026-10-16; `false < true`, `bytes.zeroed(2)`, `"ab" * 3` (now `.repeat`) and `match 1.5:` landed 2026-11-03; still open: enum `.copy()` (waits on the Copy protocol), `{1, 2}.map(f)` | decided, see below |
+| U5 | An operator accepts a type exactly when the type satisfies the operator's protocol; builtin types declare their protocols like user types | `in`/`Contains`, `+`/`Add`, `==`/`Eq`, display/`Stringable`, sibling-type holes | TICKET-257 (landed); re-run 2026-10-16; `false < true`, `bytes.zeroed(2)`, `"ab" * 3` (now `.repeat`) and `match 1.5:` landed 2026-11-03; still open: `{1, 2}.map(f)` (enum `.copy()` settled by wave 24 F4: `copy` exists only when declared) | decided, see below |
 | U6 | One iteration source: `for`, comprehensions, `List()`/`Set()`/`Map()`, destructuring and `Iterable` ask one function | range, channel, Set of tuples, std containers, `std.iter` | TICKET-253 (ranges), TICKET-257 (channels) | decided, see below |
 | U7 | A range is a value | every "a range is only valid as" site, `range()`, slice spelling | TICKET-253, TICKET-254 (landed) | decided, see below |
 | U8 | A block expression is an expression wherever layout exists, and layout exists inside brackets and interpolation holes | `match`/`recover:` rejected inside brackets, parameter default against field default, inline fn body against lambda body, line breaks in a hole | TICKET-260 (landed); re-run 2026-10-16: still open a line break inside a hole | decided, see below |
@@ -111,7 +115,7 @@ Decided before any fix. Families, repros and sites: `~/.claude/plans/2026-11-09-
 | F1 cut and verdict | A cancelled task's stuck `defer` that holds a `Shared`/`RwShared` guard is a fatal deadlock; the guard is released `CUT`, so no waiter reads the half-done value. A lock cycle (write or read guard) and a task re-entering its own guard are fatal too. One rule from the cut's cause, not from the unwind path. Still open: (Q3) does a deadlock report list every task at a join, as Go lists `WaitGroup.Wait`; (Q4) a cancel of a holder outside a `defer` publishes its partial in-place change (`C sees [0, 1]`): keep, or release `CUT`? | Go: `fatal error: all goroutines are asleep - deadlock!` |
 | F2 `parallel:` defer order | A level's body `defer`s run before its children are cancelled and joined on every non-normal exit (fault, `?`, `return`, `break`/`continue`, cancel), wherever the `recover:` sits. Normal fall-through keeps the order of 43cdc74e (after the join). | Go `defer` + `wg.Wait`, Python `TaskGroup` + `finally`: cleanup first in both shapes |
 | F3 names | `Self` is a keyword (`struct Self` is an error). Inside a method `Self(...)` and `Self.m()` are values. Compiler temps use the private `$` names (`__opt{n}` / `__optrecv{n}` go). Every binder kind hides a full module path (`match` bare capture, `else` err name, nested `fn` included), as `16-imports.md` says. The no-inference rule of TICKET-238 (`xs := []` is an error) stays. Still open: (Q4) `std := 1` beside `import std.math` is accepted while `math := 1` is rejected; intended? | Rust: `Self` is a keyword; Go `fmt := 1; fmt.Println` and Python `case os: os.path`: the local wins |
-| F4 `copy` | No intrinsic struct `copy`. A type has `copy` only when it declares one, and the author picks shallow or deep. `List.copy` stays shallow. This is not the report's recommendation (a std `Copy` protocol), which also gave enums a `copy`: an enum now gets `copy` only by declaring it, as a struct. Still open: (Q2) whether hook methods (`(5).str()`) are callable directly; (Q3) whether an intrinsic method satisfies a same-shaped user protocol; (Q4) whether a function value is comparable (`==` says yes, `Atomic.cas` says no). | Rust `Clone` is opt-in; CPython `list.copy()` is shallow |
+| F4 `copy` and the method set | No intrinsic struct `copy`. A type has `copy` only when it declares one, and the author picks shallow or deep. `List.copy` stays shallow. This is not the report's recommendation (a std `Copy` protocol), which also gave enums a `copy`: an enum now gets `copy` only by declaring it, as a struct. Owner 2026-11-14, landed with F4: hook methods are ordinary methods (`(5).str()` is `5`); an intrinsic method satisfies a same-shaped user protocol (structural); a function value compares by identity everywhere, and `Atomic.cas` follows `==`. One method set per type: `Checker::declares_member` + `Checker::intrinsic_method`. | Rust `Clone` is opt-in; CPython `list.copy()` is shallow; Go structural interfaces; CPython/Rust fn identity |
 | F5 conversions | `[1].map(Rat.from[int])` (a picked overload as a value) works. Other F5 questions take the report's recommendations unless the owner changes them. | Rust: `<Rat as From<i64>>::from` as a value works |
 | F6 range bounds | A missing bound is judged on the value only: `Range.iter` / `Range.len` own the rule, and the checker's literal-only check goes (U7). `(..5).len()` and `r := ..5; r.len()` give the same runtime error. Landed 2026-11-14 with the rest of F6: a malformed `wait` arm head and a non-call `spawn`/`defer` target are parse errors, one text per malformation for both directions and both keywords. | — |
 | F7 native tables | No decision needed (latent, no language change). | — |
@@ -133,7 +137,7 @@ Sibling types that differed with no stated reason:
 | `1 == 1.0`, `[1] == [1.0]` | `1 in [1.0]`, `[1.0].contains(1)`, `[1] < [1.5]` | CPython: all `True` |
 | tuple of `Hashable` as a map key; a struct or enum with `hash` and `eq` | zero-field struct, enum or struct without both hooks, `int?` | Rust: `Hash + Eq` derive; CPython: enum members and `None` are keys (U15; `T?` owner note 2026-10-21) |
 | `false < true` (2026-11-03) | `int? < int?` (`cannot compare int? and int?`, since TICKET-265), `int!str < int!str` | Rust orders both |
-| struct has automatic `.copy()` | enum has none | Rust derives `Clone` on both. Owner 2026-11-09 (wave 24 F4): the automatic struct `copy` goes, so both have `copy` only when declared |
+| a declared `copy` (landed 2026-11-14, wave 24 F4) | an undeclared struct or enum `copy` | Rust: `Clone` is opt-in on both |
 | `iter.islice({1, 2}, 1)`, `[1.5].sum()` | `iter.enumerate({1, 2})`, `iter.sum([1.5])`, `{1, 2}.map(f)`, `xs.extend({2})`, `",".join({"a"})` | CPython works |
 | `bytearray()`, `bytes()`, `bytearray.zeroed(2)`, `bytes.zeroed(2)`, `bytes.from_iter({1, 2})` (2026-11-03) | — | CPython works |
 | `match` literal patterns for int, float (2026-11-03), str, bool, tuple | bytes | CPython `case 1.5:` |
@@ -323,9 +327,9 @@ Owner direction (2026-10-11): fixes are done outside the pipeline for now.
 - Int `/` truncates and `%` follows the dividend (`-7 / 2` is `-3`; CPython `-4`).
 - A present `T?` prints as its bare payload.
 - Types, `import`, `test fn`, `extern`, `native` are top-level only (owner decision).
-- Intrinsic hook methods are callable only through a bound: `(5).str()` is "no method".
-- A reserved protocol and a same-shaped user protocol disagree: user `protocol MyStr: fn str(self) -> str`
-  rejects `int`. Handles never witness a user protocol.
+- Reversed 2026-11-14 (wave 24 F4): an intrinsic hook method is an ordinary method, `(5).str()` is
+  `5`, and a same-shaped user protocol (`protocol MyStr: fn str(self) -> str`) accepts `int`, a
+  handle included, through its intrinsic method.
 - Protocol conformance includes parameter names (TICKET-187; Go accepts any names).
 - `defer` is block-scoped (Go: function-scoped).
 - Return type is inferred only for an inline-expression body.

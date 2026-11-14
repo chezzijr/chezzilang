@@ -28,25 +28,38 @@ q.x = 99
 print(p.x)              # 99  — one object, two names (CPython prints 99; Go would print 3)
 ```
 
-Every struct has an intrinsic `copy()` that returns a **shallow** duplicate (Python's `copy.copy`;
-there is no deep copy). A `List`/`Map`/`Set`, nested-struct or handle field is shared by both structs
-afterwards. A struct that declares its own `copy` method, or holds a fn-typed `copy` field, keeps it. A
-struct holding a `Channel`, `Shared` or `Socket` copies and shares the handle. `List`, `Map` and `Set`
-have a shallow `copy()` too (see [`stdlib.md`](../stdlib/01-builtins.md) §2).
+A struct has a `copy()` only when it declares one (wave 24 F4, owner 2026-11-09; Rust `Clone` is
+opt-in): the author picks shallow or deep. An undeclared `p.copy()` is `type P has no method 'copy'`
+in every use (a call, a protocol bound, `P.copy`), a native struct's (`regex.Match`) included. A
+fn-typed `copy` field is a field, called as `s.copy(x)`. `List`, `Map` and `Set` keep their shallow
+`copy()` (see [`stdlib.md`](../stdlib/01-builtins.md) §2).
 
 ```chezzi
 struct P:
     x: int
     tag: str = "none"
 
+    fn copy(self) -> P:
+        return P(self.x, self.tag)
+
 p := P(1, "hi")
 print(P(p.x))            # P(x=1, tag='none')  -- a hand-written duplicate drops the field
-print(p.copy())           # P(x=1, tag='hi')    -- copy() carries every field
+print(p.copy())           # P(x=1, tag='hi')    -- the declared copy carries every field
 
 q := p.copy()
 q.x = 99
 print(p.x)                # 1  -- independent instances
 ```
+
+**A type's method set is one table** (wave 24 F4): its declared methods, then the method of each std
+protocol with no type parameters that it satisfies with no declaration behind it — `str`
+(`Stringable`), `eq` (`Eq`), `hash` (`Hashable`), `compare` (`Comparable`), the operator methods
+(`add`, `neg`, …) and `as_path` (`PathLike`). An intrinsic method is an ordinary method: `(5).str()`
+is `"5"`, `P(1).eq(P(1))` is `true`, and `int` meets a user `protocol Show: fn str(self) -> str` (Go's
+structural rule). Each one is only as wide as its protocol's grant: a struct with no `hash`/`eq` hooks
+has no `hash()`. A field of the same name shadows it (`p.str()` on a `str: int` field is "is a
+field"). Like a native method it has no proto, so `P.str` is not a value: *'str' is an intrinsic
+method of 'P' -- an intrinsic method is not a value*; wrap it (`fn(x): x.str()`).
 
 A struct is snapshotted only as a `Map`/`Set` **key** or a `Set` **element** (see [Hashing](10-protocol-hooks.md#hashing-hashable)). A `spawn:`/`parallel:` boundary copies nothing: a task gets the struct by handle (M3.4, §11b).
 

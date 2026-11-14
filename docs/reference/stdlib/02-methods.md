@@ -10,8 +10,9 @@
 | `int.try_from` / `float.try_from` (static) | `(x: str) -> int!` / `-> float!` | The parse of `x.to_int()` / `x.to_float()`, with its errors (Rust `str::parse`). Witnesses `TryFrom[str]`: `parse[int]("7")` for `fn parse[T: TryFrom[str]](s: str) -> T!`. |
 | `int.from_be_bytes` / `int.from_le_bytes` (static) | `(b: bytes, signed: bool = false) -> int!` | The int that 0 to 8 bytes hold (Python `int.from_bytes`): `int.from_be_bytes(b"\xff\xff")` is `?65535`, `int.from_be_bytes(b"\xff\xff", signed=true)` is `?-1`, `b""` is `?0`. Takes `bytes` only, as `io.write_bytes` (a `bytearray` converts with `bytes.from_iter(ba)`). Errors: `!"from_be_bytes: 9 bytes is more than 8"`, and for an unsigned 8-byte value above i64::MAX `!"from_be_bytes: the value does not fit in int; pass signed=true"`. |
 
-Display is interpolation, `"{n}"`; `n.str()` on a concrete scalar is a type error (the `Stringable`
-hook is bound-only).
+Display is interpolation, `"{n}"`, or the intrinsic method `n.str()` (wave 24 F4): a scalar's
+`str`/`eq`/`hash`/`compare` and operator methods (`(5).add(3)`) are ordinary methods, read from its
+std protocol's requirement (`docs/reference/syntax/07-structs.md`, "A type's method set").
 
 ### `str`
 | Method | Signature | Notes |

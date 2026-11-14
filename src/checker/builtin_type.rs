@@ -130,6 +130,13 @@ impl BuiltinType {
         })
     }
 
+    /// Is `Ty::Struct(name, args)` the built-in cursor `Iterator[E]` (what `.iter()` mints and a
+    /// generator returns)? The one test of the cursor's shape; it is struct-shaped, so
+    /// [`Self::of`] does not answer it.
+    pub(crate) fn is_cursor(name: &str, args: &[Ty]) -> bool {
+        name == BuiltinType::Iterator.name() && args.len() == 1
+    }
+
     /// The scalar type a name spells, or `None` for every other builtin type.
     pub(crate) fn scalar_ty(self) -> Option<Ty> {
         match self {

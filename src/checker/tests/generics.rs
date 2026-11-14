@@ -1463,13 +1463,11 @@ fn stringable_scalar_satisfies_ok() {
 }
 
 #[test]
-fn scalar_str_direct_call_is_bound_only() {
-    // The intrinsic Stringable arm is BOUND-only, exactly like the Comparable arm: a direct
-    // concrete-receiver `(5).str()` stays a compile error (no direct scalar method), matching
-    // `(5).compare(3)`. The free `str(5)` builtin covers direct use. Keeps str consistent with
-    // every sibling intrinsic protocol (none adds a first-class direct scalar method).
-    rejects("x := (5).str()\n", "type int has no method 'str'");
-    rejects("x := (5).compare(3)\n", "type int has no method 'compare'");
+fn scalar_intrinsic_methods_are_callable_directly() {
+    // Wave 24 F4 (owner, 2026-11-14): a scalar's intrinsic `str`/`compare` is an ordinary method,
+    // callable directly as well as through a bound (one method set per type).
+    ok("x := (5).str()\n");
+    ok("x := (5).compare(3)\n");
 }
 
 // ----- Hashable struct keys for map/set (key restriction lifted) -----

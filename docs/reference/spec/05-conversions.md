@@ -50,8 +50,9 @@ Full rules: [Numeric semantics](04-semantics.md#numeric-semantics).
 `stringify` that `"{x}"` uses). Structs/enums opt in with their own `str(self) -> str`.
 
 **Intrinsic conformance implies a callable method.** Where a built-in satisfies a protocol
-*intrinsically* (no user method), the protocol's method is callable on it inside an erased generic body
-or through a protocol-typed value, and it is defined as **exactly** the operator/primitive form:
+*intrinsically* (no user method), the protocol's method is callable on it: directly (`(5).str()`, `(5).add(1)`), inside an
+erased generic body, or through a protocol-typed value (the method set is owned by
+[A type's method set](../syntax/07-structs.md)), and it is defined as **exactly** the operator/primitive form:
 - `a.add(b)` ≡ `a + b` (same overflow / divide-by-zero faults, same int↔float promotion), `a.neg()` ≡
   `-a`, and `a.compare(b)` is what `<` orders by.
 - `a.eq(b)` ≡ `a == b` for a struct/enum: a struct/enum that defines `fn eq(self, other: Self) -> bool`

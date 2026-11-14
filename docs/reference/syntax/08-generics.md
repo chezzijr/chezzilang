@@ -164,7 +164,8 @@ Box[Tag] == Box[Tag]  →  type error: cannot compare Box[Tag] and Box[Tag] for 
 `!=`, containers and payloads (`[a] == [b]`, `?a == ?b`, tuples, map values, struct fields), `x in xs`,
 `list.contains`/`index_of`/`dedup`/`unique`, and every map-key / set-element position, each with a
 message naming the site (*contains() compares List[Box[Tag]] elements for equality — …*,
-*map key type Box[Tag]'s `eq` requires …*).
+*map key type Box[Tag]'s `eq` requires …*). `index_of`/`dedup`/`unique` say it through the
+`where T: Eq` bound on their `std/prelude.chz` decl (*type Box[Tag] does not satisfy Eq (…)*).
 
 **An unmet `eq` bound is refused where the value enters a protocol slot** (a `let`, a field, a
 `List`/`T?`/`T!E` element, a return):

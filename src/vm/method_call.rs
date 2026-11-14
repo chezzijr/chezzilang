@@ -354,36 +354,6 @@ impl Vm {
         let at = self.stack.len() - argc;
         let args: Vec<Value> = self.stack.split_off(at);
         let recv = self.pop();
-        // `compare` on a primitive (int/float/str): they intrinsically satisfy `Comparable`, so an
-        // erased generic body may call `.compare()` on a concrete primitive. Return the sign of the
-        // ordering. Structs with their own `compare` fall through to the normal dispatch below.
-        if method == Hook::Compare.method() && args.len() == 1 {
-            let is_prim = self.is_numeric(recv)
-                || matches!(recv.as_obj(), Some(h) if matches!(self.heap.get(h), Obj::Str(_)));
-            if is_prim && let Some(ord) = self.compare(recv, args[0]) {
-                self.push(Value::int(ord as i64));
-                return Ok(());
-            }
-        }
-        // `str` on a scalar: int/float/bool/str intrinsically satisfy `Stringable`, so an erased
-        // generic body may call `.str()` on a concrete scalar. Render via `stringify` (the same path
-        // interpolation uses) and alloc a fresh `Obj::Str`. The already-`Str` receiver (T=str)
-        // MUST be intercepted here too — otherwise it would fall to struct-method dispatch and fault;
-        // `stringify` returns its raw unquoted contents. GC-safe: `recv` is already popped, and for a
-        // scalar receiver `stringify` runs no user code, so the owned `String` exists before the alloc.
-        // Mirrors the `compare` scalar branch above. Structs with their own `str` fall through below.
-        if method == Hook::Str.method() && args.is_empty() {
-            let is_scalar = self.is_numeric(recv)
-                || recv.as_bool().is_some()
-                || recv.is_nil()
-                || matches!(recv.as_obj(), Some(h) if matches!(self.heap.get(h), Obj::Str(_)));
-            if is_scalar {
-                let s = self.stringify(recv, span, 0)?;
-                let h = self.heap.alloc(Obj::Str(s.into()));
-                self.push(Value::obj(h));
-                return Ok(());
-            }
-        }
         let Some(h) = recv.as_obj() else {
             // An inline scalar (int/float/bool/nil) receiver: its decl's methods, then the
             // intrinsic protocol methods the checker grants int/float/bool.
@@ -433,20 +403,15 @@ impl Vm {
                 return self.push_frame_in_place(proto, home, None, base, span);
             }
         }
-        // TICKET-257: the handles are `Eq` by identity (`Eq` grant rows for `Channel`, `Shared`,
-        // `RwShared`, `Atomic`): `x.eq(y)` is `x == y`. No handle declares an `eq` of its own.
+        // TICKET-257, wave 24 F4: a channel, a cursor and every reserved handle (`handle_kind`) are
+        // `Eq` by identity and `Stringable` (their `Eq`/`Stringable` grant rows): `x.eq(y)` is
+        // `x == y`. No handle declares an `eq` or `str` of its own, and its native dispatcher below
+        // would claim the name.
+        let obj = self.heap.get(h);
         if ((method == Hook::Eq.method() && args.len() == 1)
             || (method == Hook::Str.method() && args.is_empty()))
-            && matches!(
-                self.heap.get(h),
-                Obj::Channel(_)
-                    | Obj::Shared(_)
-                    | Obj::RwShared(_)
-                    | Obj::Atomic(_)
-                    | Obj::AtomicInt(_)
-                    | Obj::Iter { .. }
-                    | Obj::Generator(_)
-            )
+            && (obj.handle_kind().is_some()
+                || matches!(obj, Obj::Channel(_) | Obj::Iter { .. } | Obj::Generator(_)))
             && let Some(v) = self.intrinsic_proto_method(recv, method, &args, span)?
         {
             self.push(v);
@@ -780,19 +745,6 @@ impl Vm {
                         return Ok(()); // B1/D3: the function-field call parked on `recv` or yielded.
                     }
                     self.push(v);
-                    return Ok(());
-                }
-                // TICKET-030 — every struct gets an intrinsic, MISS-ONLY `copy()`: it is reached only
-                // after the declared-method lookup and the fn-typed-field fallback above both failed,
-                // for the same precedence reason as the checker's arm. `fields` is already the OWNED
-                // clone taken at the top of this match (`self.heap.get(h).clone()`), so allocating a
-                // new `Obj::Struct` from the same `tid` and `fields` copies each field's VALUE while a
-                // heap field (a `List`/`Map`/`Channel`/nested struct) is SHARED — a shallow copy.
-                // `Heap::alloc` never collects (the only safepoint is the top of `run_until`'s dispatch
-                // loop), so no rooting is needed between the `alloc` and the `push`.
-                if method == "copy" && args.is_empty() {
-                    let dup = self.heap.alloc(Obj::Struct { tid, fields });
-                    self.push(Value::obj(dup));
                     return Ok(());
                 }
                 // ROOT REDESIGN — render the BARE display name (not the identity key) in the error.

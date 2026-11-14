@@ -145,18 +145,29 @@ impl Checker {
                     // "attempted to take value of method"): it would hide its `self` capture, and
                     // the compiler lowers a field-read to a plain field load. The method named
                     // through its TYPE (`Bx[int].get`, receiver first) is the value form.
-                    if info.methods.contains_key(name) {
+                    // An intrinsic method has no proto, so its type path is no value either.
+                    let declared = info.methods.contains_key(name);
+                    if declared || self.intrinsic_method(&obj_ty, name).is_some() {
                         let recv = match self.head_name(obj) {
                             Some(n) if crate::ast::CarrierTemp::of(&n).is_none() => n.into_owned(),
                             Some(_) | None => "x".to_string(),
+                        };
+                        let remedy = if declared {
+                            format!(
+                                "call it (`{recv}.{name}(…)`), wrap it (`fn(): {recv}.{name}()`), \
+                                 or name it through its type (`{obj_ty}.{name}`, which takes the \
+                                 receiver first)"
+                            )
+                        } else {
+                            format!(
+                                "call it (`{recv}.{name}(…)`) or wrap it (`fn(): {recv}.{name}()`)"
+                            )
                         };
                         self.error(
                             name_span,
                             format!(
                                 "type {obj_ty} has no field '{name}' ('{name}' is a method — a bound \
-                                 method is not a value: call it (`{recv}.{name}(…)`), wrap it \
-                                 (`fn(): {recv}.{name}()`), or name it through its type \
-                                 (`{obj_ty}.{name}`, which takes the receiver first))"
+                                 method is not a value: {remedy})"
                             ),
                         );
                         return Ty::Unknown;

@@ -373,7 +373,7 @@ impl Checker {
             NativeHandleMethod::Concrete(sig, _) => sig.ret,
             NativeHandleMethod::Miss => {
                 self.infer_all(args);
-                let names = self.method_names(key);
+                let names = self.method_set_names(obj_ty);
                 self.error_help(
                     name_span,
                     format!("type {obj_ty} has no method '{method}'"),

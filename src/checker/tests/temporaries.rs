@@ -1082,6 +1082,7 @@ fn recv_kind_all_lists_every_variant() {
         RecvKind::Shared => 18,
         RecvKind::RwShared => 19,
         RecvKind::Atomic => 20,
+        RecvKind::Handle => 21,
     };
     let max = RecvKind::ALL.iter().map(|k| index(*k)).max().unwrap();
     assert_eq!(RecvKind::ALL.len(), max + 1, "ALL misses a variant");

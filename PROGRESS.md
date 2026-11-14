@@ -82,8 +82,7 @@ workspace crates, the blocking-point table (`block::wait_steps`) and the boundar
    compiler's temps are private `$` names, a binder hides a full module path in the checker alone,
    and a bracketed call always has a recorded reading); F4 to F8 design inconsistencies). Owner
    decisions: `docs/contributing/special-cases.md` "Owner design decisions (2026-11-09)". Report,
-   order and repros: `~/.claude/plans/2026-11-09-bug-hunt-w24/report.md`. Ready to file: F4 (the
-   `copy` part). Open: F1 Q3 (which tasks a report lists at a join), F1 Q4 (a
+   order and repros: `~/.claude/plans/2026-11-09-bug-hunt-w24/report.md`. Open: F1 Q3 (which tasks a report lists at a join), F1 Q4 (a
    cancel of a holder outside a `defer` publishes its partial change) and F3 Q4. F8 waits on three
    owner answers.
    F7 landed (2026-11-14): each native seam fact has one owner (`docs/contributing/owners.md`): the
@@ -102,6 +101,14 @@ workspace crates, the blocking-point table (`block::wait_steps`) and the boundar
    static call (`bool.zz(1)`: *no static method*). Owner decision (2026-11-14): a bound is met by
    the declared signature, exact (`from(x: int?)` meets `From[int?]`, not `From[int]`); a direct
    call's argument wraps as at any call.
+   F4 landed (2026-11-14): one method set per type, its declaration (`Checker::declares_member`)
+   plus its intrinsic methods (`Checker::intrinsic_method`, the requirement of each type-parameterless
+   std protocol it satisfies with no declaration). Owner decisions: `(5).str()` is `5`; `int` meets a
+   user `protocol Show: fn str(self) -> str`; no intrinsic struct `copy` (`P(1).copy()` is *no method
+   'copy'*, a native struct's too; `List.copy` stays); a fn value compares by identity everywhere and
+   `Atomic.cas` follows `==`. The native handles `==` compares by core (`Executor`, `Socket`,
+   `Listener`, `Writer`, `Reader`, `ptr`) are `Eq` and `Stringable` (`RecvKind::Handle`), so
+   `List.contains`/`index_of`/`dedup`/`unique` carry `where T: Eq` on their decls.
 1. **TICKET-266, a `never` return type.** `exit` and `panic` declare `-> never`, and a call of that
    type leaves its block (Rust `-> !`). It deletes the `panic("unreachable")` lines after `os.exit`.
    Escalated; branch `ticket/266` kept.
@@ -142,11 +149,6 @@ measured, accepted for that cell only); every other bench cell keeps the 10% gat
 
 ### Open questions for the owner
 
-- **Copy protocol: deep (Rust `Clone`) or shallow (Python `copy`)?** Open since 2026-11-03. The
-  candidate form is `protocol Copy: fn copy(self) -> Self`. Builtins would get intrinsic rows; a
-  struct or enum would derive it when all its fields are `Copy`; `Channel`, `Shared`, `Executor`
-  and `Task` would have no row. It would delete the 2 name-keyed `"copy"` checks
-  (`checker/method_call.rs`, `vm/method_call.rs`). Enum `.copy()` waits for it.
 
 ### Owner decisions not yet implemented
 

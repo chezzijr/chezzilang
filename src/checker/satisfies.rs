@@ -512,11 +512,11 @@ impl Checker {
         // means no proof the method is callable at runtime.
         //
         // Four gates:
-        // * kind ≠ `"?"`. That covers every handle (`Channel`/`Shared`/`Executor`/`Socket`/…),
-        //   `Module` and `Ty::Param` (`Func` graduated into the `"func"` kind in W7-54,
-        //   `Ty::Protocol` into the `"protocol"` kind in W7-52, so neither lands here any more). The
-        //   handles compare by identity but have no constructible probe receiver, so kind `"?"` is
-        //   the right refusal for them; `Ty::Param` MUST fall through too — `may_be_equal` treats a
+        // * kind ≠ `"?"`. That covers `Module` and `Ty::Param` (`Func` graduated into the `"func"`
+        //   kind in W7-54, `Ty::Protocol` into the `"protocol"` kind in W7-52, the handles into
+        //   their kinds in TICKET-257 and wave 24 F4 (`"handle"`: `Executor`/`Socket`/…/`ptr`, by
+        //   core identity as `==` compares them), so none lands here any more). `Ty::Param` MUST
+        //   fall through — `may_be_equal` treats a
         //   `Param` as ERASED, so admitting it would make every UNBOUNDED `T` satisfy `Eq` (a
         //   soundness hole). `Ty::Protocol` no longer falls through: at runtime a protocol-typed value
         //   IS its concrete witness, so its `Eq`-ness is exactly as decidable as any other receiver's
@@ -561,7 +561,7 @@ impl Checker {
         }
         // `Stringable` (sole method `str(self) -> str`) is satisfied intrinsically by every scalar —
         // all four stringify (int/float/bool/str), so a `[T: Stringable]` generic accepts them (the
-        // erased body's `v.str()` is dispatched by the scalar `str` branch in `Vm::do_method_call`).
+        // erased body's `v.str()` is answered by `Vm::intrinsic_proto_method` on the method miss).
         // Note the membership is all FOUR scalars, as for Comparable (Hashable has no Float).
         // TICKET-257 (owner rule U5): `print` and `"{x}"` accept every value, so every kind a
         // `RecvKind` names is `Stringable`. A method that is not the hook is invisible to `print`, so
@@ -790,7 +790,8 @@ impl Checker {
                 let Some(info) = self.struct_shape(sname) else {
                     return Err(format!("type {ty} does not satisfy {protocol_display}"));
                 };
-                self.satisfies_methods(ty, protocol, args, pinfo, &info.methods)
+                let methods = self.with_intrinsic_methods(ty, protocol, pinfo, &info.methods);
+                self.satisfies_methods(ty, protocol, args, pinfo, &methods)
                     .map(|()| Grant::no_intrinsic_method())
             }
             // Enum conformance is structural exactly like a struct's: the enum satisfies `protocol`
@@ -836,7 +837,8 @@ impl Checker {
                     let Some(methods) = self.enum_methods_of(ename) else {
                         return Err(format!("type {ty} does not satisfy {protocol_display}"));
                     };
-                    self.satisfies_methods(ty, protocol, args, pinfo, methods)
+                    let methods = self.with_intrinsic_methods(ty, protocol, pinfo, methods);
+                    self.satisfies_methods(ty, protocol, args, pinfo, &methods)
                         .map(|()| Grant::no_intrinsic_method())
                 }
                 // A builtin witnesses a protocol of STATIC requirements only (`From[bool]`) by the
@@ -850,6 +852,14 @@ impl Checker {
                     Some(info) => self
                         .satisfies_methods(ty, protocol, args, pinfo, &info.methods)
                         .map(|()| Grant::no_intrinsic_method()),
+                    // A carrier with no declared methods (a tuple, a fn, an `Option`, a handle)
+                    // meets a user protocol by its intrinsic methods alone.
+                    None if !is_std_protocol(protocol) => {
+                        let none = HashMap::new();
+                        let methods = self.with_intrinsic_methods(ty, protocol, pinfo, &none);
+                        self.satisfies_methods(ty, protocol, args, pinfo, &methods)
+                            .map(|()| Grant::no_intrinsic_method())
+                    }
                     None => Err(format!("type {ty} does not satisfy {protocol_display}")),
                 },
             },
@@ -857,25 +867,44 @@ impl Checker {
     }
 
     /// A native method's DISPATCH-TIME residual that a `FnSig` alone can't express (TICKET-024,
-    /// W8-32) — mirrors the two gates `src/checker/expr.rs` applies at `Ty::List`'s direct-call arm
-    /// (`:2981`'s numeric-`sum` gate, `:3001`'s `eq_bounds_unsatisfied` gate for
-    /// `contains`/`index_of`/`dedup`/`unique`), reused rather than re-derived so a protocol-erased
-    /// call can't type-check where a direct call would fault. No other covered built-in
-    /// (`Map`/`Set`/`str`/`bytes`/`bytearray`) has one. `Some(reason)` refuses; `None` defers to the
-    /// ordinary signature match.
+    /// W8-32): `List.sum`'s numeric element (a monoid; no `Zero` protocol exists to bound it with,
+    /// so the decl's `where T: Add` is necessary but not sufficient). The direct-call arm's
+    /// `sum_seed` gate asks the same question. The `Eq` that `contains`/`index_of`/`dedup`/`unique`
+    /// need is their decl's `where T: Eq` bound, which the signature match enforces (wave 24 F4).
+    /// `Some(reason)` refuses; `None` defers to the ordinary signature match.
     pub(super) fn native_dispatch_residual(&self, ty: &Ty, method: &str) -> Option<String> {
         let Ty::List(elem) = ty else { return None };
         if method == "sum" {
             return (!elem.is_numeric() && !elem.is_unknown())
                 .then(|| "native method 'sum' needs a numeric element type".to_string());
         }
-        if matches!(method, "contains" | "index_of" | "dedup" | "unique") {
-            let why = self.eq_bounds_unsatisfied(elem)?;
-            return Some(format!(
-                "native method '{method}' compares List elements for equality — {why}"
-            ));
-        }
         None
+    }
+
+    /// `declared` plus, for each requirement of the USER protocol `pinfo` that `declared` lacks,
+    /// `ty`'s intrinsic method of the name ([`Self::intrinsic_method`]): an intrinsic method meets
+    /// a user protocol of its shape, as a declared one does (Go's structural rule). A std
+    /// protocol's own arm above decides its intrinsic grant, so it is left as declared.
+    pub(super) fn with_intrinsic_methods<'a>(
+        &self,
+        ty: &Ty,
+        protocol: &str,
+        pinfo: &ProtocolInfo,
+        declared: &'a HashMap<String, FnSig>,
+    ) -> std::borrow::Cow<'a, HashMap<String, FnSig>> {
+        let mut methods = std::borrow::Cow::Borrowed(declared);
+        if is_std_protocol(protocol) {
+            return methods;
+        }
+        for (name, _) in pinfo.methods.iter() {
+            if !declared.contains_key(name)
+                && !self.declares_member(ty, name)
+                && let Some(sig) = self.intrinsic_method(ty, name)
+            {
+                methods.to_mut().insert(name.clone(), sig);
+            }
+        }
+        methods
     }
 
     /// Structural conformance check shared by the struct and enum arms of [`satisfies_args`]: a type

@@ -269,16 +269,6 @@ fn protocol_method_literals(code: &str) -> Vec<(usize, String)> {
 /// `(src-relative file, the code on the line, why it is not a protocol method)`.
 const NOT_PROTOCOL_METHODS: &[(&str, &str, &str)] = &[
     (
-        "checker/satisfies.rs",
-        "matches!(method, \"contains\" | \"index_of\" | \"dedup\" | \"unique\")",
-        "the `List` methods that need an `Eq` element; the native `List` decl owns their names",
-    ),
-    (
-        "checker/method_call.rs",
-        "matches!(method, \"contains\" | \"index_of\" | \"dedup\" | \"unique\")",
-        "the `List` methods that need an `Eq` element; the native `List` decl owns their names",
-    ),
-    (
         "checker/method_call.rs",
         "matches!(method, \"add\" | \"sub\")",
         "the `Atomic` `add`/`sub` methods; the native `Atomic` decl owns their names",

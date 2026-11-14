@@ -60,7 +60,7 @@ impl Checker {
     /// The element type in the return type of an `iter` hook, `Iterator[E]`.
     pub(super) fn iter_ret_elem(ret: Ty) -> Option<Ty> {
         match ret {
-            Ty::Struct(name, mut args) if name == "Iterator" && args.len() == 1 => args.pop(),
+            Ty::Struct(name, mut args) if BuiltinType::is_cursor(&name, &args) => args.pop(),
             Ty::Int
             | Ty::Float
             | Ty::Bool
@@ -191,9 +191,7 @@ impl Checker {
             // `for v := range ch`, Rust's `rx.iter()`).
             Ty::Channel(e) => Some((**e).clone()),
             // `Iterator[T]` value (a generator result): element type is its single type argument.
-            Ty::Struct(name, args) if name == "Iterator" && args.len() == 1 => {
-                Some(args[0].clone())
-            }
+            Ty::Struct(name, args) if BuiltinType::is_cursor(name, args) => Some(args[0].clone()),
             Ty::Int
             | Ty::Float
             | Ty::Bool

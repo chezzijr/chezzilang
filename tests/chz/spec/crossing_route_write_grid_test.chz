@@ -73,7 +73,7 @@ test fn grid_spawn_arg_copy():
     p := T179G(x=1)
     out := Channel[str](1)
     parallel:
-        spawn t179_row(xs.copy(), p.copy(), out)
+        spawn t179_row(xs.copy(), T179G(x=p.x), out)
     assert out.recv() == ?"ok,ok,ok,ok,ok"
     assert xs == [1]
     assert p.x == 1

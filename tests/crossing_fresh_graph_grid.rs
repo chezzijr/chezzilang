@@ -275,6 +275,8 @@ const PRELUDE: &str =
 
 struct N:
     kids: List[List[int]]
+    fn copy(self) -> N:
+        return N(self.kids)
 fn verdict(r: Channel[str], tag: str, res: None!):
     match res:
         ?_: r.send(tag + \" runs\")
@@ -574,6 +576,8 @@ fn controls_hold() {
     let src = format!(
         "{PRELUDE}struct Box:
     v: List[List[List[int]]]
+    fn copy(self) -> Box:
+        return Box(self.v)
     fn go(self, r: Channel[str], tag: str, d: int):
         poke_l(r, tag, d, self.v)
 fn main():

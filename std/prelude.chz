@@ -67,7 +67,7 @@ native struct List[T]:
     native fn push(self, v: T) -> None
     native fn pop(self) -> Option[T]
     native fn reverse(self) -> None
-    native fn contains(self, item: T) -> bool
+    native fn contains(self, item: T) -> bool where T: Eq
     # SENTINEL, NOT A CARRIER — `-1` on a miss, the shape of Python's `str.find` (`'hi'.find('zz')` is
     # `-1`, measured). HAZARD: indexing is Python-negative, so `xs[xs.index_of(v)]` on a miss silently
     # returns the LAST element instead of faulting — Python has the identical trap
@@ -75,7 +75,7 @@ native struct List[T]:
     # `contains`, when a miss must be visible. NOTE Python's LIST twin, `list.index(x)`, raises
     # `ValueError` rather than returning `-1`: the sentinel here is the uniform Chezzi choice across
     # `List` and `str`, kept because changing it is a breaking API change, not because lists inherit it.
-    native fn index_of(self, v: T) -> int
+    native fn index_of(self, v: T) -> int where T: Eq
     native fn concat(self, other: List[T]) -> List[T]
     native fn extend(self, other: List[T]) -> None
     native fn sort(self) -> None where T: Comparable
@@ -103,8 +103,8 @@ native struct List[T]:
     # TICKET-278 — remove the element at index `i` and return it (Rust `Vec::remove`); `i` follows the
     # `xs[i]` negative-index rule and a bad index faults like `xs[i]` does.
     native fn remove(self, i: int) -> T
-    native fn unique(self) -> List[T]
-    native fn dedup(self) -> List[T]
+    native fn unique(self) -> List[T] where T: Eq
+    native fn dedup(self) -> List[T] where T: Eq
     native fn chunk(self, n: int) -> List[List[T]]
     native fn windows(self, n: int) -> List[List[T]]
     native fn take_while(self, pred: fn(T) -> bool) -> List[T]

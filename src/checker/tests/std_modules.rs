@@ -1836,7 +1836,8 @@ fn builtin_iterable_rows() -> Vec<IterRow> {
             | RecvKind::Protocol
             | RecvKind::Shared
             | RecvKind::RwShared
-            | RecvKind::Atomic => panic!("an Iterable row names {kind:?}: give it a grid row"),
+            | RecvKind::Atomic
+            | RecvKind::Handle => panic!("an Iterable row names {kind:?}: give it a grid row"),
         };
         rows.push(r);
     }

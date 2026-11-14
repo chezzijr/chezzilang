@@ -957,11 +957,10 @@ impl Checker {
         }
         // A struct BY VALUE: every field must be a C scalar or a C-marshallable struct, recursively
         // (no str/owned_str). Generic structs (non-empty type args) have no fixed C layout — reject
-        // them. `visited` rejects a struct cycling back through its own fields. `Iterator` is a
-        // built-in existential `Struct`, not a real POD — never marshallable.
+        // them. `visited` rejects a struct cycling back through its own fields. The built-in
+        // cursor `Iterator[E]` always has its element argument, so `args.is_empty()` excludes it.
         if let Ty::Struct(name, args) = ty
             && args.is_empty()
-            && name != "Iterator"
             && self.structs.contains_key(name)
         {
             let mut visited = std::collections::HashSet::new();
@@ -1028,7 +1027,6 @@ impl Checker {
             // own offending field, or the recursion if it cycles back (no by-value C layout exists).
             if let Ty::Struct(inner, args) = fty
                 && args.is_empty()
-                && inner != "Iterator"
                 && self.structs.contains_key(inner)
             {
                 all_ok &= self.struct_fields_marshallable(inner, fn_name, span, visited);

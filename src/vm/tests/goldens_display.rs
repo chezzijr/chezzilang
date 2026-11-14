@@ -1641,7 +1641,7 @@ fn primitive_compare_method_on_vm() {
 }
 
 /// Scalars intrinsically satisfy `Stringable` (checker arm in `proto.rs`) AND the erased generic
-/// body's `v.str()` is dispatched by the scalar `str` branch in `do_method_call` — a checker-only
+/// body's `v.str()` is answered by `intrinsic_proto_method` on the method miss — a checker-only
 /// change would type-OK then runtime-trap "type int has no method 'str'". Covers all four scalars
 /// (int/float/bool/str; the T=str arm exercises the already-`Obj::Str` receiver re-alloc).
 /// Byte-identical (both share `do_method_call`).

@@ -29,10 +29,13 @@ use std::collections::{HashMap, HashSet};
 /// [`Checker::intrinsic_recv_kind`]'s classification of the granted `Ty` (`"?"` for an unclassified
 /// one, which matches no row and therefore trips the assert).
 ///
+/// A row of a protocol with no type parameters is also a METHOD of the receiver kind, callable
+/// directly (`(5).str()`, wave 24 F4): [`Checker::intrinsic_method`] reads it.
+///
 /// Which runtime site SERVES a row is deliberately not recorded — the three that do are the
-/// pre-dispatch interceptions at the top of `Vm::do_method_call` (`compare`/`str` on a scalar, `iter`
-/// on a collection, `next` on a struct-with-next), `Vm::core_method` (`Error.message`), and the
-/// miss-only `Vm::intrinsic_proto_method` (everything else). The ratchet asserts CALLABILITY, which is
+/// pre-dispatch interceptions in `Vm::do_method_call` (`iter` on a collection, `next` and `iter` on
+/// a cursor, `eq`/`str` on a handle), `Vm::core_method` (`Error.message`), and the miss-only
+/// `Vm::intrinsic_proto_method` (everything else, a scalar's `str`/`compare` included). The ratchet asserts CALLABILITY, which is
 /// the invariant; pinning the site would just be a second thing to keep in sync.
 ///
 /// The pairing is enforced three ways, so a NEW grant cannot silently skip its runtime arm:
@@ -106,6 +109,7 @@ pub const INTRINSIC_PROTO_METHODS: &[(&str, RecvKind)] = &[
     ("Eq", RecvKind::Shared),
     ("Eq", RecvKind::RwShared),
     ("Eq", RecvKind::Atomic),
+    ("Eq", RecvKind::Handle),
     ("Eq", RecvKind::Cursor),
     // Stringable — all four scalars.
     ("Stringable", RecvKind::Int),
@@ -129,6 +133,7 @@ pub const INTRINSIC_PROTO_METHODS: &[(&str, RecvKind)] = &[
     ("Stringable", RecvKind::Shared),
     ("Stringable", RecvKind::RwShared),
     ("Stringable", RecvKind::Atomic),
+    ("Stringable", RecvKind::Handle),
     // Hashable — the scalar key types. A struct or enum needs its own `hash` and `eq` (TICKET-280).
     ("Hashable", RecvKind::Int),
     ("Hashable", RecvKind::Str),
@@ -233,11 +238,14 @@ pub enum RecvKind {
     Shared,
     RwShared,
     Atomic,
+    /// A native handle `==` compares by its core (`Identity::Core` in `vm/heap.rs`): `Executor`,
+    /// `Socket`, `Listener`, `Writer`, `Reader` and `ptr`.
+    Handle,
 }
 
 impl RecvKind {
     #[cfg(any(test, feature = "test-api"))]
-    pub const ALL: [RecvKind; 21] = [
+    pub const ALL: [RecvKind; 22] = [
         RecvKind::Int,
         RecvKind::Float,
         RecvKind::Bool,
@@ -259,6 +267,7 @@ impl RecvKind {
         RecvKind::Shared,
         RecvKind::RwShared,
         RecvKind::Atomic,
+        RecvKind::Handle,
     ];
 
     /// A kind with no element types and no declared methods: its row alone decides a protocol
@@ -285,7 +294,8 @@ impl RecvKind {
             | RecvKind::Channel
             | RecvKind::Shared
             | RecvKind::RwShared
-            | RecvKind::Atomic => false,
+            | RecvKind::Atomic
+            | RecvKind::Handle => false,
         }
     }
 
@@ -313,6 +323,7 @@ impl RecvKind {
             RecvKind::Shared => "shared",
             RecvKind::RwShared => "rwshared",
             RecvKind::Atomic => "atomic",
+            RecvKind::Handle => "handle",
         }
     }
 }
@@ -425,7 +436,7 @@ impl Checker {
             Ty::Map(_, _) => Some(RecvKind::Map),
             Ty::Set(_) => Some(RecvKind::Set),
             Ty::Tuple(_) => Some(RecvKind::Tuple),
-            Ty::Struct(n, a) if n == "Iterator" && a.len() == 1 => Some(RecvKind::Cursor),
+            Ty::Struct(n, a) if BuiltinType::is_cursor(n, a) => Some(RecvKind::Cursor),
             Ty::Struct(..) => Some(RecvKind::Struct),
             Ty::Enum(..) => Some(RecvKind::Enum),
             // `Option`/`Result` are their OWN `Ty`s but ONE runtime shape with `enum` (`Obj::Enum`);
@@ -447,17 +458,10 @@ impl Checker {
             Ty::Shared(_) => Some(RecvKind::Shared),
             Ty::RwShared(_) => Some(RecvKind::RwShared),
             Ty::Atomic(_) | Ty::AtomicInt => Some(RecvKind::Atomic),
-            Ty::Param(_)
-            | Ty::Executor
-            | Ty::Socket
-            | Ty::Listener
-            | Ty::Writer
-            | Ty::Reader
-            | Ty::Ptr
-            | Ty::Width(_)
-            | Ty::Module(_)
-            | Ty::Unknown
-            | Ty::Var(_) => None,
+            Ty::Executor | Ty::Socket | Ty::Listener | Ty::Writer | Ty::Reader | Ty::Ptr => {
+                Some(RecvKind::Handle)
+            }
+            Ty::Param(_) | Ty::Width(_) | Ty::Module(_) | Ty::Unknown | Ty::Var(_) => None,
         }
     }
 
@@ -502,7 +506,7 @@ impl Checker {
     /// `Obj::Generator`), and its dispatch arms deliberately expose only `next`/`iter`, so a
     /// protocol grant keyed on `"struct"` would be check-OK-then-`has no method` for it.
     pub(super) fn is_cursor_ty(ty: &Ty) -> bool {
-        matches!(ty, Ty::Struct(n, a) if n == "Iterator" && a.len() == 1)
+        matches!(ty, Ty::Struct(n, a) if BuiltinType::is_cursor(n, a))
     }
 
     /// Does `INTRINSIC_PROTO_METHODS` hold the row `(protocol, kind of ty)`?
@@ -511,6 +515,80 @@ impl Checker {
         INTRINSIC_PROTO_METHODS
             .iter()
             .any(|(p, k)| *p == protocol && Some(*k) == kind)
+    }
+
+    /// The method `method` that `ty` has with no declaration behind it (wave 24 F4): the
+    /// requirement of a std protocol with no type parameters (`Stringable.str`, `Eq.eq`,
+    /// `Hashable.hash`, `Comparable.compare`, `Add.add`, …) that `ty` satisfies with an
+    /// [`INTRINSIC_PROTO_METHODS`] row, `Self` read as `ty`. The row's promise is that the method
+    /// is callable on `ty` at run time, so a direct call `(5).str()`, a bound and a user protocol
+    /// of the same shape all read this one answer. A declared method of the name comes first at
+    /// every reader; a protocol value offers only its protocol's methods (object safety), so it
+    /// has none here.
+    pub(super) fn intrinsic_method(&self, ty: &Ty, method: &str) -> Option<FnSig> {
+        let ty = ty.scalar();
+        let kind = Self::intrinsic_recv_kind(ty).filter(|k| *k != RecvKind::Protocol)?;
+        INTRINSIC_PROTO_METHODS
+            .iter()
+            .filter(|(_, k)| *k == kind)
+            .find_map(|(protocol, _)| {
+                let pinfo = self.protocol_shape(protocol)?;
+                if !pinfo.type_params.is_empty() {
+                    return None;
+                }
+                let (_, sig) = pinfo.methods.iter().find(|(n, _)| n == method)?;
+                self.satisfies(ty, protocol).ok()?;
+                let map = HashMap::from([("Self".to_string(), ty.clone())]);
+                let mut sig = subst_sig(sig, &map);
+                if let Some(recv) = sig.params.first_mut() {
+                    *recv = ty.clone();
+                }
+                Some(sig)
+            })
+    }
+
+    /// Does `ty`'s declaration name a member `name`: a method of the user struct or enum, a field
+    /// (which shadows an intrinsic method of the name, as it would a declared one), or a method of
+    /// the builtin's std `native struct` decl? The declared half of the method set; the intrinsic
+    /// half ([`Self::intrinsic_method`]) answers only when this is `false`.
+    pub(super) fn declares_member(&self, ty: &Ty, name: &str) -> bool {
+        let ty = ty.scalar();
+        if let Some(methods) = self.nominal_method_table(ty) {
+            return methods.contains_key(name) || self.data_member_ty(ty, name).is_some();
+        }
+        BuiltinType::of(ty)
+            .and_then(|b| self.struct_shape(b.name()))
+            .is_some_and(|info| info.methods.contains_key(name))
+    }
+
+    /// Every method name of `ty`'s method set, declared and intrinsic, sorted: the near-miss
+    /// candidates of a method-call miss.
+    pub(super) fn method_set_names(&self, ty: &Ty) -> Vec<String> {
+        let scalar = ty.scalar();
+        let mut names: Vec<String> = match self.nominal_method_table(scalar) {
+            Some(methods) => methods.keys().cloned().collect(),
+            None => BuiltinType::of(scalar)
+                .and_then(|b| self.struct_shape(b.name()))
+                .map(|info| info.methods.keys().cloned().collect())
+                .unwrap_or_default(),
+        };
+        names.extend(self.intrinsic_method_names(ty));
+        names.sort();
+        names.dedup();
+        names
+    }
+
+    /// The names [`Self::intrinsic_method`] answers for `ty`, for a miss's near-miss help.
+    pub(super) fn intrinsic_method_names(&self, ty: &Ty) -> Vec<String> {
+        let mut names: Vec<String> = INTRINSIC_PROTO_METHODS
+            .iter()
+            .filter_map(|(protocol, _)| self.protocol_shape(protocol))
+            .flat_map(|p| p.methods.iter().map(|(n, _)| n.clone()))
+            .filter(|n| self.intrinsic_method(ty, n).is_some())
+            .collect();
+        names.sort();
+        names.dedup();
+        names
     }
 
     /// Grant `ty` conformance to `protocol` INTRINSICALLY (no user method) — the single funnel every

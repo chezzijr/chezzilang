@@ -308,8 +308,8 @@ pub enum Obj {
 }
 
 /// How `==` decides whether two heap objects are the same value — the ONE classification of
-/// identity (TICKET-177, wave 16 Family 5). `Vm::values_equal_guarded` compares `Core` keys and
-/// `Vm::fn_value_in` (the `Atomic.cas` refusal) descends only into `Content`. The match below is
+/// identity (TICKET-177, wave 16 Family 5). `Vm::values_equal_guarded` (`==`, `.eq()`, `contains`,
+/// `Atomic.cas`) compares `Core` keys and descends only into `Content`. The match below is
 /// exhaustive with no `_` arm, so a new `Obj` variant must pick an answer before the crate builds.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Identity {
@@ -585,8 +585,8 @@ impl Obj {
             // is two slots around one address.
             Obj::Ptr(addr) => core(*addr),
             // A bare Func, Native or Cffi is one slot per fn per heap (Vm::fn_value, TICKET-215), so two
-            // reads of it are `==`; it stays Slot (DEC-177). Atomic.cas refuses every fn value, a
-            // Builtin included, through Vm::callable (TICKET-264).
+            // reads of it are `==`; it stays Slot (DEC-177). Every equality site, `Atomic.cas`
+            // included, compares a fn value by this identity (wave 24 F4).
             Obj::Func { .. }
             | Obj::Closure { .. }
             | Obj::Native { .. }

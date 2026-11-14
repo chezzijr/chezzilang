@@ -508,7 +508,8 @@ fn neighbour_cells(out: &mut Vec<Cell>) {
     out.push(main_only(
         "type_member_miss",
         "struct S:\n    n: int\nh := S.nosuch",
-        Expect::Rejects("'S' is a type, not a value"),
+        // A struct path's miss names the missing method (wave 24 F4).
+        Expect::Rejects("type 'S' has no method 'nosuch'"),
     ));
 }
 

@@ -155,8 +155,8 @@ no fault, and `try_recv` gives `None`. The full contract is in
 - Its `compare` is **total on floats**: a `NaN` operand returns an ordering int, never a fault. It uses
   the total order of `List.sort()`/`sort_by_key`/`min`/`max` (`f64::total_cmp`, `NaN` to one end;
   `+0.0` and `-0.0` are Equal, so sort is stable across them and `min`/`max` keep the first). The
-  intrinsic `compare` is reachable only through a `[T: Comparable]` bound: `1.5.compare(2.0)` on a
-  concrete scalar is `has no method 'compare'`, like `(5).str()`.
+  intrinsic `compare` is an ordinary method: `(1.5).compare(2.0)` is `-1`, the same answer a
+  `[T: Comparable]` bound gives (see [A type's method set](../syntax/07-structs.md)).
 - The `<`/`<=`/`>`/`>=` *operators* stay IEEE (`false` for every `NaN` comparison): that is the one
   divergence.
 - `min` and `max` are written with `<`, so they obey the **operator** rule, not the total order: on a

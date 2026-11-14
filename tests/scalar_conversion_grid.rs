@@ -77,6 +77,8 @@ const ACCEPT: &[(&str, &str)] = &[
     ("int() == 0", "true"),
     ("str().len()", "0"),
     ("bytes().len()", "0"),
+    // `str` is an intrinsic method of every scalar (wave 24 F4): `(7).str()` is `"{7}"`.
+    ("(7).str()", "7"),
     // int -> float is total; 2^53 + 1 rounds to the nearest float, as Rust `n as f64`.
     ("(0).to_float()", "0.0"),
     ("neg.to_float()", "-1.0"),
@@ -249,7 +251,6 @@ fn scalar_conversion_reject_cells() {
         ("i.to_int()", "type int has no method 'to_int'"),
         ("f.to_float()", "type float has no method 'to_float'"),
         ("b.to_int()", "type bool has no method 'to_int'"),
-        ("i.str()", "type int has no method 'str'"),
         // `to_int` / `to_float` give the reason, so the `parse_*` duplicates are gone.
         ("s.parse_int()", "type str has no method 'parse_int'"),
         ("s.parse_float()", "type str has no method 'parse_float'"),

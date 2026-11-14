@@ -658,6 +658,7 @@ impl Checker {
                 },
             );
         }
+        let table = self.with_intrinsic_methods(ty, protocol, pinfo, &table);
         self.satisfies_methods(ty, protocol, args, pinfo, &table)
     }
 }

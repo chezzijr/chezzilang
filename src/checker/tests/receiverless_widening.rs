@@ -413,27 +413,16 @@ fn builtin_native_method_gates_bound_protocol_satisfaction_ticket_024() {
     );
 }
 
-// TICKET-030: a struct has no `copy()` — the only way to duplicate one is to retype every field.
+// Wave 24 F4 (owner, 2026-11-09): a struct has no intrinsic `copy()` (TICKET-030's is deleted): a
+// `copy` exists only when declared, so the method answers the same in every use.
 #[test]
-fn struct_copy_method_missing_ticket_030() {
-    // DEC-026: the NAME states the bug, the BODY asserts the FIX. This is RED until the intrinsic
-    // `copy()` lands in `Checker::infer_method_call`'s `Ty::Struct` arm.
-    ok("struct P:\n    x: int\n\nfn main():\n    p := P(1)\n    q: P = p.copy()\n    print(q)\n");
-}
-
-#[test]
-fn struct_copy_rejects_an_argument() {
+fn struct_copy_exists_only_when_declared() {
     rejects(
-        "struct P:\n    x: int\n\nfn main():\n    p := P(1)\n    print(p.copy(1))\n",
-        "'copy' expects 0 argument(s), got 1",
+        "struct P:\n    x: int\n\nfn main():\n    p := P(1)\n    q: P = p.copy()\n    print(q)\n",
+        "type P has no method 'copy'",
     );
-}
-
-#[test]
-fn struct_copy_returns_the_receiver_type() {
-    rejects(
-        "struct P:\n    x: int\n\nfn main():\n    p := P(1)\n    n: int = p.copy()\n    print(n)\n",
-        "cannot assign P to variable of type int",
+    ok(
+        "struct P:\n    x: int\n    fn copy(self) -> P:\n        return P(self.x)\n\nfn main():\n    p := P(1)\n    q: P = p.copy()\n    print(q)\n",
     );
 }
 
@@ -454,19 +443,19 @@ fn struct_copy_does_not_witness_a_user_protocol() {
 }
 
 #[test]
-fn struct_copy_is_suggested_on_a_near_miss() {
+fn an_intrinsic_method_is_suggested_on_a_near_miss() {
     rejects_help(
-        "struct P:\n    x: int\n\nfn main():\n    p := P(1)\n    print(p.cpy())\n",
-        "type P has no method 'cpy'",
-        "did you mean 'copy'?",
+        "struct P:\n    x: int\n\nfn main():\n    p := P(1)\n    print(p.sttr())\n",
+        "type P has no method 'sttr'",
+        "did you mean 'str'?",
     );
 }
 
 #[test]
-fn struct_copy_field_wins_over_the_intrinsic_and_stays_uncallable() {
+fn a_plain_field_named_copy_stays_uncallable() {
     // A non-fn field named `copy` (review finding on `3faa6948`): the fn-typed-field fallback
-    // matches only `Ty::Func`, so `copy: int` must NOT fall through to the intrinsic arm — that
-    // was accepted at check time and then faulted at runtime with "'{}' is not callable".
+    // matches only `Ty::Func`, so `copy: int` is no method — calling it would fault at runtime
+    // with "'{}' is not callable".
     rejects(
         "struct S:\n    copy: int\n\nfn main():\n    s := S(7)\n    print(s.copy())\n",
         "has no method 'copy' ('copy' is a field -- read it without parentheses)",

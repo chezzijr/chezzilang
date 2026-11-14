@@ -307,7 +307,8 @@ fn intrinsic_grants_all_have_vm_arms() {
             | RecvKind::Channel
             | RecvKind::Shared
             | RecvKind::RwShared
-            | RecvKind::Atomic => ("-", "int"),
+            | RecvKind::Atomic
+            | RecvKind::Handle => ("-", "int"),
         }
     };
     let recvs: &[Recv] = &[
@@ -504,6 +505,18 @@ fn intrinsic_grants_all_have_vm_arms() {
             RecvKind::Atomic,
             "import std.concurrency\nimport Atomic, Executor, RwShared, Shared from std.concurrency\n",
             "Atomic(1)",
+            "-",
+            "-",
+            "-",
+            "-",
+            "-",
+            "-",
+        ),
+        // Wave 24 F4 — a native handle compared by its core (`Executor`, `Socket`, …, `ptr`).
+        r(
+            RecvKind::Handle,
+            "import std.concurrency\nimport Atomic, Executor, RwShared, Shared from std.concurrency\n",
+            "Executor()",
             "-",
             "-",
             "-",

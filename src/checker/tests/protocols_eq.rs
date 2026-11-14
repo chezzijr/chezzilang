@@ -673,35 +673,40 @@ a := Box(Tag(1))
 b := Box(Tag(2))
 ";
     const WHY: &str = "Box[Tag]'s `eq` requires Tag: Comparable";
-    for (expr, head) in [
+    // `contains` and `in` ask the one membership verdict; `index_of`/`dedup`/`unique` carry
+    // `where T: Eq` on their `std/prelude.chz` decl (wave 24 F4), so the bound names the element.
+    // Each result is bound, not printed: a printed `List[Box[Tag]]` is a second, real error (its
+    // erasure to `Any` meets the same unmet `eq` bound, TICKET-053).
+    for (expr, head, tail) in [
         (
             "[a].contains(b)",
             "contains() compares List[Box[Tag]] elements for equality — ",
+            "",
         ),
         (
             "[a].index_of(b)",
-            "index_of() compares List[Box[Tag]] elements for equality — ",
+            "type Box[Tag] does not satisfy Eq (",
+            ")",
         ),
-        (
-            "[a, b].dedup()",
-            "dedup() compares List[Box[Tag]] elements for equality — ",
-        ),
+        ("[a, b].dedup()", "type Box[Tag] does not satisfy Eq (", ")"),
         (
             "[a, b].unique()",
-            "unique() compares List[Box[Tag]] elements for equality — ",
+            "type Box[Tag] does not satisfy Eq (",
+            ")",
         ),
         (
             "a in [b]",
             "cannot test membership of Box[Tag] in List[Box[Tag]] — ",
+            "",
         ),
     ] {
-        let errs = check_entry(&format!("{COND}print({expr})\n"));
+        let errs = check_entry(&format!("{COND}x := {expr}\n"));
         assert_eq!(
             errs.len(),
             1,
             "`{expr}`: expected exactly one error, got {errs:?}"
         );
-        assert_eq!(errs[0].message, format!("{head}{WHY}"), "`{expr}`");
+        assert_eq!(errs[0].message, format!("{head}{WHY}{tail}"), "`{expr}`");
     }
     // Through a BINDING, not only a literal receiver — the element type is read off the type, so a
     // named list is the same hook (and is what a real program writes).
@@ -1876,55 +1881,25 @@ fn atomic_payload_with_eq_rejected() {
     );
 }
 
-/// TICKET-144 (W14-24): `Atomic.cas` on a payload that holds a `fn` value can never succeed — every
-/// `load()` returns a fresh copy of the closure and closures compare by identity — so the standard
-/// `cas(a.load(), new)` retry loop spins forever. Go's `atomic.Value.CompareAndSwap` panics
-/// `comparing uncomparable type` on the same shape. Rejected at the `cas` CALL (`load`/`store`/
-/// `exchange` of a fn stay legal, as Go's `Value` Store/Load of a func do); a builtin fn value
-/// (`ord`) is rejected like every other fn value.
+/// Wave 24 F4 (owner, 2026-11-14): a fn value compares by identity everywhere, and `Atomic.cas`
+/// compares as `==` does, so a payload that holds a fn value is a legal `cas` (CPython / Rust fn
+/// pointers; it reverses TICKET-144's refusal). The answers are pinned in `tests/method_set_grid.rs`.
 #[test]
-fn atomic_cas_on_fn_payload_rejected() {
+fn atomic_cas_on_fn_payload_follows_eq() {
     let decl = "import std.concurrency\nfn one() -> int:\n    return 1\nstruct H:\n    n: int\n    f: fn() -> int\n";
-    let needle = "cas cannot compare a payload that holds a function value";
-    entry_rejects(
-        &format!(
-            "import Atomic from std.concurrency\n{decl}fn main():\n    a := Atomic[fn() -> int](one)\n    print(a.cas(a.load(), one))\nmain()\n"
-        ),
-        needle,
-    );
-    entry_rejects(
-        &format!(
-            "import Atomic from std.concurrency\n{decl}fn main():\n    a := Atomic(H(1, one))\n    print(a.cas(a.load(), H(2, one)))\nmain()\n"
-        ),
-        needle,
-    );
-    // The fn nested in a container/option is the same payload.
-    entry_rejects(
-        &format!(
-            "import Atomic from std.concurrency\n{decl}fn main():\n    a := Atomic([one])\n    print(a.cas(a.load(), [one]))\nmain()\n"
-        ),
-        needle,
-    );
-    // A std native fn (`math.sqrt`) types as `fn(float) -> float` and loads back UNEQUAL to itself
-    // (measured on the base binary: `Atomic(math.sqrt).cas(a.load(), math.sqrt)` is `false`), so it
-    // is the same bug and is rejected too.
-    entry_rejects(
+    for main in [
+        "    a := Atomic[fn() -> int](one)\n    print(a.cas(a.load(), one))\n",
+        "    a := Atomic(H(1, one))\n    print(a.cas(a.load(), H(2, one)))\n",
+        "    a := Atomic([one])\n    print(a.cas(a.load(), [one]))\n",
+        "    a := Atomic(ord)\n    print(a.cas(a.load(), ord))\n",
+    ] {
+        entry_ok(&format!(
+            "import Atomic from std.concurrency\n{decl}fn main():\n{main}main()\n"
+        ));
+    }
+    entry_ok(
         "import Atomic from std.concurrency\nimport std.math\nfn main():\n    a := Atomic(math.sqrt)\n    print(a.cas(a.load(), math.sqrt))\nmain()\n",
-        needle,
     );
-    // A builtin fn (`ord`) is a `fn(str) -> int` like any other fn value, so `cas` rejects it too.
-    entry_rejects(
-        "import Atomic from std.concurrency\nfn main():\n    a := Atomic(ord)\n    print(a.cas(a.load(), ord))\nmain()\n",
-        needle,
-    );
-    // MUST STILL PASS: a fn payload with only `store`/`load`/`exchange`.
-    entry_ok(&format!(
-        "import Atomic from std.concurrency\n{decl}fn main():\n    a := Atomic[fn() -> int](one)\n    a.store(one)\n    f := a.exchange(one)\n    print(f() + a.load()())\nmain()\n"
-    ));
-    // A payload with no fn in it keeps `cas`.
-    entry_ok(&format!(
-        "import Atomic from std.concurrency\n{decl}struct Q:\n    x: int\nfn main():\n    a := Atomic(Q(1))\n    print(a.cas(a.load(), Q(2)))\nmain()\n"
-    ));
 }
 
 /// The gate must see through EVERY type structural equality recurses into, not just the payload's
@@ -3335,7 +3310,8 @@ fn optional_never_orders_grid() {
             | RecvKind::Channel
             | RecvKind::Shared
             | RecvKind::RwShared
-            | RecvKind::Atomic => None,
+            | RecvKind::Atomic
+            | RecvKind::Handle => None,
         };
         if let Some(s) = spelling {
             payloads.push((s, ""));

@@ -459,7 +459,7 @@ impl Checker {
         // and for a generator with no `->`: the element type is written, never inferred.
         let new_yield_ty = if decl.is_generator {
             match &sig.ret {
-                Ty::Struct(name, args) if name == "Iterator" && args.len() == 1 => {
+                Ty::Struct(name, args) if BuiltinType::is_cursor(name, args) => {
                     Some(args[0].clone())
                 }
                 Ty::Int

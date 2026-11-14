@@ -53,16 +53,6 @@ impl ArgPass {
 /// `(head, the std.concurrency.collection type that owns the surface, the primitive names)`.
 /// The `Ty::RwShared` arm types exactly these names, and only inside std (`std_internal_hidden`);
 /// a Miss on one names the collection.
-///
-/// A walk is not a primitive (TICKET-246): the collection writes it as `inner.get()` plus a
-/// loop. [`RWSHARED_WALKS`] lists the walk names per head only so a Miss on one still names the
-/// collection.
-pub(super) const RWSHARED_WALKS: &[(&str, &[&str])] = &[
-    ("List", &["for_each", "fold"]),
-    ("Map", &["for_each_entry", "fold_entries"]),
-    ("Set", &["for_each", "fold"]),
-];
-
 pub(super) const RWSHARED_VIEWS: &[(&str, &str, &[RwSharedPrim])] = &[
     (
         "List",
@@ -97,6 +87,38 @@ pub(super) const RWSHARED_VIEWS: &[(&str, &str, &[RwSharedPrim])] = &[
         ],
     ),
 ];
+
+/// Does the std.concurrency.collection type `coll` (`ConcurrentMap`, ...) declare method `name`?
+/// Read from that file's decls, so an `RwShared` miss on any method of the collection (a walk such
+/// as `fold`, `contains`, `snapshot`) names the type that has it.
+pub(super) fn concurrent_type_has(coll: &str, name: &str) -> bool {
+    static DECLS: std::sync::OnceLock<Vec<(String, Vec<String>)>> = std::sync::OnceLock::new();
+    let decls = DECLS.get_or_init(|| {
+        let std = crate::native::std_embed::STD_FILES
+            .iter()
+            .position(|(k, _)| *k == "concurrency/collection.chz")
+            .and_then(crate::native::std_embed::decode_ast);
+        let Some((module, _)) = std else {
+            return Vec::new();
+        };
+        module
+            .stmts
+            .iter()
+            .filter_map(|s| {
+                let crate::ast::StmtKind::Struct { name, methods, .. } = &s.kind else {
+                    return None;
+                };
+                Some((
+                    name.clone(),
+                    methods.iter().map(|m| m.name.clone()).collect(),
+                ))
+            })
+            .collect()
+    });
+    decls
+        .iter()
+        .any(|(n, ms)| n == coll && ms.iter().any(|m| m == name))
+}
 
 impl Checker {
     #[allow(clippy::too_many_arguments)] // the call node's parts, its bracket reading, span and id

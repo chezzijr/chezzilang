@@ -572,6 +572,18 @@ fn grid_samples(k: super::proto::RecvKind) -> Vec<GridSample> {
             lit: "Atomic(1)",
             ..GRID_BARE
         }],
+        RecvKind::Handle => vec![
+            GridSample {
+                prelude: "import Executor from std.concurrency\n",
+                lit: "Executor()",
+                ..GRID_BARE
+            },
+            GridSample {
+                prelude: "import std.ffi\n",
+                lit: "ffi.null()",
+                ..GRID_BARE
+            },
+        ],
     }
 }
 

@@ -127,51 +127,42 @@ fn grid[T: StructuralEq](kind: str, a: T, c: T, ops: fn(T, T, T) -> List[str]) -
     tag(bad, kind, "executor", ops(a, via_executor(a), c))
     return bad
 
-# `Atomic.cas` compares as `==` does (Go `atomic.Value.CompareAndSwap`), and refuses a payload that
-# holds a fn value: Go's func is uncomparable, so its CAS panics `comparing uncomparable type`. Every
-# fn kind is refused, a builtin fn (`ord`) included (TICKET-264). A handle compares by core, and an
+# `Atomic.cas` compares as `==` does (Go `atomic.Value.CompareAndSwap`). A fn value compares by
+# identity (wave 24 F4, owner 2026-11-14; CPython and Rust fn pointers), so a fn payload is a legal
+# `cas` for every fn kind, a builtin fn (`ord`) included. A handle compares by core, and an
 # iterator or a generator by its object: `load()` returns the stored handle, so `cas(a.load(), v)`
-# succeeds (Go: a pointer compares by address). `cas_self` is generic so the checker's static fn
-# check cannot see the payload.
+# succeeds (Go: a pointer compares by address). `cas_self` is generic, so no static type tells the
+# payload apart.
 extern "libm.so.6":
     fn cos(x: float) -> float
 
 fn cas_self[T: StructuralEq](a: Atomic[T], v: T) -> bool:
     return a.cas(a.load(), v)
 
-fn refused(r: bool!, want: str) -> bool:
-    match r:
-        ?_:
-            return false
-        !e:
-            return e.message() == "Atomic.cas: the payload holds " + want + ", which cas cannot compare"
-
 fn named_fn() -> int:
     return 1
 
-test fn atomic_cas_refuses_every_fn_value():
+test fn atomic_cas_compares_every_fn_value_as_eq_does():
     bad: List[str] = []
     k := 2
     closure := fn() -> int: k
-    r1 := recover: cas_self(Atomic(closure), closure)
-    if not refused(r1, "a function value"):
+    if cas_self(Atomic(closure), closure) != (closure == closure):
         bad.push("closure")
     fv := named_fn
-    r2 := recover: cas_self(Atomic(fv), fv)
-    if not refused(r2, "a function value"):
+    if cas_self(Atomic(fv), fv) != (fv == fv):
         bad.push("fn")
     nv := math.sqrt
-    r3 := recover: cas_self(Atomic(nv), nv)
-    if not refused(r3, "a function value"):
+    if cas_self(Atomic(nv), nv) != (nv == nv):
         bad.push("native-fn")
     cv := cos
-    r4 := recover: cas_self(Atomic(cv), cv)
-    if not refused(r4, "a function value"):
+    if cas_self(Atomic(cv), cv) != (cv == cv):
         bad.push("extern-fn")
     bv := ord
-    r6 := recover: cas_self(Atomic(bv), bv)
-    if not refused(r6, "a function value"):
+    if cas_self(Atomic(bv), bv) != (bv == bv):
         bad.push("builtin-fn")
+    other := fn() -> int: k
+    if Atomic(closure).cas(other, closure) != (closure == other):
+        bad.push("closure-other")
     assert bad.len() == 0, " ".join(bad)
 
 fn gen_three() -> Iterator[int]:
@@ -194,13 +185,13 @@ test fn atomic_cas_compares_an_iterator_or_a_generator_by_identity():
     c := Atomic(xs)
     assert cas_self(c, [gen_three()])
 
-# The refusal walk descends into content: a fn inside a list is still refused.
-test fn atomic_cas_refuses_a_function_value_nested_in_content():
+# A fn inside content compares as `==` compares it: by identity.
+test fn atomic_cas_compares_a_function_value_nested_in_content():
     k := 3
     closure := fn() -> int: k
     xs := [closure]
-    r := recover: cas_self(Atomic(xs), xs)
-    assert refused(r, "a function value")
+    assert cas_self(Atomic(xs), [closure])
+    assert not Atomic(xs).cas([fn() -> int: k], xs)
 
 fn a_listener() -> net.Listener:
     match net.listen("127.0.0.1:0"):

@@ -706,26 +706,51 @@ impl Checker {
             );
             return true;
         }
-        if th.native_handle {
-            if !self
+        // A native method and an intrinsic one have no proto, so neither is a value.
+        let native = th.native_handle
+            && self
                 .structs
                 .get(&th.key)
                 .and_then(|info| info.methods.get(name))
-                .is_some_and(|sig| !sig.is_static)
-            {
-                return false;
+                .is_some_and(|sig| !sig.is_static);
+        let source = if native {
+            "a method of the native type"
+        } else if self.type_head_ty(th).is_some_and(|ty| {
+            !self.declares_member(&ty, name) && self.intrinsic_method(&ty, name).is_some()
+        }) {
+            "an intrinsic method of"
+        } else {
+            return false;
+        };
+        let kind = if native { "a native" } else { "an intrinsic" };
+        self.error(
+            name_span,
+            format!(
+                "'{name}' is {source} '{spelled}' -- {kind} method is not a value: call it on a \
+                 value (`x.{name}(…)`) or wrap it in a closure (`fn(x): x.{name}()`)"
+            ),
+        );
+        true
+    }
+
+    /// The type a type head names, its type arguments unknown: what its method set is read on.
+    fn type_head_ty(&self, th: &TypeHead) -> Option<Ty> {
+        let unknown = |n: usize| vec![Ty::Unknown; n];
+        match th.kind {
+            TypeHeadKind::Protocol => None,
+            TypeHeadKind::Struct if th.native_handle => {
+                let b = BuiltinType::from_name(&th.key)?;
+                b.plain_ty().or_else(|| b.applied_ty(unknown(b.arity())))
             }
-            self.error(
-                name_span,
-                format!(
-                    "'{name}' is a method of the native type '{spelled}' -- \
-                     a native method is not a value: call it on a value (`x.{name}(…)`) or wrap \
-                     it in a closure (`fn(x): x.{name}()`)"
-                ),
-            );
-            return true;
+            TypeHeadKind::Struct => {
+                let n = self.struct_shape(&th.key)?.type_params.len();
+                Some(Ty::Struct(th.key.clone(), unknown(n)))
+            }
+            TypeHeadKind::Enum => {
+                let n = self.type_param_count(&th.key);
+                Some(Ty::enum_ty(th.key.clone(), unknown(n)))
+            }
         }
-        false
     }
 
     /// A type path `Head.name` / `Head[T…].name` read as a value (TICKET-204): a nullary variant, a
@@ -745,6 +770,10 @@ impl Checker {
             return Some(Ty::Unknown);
         }
         let key = th.key.clone();
+        let struct_miss = (res.is_none() && th.kind == TypeHeadKind::Struct && !th.native_handle)
+            .then(|| self.type_head_ty(&th))
+            .flatten()
+            .filter(|ty| !self.declares_member(ty, name));
         match res {
             Some(Resolution::Variant { .. }) => {
                 // A nullary variant is a value of the enum: explicit head args resolve and
@@ -799,8 +828,20 @@ impl Checker {
                 self.type_not_value(&TypeRead::Variant(format!("{spelled}.{name}")), name_span);
                 Some(Ty::Unknown)
             }
-            // A miss on an enum: no such variant. A struct's miss reads `obj` as a value below,
-            // which reports the type.
+            // A miss on a declared struct: no such method (its fields are no member of the type
+            // path, `P.x` reads `P` as a value below).
+            None if struct_miss.is_some() => {
+                let names = struct_miss
+                    .map(|ty| self.method_set_names(&ty))
+                    .unwrap_or_default();
+                self.error_help(
+                    name_span,
+                    format!("type '{spelled}' has no method '{name}'"),
+                    suggest::did_you_mean(name, &names),
+                );
+                Some(Ty::Unknown)
+            }
+            // A miss on an enum: no such variant.
             None if th.kind == TypeHeadKind::Enum && !th.native_handle => {
                 // A declared enum is named bare, as the call path names it; an alias as written.
                 let ename = if th.pinned.is_some() {

@@ -924,7 +924,7 @@ struct P:
 #[test]
 fn type_head_member_value_keeps_its_decline_neighbours() {
     // W12-22 scope fence: a shadowing parameter keeps `type int has no field`, and an unknown
-    // member on a real struct head reports the type-as-value message (TICKET-204).
+    // member on a real struct head names the miss (wave 24 F4).
     const S: &str = "\
 struct S:
     n: int
@@ -935,7 +935,10 @@ struct S:
         &format!("{S}fn f(S: int) -> int:\n    return S.zero\n"),
         "type int has no field 'zero'",
     );
-    entry_rejects(&format!("{S}h := S.nosuch\n"), "'S' is a type, not a value");
+    entry_rejects(
+        &format!("{S}h := S.nosuch\n"),
+        "type 'S' has no method 'nosuch'",
+    );
 }
 
 #[test]

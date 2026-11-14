@@ -595,18 +595,6 @@ impl Vm {
                 // meanwhile — a racy result, no UB.
                 let mut g = core.lock();
                 let cur = *g;
-                // TICKET-144 / TICKET-264: a payload that holds a fn value is refused, a builtin
-                // included: Go's func is uncomparable, and `atomic.Value.CompareAndSwap` panics on
-                // it (`Vm::fn_value_in`). Every other payload compares as `==` does: a handle by its
-                // core, an iterator or a generator by its object. (`g` drops on the early return,
-                // leaving the box unchanged.)
-                if self.fn_value_in(cur) {
-                    return Err(self.err(
-                        "Atomic.cas: the payload holds a function value, which cas cannot compare"
-                            .to_string(),
-                        span,
-                    ));
-                }
                 // Propagate a cyclic-operand depth fault (`?`) instead of swallowing it — consistent
                 // with `==` and every container membership site. The `?` runs BEFORE the store, so a
                 // fault leaves the box unchanged (the lock guard `g` drops on the early return).

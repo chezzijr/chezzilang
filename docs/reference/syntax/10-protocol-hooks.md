@@ -89,8 +89,10 @@ with `str(self) -> str` replaces its default repr (`Name(field=value, …)`, `Va
 `print` and `{…}` interpolation, also when nested in a list / tuple / map / set / enum
 payload. It works as a bound (`fn show[T: Stringable](v: T)`).
 
-`int`/`float`/`bool`/`str` satisfy `Stringable`; in an erased body `v.str()` renders as `"{v}"`. This
-is bound-only: `(5).str()` on a concrete scalar is a compile error (write `"{x}"`).
+`int`/`float`/`bool`/`str` satisfy `Stringable`; `v.str()` renders as `"{v}"`, in an erased body and
+on a concrete value alike: `(5).str()` is `"5"` (wave 24 F4). An intrinsic method is an ordinary
+method of the type, so it also meets a same-shaped user protocol (`protocol Show: fn str(self) -> str`
+accepts `int`).
 
 **Every intrinsic grant is callable and equals its operator form.** Inside an erased `[T: P]` body you
 may call `a.add(b)`/`a.sub(b)`/`a.mul(b)`/`a.div(b)`/`a.mod(b)`/`a.neg()` on `int`/`float`,

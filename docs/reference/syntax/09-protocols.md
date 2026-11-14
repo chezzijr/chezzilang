@@ -7,9 +7,11 @@ qualified `shapes.Drawable`.
 
 A built-in `List`/`Map`/`Set`/`str`/`bytes`/`bytearray` satisfies a user protocol the same way, from
 its own methods: `protocol Sized: fn len(self) -> int` is satisfied by `[1,2,3]`, `{"a": 1}`,
-`{1, 2}`, `"abc"`, `b"ab"` and `bytearray.from_iter(b"ab")`. `int`/`float`/`bool` have no methods, so they
-satisfy only an empty protocol. The handles (`Channel`, `Shared`, `RwShared`, `Atomic`, `Executor`,
-`Socket`, `Listener`, `Writer`, `Reader`) do not witness a user protocol.
+`{1, 2}`, `"abc"`, `b"ab"` and `bytearray.from_iter(b"ab")`. Every type also has its intrinsic
+methods (wave 24 F4: the requirement of each std protocol with no type parameters it satisfies, such
+as `str`, `eq`, `hash`, `compare`, `add`), and they witness a user protocol too:
+`protocol Show: fn str(self) -> str` is satisfied by `5`, a struct, a tuple and a handle
+(`Channel`, `Shared`, `Executor`, ...).
 
 **Where the std protocols live.** Each std protocol is declared in a std module. A bound or a value
 type names it after an import (`import Add from std.ops`). Without the import the name is
@@ -124,7 +126,9 @@ prebuilt **`Eq`** protocol (`eq(self, other: Self) -> bool`) owns them: a struct
 **`Eq` satisfaction is exactly "`==` works on it".** Structural `==` is an automatic derive (Go gives
 structs `==`; Rust spells it `#[derive(PartialEq, Eq)]`). So `where T: Eq` accepts:
 `int`/`float`/`bool`/`str`, `bytes`, tuples, `List`/`Map`/`Set`, `T?`/`T!E`, any struct or enum, a
-function value, and a protocol-typed (existential) value.
+function value, a protocol-typed (existential) value, and every handle (`Channel`, `Shared`,
+`RwShared`, `Atomic`, `Executor`, `Socket`, `Listener`, `Writer`, `Reader`, `ptr`), by identity.
+`List.contains`/`index_of`/`dedup`/`unique` declare `where T: Eq`.
 
 - A function value compares by identity: two loads of one `fn` def (or builtin) are equal; two calls to
   a factory that makes a fresh nested `fn` are not; two closures with equal captures are not (CPython

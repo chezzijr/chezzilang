@@ -652,28 +652,6 @@ impl Checker {
             .or_else(|| self.owning_struct_def(key))
     }
 
-    /// A struct's method names, sorted. `methods` is a `HashMap`, so an unsorted list would make a
-    /// near-miss suggestion on a distance tie depend on hash order — sort here, once, for every
-    /// caller rather than at each call site.
-    pub(super) fn method_names(&self, key: &str) -> Vec<String> {
-        let mut names: Vec<String> = self
-            .struct_shape(key)
-            .map(|s| s.methods.keys().cloned().collect())
-            .unwrap_or_default();
-        names.sort();
-        names
-    }
-
-    /// An enum's method names, sorted (same `HashMap` ordering reason as `method_names`).
-    pub(super) fn enum_method_names(&self, key: &str) -> Vec<String> {
-        let mut names: Vec<String> = self
-            .enum_methods_of(key)
-            .map(|m| m.keys().cloned().collect())
-            .unwrap_or_default();
-        names.sort();
-        names
-    }
-
     /// An enum's variant names, in declaration order. `self.enums` values are already a `Vec`, so no
     /// sort — declaration order is what the enum's own docs show.
     #[allow(dead_code)]

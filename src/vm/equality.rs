@@ -619,30 +619,6 @@ impl Vm {
         }
     }
 
-    /// Whether a fn value is reachable from `v` through the content `==` compares. `Atomic.cas`
-    /// refuses such a payload, as Go's `atomic.Value.CompareAndSwap` panics `comparing uncomparable
-    /// type` on a func (TICKET-144, TICKET-264): every fn value, a builtin (`ord`) included, whose
-    /// `==` is by name. [`Vm::callable`] decides fn-ness. The walk descends only into
-    /// [`Identity::Content`]: a handle compares by its core and a slot object (an iterator, a
-    /// generator) by its slot, never by what they hold. `seen` makes a cyclic payload terminate.
-    pub(super) fn fn_value_in(&self, v: Value) -> bool {
-        let mut stack: Vec<GcRef> = v.child_gcref().into_iter().collect();
-        let mut seen = super::fxhash::FxHashSet::default();
-        while let Some(h) = stack.pop() {
-            if !seen.insert(h) {
-                continue;
-            }
-            if self.callable(Value::obj(h)).is_some() {
-                return true;
-            }
-            match self.heap.get(h).identity() {
-                Identity::Slot | Identity::Core(_) => {}
-                Identity::Content => stack.extend(self.heap.children(h)),
-            }
-        }
-        false
-    }
-
     /// Total order over scalar values for `sort()`. The checker restricts `sort` to a homogeneous
     /// Comparable element type. A float pair orders by `float_order` (NaN to one end); every other
     /// pair reads the one scalar order, [`Self::compare`]. An unordered pair compares Equal.

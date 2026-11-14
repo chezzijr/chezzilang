@@ -136,8 +136,8 @@ impl Vm {
                 self.pop();
                 Ok(Some(n))
             }
-            // `Comparable` — needed for a NaN operand on a scalar (the pre-dispatch scalar arm only
-            // answers when `compare` returns `Some`).
+            // `Comparable` on a scalar: `compare` answers; a NaN operand (for which `compare`
+            // returns `None`) takes the total order below.
             //
             // NaN is TOTAL here, and by the SAME order the rest of the language sorts by: route the
             // pair through [`Vm::order_key`] — the one ordering site behind `sort()` / `sort_by_key` /

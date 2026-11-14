@@ -3,8 +3,8 @@
 
 use super::expr::NativeHandleMethod;
 use super::expr::RWSHARED_VIEWS;
-use super::expr::RWSHARED_WALKS;
 use super::expr::callable_slots;
+use super::expr::concurrent_type_has;
 use super::*;
 use crate::base::builtin_method::RwSharedPrim;
 
@@ -58,7 +58,7 @@ impl Checker {
             && args.is_empty()
             && let Some(elem) = self.builtin_iter_elem(&obj_ty)
         {
-            return Ty::Struct("Iterator".to_string(), vec![elem]);
+            return Ty::Struct(BuiltinType::Iterator.name().to_string(), vec![elem]);
         }
         // `c.contains(x)` on a builtin container asks the same needle rule as `x in c` and the
         // `Contains[X]` bound (`builtin_contains_verdict`). bytes and bytearray have no such method.
@@ -92,6 +92,19 @@ impl Checker {
         {
             self.static_on_value(key, method, args, span);
             return Ty::Unknown;
+        }
+        // A method the receiver's type has with no declaration behind it (`(5).str()`,
+        // `P(1).eq(q)`): its std protocol's requirement, read from the one method set.
+        if !self.declares_member(&obj_ty, method)
+            && let Some(sig) = self.intrinsic_method(&obj_ty, method)
+        {
+            let sig = sig.receiverless();
+            self.record_method_hover(name_span, &sig);
+            let Some(args) = self.bind_sig(&sig, method, args, 0, span) else {
+                return Ty::Unknown;
+            };
+            self.check_args_range(method, &sig.params, sig.min_params, &args, span);
+            return sig.ret;
         }
         match &obj_ty {
             // `module.fn(args)` is a plain call on the member — no `self`.
@@ -287,7 +300,7 @@ impl Checker {
             // An `Iterator[T]` value (a generator result) exposes the protocol's one method,
             // `next(self) -> Option[T]`, so it is drivable by explicit `.next()` as well as `for`.
             // (There is no registered struct named `Iterator`, so this must be handled here.)
-            Ty::Struct(sname, targs) if sname == "Iterator" && targs.len() == 1 => {
+            Ty::Struct(sname, targs) if BuiltinType::is_cursor(sname, targs) => {
                 if method == Hook::Next.method() {
                     self.check_args(method, &[], args, span);
                     return Ty::option(targs[0].clone());
@@ -426,22 +439,6 @@ impl Checker {
                         .unwrap_or_default();
                     return self.apply_value_call(None, Some(method), t, args, &named, span);
                 }
-                // TICKET-030 — every struct gets an intrinsic, MISS-ONLY `copy()`: it is checked here
-                // only after the declared-method lookup and the fn-typed-field fallback above both
-                // failed, so a struct declaring its own `copy` or holding a fn-typed `copy` field keeps
-                // it. Also miss-only against a NON-fn field named `copy` — the fn-typed-field fallback
-                // above only matches `Ty::Func`, so a plain `copy: int` field falls through to here;
-                // without this guard the checker accepts `s.copy()` but the VM's field fallback faults
-                // with "'{}' is not callable" (review finding on `3faa6948`). Returns the receiver type
-                // UNCHANGED (not just `sname`), so a generic struct's type arguments survive. Mirrors
-                // the runtime arm in `Vm::do_method_call`.
-                let has_copy_field = self
-                    .struct_shape(sname)
-                    .is_some_and(|info| info.fields.iter().any(|(f, _)| f == "copy"));
-                if method == "copy" && self.struct_shape(sname).is_some() && !has_copy_field {
-                    self.check_args(method, &[], args, span);
-                    return obj_ty.clone();
-                }
                 self.infer_all(args);
                 // TICKET-079/TICKET-080 (c): a name that exists as a FIELD is never suggested for a
                 // method miss of the same name — `did you mean 'copy'?` would answer with the exact
@@ -457,14 +454,9 @@ impl Checker {
                     );
                     return Ty::Unknown;
                 }
-                // TICKET-030 — DEC-007: a `HashMap`-drawn candidate list must be sorted before scoring
-                // so a distance tie doesn't depend on hash order. `copy` is callable on every struct
-                // WITHOUT a `copy` field, so it belongs in this near-miss set only then.
-                let mut names = self.method_names(sname);
-                if !has_copy_field {
-                    names.push("copy".to_string());
-                }
-                names.sort();
+                // DEC-007: a `HashMap`-drawn candidate list must be sorted before scoring so a
+                // distance tie doesn't depend on hash order.
+                let names = self.method_set_names(&obj_ty);
                 self.error_help(
                     name_span,
                     format!("type {obj_ty} has no method '{method}'"),
@@ -558,7 +550,7 @@ impl Checker {
                     return ret;
                 }
                 self.infer_all(args);
-                let names = self.enum_method_names(ename);
+                let names = self.method_set_names(&obj_ty);
                 self.error_help(
                     name_span,
                     format!("type {obj_ty} has no method '{method}'"),
@@ -580,7 +572,7 @@ impl Checker {
                     return sig.ret;
                 }
                 self.infer_all(args);
-                let names = self.method_names(key);
+                let names = self.method_set_names(&obj_ty);
                 self.error_help(
                     name_span,
                     format!("type {obj_ty} has no method '{method}'"),
@@ -613,27 +605,6 @@ impl Checker {
                         return Ty::Unknown;
                     }
                     self.record_sum_seed(name_span, seed, span);
-                }
-                // **W7-45**, the same dispatch-time residual one line up, for the same reason. These
-                // four have a RUNTIME of `values_equal` (`vm/call.rs` contains / index_of /
-                // unique+dedup) but a harvested sig validated by `assignable` alone, so the W7-41
-                // `==` guard never sees them: `[a].contains(b)` over a `Box[Tag]` check-cleaned and
-                // then faulted with *"struct 'Tag' has no 'compare' method"*. The element type is
-                // not expressible as a `where` bound on the decl — `List` puts no bound on `T` at
-                // all — so it is enforced here, exactly where `sum`'s numeric requirement is.
-                // The four are exhaustive against the `native struct List[T]` surface: `count` and
-                // `position` take a PREDICATE (`fn(T) -> bool`) so they never compare, and there is
-                // `remove` takes an index, so it never compares. NOT erased (W7-53): a free `elem` must
-                // carry `Eq` among its declared bounds, same as the `==`/`in` gates — `eq_bounds_unsatisfied`.
-                if matches!(method, "contains" | "index_of" | "dedup" | "unique")
-                    && let Some(why) = self.eq_bounds_unsatisfied(&elem)
-                {
-                    self.infer_all(args);
-                    self.error(
-                        span,
-                        format!("{method}() compares List[{elem}] elements for equality — {why}"),
-                    );
-                    return Ty::Unknown;
                 }
                 // Every other method's sig is harvested from `std/prelude.chz`'s `native struct List[T]`
                 // (re-seeded by `seed_stdlib_structs`); the element type is substituted for `Ty::Param`.
@@ -689,7 +660,7 @@ impl Checker {
                     return sig.ret;
                 }
                 self.infer_all(args);
-                let names = self.method_names("List");
+                let names = self.method_set_names(&obj_ty);
                 self.error_help(
                     name_span,
                     format!("type {obj_ty} has no method '{method}'"),
@@ -728,7 +699,7 @@ impl Checker {
                     return sig.ret;
                 }
                 self.infer_all(args);
-                let names = self.method_names("bytearray");
+                let names = self.method_set_names(&obj_ty);
                 self.error_help(
                     name_span,
                     format!("type bytearray has no method '{method}'"),
@@ -750,7 +721,7 @@ impl Checker {
                     return sig.ret;
                 }
                 self.infer_all(args);
-                let names = self.method_names("Map");
+                let names = self.method_set_names(&obj_ty);
                 let message = format!("type {obj_ty} has no method '{method}'");
                 self.error_help(name_span, message, suggest::did_you_mean(method, &names));
                 Ty::Unknown
@@ -770,7 +741,7 @@ impl Checker {
                     return sig.ret;
                 }
                 self.infer_all(args);
-                let names = self.method_names("Set");
+                let names = self.method_set_names(&obj_ty);
                 let message = format!("type {obj_ty} has no method '{method}'");
                 self.error_help(name_span, message, suggest::did_you_mean(method, &names));
                 Ty::Unknown
@@ -802,7 +773,7 @@ impl Checker {
                     return sig.ret;
                 }
                 self.infer_all(args);
-                let names = self.method_names("Channel");
+                let names = self.method_set_names(&obj_ty);
                 self.error_help(
                     name_span,
                     format!("type {obj_ty} has no method '{method}'"),
@@ -836,7 +807,7 @@ impl Checker {
                     }
                     NativeHandleMethod::Miss => {
                         self.infer_all(args);
-                        let names = self.method_names(BuiltinType::Shared.name());
+                        let names = self.method_set_names(&obj_ty);
                         self.error_help(
                             name_span,
                             format!("type {obj_ty} has no method '{method}'"),
@@ -1052,18 +1023,16 @@ impl Checker {
                         // before any near-miss: `set_key` is not a typo of `set`.
                         let under = format!("_{method}");
                         let help = match view {
-                            Some((head, coll, names))
+                            Some((_, coll, names))
                                 if names
                                     .iter()
                                     .any(|p| p.name() == method || p.name() == under)
-                                    || RWSHARED_WALKS
-                                        .iter()
-                                        .any(|(h, walks)| h == head && walks.contains(&method)) =>
+                                    || concurrent_type_has(coll, method) =>
                             {
                                 Some(format!("use {coll} from std.concurrency.collection"))
                             }
                             _ => {
-                                let mut names = self.method_names(BuiltinType::RwShared.name());
+                                let mut names = self.method_set_names(&obj_ty);
                                 names.retain(|n| !self.std_internal_hidden(n));
                                 suggest::did_you_mean(method, &names)
                             }
@@ -1088,20 +1057,6 @@ impl Checker {
                 // express — it must stay BEFORE the lookup so a non-numeric element short-circuits to
                 // the "no method" path (matching the retired `atomic_method_sig`).
                 let numeric_gated = matches!(method, "add" | "sub") && !elem.is_numeric();
-                // TICKET-144 (W14-24): `cas` refuses a payload that holds a `fn` value: Go's func is
-                // uncomparable, and `atomic.Value.CompareAndSwap` panics `comparing uncomparable type`
-                // there. `load`/`store`/`exchange` stay legal; a `Param`/protocol payload hides the fn,
-                // so the runtime `cas` backstops it.
-                if method == "cas"
-                    && let Some(f) = self.reaches_func(&elem, &mut Vec::new())
-                {
-                    self.error(
-                        name_span,
-                        format!(
-                            "Atomic[{elem}].cas cannot compare a payload that holds a function value ('{f}'): a function value is not comparable (Go: func is uncomparable); use store/exchange instead"
-                        ),
-                    );
-                }
                 let resolved = if numeric_gated {
                     NativeHandleMethod::Miss
                 } else {
@@ -1122,7 +1077,7 @@ impl Checker {
                     NativeHandleMethod::Concrete(sig, _) => sig.ret,
                     NativeHandleMethod::Miss => {
                         self.infer_all(args);
-                        let names = self.method_names(BuiltinType::Atomic.name());
+                        let names = self.method_set_names(&obj_ty);
                         self.error_help(
                             name_span,
                             format!("type {obj_ty} has no method '{method}'"),
@@ -1152,7 +1107,7 @@ impl Checker {
                     NativeHandleMethod::Concrete(sig, _) => sig.ret,
                     NativeHandleMethod::Miss => {
                         self.infer_all(args);
-                        let names = self.method_names(BuiltinType::AtomicInt.name());
+                        let names = self.method_set_names(&obj_ty);
                         self.error_help(
                             name_span,
                             format!("type {obj_ty} has no method '{method}'"),
@@ -1182,7 +1137,7 @@ impl Checker {
                     NativeHandleMethod::Concrete(sig, _) => sig.ret,
                     NativeHandleMethod::Miss => {
                         self.infer_all(args);
-                        let mut names = self.method_names(BuiltinType::Executor.name());
+                        let mut names = self.method_set_names(&obj_ty);
                         names.retain(|n| !self.std_internal_hidden(n));
                         self.error_help(
                             name_span,
