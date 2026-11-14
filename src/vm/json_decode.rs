@@ -119,25 +119,28 @@ impl Vm {
         span: Span,
     ) -> Result<Value, DecodeFail> {
         use crate::base::json_desc::TypeDescriptor as D;
+        use crate::native::std_embed::JsonVariant as J;
         let (_jty, variant, payload) = self
             .enum_parts(jv)
+            .ok_or_else(|| format!("decode: expected a JSON value at {path}"))?;
+        let variant = J::from_name(&variant)
             .ok_or_else(|| format!("decode: expected a JSON value at {path}"))?;
         let mismatch = |want: &str| {
             format!(
                 "decode: expected {want} at {path}, found {}",
-                crate::base::json_desc::json_kind(&variant)
+                crate::base::json_desc::json_kind(variant)
             )
         };
         match desc {
             D::Int => {
                 // `Json.Int` carries its exact i64 payload (TICKET-013, W8-35) — take it directly,
                 // never through f64, so a 19-digit id decodes byte-exact.
-                if variant == "Int" {
+                if variant == J::Int {
                     let n = self.int_val(payload[0]).ok_or_else(|| mismatch("int"))?;
                     return Ok(self.make_int(n));
                 }
                 let f = self
-                    .json_num(&variant, &payload)
+                    .json_num(variant, &payload)
                     .ok_or_else(|| mismatch("int"))?;
                 if f.fract() != 0.0 || !f.is_finite() {
                     return Err(format!("decode: expected an integer at {path}, found {f}").into());
@@ -154,16 +157,16 @@ impl Vm {
             }
             D::Float => {
                 let f = self
-                    .json_num(&variant, &payload)
+                    .json_num(variant, &payload)
                     .ok_or_else(|| mismatch("float"))?;
                 Ok(self.box_float(f))
             }
-            D::Bool => match (variant.as_str(), payload.first().and_then(|v| v.as_bool())) {
-                ("Bool", Some(b)) => Ok(Value::bool(b)),
+            D::Bool => match (variant, payload.first().and_then(|v| v.as_bool())) {
+                (J::Bool, Some(b)) => Ok(Value::bool(b)),
                 _ => Err(mismatch("bool").into()),
             },
             D::Str => {
-                if variant == "Str" {
+                if variant == J::Str {
                     let s = self.val_str(payload[0]).unwrap_or_default();
                     Ok(self.alloc_str(s))
                 } else {
@@ -171,7 +174,7 @@ impl Vm {
                 }
             }
             D::Option(inner) => {
-                if variant == "Null" {
+                if variant == J::Null {
                     Ok(self.alloc_enum("Option", "None", &[]))
                 } else {
                     let v = self.coerce_json(jv, inner, path, span)?;
@@ -179,7 +182,7 @@ impl Vm {
                 }
             }
             D::List(inner) => {
-                if variant != "Arr" {
+                if variant != J::Arr {
                     return Err(mismatch("array").into());
                 }
                 let items = match self.heap.get(self.as_obj(payload[0])).as_list() {
@@ -197,7 +200,7 @@ impl Vm {
                 Ok(Value::obj(self.heap.alloc(Obj::List(out.into()))))
             }
             D::Tuple(elems) => {
-                if variant != "Arr" {
+                if variant != J::Arr {
                     return Err(mismatch("array").into());
                 }
                 let items = match self.heap.get(self.as_obj(payload[0])).as_list() {
@@ -222,7 +225,7 @@ impl Vm {
                 Ok(Value::obj(self.heap.alloc(Obj::Tuple(out))))
             }
             D::Map(inner) => {
-                if variant != "Obj" {
+                if variant != J::Obj {
                     return Err(mismatch("object").into());
                 }
                 let entries = match self.heap.get(self.as_obj(payload[0])).as_map() {
@@ -253,7 +256,7 @@ impl Vm {
                 display,
                 fields,
             } => {
-                if variant != "Obj" {
+                if variant != J::Obj {
                     // ROOT REDESIGN — error text shows the BARE display name, never the identity key.
                     return Err(mismatch(&format!("object for {display}")).into());
                 }
@@ -309,8 +312,13 @@ impl Vm {
     }
 
     /// The `f64` of a JSON `Num` or `Int`, else `None`.
-    pub(super) fn json_num(&self, variant: &str, payload: &[Value]) -> Option<f64> {
-        if variant == "Num" || variant == "Int" {
+    pub(super) fn json_num(
+        &self,
+        variant: crate::native::std_embed::JsonVariant,
+        payload: &[Value],
+    ) -> Option<f64> {
+        use crate::native::std_embed::JsonVariant as J;
+        if matches!(variant, J::Num | J::Int) {
             payload.first().and_then(|&v| {
                 if v.is_float() {
                     Some(self.float_of(v))
@@ -355,16 +363,19 @@ impl Vm {
     }
 
     /// Build a `Json.<variant>` enum value, keyed by `Program::variants[("Json", variant)]` (the
-    /// runtime key `std.json` registers itself under — bare, since it stays a non-native module).
-    /// A missing key means `std.json` was never loaded, e.g. `json._to_json` reached through some
-    /// other module.
-    fn json_variant(&mut self, variant: &str, payload: Vec<Value>) -> Result<Value, String> {
+    /// runtime key `std.json` registers itself under — bare, as every std type is). Only
+    /// `std.json`'s own `_to_json` emits the op that reaches here, so a miss is an internal fault.
+    fn json_variant(
+        &mut self,
+        variant: crate::native::std_embed::JsonVariant,
+        payload: Vec<Value>,
+    ) -> Result<Value, String> {
         let variant_id = self
             .program
             .variants
-            .get(&("Json".to_string(), variant.to_string()))
+            .get(&("Json".to_string(), variant.name().to_string()))
             .map(|d| d.variant_id)
-            .ok_or_else(|| "json.encode: std.json is not loaded".to_string())?;
+            .ok_or_else(|| format!("internal: Json.{} is not registered", variant.name()))?;
         Ok(Value::obj(self.heap.alloc(Obj::Enum {
             variant_id,
             payload: payload.into(),
@@ -379,7 +390,7 @@ impl Vm {
             out.push(self.json_of(it, inner)?);
         }
         let lv = Value::obj(self.heap.alloc(Obj::List(out.into())));
-        self.json_variant("Arr", vec![lv])
+        self.json_variant(crate::native::std_embed::JsonVariant::Arr, vec![lv])
     }
 
     /// The runtime walk behind `json.encode`: a `Value` -> the `Json` tree that mirrors its shape.
@@ -387,6 +398,7 @@ impl Vm {
     /// `coerce_json` (no new rooting scheme).
     fn json_of(&mut self, v: Value, depth: usize) -> Result<Value, String> {
         use crate::base::op::{VID_ERR, VID_NONE_VARIANT, VID_OK, VID_SOME};
+        use crate::native::std_embed::JsonVariant as J;
         // Peel every `Some` wrapper iteratively: it emits no JSON bracket, so it must charge
         // neither a bracket level (W13-19) nor a Rust stack frame (a recursive arm here would let
         // an `Option`-linked chain reach two Rust frames per bracket level, defeating the reason
@@ -406,21 +418,21 @@ impl Vm {
             v = payload.get(0);
         }
         match v.view() {
-            ValueView::Nil => self.json_variant("Null", Vec::new()),
-            ValueView::Bool(b) => self.json_variant("Bool", vec![Value::bool(b)]),
-            ValueView::Int(n) => self.json_variant("Int", vec![Value::int(n)]),
+            ValueView::Nil => self.json_variant(J::Null, Vec::new()),
+            ValueView::Bool(b) => self.json_variant(J::Bool, vec![Value::bool(b)]),
+            ValueView::Int(n) => self.json_variant(J::Int, vec![Value::int(n)]),
             ValueView::Obj(h) => match self.heap.get(h).clone() {
                 Obj::FloatBox(f) => {
                     let fv = self.box_float(f);
-                    self.json_variant("Num", vec![fv])
+                    self.json_variant(J::Num, vec![fv])
                 }
                 Obj::BigInt(n) => {
                     let iv = self.make_int(n);
-                    self.json_variant("Int", vec![iv])
+                    self.json_variant(J::Int, vec![iv])
                 }
                 Obj::Str(s) => {
                     let sv = self.alloc_str(s.to_string());
-                    self.json_variant("Str", vec![sv])
+                    self.json_variant(J::Str, vec![sv])
                 }
                 Obj::List(items) => self.json_arr(items.to_vec(), depth),
                 Obj::Tuple(items) => self.json_arr(items, depth),
@@ -438,7 +450,7 @@ impl Vm {
                         out.push(&self.heap, hk, k, jv);
                     }
                     let mv = Value::obj(self.heap.alloc(Obj::Map(out)));
-                    self.json_variant("Obj", vec![mv])
+                    self.json_variant(J::Obj, vec![mv])
                 }
                 Obj::Struct { tid, fields } => {
                     let inner = Self::json_enter(depth)?;
@@ -458,7 +470,7 @@ impl Vm {
                         out.push(&self.heap, hk, key_v, jv);
                     }
                     let mv = Value::obj(self.heap.alloc(Obj::Map(out)));
-                    self.json_variant("Obj", vec![mv])
+                    self.json_variant(J::Obj, vec![mv])
                 }
                 Obj::Enum {
                     variant_id,
@@ -470,7 +482,7 @@ impl Vm {
                     }
                     match variant_id {
                         // `VID_SOME` is peeled at the top of this fn, before this match.
-                        VID_NONE_VARIANT => self.json_variant("Null", Vec::new()),
+                        VID_NONE_VARIANT => self.json_variant(J::Null, Vec::new()),
                         VID_OK | VID_ERR => {
                             Err(format!("json.encode: cannot encode {}", self.type_name(v)))
                         }

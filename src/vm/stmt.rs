@@ -34,9 +34,9 @@ impl<'a> BoxCore<'a> {
 
     pub(super) fn label(self) -> &'static str {
         match self {
-            BoxCore::Shared(_) => "Shared",
-            BoxCore::RwShared(_) => "RwShared",
-            BoxCore::Atomic(_) => "Atomic",
+            BoxCore::Shared(c) => c.lock.kind.name(),
+            BoxCore::RwShared(c) => c.lock.kind.name(),
+            BoxCore::Atomic(_) => HandleKind::Atomic.name(),
         }
     }
 }

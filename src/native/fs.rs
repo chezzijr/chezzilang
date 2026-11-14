@@ -1006,10 +1006,15 @@ mod tests {
         std::fs::write(&f, "hello\n").unwrap(); // 6 bytes
         let (name, fields) = ok_struct_fields(stat(&mut host(&[&f])).unwrap());
         assert_eq!(name, "FileInfo");
-        let names: Vec<&str> = fields.iter().map(|(n, _)| n.as_str()).collect();
+        let mut names: Vec<&str> = fields.iter().map(|(n, _)| n.as_str()).collect();
+        names.sort_unstable();
+        let mut decl = crate::native::native_struct_layout("FileInfo")
+            .expect("a FileInfo decl")
+            .to_vec();
+        decl.sort_unstable();
         assert_eq!(
-            names,
-            vec!["size", "mtime", "mode", "is_dir", "is_file", "is_symlink"]
+            names, decl,
+            "the stat builder's fields are not FileInfo's decl's"
         );
         assert_eq!(fields[0].1, NativeRet::Int(6)); // size
         assert!(matches!(fields[1].1, NativeRet::Int(t) if t > 0)); // mtime

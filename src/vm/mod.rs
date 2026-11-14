@@ -34,7 +34,9 @@ use core::{
     GUARD_DEMOTE_BUDGET, GuardCycle, GuardKey, GuardMode, ListenerCore, ReaderCore, RwSharedCore,
     SharedCore, SocketCore, WriterCore,
 };
-use heap::{Fields, Heap, Identity, MapData, MapEntry, ModuleData, Obj, SetData, SetEntry};
+use heap::{
+    Fields, HandleKind, Heap, Identity, MapData, MapEntry, ModuleData, Obj, SetData, SetEntry,
+};
 use op::{CapEntry, CapSrc, NO_IC, Op, Program, ProtoId, TID_NONE, WaitMeta};
 use quiesce::RunHalt;
 use std::os::fd::AsRawFd;
@@ -965,7 +967,6 @@ pub(crate) enum Callee {
     },
     Native {
         func: crate::native::NativeFn,
-        name: Box<str>,
         kind: crate::native::Kind,
         defaults: &'static crate::base::builtin_method::DeclDefaults,
     },

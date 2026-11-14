@@ -330,8 +330,8 @@ fn transport_msg(url: &str, e: &ureq::Error) -> String {
     format!("{url}: {e}")
 }
 
-/// Build the `Response` struct value from its parts.
-fn response_ret(status: i64, body: String, headers: Vec<(String, String)>) -> NativeRet {
+/// Build the `Response` struct value from its parts, its fields named as `std/request.chz` declares.
+pub(super) fn response_ret(status: i64, body: String, headers: Vec<(String, String)>) -> NativeRet {
     NativeRet::Struct {
         name: "Response".into(),
         fields: vec![

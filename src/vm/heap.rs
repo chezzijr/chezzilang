@@ -327,7 +327,78 @@ pub enum Identity {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct CoreKey(std::mem::Discriminant<Obj>, usize);
 
+/// A reserved native handle: the receiver kinds whose methods are native ops (plus any bodied
+/// Chezzi method of their `native struct`), keyed by [`HandleKind::name`] in
+/// `Program::native_methods`. [`Obj::handle_kind`] is the one map from an object to its kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HandleKind {
+    Shared,
+    RwShared,
+    Atomic,
+    AtomicInt,
+    Executor,
+    Socket,
+    Listener,
+    Writer,
+    Reader,
+}
+
+impl HandleKind {
+    /// The handle's type name, as its `native struct` decl spells it (`type_name`, the native
+    /// method table key).
+    pub fn name(self) -> &'static str {
+        match self {
+            HandleKind::Shared => "Shared",
+            HandleKind::RwShared => "RwShared",
+            HandleKind::Atomic => "Atomic",
+            HandleKind::AtomicInt => "AtomicInt",
+            HandleKind::Executor => "Executor",
+            HandleKind::Socket => "Socket",
+            HandleKind::Listener => "Listener",
+            HandleKind::Writer => "Writer",
+            HandleKind::Reader => "Reader",
+        }
+    }
+}
+
 impl Obj {
+    /// The handle kind this object is, or `None` for every non-handle object.
+    pub fn handle_kind(&self) -> Option<HandleKind> {
+        Some(match self {
+            Obj::Shared(_) => HandleKind::Shared,
+            Obj::RwShared(_) => HandleKind::RwShared,
+            Obj::Atomic(_) => HandleKind::Atomic,
+            Obj::AtomicInt(_) => HandleKind::AtomicInt,
+            Obj::Executor(_) => HandleKind::Executor,
+            Obj::Socket(_) => HandleKind::Socket,
+            Obj::Listener(_) => HandleKind::Listener,
+            Obj::Writer(_) => HandleKind::Writer,
+            Obj::Reader(_) => HandleKind::Reader,
+            Obj::Str(_)
+            | Obj::Bytes(_)
+            | Obj::ByteArray(_)
+            | Obj::BigInt(_)
+            | Obj::FloatBox(_)
+            | Obj::Iter { .. }
+            | Obj::List(_)
+            | Obj::Tuple(_)
+            | Obj::Map(_)
+            | Obj::Set(_)
+            | Obj::Struct { .. }
+            | Obj::Enum { .. }
+            | Obj::Cell(_)
+            | Obj::Func { .. }
+            | Obj::Closure { .. }
+            | Obj::Module(_)
+            | Obj::Native { .. }
+            | Obj::Builtin(_)
+            | Obj::Cffi(_)
+            | Obj::Ptr(_)
+            | Obj::Channel(_)
+            | Obj::Generator(_) => return None,
+        })
+    }
+
     /// The elements when this object is a list. Every other kind answers `None`.
     #[inline]
     pub fn as_list(&self) -> Option<&RVec<Value>> {

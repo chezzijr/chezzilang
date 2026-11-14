@@ -139,7 +139,7 @@ fn golden_variadic_chz_matches_expected() {
 /// Phase-4d file-backed native-module golden: `examples/std_native_4d.chz` exercises the five
 /// migrated pure-function modules (`std.math`/`io`/`os`/`rand`/`fs`) whose signatures now come from
 /// real `std/<M>.chz` files (bodyless `native fn` decls) instead of a hand-built `native_module_sig`
-/// arm. Dispatch is UNCHANGED (name-keyed `native_members`), so output must be byte-identical
+/// arm. Member values come from the native registry (`native_members`), so output must be byte-identical
 /// against `.expected`. `rand` is seeded and `getcwd` is
 /// matched (not printed), so the sequence is deterministic — but ONLY while serialized against the
 /// other rand tests: `std_native_4d.chz` does `rand.seed(1)` then `rand.int(0,100)` as two separate
@@ -169,7 +169,7 @@ fn golden_std_native_4d_chz_matches_expected() {
 /// std.ffi C-buffer surface (`alloc`/`alloc_zeroed`/`store_int64_at`/`load_int64_at`/
 /// `store_int32_at`/`load_int32_at`/`is_null`/`null`/`free`) whose 59 signatures now come from the
 /// real `std/ffi.chz` (bodyless `native fn` decls) instead of a hand-built `native_module_sig` arm.
-/// Dispatch is UNCHANGED (name-keyed `native_members("std.ffi")`), so output must be byte-identical
+/// Member values come from the native registry (`native_members("std.ffi")`), so output must be byte-identical
 /// against `.expected`. FFI is layout-dependent
 /// UB, so this drives a REAL alloc/store/load round-trip (never printing a nondeterministic pointer
 /// address, only the round-tripped payload) — a stronger guard than a pure-checker test.
@@ -1207,4 +1207,71 @@ fn golden_assert_chz_matches_expected() {
 fn a_c_variadic_extern_value_takes_its_varargs() {
     let src = "import std.ffi\nimport int32 from std.ffi\nextern \"libc\":\n    fn snprintf(buf: ffi.ptr, n: int, fmt: str, ...) -> int32\nbuf := ffi.alloc(64)\nf := snprintf\nprint(f(buf, 64, \"%s-%ld\", \"x\", 42))\nprint(ffi.load_str(buf))\nffi.free(buf)\n";
     assert_eq!(run(src), "4\nx-42\n");
+}
+
+/// A VM whose program registers the `Match` layout.
+fn vm_with_match_layout() -> Vm {
+    let mut program = empty_program();
+    program.structs.insert(
+        "Match".to_string(),
+        crate::base::op::StructDef {
+            fields: ["text", "start", "end", "groups"]
+                .map(String::from)
+                .to_vec(),
+            methods: Default::default(),
+            module_idx: 0,
+            tid: 0,
+            test_methods: Vec::new(),
+            display_name: "Match".to_string(),
+        },
+    );
+    Vm::new(Arc::new(program))
+}
+
+/// F7 — a native struct value whose fields are not its registered layout's is an internal error at
+/// the seam: a missing field is never a silent `nil` in its slot, an extra one is never dropped.
+#[test]
+fn a_native_struct_missing_a_layout_field_is_an_internal_error() {
+    use crate::native::NativeRet as N;
+    let field = |k: &str, v: N| (k.to_string(), v);
+    let three = || {
+        vec![
+            field("text", N::Str("a".to_string())),
+            field("start", N::Int(0)),
+            field("end", N::Int(1)),
+        ]
+    };
+    let missing = N::Struct {
+        name: "Match".to_string(),
+        fields: three(),
+    };
+    let err = vm_with_match_layout()
+        .lower_native(missing)
+        .expect_err("a missing layout field must not lower to a struct");
+    assert!(
+        err.starts_with("internal:") && err.contains("groups"),
+        "{err}"
+    );
+    let mut extra_fields = three();
+    extra_fields.push(field("groups", N::List(vec![])));
+    extra_fields.push(field("stray", N::Int(9)));
+    let extra = N::Struct {
+        name: "Match".to_string(),
+        fields: extra_fields,
+    };
+    let err = vm_with_match_layout()
+        .lower_native(extra)
+        .expect_err("a field the layout lacks must not be dropped");
+    assert!(
+        err.starts_with("internal:") && err.contains("stray"),
+        "{err}"
+    );
+    let exact = N::Struct {
+        name: "Match".to_string(),
+        fields: three()
+            .into_iter()
+            .chain([field("groups", N::List(vec![]))])
+            .collect(),
+    };
+    assert!(vm_with_match_layout().lower_native(exact).is_ok());
 }

@@ -256,12 +256,6 @@ struct Compiler {
     /// `compile_module`. Shared across the toplevel proto and every fn/method/closure compiled for
     /// the module, so a global reference anywhere in the module resolves to the same slot.
     globals: HashMap<String, u32>,
-    /// The CURRENT module's top-level `fn` names (rebuilt per `compile_module` in `collect_globals`).
-    /// Drives the generic-fn-as-value turbofish erase: a `Name[TypeArgs]` whose `Name` is a
-    /// (non-shadowed) top-level fn is a generic-fn turbofish the checker already accepted, so the index
-    /// is dropped and only the plain fn value is loaded (runtime is generic-ERASED). The exact
-    /// same-module set the checker's `local_fn_names` gates on, keeping accept ⟺ erase in lockstep.
-    fn_names: std::collections::HashSet<String>,
     /// The current module's globals in slot order (slot `i` ⇒ `global_slots[i]`), recorded into the
     /// module's [`ModuleProto`] so the run driver can pre-size storage + build its name→slot index.
     global_slots: Vec<String>,
@@ -284,27 +278,17 @@ struct Compiler {
     /// reserved/native type (`Result`/`Option`/`Match`/`Response`/`Iterator`/FFI widths),
     /// which keeps its bare name (those never module-key).
     type_keys: HashMap<(usize, String), String>,
-    /// `module_idx → its declared user type names` (struct/enum/alias). Drives the collision detection
-    /// and resolves a qualified `geo.X` to the right module's key.
-    module_types: Vec<std::collections::HashSet<String>>,
-    /// STATIC (associated) methods, keyed `"{type_runtime_key}\u{1}{method}"` — a struct/enum method
-    /// whose first param is not `self` (the "no self ⇒ static" rule). Populated in `hoist_types` (all
-    /// types across all modules are seen there before any body compiles), so a `Type.method(...)` call
-    /// site in any module classifies the call as `Op::CallStatic` exactly like the checker does. The
-    /// checker has already validated the call shape; this only drives compiler dispatch.
-    static_methods: std::collections::HashSet<String>,
     /// The CURRENT module's bound module name → that module's index, rebuilt per `compile_module`
     /// (mirrors the checker's `imported_modules`). Lets `geo.Point(...)` resolve the qualified key.
     imported_modules: HashMap<String, usize>,
     /// The CURRENT module's index, set at the top of `compile_module` — the home module whose
     /// locally-declared types use its own `type_keys` entry.
     current_module_idx: usize,
-    /// The module index that declared `std/json.chz`'s bodyless `native fn _to_json` (set once, in
-    /// `hoist_types`, which runs over every module before any `compile_module`). `None` if
-    /// `std.json` is not part of this compile. Gates the bare-call `_to_json(...)` lowering to
-    /// `Op::JsonToValue` so a user module cannot spell that name and hijack the opcode — a user
-    /// module can't declare `native fn` at all, so the name is otherwise self-scoping too.
-    json_to_value_home: Option<usize>,
+    /// The opcode of each bodyless `native fn` a compiled module declares, keyed `(module idx, fn
+    /// name)` ([`crate::base::op::native_decl_op`]; `std/json.chz`'s `_to_json`). Filled in
+    /// `hoist_types`, which runs over every module before any `compile_module`. A user module cannot
+    /// declare a `native fn`, so no user fn is ever a key.
+    native_ops: HashMap<(usize, String), Op>,
     /// FFI ROOT FIX (fix4): the checker-resolved C signature of every `extern` fn, keyed by `(graph
     /// module index, fn name)`. The extern lowering consumes THIS instead of re-resolving alias names
     /// itself — so every qualified/imported/aliased width resolves in its DEFINING module's scope
@@ -359,17 +343,6 @@ struct Compiler {
     kw_frag_ord: usize,
 }
 
-/// M19 lever #2 — register an enum variant into BOTH program tables, assigning it the next dense
-/// `variant_id` (`variants_by_id.len()`, a global gap-free counter — the analogue of how `StructDef`
-/// gets its `tid` from `structs.len()`). Keeps `variants` (`(enum, variant)`→def) and `variants_by_id`
-/// (id→def) in lockstep so cold-path id→names resolution is O(1). The map is keyed by the
-/// `(enum, variant)` pair, so two enums may share a variant name yet get distinct ids.
-/// The "no self ⇒ static" classification: a method whose FIRST param is not named `self`, or which
-/// has no params, is a STATIC (associated) method (`FnDecl::takes_self`).
-fn is_static_method(m: &FnDecl) -> bool {
-    !m.takes_self()
-}
-
 impl Compiler {
     /// The name method `m` of module `module_idx` is compiled and tabled under: a `from`
     /// overload's internal name (`from$int`) from the checker's
@@ -383,8 +356,8 @@ impl Compiler {
     }
 }
 
-/// Key into [`Compiler::static_methods`]: the type's runtime key + the method name, joined by a
-/// control char that can never appear in a type key or identifier.
+/// A static-method witness value: the type's runtime key + the method name, joined by a control char
+/// that can never appear in a type key or identifier (`Op::CallStaticDyn` splits it).
 fn static_key(type_key: &str, method: &str) -> String {
     format!("{type_key}\u{1}{method}")
 }
@@ -403,6 +376,11 @@ fn send_arm_parts(call: &Expr) -> (&Expr, &Expr) {
     unreachable!("send-arm call shape must be validated by the checker before compile");
 }
 
+/// M19 lever #2 — register an enum variant into BOTH program tables, assigning it the next dense
+/// `variant_id` (`variants_by_id.len()`, a global gap-free counter — the analogue of how `StructDef`
+/// gets its `tid` from `structs.len()`). Keeps `variants` (`(enum, variant)`→def) and `variants_by_id`
+/// (id→def) in lockstep so cold-path id→names resolution is O(1). The map is keyed by the
+/// `(enum, variant)` pair, so two enums may share a variant name yet get distinct ids.
 fn register_variant(program: &mut Program, enum_name: &str, variant: &str, arity: usize) {
     let variant_id = program.variants_by_id.len() as u32;
     let def = VariantDef {
@@ -527,23 +505,10 @@ impl Compiler {
             vid(&program, "Option", "None"),
             crate::base::op::VID_NONE_VARIANT
         );
-        // M19 memory-layout lever #1 — register the synthetic native std structs (`Match` from
-        // `std.regex`, `Response` from `std.request`, `ProcResult` from `std.process`). They have no
-        // AST (the checker seeds their shapes in `seed_stdlib_structs`), so with the positional
-        // struct layout the runtime must know their declaration-order field names HERE to resolve
-        // field reads + Display. Order must match the native builders (`match_to_ret` /
-        // `response_ret` / `proc_result_ret`) and the checker's seed.
-        for (name, fields) in [
-            ("Match", &["text", "start", "end", "groups"][..]),
-            ("Response", &["status", "body", "headers"][..]),
-            ("ProcResult", &["stdout", "stderr", "code"][..]),
-            // gaps §6 — `FileInfo` from `std.fs` (returned by `fs.stat`). Field order load-bearing
-            // (matches `native/fs.rs` stat builder + checker `seed_stdlib_structs`).
-            (
-                "FileInfo",
-                &["size", "mtime", "mode", "is_dir", "is_file", "is_symlink"][..],
-            ),
-        ] {
+        // M19 memory-layout lever #1 — register the native std structs a native fn builds (`Match`,
+        // `Response`, `ProcResult`, `FileInfo`): their decl-order field names, from their `native
+        // struct` decls, resolve field reads + Display.
+        for (name, fields) in crate::native::std_embed::NATIVE_STRUCT_LAYOUTS {
             let tid = program.structs.len() as u32;
             program.structs.insert(
                 name.to_string(),
@@ -571,17 +536,14 @@ impl Compiler {
             provider_ids: HashMap::new(),
             provider_defs: HashMap::new(),
             synth_fns: HashMap::new(),
-            fn_names: std::collections::HashSet::new(),
             global_slots: Vec::new(),
             global_let_lines: Vec::new(),
             field_ic_next: 0,
             method_ic_next: 0,
             type_keys: HashMap::new(),
-            module_types: Vec::new(),
-            static_methods: std::collections::HashSet::new(),
             imported_modules: HashMap::new(),
             current_module_idx: 0,
-            json_to_value_home: None,
+            native_ops: HashMap::new(),
             extern_sigs: crate::checker::ExternTable::new(),
             call_plans: crate::checker::CallPlanTable::new(),
             witnesses: crate::checker::WitnessTable::default(),
@@ -603,38 +565,8 @@ impl Compiler {
     /// `<module-key>::<Name>` (via [`crate::resolver::module_keys`]) — no winner/loser, no bare keys,
     /// so every user type is unique by construction (a cross-module name clash is just two distinct
     /// keys). Reserved/native names are never user-declared here, so they keep their bare name (absent
-    /// from this map). Also seeds `module_types` (per-module declared names, deps-first).
+    /// from this map).
     fn assign_type_keys(&mut self, graph: &ModuleGraph) {
-        self.module_types = vec![std::collections::HashSet::new(); graph.modules.len()];
-        for (idx, lm) in graph.modules.iter().enumerate() {
-            if let Some(nat) = lm.native {
-                // A native std module has no AST, but `std.regex`/`std.request`/`std.process` each own
-                // ONE synthetic struct (`Match`/`Response`/`ProcResult`) the checker now treats as a
-                // module-owned type. Register its bare name so `module.Struct(...)` / a bare import +
-                // `Struct(...)` resolve to the `NewStruct` ctor (the struct's layout is registered in
-                // `Compiler::new`). Name kept BARE (no `type_keys` entry → `type_key` falls back to it).
-                if let Some(sname) = match nat {
-                    "std.regex" => Some("Match"),
-                    "std.request" => Some("Response"),
-                    "std.process" => Some("ProcResult"),
-                    "std.fs" => Some("FileInfo"),
-                    _ => None,
-                } {
-                    self.module_types[idx].insert(sname.to_string());
-                }
-                continue;
-            }
-            // ROOT REDESIGN — std modules' types are RESERVED/NATIVE: keep their BARE name (no qualified
-            // key entry → `type_key` falls back to bare), so `Iterator`/FFI widths resolve bare.
-            for s in &lm.ast.stmts {
-                if let StmtKind::Struct { name, .. }
-                | StmtKind::Enum { name, .. }
-                | StmtKind::TypeAlias { name, .. } = &s.kind
-                {
-                    self.module_types[idx].insert(name.clone());
-                }
-            }
-        }
         // A protocol has no runtime layout, so it gets no key here.
         for k in crate::resolver::user_type_keys(graph) {
             if !k.is_protocol {
@@ -696,7 +628,6 @@ impl Compiler {
         self.globals.clear();
         self.global_slots.clear();
         self.global_let_lines.clear();
-        self.fn_names.clear();
         let add = |name: String, globals: &mut HashMap<String, u32>, slots: &mut Vec<String>| {
             if !globals.contains_key(&name) {
                 globals.insert(name.clone(), slots.len() as u32);
@@ -706,13 +637,10 @@ impl Compiler {
         // Every slot before the first `let` holds a hoisted value from the start: no let line.
         for (name, source) in binds.iter().cloned() {
             match source {
-                GlobalSource::Import | GlobalSource::Native | GlobalSource::Extern => {
-                    add(name, &mut self.globals, &mut self.global_slots);
-                }
-                GlobalSource::Fn => {
-                    // Same-module top-level fn — licenses the generic-fn-as-value turbofish erase.
-                    // A native fn does not.
-                    self.fn_names.insert(name.clone());
+                GlobalSource::Import
+                | GlobalSource::Native
+                | GlobalSource::Extern
+                | GlobalSource::Fn => {
                     add(name, &mut self.globals, &mut self.global_slots);
                 }
                 GlobalSource::Let { line } => {
@@ -734,21 +662,8 @@ impl Compiler {
     fn hoist_types(&mut self, module_idx: usize, stmts: &[Stmt]) -> Result<(), CompileError> {
         for stmt in stmts {
             match &stmt.kind {
-                StmtKind::Struct {
-                    name,
-                    fields,
-                    methods,
-                    ..
-                } => {
+                StmtKind::Struct { name, fields, .. } => {
                     let key = self.type_key(module_idx, name);
-                    // Record each STATIC method (first param not `self`) so a `Type.method(...)` call
-                    // site classifies it as `Op::CallStatic`, mirroring the checker's classification.
-                    for m in methods {
-                        if is_static_method(m) {
-                            let mname = self.method_name(module_idx, m);
-                            self.static_methods.insert(static_key(&key, &mname));
-                        }
-                    }
                     if self.program.structs.contains_key(&key) {
                         return Err(CompileError {
                             message: format!("type '{name}' is already defined"),
@@ -776,12 +691,7 @@ impl Compiler {
                 }
                 // Type-erased: type parameters are checker-only, the runtime is identical for
                 // `Tree[int]` and `Tree[str]`.
-                StmtKind::Enum {
-                    name,
-                    variants,
-                    methods,
-                    ..
-                } => {
+                StmtKind::Enum { name, variants, .. } => {
                     // M19 lever #2 — assign each variant the next dense `variant_id` (user variants
                     // follow the fixed native ids at `4..`, in declaration order). The enum is keyed
                     // by its module-scoped runtime key (bare unless a cross-module clash).
@@ -789,18 +699,13 @@ impl Compiler {
                     for v in variants {
                         register_variant(&mut self.program, &key, &v.name, v.payload.len());
                     }
-                    for m in methods {
-                        if is_static_method(m) {
-                            let mname = self.method_name(module_idx, m);
-                            self.static_methods.insert(static_key(&key, &mname));
-                        }
-                    }
                 }
-                // `std/json.chz`'s bodyless `native fn _to_json` — record its home module so the
-                // bare-call lowering (mirroring the `timer` arm) can gate on it. Runs in pass 1
-                // (every module) before pass 2 compiles any module's bare calls.
-                StmtKind::Native(d) if d.name == "_to_json" => {
-                    self.json_to_value_home = Some(module_idx);
+                // A bodyless `native fn` that names an engine operation: its bare calls lower to
+                // the opcode. Runs in pass 1 (every module) before pass 2 compiles any bare call.
+                StmtKind::Native(d) => {
+                    if let Some(op) = crate::base::op::native_decl_op(&d.name) {
+                        self.native_ops.insert((module_idx, d.name.clone()), op);
+                    }
                 }
                 StmtKind::Let { .. }
                 | StmtKind::Assign { .. }
@@ -822,7 +727,6 @@ impl Compiler {
                 | StmtKind::Pass
                 | StmtKind::Import(_)
                 | StmtKind::Extern { .. }
-                | StmtKind::Native(_)
                 | StmtKind::NativeStruct { .. }
                 | StmtKind::NativeEnum { .. }
                 | StmtKind::NativeType { .. }

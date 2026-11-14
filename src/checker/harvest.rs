@@ -7,115 +7,16 @@ use super::sig::TypePos;
 use super::*;
 
 impl Checker {
-    /// Register the synthetic struct shapes that native std modules return (M9): `Match`
-    /// (`std.regex`), `Response` (`std.request`), and `ProcResult` (`std.process`). They have no
-    /// AST, so their field layouts are seeded here; `infer_field` then types `m.text`, `resp.status`,
-    /// `r.code`, etc. — IMPORT-FREE, since the layout lookup is keyed by the name the native return's
-    /// `Ty::Struct(...)` carries. These are MODULE-OWNED, NOT program-global: only the LAYOUT is
-    /// seeded (so field access on a return works without an import); the BARE TYPE NAME for
-    /// annotation/construction is licensed ONLY by importing the owning module (whose
-    /// `native_module_sig` exports the same shape via `struct_defs`). So a user `struct Response`
-    /// (without `import std.request`) is their OWN type — the `Builtin`-origin seed is overwritten.
+    /// Re-seed every harvested native struct ([`Checker::native_struct_seeds`]: `Match`'s layout,
+    /// `Socket`'s method table, …) and the prelude containers' method tables into `self.structs`,
+    /// then the carrier enums. Only the LAYOUT/METHOD table is seeded (so `regex.find(...).text`
+    /// resolves with no import, keyed by the name the native return's `Ty::Struct("Match", ...)`
+    /// carries); the BARE TYPE NAME (`m: Match` / `Match(...)`) is licensed ONLY by importing the
+    /// owning module, whose `struct_defs` flow into `struct_names`/`bare_types` on import. So a user
+    /// `struct Response` (without `import std.request`) is their OWN type: the `Builtin`-origin seed
+    /// is overwritten (see the already-defined gate in the hoist pass).
     pub(super) fn seed_stdlib_structs(&mut self) {
-        let mk = |fields: Vec<(&str, Ty)>| StructInfo {
-            type_params: Vec::new(),
-            fields: fields
-                .into_iter()
-                .map(|(n, t)| (n.to_string(), t))
-                .collect(),
-            methods: HashMap::new(),
-            overloads: Default::default(),
-            origin: StructOrigin::Builtin,
-            doc: None,
-            defaulted_fields: Vec::new(),
-            field_slots: None,
-        };
-        // The LAYOUT stays globally present (so field access on a native return — `regex.find(...)
-        // .text`, `request.get(...).status`, `process.run(...).code` — resolves import-free via
-        // `infer_field`'s `self.structs[sname]` lookup keyed by the name the native return's
-        // `Ty::Struct("Match",...)` carries). The BARE-NAME reservation (`struct_names`) is NOT
-        // seeded: the bare type name (`m: Match` / `Match(...)`) is licensed ONLY by importing the
-        // owning module (`import std.regex` / `from std.regex import Match`), whose `struct_defs`
-        // flow into `struct_names`/`bare_types` on import. This frees the names for a user `struct
-        // Response` — the always-present `Builtin`-origin seed is overwritten by a user `User`-origin
-        // declaration (see the already-defined gate in the hoist pass).
-        self.structs.insert(
-            "Match".into(),
-            mk(vec![
-                ("text", Ty::Str),
-                ("start", Ty::Int),
-                ("end", Ty::Int),
-                ("groups", Ty::list(Ty::Str)),
-            ]),
-        );
-        self.structs.insert(
-            "Response".into(),
-            mk(vec![
-                ("status", Ty::Int),
-                ("body", Ty::Str),
-                ("headers", Ty::map(Ty::Str, Ty::Str)),
-            ]),
-        );
-        self.structs.insert(
-            "ProcResult".into(),
-            mk(vec![
-                ("stdout", Ty::Str),
-                ("stderr", Ty::Str),
-                ("code", Ty::Int),
-            ]),
-        );
-        // gaps §6 — `FileInfo` from `std.fs` (returned by `fs.stat`). Field order load-bearing
-        // (matches `native/fs.rs` stat builder + compiler `Compiler::new` layout).
-        self.structs.insert(
-            "FileInfo".into(),
-            mk(vec![
-                ("size", Ty::Int),
-                ("mtime", Ty::Int),
-                ("mode", Ty::Int),
-                ("is_dir", Ty::Bool),
-                ("is_file", Ty::Bool),
-                ("is_symlink", Ty::Bool),
-            ]),
-        );
-        // Phase 4c-net — re-seed std.net's `Socket`/`Listener` METHOD tables (harvested from
-        // `std/net.chz`) under their bare names so `socket.read(...)`/`listener.accept(...)` resolve via
-        // the normal method path (the `Ty::Socket`/`Ty::Listener` method arms look the table up here).
-        // NO `struct_names`/`bare_types` licensing is added: `Socket`/`Listener`
-        // resolve to the RESERVED `Ty::Socket`/`Ty::Listener` (opaque handles, not nominal structs) via
-        // `resolve_type`'s reserved arm, which stays bound by an import (`builtin_binds`). The method table is
-        // reached only from a value whose `Ty` is already `Ty::Socket`/`Ty::Listener`, so a bare
-        // unimported annotation still errors while a licensed `socket.read(...)` still resolves.
-        if let Some(info) = self.net_socket_seed.clone() {
-            self.structs.insert("Socket".into(), info);
-        }
-        if let Some(info) = self.net_listener_seed.clone() {
-            self.structs.insert("Listener".into(), info);
-        }
-        // R2 — re-seed std.io's `Writer` METHOD table (harvested from `std/io.chz`) under its bare name
-        // so `w.write(...)`/`w.close(...)` resolve via the normal method path (the `Ty::Writer` method
-        // arm looks the table up here). Like `Socket`/`Listener` — NO `struct_names`/`bare_types`
-        // licensing: `Writer` resolves to the RESERVED `Ty::Writer` (opaque handle) via `resolve_type`'s
-        // reserved arm, bound by an import (`builtin_binds`). The method table is reached only from a value
-        // whose `Ty` is already `Ty::Writer`, so a bare unimported annotation still errors.
-        if let Some(info) = self.io_writer_seed.clone() {
-            self.structs.insert("Writer".into(), info);
-        }
-        // R2b — re-seed std.io's `Reader` METHOD table (harvested from `std/io.chz`) under its bare name
-        // so `r.read_line()`/`r.read_bytes(..)`/`r.close()` resolve via the normal method path (the
-        // `Ty::Reader` method arm looks the table up here). Same as `Writer` above.
-        if let Some(info) = self.io_reader_seed.clone() {
-            self.structs.insert("Reader".into(), info);
-        }
-        // Phase 4c-concurrency — re-seed std.concurrency's `Shared`/`RwShared`/`Atomic`/`Executor`
-        // METHOD tables (harvested from `std/concurrency.chz`) under their bare names so `s.set(...)`/
-        // `r.read(...)`/`a.cas(...)`/`ex.submit(...)` resolve via the normal method path (the
-        // `Ty::Shared`/etc method arms look the table up here, substituting the box's element type for
-        // the sig's `Ty::Param`). Like `Socket`/`Listener` above — and UNLIKE `Ref` — NO
-        // `struct_names`/`bare_types` licensing is added: the four resolve to the RESERVED
-        // `Ty::Shared`/`Ty::RwShared`/`Ty::Atomic`/`Ty::Executor` via `resolve_type`'s reserved arm,
-        // which stays bound by an import (`builtin_binds`). The method table is reached only from a
-        // value whose `Ty` is already one of those, so a bare unimported annotation still errors.
-        for (name, info) in &self.concurrency_seeds {
+        for (name, info) in &self.native_struct_seeds {
             self.structs.insert(name.clone(), info.clone());
         }
         // Phase 5a-containers — re-seed the always-linked prelude's `List`/`Map`/`Set` METHOD tables
@@ -133,11 +34,11 @@ impl Checker {
         self.seed_carrier_enums();
     }
 
-    /// Phase 4b — harvest a FILE-BACKED native std module's whole SIGNATURE from its parsed in-module
-    /// `native struct` / `native fn` decls into its [`ModuleSig`], REPLACING both the retired phase-4a
-    /// companion stub and the hand-built `native_module_sig` regex arm. Used only for
-    /// `std.regex` today (the resolver loads its real `std/regex.chz` while keeping the `native` marker;
-    /// runtime member VALUES stay name-keyed via `native_members` — this supplies only the checker sig).
+    /// Phase 4b — harvest a native std module's whole SIGNATURE from its parsed in-module
+    /// `native struct` / `native fn` decls into its [`ModuleSig`]. Every native module goes through
+    /// here (the resolver loads its real `std/<M>.chz` while keeping the `native` marker); its runtime
+    /// member VALUES come from the native registry (`native_members`) — this supplies only the
+    /// checker sig.
     ///
     /// Two passes so a `native fn`'s return type can reference the module's own `native struct` (regex's
     /// `find -> Result[Option[Match]]`): pass 1 harvests every `native struct` (into `sig.struct_defs`/

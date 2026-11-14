@@ -263,7 +263,8 @@ check-OK-then-broken program, and a JIT would trust the static type.
   actual got-vs-want `Ty` before you claim a wall.
 - **The native seam is scalar/str/map-shaped.** Generic `list[T]` cannot cross; generic helpers are
   pure Chezzi in `std/*.chz`. Concrete `list[str]` crosses through the `map[str,str]` triad in both
-  hosts (`VmHost`, `OffloadHost`). A native module can be file-backed (`is_file_backed_native`).
+  hosts (`VmHost`, `OffloadHost`). Every native module is one row of `native::MODULES` and loads
+  its `std/<M>.chz`; a native struct value takes its field names from its `native struct` decl.
 - **Type args go where the generic is declared** (`Box[int].Has(5)`, `obj.m[U](x)`). The parser cannot
   tell `Box[int].make[U](x)` from `value[i].field[k](x)`; only the checker can, by reinterpretation.
 - **Static protocol requirements** (`T.default()` through `[T: Default]`) use witness passing (M24).

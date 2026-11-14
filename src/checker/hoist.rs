@@ -240,8 +240,8 @@ impl Checker {
                     let sig = self.fn_sig(decl, decl.name_span, None);
                     self.functions.insert(decl.name.clone(), sig);
                     // Same-module fn name (top-level `fn` only, NOT an import) — licenses the
-                    // generic-fn-as-value turbofish B-path in `infer_index`, in lockstep with the
-                    // compiler's `fn_names` erase set.
+                    // generic-fn-as-value turbofish B-path in `infer_index`; the compiler reads
+                    // the head's recorded `Resolution`.
                     self.local_fn_names.insert(decl.name.clone());
                 }
                 StmtKind::Struct {

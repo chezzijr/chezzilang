@@ -412,7 +412,11 @@ impl Vm {
         args: &[crate::native::NativeRet],
     ) -> Result<crate::native::NativeRet, crate::native::HostError> {
         // Lower the C scalar args to engine `Value`s (allocations happen here, at the boundary).
-        let vals: Vec<Value> = args.iter().map(|a| self.lower_native(a.clone())).collect();
+        let vals = args
+            .iter()
+            .map(|a| self.lower_native(a.clone()))
+            .collect::<Result<Vec<Value>, String>>()
+            .map_err(|message| crate::native::HostError { message })?;
         let result = self
             .guarded(|vm| vm.invoke_value(callee, vals, Span::default()))
             .map_err(|e| crate::native::HostError { message: e.message })?;

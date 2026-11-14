@@ -101,15 +101,14 @@ impl<F> TypeDescriptor<F> {
 
 /// The human-readable kind of a parsed `Json` value, named by its enum variant — used in decode
 /// error messages ("found number"). Single source of truth so error wording stays consistent.
-pub fn json_kind(variant: &str) -> &'static str {
+pub fn json_kind(variant: crate::native::std_embed::JsonVariant) -> &'static str {
+    use crate::native::std_embed::JsonVariant as J;
     match variant {
-        "Null" => "null",
-        "Bool" => "bool",
-        "Int" => "number",
-        "Num" => "number",
-        "Str" => "string",
-        "Arr" => "array",
-        "Obj" => "object",
-        _ => "value",
+        J::Null => "null",
+        J::Bool => "bool",
+        J::Int | J::Num => "number",
+        J::Str => "string",
+        J::Arr => "array",
+        J::Obj => "object",
     }
 }

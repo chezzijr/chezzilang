@@ -20,7 +20,7 @@
 //! there, so it can't time out), though a `timeout_ms == 0` would-block still surfaces `Err("timeout")`
 //! since the poll-once check precedes the engine gate. Either way the top-level result is an `Err`.
 
-use super::{Host, HostError, Kind, NativeFn, NativeRet};
+use super::{Host, HostError, Kind, NativeFn, NativeRet, NetOp};
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 use std::net::{TcpListener, TcpStream, ToSocketAddrs};
 
@@ -89,8 +89,8 @@ fn intercepted(_h: &mut dyn Host) -> Result<NativeRet, HostError> {
 /// exist so the member resolves to an `Obj::Native` carrying the [`Kind::InterceptNet`] the
 /// interception keys on.
 pub const MEMBERS: &[(&str, NativeFn, Kind)] = &[
-    ("connect", intercepted, Kind::InterceptNet),
-    ("listen", intercepted, Kind::InterceptNet),
+    ("connect", intercepted, Kind::InterceptNet(NetOp::Connect)),
+    ("listen", intercepted, Kind::InterceptNet(NetOp::Listen)),
 ];
 
 #[cfg(test)]

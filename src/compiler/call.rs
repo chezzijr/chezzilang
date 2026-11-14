@@ -477,13 +477,14 @@ impl Compiler {
                 | Resolution::VariantFn {
                     enum_key, variant, ..
                 } => return self.compile_variant_call(fc, &enum_key, &variant, args, span),
-                // `std.json`'s own `_to_json` lowers to its opcode. A user module cannot declare a
-                // `native fn`, so no user fn is ever this pair.
+                // A bodyless `native fn` that names an engine operation (`std.json`'s `_to_json`)
+                // lowers to its opcode.
                 Resolution::Fn { module, name }
-                    if name == "_to_json" && self.json_to_value_home == Some(module) =>
+                    if self.native_ops.contains_key(&(module, name.clone())) =>
                 {
+                    let op = self.native_ops[&(module, name)].clone();
                     self.compile_args(fc, args)?;
-                    fc.emit(Op::JsonToValue, span);
+                    fc.emit(op, span);
                     return Ok(());
                 }
                 Resolution::Local

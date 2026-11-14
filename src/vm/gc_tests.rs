@@ -1938,7 +1938,6 @@ main()"
                     w.gc_poll();
                     let r = w.invoke_native(
                         probe,
-                        "probe",
                         crate::native::Kind::Blocking,
                         vec![Value::obj(l)],
                         sp,

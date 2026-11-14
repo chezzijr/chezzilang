@@ -3,7 +3,9 @@
 //! The generated file holds the embedded text table, one encoded AST per file (the artifact the
 //! resolver decodes instead of lexing and parsing at run time) and the encoded `protocol`
 //! statements of all files, plus `PROTOCOL_METHODS`, the method names each `protocol` declares
-//! itself. `std/` is the one source: a new or edited file reruns this script.
+//! itself, `NATIVE_STRUCT_LAYOUTS`, the field names of each `native struct` that has fields, and
+//! `JsonVariant`, the variants of `std/json.chz`'s `enum Json`. `std/` is the one source: a new or
+//! edited file reruns this script.
 
 use chezzi_syntax::ast::StmtKind;
 use chezzi_syntax::ast::codec;
@@ -47,6 +49,8 @@ fn main() {
     let mut protocols = Vec::new();
     let mut protocol_methods = String::new();
     let mut protocol_names = std::collections::HashSet::new();
+    let mut layouts = String::new();
+    let mut json_variants: Vec<String> = Vec::new();
     let (all_ids, ()) = codec::with_id_range(|| {
         for (i, rel) in files.iter().enumerate() {
             let path = std_dir.join(rel);
@@ -72,6 +76,18 @@ fn main() {
                             }
                             protocols.push((i as u32, stmt.clone()));
                         }
+                        if let StmtKind::NativeStruct { name, fields, .. } = &stmt.kind
+                            && !fields.is_empty()
+                        {
+                            let names: Vec<&str> = fields.iter().map(|f| f.name.as_str()).collect();
+                            let _ = writeln!(layouts, "    ({name:?}, &{names:?}),");
+                        }
+                        if let StmtKind::Enum { name, variants, .. } = &stmt.kind
+                            && rel == "json.chz"
+                            && name == "Json"
+                        {
+                            json_variants = variants.iter().map(|v| v.name.clone()).collect();
+                        }
                     }
                     let bin = out_dir.join(format!("std_ast_{i}.bin"));
                     std::fs::write(&bin, codec::encode(ids, &(module, words)))
@@ -89,6 +105,19 @@ fn main() {
             }
         }
     });
+    assert!(
+        !json_variants.is_empty(),
+        "std/json.chz must declare `enum Json`"
+    );
+    let json_enum = json_variants.join(", ");
+    let json_all: Vec<String> = json_variants
+        .iter()
+        .map(|v| format!("JsonVariant::{v}"))
+        .collect();
+    let json_names: String = json_variants
+        .iter()
+        .map(|v| format!("            JsonVariant::{v} => {v:?},\n"))
+        .collect();
     let bin = out_dir.join("std_protocols.bin");
     std::fs::write(&bin, codec::encode(all_ids, &protocols)).expect("write the protocol artifact");
 
@@ -101,8 +130,27 @@ fn main() {
          pub const STD_PROTOCOLS: &[u8] = include_bytes!({:?});\n\n\
          /// One row per method a std `protocol` declares itself, `(protocol, method)`, in decl order:\n\
          /// the owner of every protocol method name (`Hook::method` reads it).\n\
-         pub const PROTOCOL_METHODS: &[(&str, &str)] = &[\n{protocol_methods}];\n",
-        bin.display().to_string()
+         pub const PROTOCOL_METHODS: &[(&str, &str)] = &[\n{protocol_methods}];\n\n\
+         /// One row per `native struct` that declares fields, `(struct, field names in decl order)`:\n\
+         /// the runtime layout of every native struct value a native fn builds.\n\
+         pub const NATIVE_STRUCT_LAYOUTS: &[(&str, &[&str])] = &[\n{layouts}];\n\n\
+         /// The variants of `std/json.chz`'s `enum Json`, in decl order.\n\
+         #[derive(Debug, Clone, Copy, PartialEq, Eq)]\n\
+         pub enum JsonVariant {{ {json_enum} }}\n\n\
+         impl JsonVariant {{\n\
+         \x20   /// Every variant, in decl order.\n\
+         \x20   pub const ALL: &[JsonVariant] = &[{}];\n\n\
+         \x20   /// The variant's name as `std/json.chz` spells it.\n\
+         \x20   pub fn name(self) -> &'static str {{\n\
+         \x20       match self {{\n{json_names}        }}\n\
+         \x20   }}\n\n\
+         \x20   /// The variant named `name`, if `enum Json` declares one.\n\
+         \x20   pub fn from_name(name: &str) -> Option<JsonVariant> {{\n\
+         \x20       Self::ALL.iter().copied().find(|v| v.name() == name)\n\
+         \x20   }}\n\
+         }}\n",
+        bin.display().to_string(),
+        json_all.join(", ")
     );
     std::fs::write(out_dir.join("std_files.rs"), generated).expect("write std_files.rs");
 }

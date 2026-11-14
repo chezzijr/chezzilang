@@ -74,12 +74,11 @@ impl Wait {
         }
     }
 
-    /// The guard wait of a box of kind `kind` (`"Shared"` or `"RwShared"`).
-    pub(crate) fn guard(kind: &str) -> Self {
-        if kind == "RwShared" {
-            Wait::RwSharedGuard
-        } else {
-            Wait::SharedGuard
+    /// The guard wait of a box of kind `kind`.
+    pub(crate) fn guard(kind: super::core::BoxKind) -> Self {
+        match kind {
+            super::core::BoxKind::Shared => Wait::SharedGuard,
+            super::core::BoxKind::RwShared => Wait::RwSharedGuard,
         }
     }
 

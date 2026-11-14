@@ -318,6 +318,15 @@ pub enum NativeRet {
     Ptr(usize),
 }
 
+/// The field names of native struct `name`, in decl order, as its `native struct` in `std/*.chz`
+/// declares them ([`std_embed::NATIVE_STRUCT_LAYOUTS`]). `None` for a name with no fielded decl.
+pub fn native_struct_layout(name: &str) -> Option<&'static [&'static str]> {
+    std_embed::NATIVE_STRUCT_LAYOUTS
+        .iter()
+        .find(|(n, _)| *n == name)
+        .map(|(_, fields)| *fields)
+}
+
 /// D5 — an offloaded blocking native's already-extracted argument, in `Send` primitive form (no heap
 /// `GcRef`). The engine materializes these on the worker (heap live) before handing a blocking call
 /// to the dirty pool; the off-heap host serves them back to the native fn off-thread. The scoped
@@ -568,14 +577,14 @@ pub enum Kind {
     /// cancel checkpoint).
     TimedWait,
     /// R2 — a `std.io` Writer/Reader opener or handle (`_create`/`_append`/`stdout`/`stderr`/
-    /// `buffered`/`_open`). It allocates a heap `Writer`/`Reader` over an `Arc`'d core, which a pure
-    /// off-heap native cannot, so the engine runs it itself (`Vm::io_native`) and the registered fn
-    /// (`io::intercepted`) never executes.
-    InterceptIo,
-    /// D6 — `std.net.connect`/`listen`. Same reason as [`Kind::InterceptIo`] (allocates a
-    /// `Socket`/`Listener` handle over an `Arc`'d core); run by `Vm::net_connect_or_listen`, and the
-    /// registered `net::intercepted` placeholder never executes.
-    InterceptNet,
+    /// `buffered`/`_open`), named by its [`IoOp`]. It allocates a heap `Writer`/`Reader` over an
+    /// `Arc`'d core, which a pure off-heap native cannot, so the engine runs it itself
+    /// (`Vm::io_native`) and the registered fn (`io::intercepted`) never executes.
+    InterceptIo(IoOp),
+    /// D6 — `std.net.connect`/`listen`, named by its [`NetOp`]. Same reason as [`Kind::InterceptIo`]
+    /// (allocates a `Socket`/`Listener` handle over an `Arc`'d core); run by
+    /// `Vm::net_connect_or_listen`, and the registered `net::intercepted` placeholder never executes.
+    InterceptNet(NetOp),
     /// TICKET-151 (W14-40) — an inline native that WAITS ON THE HOST for an unbounded time (`std.io`'s
     /// stdin readers). It touches host stdio, so it cannot be offloaded (the off-heap host's
     /// `read_line` is `unreachable!`); instead the engine demotes the worker around the call and
@@ -601,8 +610,8 @@ impl Kind {
             Kind::Blocking | Kind::TimedWait => true,
             Kind::Inline
             | Kind::HostWait
-            | Kind::InterceptIo
-            | Kind::InterceptNet
+            | Kind::InterceptIo(_)
+            | Kind::InterceptNet(_)
             | Kind::InterceptTimer => false,
         }
     }
@@ -619,11 +628,38 @@ impl Kind {
             Kind::Blocking | Kind::HostWait => true,
             Kind::Inline
             | Kind::TimedWait
-            | Kind::InterceptIo
-            | Kind::InterceptNet
+            | Kind::InterceptIo(_)
+            | Kind::InterceptNet(_)
             | Kind::InterceptTimer => false,
         }
     }
+}
+
+/// The `std.io` opener an [`Kind::InterceptIo`] member is: the engine's `Vm::io_native` matches it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IoOp {
+    /// `_create(path)`: truncate + create a file `Writer`.
+    Create,
+    /// `_append(path)`: append to (create if absent) a file `Writer`.
+    Append,
+    /// `stdout()`: the stdout `Writer`.
+    Stdout,
+    /// `stderr()`: the stderr `Writer`.
+    Stderr,
+    /// `buffered(w, size)`: a buffering `Writer` over `w`.
+    Buffered,
+    /// `_open(path)`: a file `Reader`.
+    Open,
+}
+
+/// The `std.net` call a [`Kind::InterceptNet`] member is: the engine's `Vm::net_connect_or_listen`
+/// matches it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NetOp {
+    /// `connect(addr)`: a connected `Socket`.
+    Connect,
+    /// `listen(addr)`: a bound `Listener`.
+    Listen,
 }
 
 impl HostError {
@@ -662,101 +698,54 @@ pub fn expect_args(h: &dyn Host, name: &str, n: usize) -> Result<(), HostError> 
     }
 }
 
-/// If this dotted import path names a native (virtual, no-file) std module, return its canonical
-/// `'static` name. `std.string` is intentionally absent: it is a real Chezzi file under the stdlib dir.
+/// One callable member of a native module: `(name, fn, kind)`.
+pub type Member = (&'static str, NativeFn, Kind);
+
+/// Every native std module, `(import name, callable members)`: the one list of native modules.
+/// Each one's signature is its `std/<M>.chz` (bodyless `native fn`/`native struct` decls, harvested
+/// by the checker); its members are `(name, fn, kind)`, the single source of truth for how each one
+/// is called and, since `future.md` §3c, how it is run ([`Kind`]). `std.concurrency`'s members are
+/// `_settle` / `is_settled` (TICKET-219) and `_cancel_job` (TICKET-289); its four TYPE names lower
+/// via the compiler's name→opcode path. `std.string` is absent: it is a plain Chezzi file.
+pub const MODULES: &[(&str, &[Member])] = &[
+    ("std.math", math::MEMBERS),
+    ("std.io", io::MEMBERS),
+    ("std.os", os::MEMBERS),
+    ("std.process", process::MEMBERS),
+    ("std.rand", rand::MEMBERS),
+    ("std.fs", fs::MEMBERS),
+    ("std.time", time::MEMBERS),
+    ("std.regex", regex::MEMBERS),
+    ("std.request", request::MEMBERS),
+    ("std.net", net::MEMBERS),
+    ("std.ffi", ffi::MEMBERS),
+    ("std.encoding", encoding::MEMBERS),
+    ("std.crypto", crypto::MEMBERS),
+    ("std.uuid", uuid::MEMBERS),
+    ("std.concurrency", concurrency::MEMBERS),
+];
+
+/// If this dotted import path names a native std module ([`MODULES`]), return its canonical
+/// `'static` name. Only a two-part `std.<m>` path is one: `import std.concurrency.collection` loads
+/// `std/concurrency/collection.chz` as a plain file.
 pub fn native_name(path: &[String]) -> Option<&'static str> {
     match path {
-        [a, b] if a == "std" => match b.as_str() {
-            "math" => Some("std.math"),
-            "io" => Some("std.io"),
-            "os" => Some("std.os"),
-            "process" => Some("std.process"),
-            "rand" => Some("std.rand"),
-            "fs" => Some("std.fs"),
-            "time" => Some("std.time"),
-            "regex" => Some("std.regex"),
-            "request" => Some("std.request"),
-            "net" => Some("std.net"),
-            "ffi" => Some("std.ffi"),
-            "encoding" => Some("std.encoding"),
-            "crypto" => Some("std.crypto"),
-            "uuid" => Some("std.uuid"),
-            // `std.concurrency` is a FILE-BACKED native module (phase 4c-concurrency): its
-            // callable members are `_settle` / `is_settled` (TICKET-219) and `_cancel_job` (TICKET-289); otherwise it declares the four runtime concurrency TYPE/ctor names
-            // (`Shared`/`RwShared`/`Atomic`/`Executor`) as `native struct`s in `std/concurrency.chz`,
-            // harvested for their sigs + method tables (the ctors still lower via the compiler's
-            // name→opcode dispatch, not a bound module member). Only the len-2 path is the native module
-            // (loads `std/concurrency.chz`); `import std.concurrency.collection` (len-3) falls through
-            // to load `std/concurrency/collection.chz` as a real (non-native) file.
-            "concurrency" => Some("std.concurrency"),
-            _ => None,
-        },
+        [a, b] if a == "std" => MODULES
+            .iter()
+            .map(|(name, _)| *name)
+            .find(|name| name.strip_prefix("std.") == Some(b.as_str())),
         _ => None,
     }
 }
 
-/// Whether a native std module is FILE-BACKED (its whole signature is declared in a real `std/<M>.chz`
-/// with bodyless `native fn`/`native struct` decls, harvested by the checker) rather than hand-built in
-/// `native_module_sig`. The resolver loads the real file (`visit_native_file`) and the checker harvests
-/// its decls (`harvest_native_module`) — both gates MUST agree, so they share this one predicate to keep
-/// the sig-source (file) and AST-source (file) provably in lockstep. Runtime member dispatch stays
-/// name-keyed via `native_members` for these exactly as for the virtual ones (this is a front-end-only
-/// distinction). `std.time` is file-backed for its 4 real fns but ALSO keeps a minimal
-/// `native_module_sig` arm for its opcode-backed `timer` type-license (no runtime member value).
-/// Phases: std.regex (4b); std.encoding/crypto/uuid/time (4e); std.process/request (4f);
-/// std.math/io/os/rand/fs (4d); std.ffi (4c-ffi) — file-backed for its 59 real fns but ALSO keeps a
-/// minimal `native_module_sig` arm for its opcode/type-license names (`ptr` + the fixed-width int
-/// names — no runtime member value), like `std.time`'s `timer`; std.net (4c-net — native structs WITH
-/// harvested method tables); std.concurrency (4c-concurrency — the four GENERIC native structs
-/// Shared/RwShared/Atomic/Executor WITH harvested method tables, the LAST migration: after it every
-/// native std module is file-backed, and its arm is DELETED entirely — no opcode/type-license residual
-/// remains in `native_module_sig` for it since the four type names are harvested from the file).
-pub fn is_file_backed_native(name: &str) -> bool {
-    matches!(
-        name,
-        "std.regex"
-            | "std.encoding"
-            | "std.crypto"
-            | "std.uuid"
-            | "std.time"
-            | "std.process"
-            | "std.request"
-            | "std.math"
-            | "std.io"
-            | "std.os"
-            | "std.rand"
-            | "std.fs"
-            | "std.ffi"
-            | "std.net"
-            | "std.concurrency"
-    )
-}
-
-/// The callable members of a native module, as `(name, fn, kind)`. Single source of truth for how each
-/// one is called (only the runtime's own value-lowering and the checker's static signatures differ) — and, since
-/// `future.md` §3c, the single source of truth for HOW each one is run too ([`Kind`]). Empty for an
-/// unknown name.
-pub fn native_members(module: &str) -> &'static [(&'static str, NativeFn, Kind)] {
-    match module {
-        "std.math" => math::MEMBERS,
-        "std.io" => io::MEMBERS,
-        "std.os" => os::MEMBERS,
-        "std.process" => process::MEMBERS,
-        "std.rand" => rand::MEMBERS,
-        "std.fs" => fs::MEMBERS,
-        "std.time" => time::MEMBERS,
-        "std.regex" => regex::MEMBERS,
-        "std.request" => request::MEMBERS,
-        "std.net" => net::MEMBERS,
-        "std.ffi" => ffi::MEMBERS,
-        "std.encoding" => encoding::MEMBERS,
-        "std.crypto" => crypto::MEMBERS,
-        "std.uuid" => uuid::MEMBERS,
-        // Callable members _settle / is_settled (TICKET-219) and _cancel_job (TICKET-289); the four concurrency TYPE names have no
-        // runtime value -- they lower via the compiler name→opcode path.
-        "std.concurrency" => concurrency::MEMBERS,
-        _ => &[],
-    }
+/// The callable members of native module `module` ([`MODULES`]), as `(name, fn, kind)`. Empty for
+/// an unknown name.
+pub fn native_members(module: &str) -> &'static [Member] {
+    MODULES
+        .iter()
+        .find(|(name, _)| *name == module)
+        .map(|(_, members)| *members)
+        .unwrap_or(&[])
 }
 
 /// TICKET-179: the ONE table of native methods that mutate their receiver in place. The checker's
@@ -789,76 +778,78 @@ mod tests {
     use super::*;
     use std::collections::VecDeque;
 
-    /// Every native module with callable members — the domain the [`Kind`] assertions sweep.
-    ///
-    /// A hand-kept list is exactly the smell [`Kind`] exists to remove, so it is not hand-kept:
-    /// `native_modules_matches_the_member_tables` below reads THIS FILE and derives the same set from
-    /// [`native_members`]' match arms, both directions. Without that, adding a module and forgetting
-    /// the list would leave every sweep below green while never looking at the new module — the
-    /// silent-omission failure, relocated into the test harness.
-    const NATIVE_MODULES: &[&str] = &[
-        "std.math",
-        "std.io",
-        "std.os",
-        "std.process",
-        "std.rand",
-        "std.fs",
-        "std.time",
-        "std.regex",
-        "std.request",
-        "std.net",
-        "std.ffi",
-        "std.encoding",
-        "std.crypto",
-        "std.uuid",
-        "std.concurrency",
-    ];
-
-    /// Each name in [`NATIVE_MODULES`] really names a native module with a member table — so a typo or
-    /// a module renamed out from under the list turns the kind sweeps into silent no-ops.
+    /// Every module in [`MODULES`] is a native module path with a member table.
     #[test]
     fn native_modules_all_have_members() {
-        for module in NATIVE_MODULES {
+        for (module, members) in MODULES {
             let path: Vec<String> = module.split('.').map(str::to_string).collect();
             assert_eq!(native_name(&path), Some(*module), "not a native module");
-            assert!(
-                !native_members(module).is_empty(),
-                "{module} has no callable members"
-            );
+            assert!(!members.is_empty(), "{module} has no callable members");
         }
     }
 
-    /// …and the OTHER direction: every `"std.x" => x::MEMBERS` arm of [`native_members`] is in
-    /// [`NATIVE_MODULES`]. Source-derived (`include_str!` of this file + the arm pattern) because a
-    /// second hand-maintained list of natives is precisely what [`Kind`] was introduced to abolish: a
-    /// new module missing from the const would leave `std_time_sleep_is_the_only_timed_wait` and the
-    /// intercept-exclusivity sweep GREEN while never examining it, and the engine would then route,
-    /// say, a stray `Kind::InterceptNet` member into `net_connect_or_listen`'s name dispatch.
+    /// F7 — every native struct's layout is its `native struct` decl in `std/*.chz`, and every
+    /// builder of one names exactly that decl's fields (the VM places them by name). `FileInfo`'s builder reads a
+    /// real file, so `fs::tests::fs_stat_reads_metadata` checks it against the same layout.
     #[test]
-    fn native_modules_matches_the_member_tables() {
-        let src = include_str!("mod.rs");
-        let body = {
-            let start = src
-                .find("pub fn native_members(")
-                .expect("native_members moved — update this fence");
-            let rest = &src[start..];
-            &rest[..rest.find("\n}\n").expect("unterminated native_members")]
-        };
-        let arms: std::collections::BTreeSet<&str> = body
-            .lines()
-            .filter_map(|l| {
-                let l = l.trim();
-                // `"std.math" => math::MEMBERS,` — the `_ => &[]` fallback has no `::MEMBERS`
-                // and is skipped, matching the const.
-                let name = l.strip_prefix('"')?.split('"').next()?;
-                l.contains("::MEMBERS").then_some(name)
-            })
+    fn native_layout_is_the_std_decl() {
+        let mut decls: Vec<(String, Vec<String>)> = Vec::new();
+        for i in 0..std_embed::STD_FILES.len() {
+            let (module, _) = std_embed::decode_ast(i).expect("std file parses");
+            for stmt in &module.stmts {
+                if let crate::ast::StmtKind::NativeStruct { name, fields, .. } = &stmt.kind
+                    && !fields.is_empty()
+                {
+                    decls.push((
+                        name.clone(),
+                        fields.iter().map(|f| f.name.clone()).collect(),
+                    ));
+                }
+            }
+        }
+        let table: Vec<(String, Vec<String>)> = std_embed::NATIVE_STRUCT_LAYOUTS
+            .iter()
+            .map(|(n, fs)| (n.to_string(), fs.iter().map(|f| f.to_string()).collect()))
             .collect();
-        let listed: std::collections::BTreeSet<&str> = NATIVE_MODULES.iter().copied().collect();
-        assert_eq!(
-            arms, listed,
-            "NATIVE_MODULES is out of step with native_members' match arms"
-        );
+        assert_eq!(table, decls, "the generated layouts are not the std decls");
+        let status = std::process::Command::new("true")
+            .output()
+            .expect("run `true`");
+        let built = [
+            regex::match_to_ret(regex::MatchData {
+                text: "a".into(),
+                start: 0,
+                end: 1,
+                groups: vec![],
+            }),
+            request::response_ret(200, String::new(), vec![]),
+            process::proc_result_ret(status),
+        ];
+        let mut covered = vec!["FileInfo".to_string()];
+        for ret in built {
+            let ret = match ret {
+                NativeRet::Ok(inner) => *inner,
+                other => other,
+            };
+            let NativeRet::Struct { name, fields } = ret else {
+                panic!("a builder returned {ret:?}");
+            };
+            let mut names: Vec<String> = fields.into_iter().map(|(f, _)| f).collect();
+            names.sort();
+            let mut decl = decls
+                .iter()
+                .find(|(n, _)| *n == name)
+                .expect("a decl")
+                .1
+                .clone();
+            decl.sort();
+            assert_eq!(names, decl, "{name}'s builder fields are not its decl's");
+            covered.push(name);
+        }
+        covered.sort();
+        let mut all: Vec<String> = decls.into_iter().map(|(n, _)| n).collect();
+        all.sort();
+        assert_eq!(covered, all, "a native struct has no builder check here");
     }
 
     /// A standalone `Host` for unit-testing native fns in isolation from either engine.
@@ -1078,8 +1069,8 @@ mod tests {
         assert!(Kind::Blocking.blocks());
         assert!(Kind::TimedWait.blocks());
         assert!(!Kind::Inline.blocks());
-        assert!(!Kind::InterceptIo.blocks());
-        assert!(!Kind::InterceptNet.blocks());
+        assert!(!Kind::InterceptIo(IoOp::Create).blocks());
+        assert!(!Kind::InterceptNet(NetOp::Connect).blocks());
         // TICKET-151: a stdin read waits on the host but must NOT reach the offload gate.
         assert!(!Kind::HostWait.blocks());
         assert!(!Kind::InterceptTimer.blocks());
@@ -1093,8 +1084,8 @@ mod tests {
         assert!(Kind::HostWait.holds_host_thread());
         assert!(!Kind::Inline.holds_host_thread());
         assert!(!Kind::TimedWait.holds_host_thread());
-        assert!(!Kind::InterceptIo.holds_host_thread());
-        assert!(!Kind::InterceptNet.holds_host_thread());
+        assert!(!Kind::InterceptIo(IoOp::Create).holds_host_thread());
+        assert!(!Kind::InterceptNet(NetOp::Connect).holds_host_thread());
         assert!(!Kind::InterceptTimer.holds_host_thread());
     }
 
@@ -1188,7 +1179,7 @@ mod tests {
         );
         // …and no OTHER module smuggles one in: the engine's timed-wait paths (offload timer, callback
         // demote, block-in-place) all key on this kind alone.
-        for module in NATIVE_MODULES {
+        for (module, _) in MODULES {
             for (name, kind) in kinds(module) {
                 assert!(
                     kind != Kind::TimedWait || (*module == "std.time" && name == "sleep_ms"),
@@ -1226,29 +1217,28 @@ mod tests {
                 // R1 — the binary whole-file twins (`write_bytes` offloads via `NativeArg::Bytes`).
                 ("_read_bytes", Kind::Blocking),
                 ("_write_bytes", Kind::Blocking),
-                ("_create", Kind::InterceptIo),
-                ("_append", Kind::InterceptIo),
-                ("stdout", Kind::InterceptIo),
-                ("stderr", Kind::InterceptIo),
-                ("buffered", Kind::InterceptIo),
-                ("_open", Kind::InterceptIo),
+                ("_create", Kind::InterceptIo(IoOp::Create)),
+                ("_append", Kind::InterceptIo(IoOp::Append)),
+                ("stdout", Kind::InterceptIo(IoOp::Stdout)),
+                ("stderr", Kind::InterceptIo(IoOp::Stderr)),
+                ("buffered", Kind::InterceptIo(IoOp::Buffered)),
+                ("_open", Kind::InterceptIo(IoOp::Open)),
             ]
         );
         assert_eq!(
             kinds("std.net"),
             vec![
-                ("connect", Kind::InterceptNet),
-                ("listen", Kind::InterceptNet),
+                ("connect", Kind::InterceptNet(NetOp::Connect)),
+                ("listen", Kind::InterceptNet(NetOp::Listen)),
             ]
         );
-        // The two intercept kinds are exclusive to those modules — `invoke_native` dispatches an
-        // InterceptIo to `io_native` and an InterceptNet to `net_connect_or_listen` by kind alone, so a
-        // stray one elsewhere would be routed to a handler that does not know its name.
-        for module in NATIVE_MODULES {
+        // The intercept kinds are exclusive to their modules: `invoke_native` hands an InterceptIo
+        // to `io_native` and an InterceptNet to `net_connect_or_listen`, which run its op.
+        for (module, _) in MODULES {
             for (name, kind) in kinds(module) {
                 match kind {
-                    Kind::InterceptIo => assert_eq!(*module, "std.io", "{module}.{name}"),
-                    Kind::InterceptNet => assert_eq!(*module, "std.net", "{module}.{name}"),
+                    Kind::InterceptIo(_) => assert_eq!(*module, "std.io", "{module}.{name}"),
+                    Kind::InterceptNet(_) => assert_eq!(*module, "std.net", "{module}.{name}"),
                     Kind::InterceptTimer => assert_eq!(*module, "std.time", "{module}.{name}"),
                     _ => {}
                 }

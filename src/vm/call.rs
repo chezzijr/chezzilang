@@ -204,12 +204,11 @@ impl Vm {
             }
             Callee::Native {
                 func,
-                name,
                 kind,
                 defaults,
             } => {
                 let args = self.fill_decl_defaults(args, defaults);
-                self.invoke_native(func, &name, kind, args, span)
+                self.invoke_native(func, kind, args, span)
             }
             // A first-class universe builtin fn value (`print`/`ord`/`chr`/`panic`) — route
             // back into the SAME logic direct calls use. `panic` returns `Err` (mirrors
@@ -307,7 +306,7 @@ impl Vm {
                     is_panic: false,
                     blocked: None,
                 })?;
-                Ok(self.lower_native(ret))
+                self.lower_native(ret).map_err(|m| self.err(m, span))
             }
         }
     }
@@ -332,12 +331,11 @@ impl Vm {
             }),
             Obj::Native {
                 func,
-                name,
                 kind,
                 defaults,
+                ..
             } => Some(Callee::Native {
                 func: *func,
-                name: name.clone(),
                 kind: *kind,
                 defaults,
             }),
@@ -412,7 +410,6 @@ impl Vm {
     pub(super) fn invoke_native(
         &mut self,
         func: crate::native::NativeFn,
-        name: &str,
         kind: crate::native::Kind,
         args: Vec<Value>,
         span: Span,
@@ -421,18 +418,16 @@ impl Vm {
         // D6 / R2 — an INTERCEPTED native is run by the engine itself: `std.net.connect`/`listen` and
         // `std.io`'s Writer/Reader openers all allocate a handle (a heap object over an `Arc`'d core),
         // which a pure off-heap native cannot do, so their registered placeholder fns never execute.
-        // Both arms must stay AHEAD of the offload gate below. The kind is what distinguishes them:
-        // `std.io::_append` (an opener) and `std.fs::_append` (a syscall) share a bare name, and used
-        // to be told apart only by check ORDER plus a func-pointer identity test.
+        // Both arms must stay AHEAD of the offload gate below. The kind carries which op to run.
         //
         // EXHAUSTIVE on purpose (no `_` arm): a future `Kind` must be routed here deliberately, or it
         // does not compile — a catch-all would silently run a new variant inline.
         match kind {
-            Kind::InterceptNet => {
+            Kind::InterceptNet(op) => {
                 self.sched_seed_point();
-                return self.net_connect_or_listen(name, args, span);
+                return self.net_connect_or_listen(op, args, span);
             }
-            Kind::InterceptIo => return self.io_native(name, args, span),
+            Kind::InterceptIo(op) => return self.io_native(op, args, span),
             Kind::InterceptTimer => return self.new_timer(&args, span),
             Kind::Inline | Kind::Blocking | Kind::TimedWait | Kind::HostWait => {}
         }
@@ -496,8 +491,8 @@ impl Vm {
                 }
                 Kind::Inline
                 | Kind::Blocking
-                | Kind::InterceptIo
-                | Kind::InterceptNet
+                | Kind::InterceptIo(_)
+                | Kind::InterceptNet(_)
                 | Kind::HostWait
                 | Kind::InterceptTimer => Some(OffloadReq {
                     func,
@@ -605,7 +600,7 @@ impl Vm {
         {
             return Err(halt);
         }
-        Ok(self.lower_native(ret))
+        self.lower_native(ret).map_err(|m| self.err(m, span))
     }
 
     /// D5 — materialize a blocking native's already-evaluated `Value` args into `Send` primitives so
@@ -656,9 +651,11 @@ impl Vm {
         N::Int(0)
     }
 
-    pub(super) fn lower_native(&mut self, ret: crate::native::NativeRet) -> Value {
+    /// Lower a native's result to an engine value. `Err` is an internal fault: a native struct value
+    /// that lacks a field of its registered layout (`Program::structs`).
+    pub(super) fn lower_native(&mut self, ret: crate::native::NativeRet) -> Result<Value, String> {
         use crate::native::NativeRet as N;
-        match ret {
+        Ok(match ret {
             N::Int(n) => self.make_int(n),
             N::Float(f) => self.box_float(f),
             N::Bool(b) => Value::bool(b),
@@ -669,35 +666,49 @@ impl Vm {
             N::List(items) => {
                 let mut vs = Vec::with_capacity(items.len());
                 for x in items {
-                    vs.push(self.lower_native(x));
+                    vs.push(self.lower_native(x)?);
                 }
                 Value::obj(self.heap.alloc(Obj::List(vs.into())))
             }
             N::Struct { name, fields } => {
-                // Positional layout: lower the named native fields, then place them into a flat Vec
-                // at the StructDef's declaration-order index (native emit order already matches, but
-                // resolving by name keeps it robust to drift). Lower first (each may allocate), then
-                // allocate the struct — keeps every allocation at this boundary (GC invariant).
+                // Positional layout: lower the named native fields, then place each at its
+                // StructDef's declaration-order index. A layout field the value lacks, or a value
+                // field the layout lacks, is an internal fault. Lower first (each may allocate), then allocate the struct — keeps every
+                // allocation at this boundary (GC invariant).
                 let tid = self.struct_tid(&name);
                 let order: Option<Vec<String>> =
                     self.program.structs.get(&name).map(|d| d.fields.clone());
                 let mut lowered: Vec<(Box<str>, Value)> = Vec::with_capacity(fields.len());
                 for (k, v) in fields {
-                    let lv = self.lower_native(v);
+                    let lv = self.lower_native(v)?;
                     lowered.push((k.into_boxed_str(), lv));
                 }
                 let fs: Vec<Value> = match order {
                     // Registered type: place each lowered value at its declaration-order slot.
-                    Some(order) => order
-                        .iter()
-                        .map(|fname| {
-                            lowered
-                                .iter()
-                                .find(|(k, _)| k.as_ref() == fname.as_str())
-                                .map(|(_, v)| *v)
-                                .unwrap_or(Value::nil())
-                        })
-                        .collect(),
+                    Some(order) => {
+                        if let Some((k, _)) = lowered
+                            .iter()
+                            .find(|(k, _)| !order.iter().any(|f| f.as_str() == k.as_ref()))
+                        {
+                            return Err(format!(
+                                "internal: native struct '{name}' has no layout field '{k}'"
+                            ));
+                        }
+                        order
+                            .iter()
+                            .map(|fname| {
+                                lowered
+                                    .iter()
+                                    .find(|(k, _)| k.as_ref() == fname.as_str())
+                                    .map(|(_, v)| *v)
+                                    .ok_or_else(|| {
+                                        format!(
+                                            "internal: native struct '{name}' has no field '{fname}'"
+                                        )
+                                    })
+                            })
+                            .collect::<Result<_, _>>()?
+                    }
                     // Ad-hoc / unregistered (TID_NONE): keep native emit order positionally.
                     None => lowered.into_iter().map(|(_, v)| v).collect(),
                 };
@@ -711,15 +722,15 @@ impl Vm {
                 // dedup needed).
                 let map = MapData::default();
                 for (k, v) in entries {
-                    let lk = self.lower_native(k);
-                    let lv = self.lower_native(v);
+                    let lk = self.lower_native(k)?;
+                    let lv = self.lower_native(v)?;
                     let hk = self.scalar_hash(lk);
                     map.push(&self.heap, hk, lk, lv);
                 }
                 Value::obj(self.heap.alloc(Obj::Map(map)))
             }
             N::Ok(inner) => {
-                let p = self.lower_native(*inner);
+                let p = self.lower_native(*inner)?;
                 self.alloc_enum("Result", "Ok", &[p])
             }
             N::Err(msg) => {
@@ -727,11 +738,11 @@ impl Vm {
                 self.alloc_enum("Result", "Err", &[p])
             }
             N::Some(inner) => {
-                let p = self.lower_native(*inner);
+                let p = self.lower_native(*inner)?;
                 self.alloc_enum("Option", "Some", &[p])
             }
             N::None => self.alloc_enum("Option", "None", &[]),
-        }
+        })
     }
 
     /// Return from the current frame. `propagated` true ⇒ the value came from `?` (no observable

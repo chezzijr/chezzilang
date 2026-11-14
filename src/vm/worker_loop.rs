@@ -698,11 +698,11 @@ impl Vm {
                 other => other,
             };
             if let Some(result) = resume_native {
+                let span = self.frames.last().map(|f| f.call_span).unwrap_or_default();
+                let result =
+                    result.and_then(|nr| self.lower_native(nr).map_err(|m| self.err(m, span)));
                 match result {
-                    Ok(nr) => {
-                        let v = self.lower_native(nr);
-                        self.push(v);
-                    }
+                    Ok(v) => self.push(v),
                     Err(rte) => {
                         // W7-16 — an offloaded `sleep_ms` ENDED by a cancel is delivered by the halt
                         // branch above (TICKET-188), so `Cut::Cancelled` is never set here: this arm

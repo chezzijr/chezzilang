@@ -40,8 +40,30 @@ pub struct BoxLock {
     wait_readers: AtomicU32,
     parked: Mutex<Vec<std::sync::Weak<super::MnSched>>>,
     parks: AtomicU32,
-    /// `"Shared"` or `"RwShared"`: the ONE owner of the box kind a fault text names.
-    pub kind: &'static str,
+    /// Which box this lock guards: the ONE owner of the box kind a fault text names.
+    pub kind: BoxKind,
+}
+
+/// The kind of box a [`BoxLock`] guards.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BoxKind {
+    Shared,
+    RwShared,
+}
+
+impl BoxKind {
+    /// The box's handle kind.
+    pub fn handle(self) -> super::HandleKind {
+        match self {
+            BoxKind::Shared => super::HandleKind::Shared,
+            BoxKind::RwShared => super::HandleKind::RwShared,
+        }
+    }
+
+    /// The box's type name (`Shared`, `RwShared`).
+    pub fn name(self) -> &'static str {
+        self.handle().name()
+    }
 }
 
 const WRITER: u64 = 1 << 63;
@@ -54,7 +76,7 @@ const R_MASK: u64 = 0x7fff_ffff;
 const CUT: u64 = 1 << 31;
 
 impl BoxLock {
-    pub fn new(kind: &'static str) -> Self {
+    pub fn new(kind: BoxKind) -> Self {
         BoxLock {
             state: AtomicU64::new(0),
             writer: AtomicU64::new(0),
@@ -1244,7 +1266,7 @@ impl SharedCore {
     pub fn new(v: Value) -> Self {
         SharedCore {
             v: super::rvec::RCell::new(v),
-            lock: Arc::new(BoxLock::new("Shared")),
+            lock: Arc::new(BoxLock::new(BoxKind::Shared)),
         }
     }
 }
@@ -1272,7 +1294,7 @@ impl RwSharedCore {
     pub fn new(v: Value) -> Self {
         RwSharedCore {
             v: super::rvec::RCell::new(v),
-            lock: Arc::new(BoxLock::new("RwShared")),
+            lock: Arc::new(BoxLock::new(BoxKind::RwShared)),
         }
     }
 }

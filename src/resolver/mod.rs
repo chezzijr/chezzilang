@@ -1119,23 +1119,14 @@ impl Builder {
                 Import::Module { .. } | Import::From { .. } | Import::Variants { .. } => false,
             });
             let path = import_path(&import);
-            // Native std modules (std.math/io/os) are virtual: no `.chz` file, members injected by
-            // the engines. Bind them to a synthetic, stable id and skip the filesystem entirely.
+            // A native std module (`native::MODULES`) binds to a synthetic, stable id. It declares
+            // its native TYPEs + fns in a real `std/<M>.chz` (the checker harvests them as the sig
+            // source): load that AST while KEEPING the `native` marker, so its member values come
+            // from the native registry (`native_members`). Fallible (like the always-linked
+            // prelude): a missing/unparseable file is a hard error.
             if let Some(name) = crate::native::native_name(&path) {
                 let target = native_id(name);
-                // FILE-BACKED native modules (std.regex phase 4b; std.encoding/crypto/uuid/time phase
-                // 4e; std.process/std.request phase 4f; std.math/io/os/rand/fs phase 4d) declare their
-                // native TYPE + fns in a real `std/<M>.chz` (the checker harvests them as the sig source).
-                // Load that real AST while KEEPING the `native` marker so runtime member dispatch stays
-                // name-keyed via `native_members`. Fallible (like the always-linked prelude): a
-                // missing/unparseable file is a hard error. Other native modules stay virtual (empty AST).
-                // The two gates (here + the checker harvest gate) share `is_file_backed_native` so the
-                // file-source and the AST-source stay provably in lockstep.
-                if crate::native::is_file_backed_native(name) {
-                    self.visit_native_file(&target, name, &path, span)?;
-                } else {
-                    self.visit_native(&target, name);
-                }
+                self.visit_native_file(&target, name, &path, span)?;
                 resolved.push(ResolvedImport {
                     target: target.clone(),
                     import,
@@ -1203,32 +1194,10 @@ impl Builder {
         Ok(resolved)
     }
 
-    /// Emit a native (virtual) std module: no file read, no recursion, deduped like any other.
-    /// Its dotted path is the name split on `.` so [`LoadedModule::label`] reads `std.math`.
-    fn visit_native(&mut self, id: &ModuleId, name: &'static str) {
-        if self.visited.contains_key(id) {
-            return;
-        }
-        self.visited.insert(id.clone(), ());
-        // No source is lexed here (the AST is empty), but still burn an id so `file` is unique across
-        // EVERY module in the graph — the invariant is easier to assert than "unique among the ones
-        // that lexed".
-        self.file_seq.set(self.file_seq.get() + 1);
-        self.order.push(LoadedModule {
-            id: id.clone(),
-            dotted: name.split('.').map(str::to_string).collect(),
-            ast: Module { stmts: Vec::new() },
-            file: self.file_seq.get(),
-            imports: Vec::new(),
-            native: Some(name),
-        });
-    }
-
-    /// Emit a FILE-BACKED native std module (phase 4b: `std.regex`). Like [`visit_native`] it carries
-    /// the `native` marker (so the engines dispatch its members name-keyed via `native_members`) and a
-    /// synthetic `<native:…>` id, but its AST is the REAL `.chz` file under `std_root` (its `native
-    /// struct`/`native fn` decls are the checker's SIGNATURE source), not an injected empty module.
-    /// Unlike [`visit_native`] it may carry BODIED Chezzi decls (the hybrid module form) and — like any
+    /// Emit a native std module. It carries the `native` marker (so the engines take its member
+    /// values from the native registry, `native_members`) and a synthetic `<native:…>` id; its AST is
+    /// the REAL `.chz` file under `std_root` (its `native struct`/`native fn` decls are the checker's
+    /// SIGNATURE source). It may carry BODIED Chezzi decls (the hybrid module form) and — like any
     /// `.chz` — may itself `import` other modules (resolved via [`resolve_ast_imports`]). Fallible: a
     /// missing/unparseable file is a hard error (like the prelude).
     fn visit_native_file(
@@ -2038,11 +2007,33 @@ mod tests {
         assert_eq!(graph.modules.last().unwrap().id, graph.entry);
     }
 
-    // 8a. Phase 4d: std.math (and io/os/rand/fs) are FILE-BACKED like std.regex — the `native` marker is
-    // KEPT (runtime dispatch stays name-keyed) but the resolver loads the REAL `std/math.chz` AST, whose
-    // bodyless `native fn` decls the checker harvests as the sig source (retiring the math arm).
+    // 8a. Every native module (`native::MODULES`) keeps the `native` marker (its member values come
+    // from the native registry) and loads its REAL `std/<M>.chz` AST, whose bodyless `native fn`
+    // decls the checker harvests as the sig source.
     #[test]
-    fn math_is_file_backed_native() {
+    fn every_native_module_loads_its_file() {
+        for (name, _) in crate::native::MODULES {
+            let t = TmpDir::new();
+            let entry = t.write("main.chz", &format!("import {name}\nfn main(): print(1)\n"));
+            let graph = build_graph(&entry).unwrap();
+            let m = graph
+                .modules
+                .iter()
+                .find(|m| m.label() == *name)
+                .unwrap_or_else(|| panic!("{name} should be in the graph"));
+            assert_eq!(m.native, Some(*name));
+            assert!(
+                m.ast
+                    .stmts
+                    .iter()
+                    .any(|s| matches!(&s.kind, crate::ast::StmtKind::Native(_))),
+                "{name} must load its real std file (a `native fn` decl)"
+            );
+        }
+    }
+
+    #[test]
+    fn math_loads_its_file_with_native_marker() {
         let t = TmpDir::new();
         let entry = t.write("main.chz", "import std.math\nfn main(): print(1)\n");
         let graph = build_graph(&entry).unwrap();
@@ -2062,8 +2053,8 @@ mod tests {
         assert_eq!(graph.modules.last().unwrap().id, graph.entry);
     }
 
-    // 8b. std.regex (phase 4b) is FILE-BACKED: it keeps the `native` marker (runtime dispatch stays
-    // name-keyed via `native_members`) but the resolver loads the REAL `std/regex.chz` AST — the
+    // 8b. std.regex keeps the `native` marker (its member values come from `native_members`) and
+    // the resolver loads the REAL `std/regex.chz` AST — the
     // `native struct Match` + `native fn` decls are present (the checker harvests them as the sig
     // source, retiring the companion stub + the native_module_sig regex arm). Entry-last invariant holds.
     #[test]
@@ -2077,7 +2068,7 @@ mod tests {
             .find(|m| m.label() == "std.regex")
             .expect("std.regex should be in the graph");
         // The native marker is KEPT (unlike a normal user module) so runtime member dispatch stays
-        // name-keyed, but the AST is the REAL file (non-empty), unlike the virtual std.math above.
+        // name-keyed, and the AST is the REAL file (non-empty).
         assert_eq!(m.native, Some("std.regex"));
         assert!(
             !m.ast.stmts.is_empty(),

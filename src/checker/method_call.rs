@@ -820,7 +820,7 @@ impl Checker {
                 // substituted for the sig's `Ty::Param("T")` here.
                 let elem = (**elem).clone();
                 match self.resolve_native_handle_method(
-                    "Shared",
+                    BuiltinType::Shared.name(),
                     method,
                     std::slice::from_ref(&elem),
                     name_span,
@@ -839,7 +839,7 @@ impl Checker {
                     }
                     NativeHandleMethod::Miss => {
                         self.infer_all(args);
-                        let names = self.method_names("Shared");
+                        let names = self.method_names(BuiltinType::Shared.name());
                         self.error_help(
                             name_span,
                             format!("type {obj_ty} has no method '{method}'"),
@@ -1032,7 +1032,7 @@ impl Checker {
                     | Ty::Var(_) => {}
                 }
                 match self.resolve_native_handle_method(
-                    "RwShared",
+                    BuiltinType::RwShared.name(),
                     method,
                     std::slice::from_ref(&elem),
                     name_span,
@@ -1066,7 +1066,7 @@ impl Checker {
                                 Some(format!("use {coll} from std.concurrency.collection"))
                             }
                             _ => {
-                                let mut names = self.method_names("RwShared");
+                                let mut names = self.method_names(BuiltinType::RwShared.name());
                                 names.retain(|n| !self.std_internal_hidden(n));
                                 suggest::did_you_mean(method, &names)
                             }
@@ -1109,7 +1109,7 @@ impl Checker {
                     NativeHandleMethod::Miss
                 } else {
                     self.resolve_native_handle_method(
-                        "Atomic",
+                        BuiltinType::Atomic.name(),
                         method,
                         std::slice::from_ref(&elem),
                         name_span,
@@ -1125,7 +1125,7 @@ impl Checker {
                     NativeHandleMethod::Concrete(sig, _) => sig.ret,
                     NativeHandleMethod::Miss => {
                         self.infer_all(args);
-                        let names = self.method_names("Atomic");
+                        let names = self.method_names(BuiltinType::Atomic.name());
                         self.error_help(
                             name_span,
                             format!("type {obj_ty} has no method '{method}'"),
@@ -1141,7 +1141,7 @@ impl Checker {
                 // numeric gate (int is ALWAYS numeric — the whole reason for monomorphizing). Sigs are
                 // harvested from `std/concurrency.chz` as concrete int sigs (no generic solving).
                 match self.resolve_native_handle_method(
-                    "AtomicInt",
+                    BuiltinType::AtomicInt.name(),
                     method,
                     &[],
                     name_span,
@@ -1155,7 +1155,7 @@ impl Checker {
                     NativeHandleMethod::Concrete(sig, _) => sig.ret,
                     NativeHandleMethod::Miss => {
                         self.infer_all(args);
-                        let names = self.method_names("AtomicInt");
+                        let names = self.method_names(BuiltinType::AtomicInt.name());
                         self.error_help(
                             name_span,
                             format!("type {obj_ty} has no method '{method}'"),
@@ -1171,7 +1171,7 @@ impl Checker {
                 // routes through the helper's generic solver (infer T from the closure return);
                 // the inner `self._submit_settled(..)` that its body emits is the `Concrete` path.
                 match self.resolve_native_handle_method(
-                    "Executor",
+                    BuiltinType::Executor.name(),
                     method,
                     &[],
                     name_span,
@@ -1185,7 +1185,7 @@ impl Checker {
                     NativeHandleMethod::Concrete(sig, _) => sig.ret,
                     NativeHandleMethod::Miss => {
                         self.infer_all(args);
-                        let mut names = self.method_names("Executor");
+                        let mut names = self.method_names(BuiltinType::Executor.name());
                         names.retain(|n| !self.std_internal_hidden(n));
                         self.error_help(
                             name_span,
@@ -1200,20 +1200,44 @@ impl Checker {
             // fiber on a would-block `read`/`write`/`accept`; from the type system they just return
             // their `Result`.
             Ty::Socket => self.infer_fixed_native_handle_method(
-                "Socket", method, name_span, &obj_ty, type_args, args, span,
+                BuiltinType::Socket.name(),
+                method,
+                name_span,
+                &obj_ty,
+                type_args,
+                args,
+                span,
             ),
             Ty::Listener => self.infer_fixed_native_handle_method(
-                "Listener", method, name_span, &obj_ty, type_args, args, span,
+                BuiltinType::Listener.name(),
+                method,
+                name_span,
+                &obj_ty,
+                type_args,
+                args,
+                span,
             ),
             // R2 — `Writer` (std.io): a small fixed write-only method set (`write`/`write_bytes`/
             // `flush`/`close`). Method table harvested from `std/io.chz`, looked up here like Socket.
             Ty::Writer => self.infer_fixed_native_handle_method(
-                "Writer", method, name_span, &obj_ty, type_args, args, span,
+                BuiltinType::Writer.name(),
+                method,
+                name_span,
+                &obj_ty,
+                type_args,
+                args,
+                span,
             ),
             // R2b — `Reader` (std.io): a small fixed read-only method set (`read_line`/`read_bytes`/
             // `close`, plus the bodied `lines`). Method table harvested from `std/io.chz`.
             Ty::Reader => self.infer_fixed_native_handle_method(
-                "Reader", method, name_span, &obj_ty, type_args, args, span,
+                BuiltinType::Reader.name(),
+                method,
+                name_span,
+                &obj_ty,
+                type_args,
+                args,
+                span,
             ),
             // A bound generic type parameter exposes its protocol's methods (e.g. `a.compare(b)`
             // where `a: T` and `T: Comparable`).

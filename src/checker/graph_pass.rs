@@ -167,10 +167,9 @@ impl Checker {
                 // and the decision.
                 c.begin_module(Some(lm.label()));
                 c.collect_module_globals(&lm.ast.stmts, &lm.imports, &binds[idx]);
-                // FILE-BACKED native modules harvest their whole SIGNATURE (fns, native structs,
-                // `native type` exports, std.time's `timer` license) from the real `std/<M>.chz` AST
-                // the resolver loaded; no Rust-side sig exists. Same predicate as the resolver's
-                // `visit_native_file` gate — lockstep by construction.
+                // A native module harvests its whole SIGNATURE (fns, native structs, `native type`
+                // exports, std.time's `timer` license) from the real `std/<M>.chz` AST the resolver
+                // loaded; no Rust-side sig exists.
                 let mut sig = ModuleSig::default();
                 // W7-8 — a native `.chz` may `import` a sibling std module and NAME ITS TYPES in the
                 // harvested SIGNATURES (`std.fs`'s `list_dir(p: PathLike) -> Result[List[path.Path]]`).
@@ -195,45 +194,19 @@ impl Checker {
                 sig.builtins = super::builtin_type::module_builtins(name)
                     .into_iter()
                     .collect();
-                if crate::native::is_file_backed_native(name) {
-                    c.harvest_native_module(&lm.ast, &mut sig);
-                }
-                // Phase 4c-net — cache std.net's harvested `Socket`/`Listener` method tables so
-                // `seed_stdlib_structs` can re-seed them (bare, method-table only) into `self.structs`
-                // for every subsequent module, letting `socket.read(...)`/`listener.accept(...)` resolve
-                // via the normal method path (the retired bespoke `socket_method_sig` arm's replacement).
-                if name == "std.net" {
-                    c.net_socket_seed = sig.struct_defs.get("Socket").cloned();
-                    c.net_listener_seed = sig.struct_defs.get("Listener").cloned();
-                }
-                // R2 — cache std.io's harvested `Writer` method table so `seed_stdlib_structs` re-seeds
-                // it (bare, method-table only) for every subsequent module, letting `w.write(...)`/
-                // `w.close(...)` resolve via the normal method path.
-                if name == "std.io" {
-                    c.io_writer_seed = sig.struct_defs.get("Writer").cloned();
-                    // R2b — cache std.io's harvested `Reader` method table (parallel to `io_writer_seed`;
-                    // a SEPARATE field so neither type's table clobbers the other).
-                    c.io_reader_seed = sig.struct_defs.get("Reader").cloned();
-                }
+                c.harvest_native_module(&lm.ast, &mut sig);
                 // Re-attach the checker-side metadata that native decls can't express (hover docs,
                 // module constants like math.pi/e, std.concurrency's
                 // `RwShared.read`/`Executor.submit` closure-param sigs). Run for EVERY native module
                 // (idempotent for those it doesn't cover) so the doc/const/poly attach no longer lives
                 // in the deleted per-module arms.
                 attach_native_module_metadata(name, &mut sig);
-                // Phase 4c-concurrency — cache std.concurrency's harvested `Shared`/`RwShared`/`Atomic`/
-                // `Executor` method tables so `seed_stdlib_structs` can re-seed them (bare, method-table
-                // only) into `self.structs` for every subsequent module, letting `s.set(...)`/`a.cas(...)`
-                // resolve via the normal method path (the retired bespoke `shared_method_sig`/etc arms'
-                // replacement). Cached AFTER `attach_native_module_metadata` (unlike net's before-attach
-                // cache) because that step mutates `RwShared.read`/`Executor.submit`'s closure-param sigs
-                // — caching before would seed the pre-port (unannotated) tables.
-                if name == "std.concurrency" {
-                    for tn in ["Shared", "RwShared", "Atomic", "AtomicInt", "Executor"] {
-                        if let Some(info) = sig.struct_defs.get(tn) {
-                            c.concurrency_seeds.insert(tn.to_string(), info.clone());
-                        }
-                    }
+                // Cache the module's native structs (after the metadata step, which retypes
+                // `RwShared.read`'s closure param) so `seed_stdlib_structs` re-seeds them for every
+                // later module: `m.text`, `socket.read(...)`, `s.set(...)` resolve by the normal
+                // field and method paths.
+                for (tn, info) in &sig.struct_defs {
+                    c.native_struct_seeds.insert(tn.clone(), info.clone());
                 }
                 // A HYBRID native module carries BODIED Chezzi decls alongside its bodyless native
                 // ones: module-level `fn`s (PASS 2b harvested them into `sig.members`) and

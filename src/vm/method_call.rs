@@ -515,59 +515,24 @@ impl Vm {
             // The body runs as a frame on this stack, so a wait in it parks.
             return self.gen_resume(h, GenThen::Push, span);
         }
-        // UNIFIED NATIVE-HANDLE DISPATCH for every reserved handle (concurrency + io/net). ONE match
-        // maps the receiver to its `&'static str` key; a `None` short-circuits straight to the hot
-        // collection arms below (this REPLACES the eight per-handle `if matches!` probes that used to
-        // sit on that path). For a handle, a BODIED Chezzi method compiled to bytecode (generic like
-        // `Executor.submit`, or plain like `Reader.lines`) dispatches FIRST; a miss (`Ok(false)`)
-        // falls through to the name-keyed native op body below, BYTE-IDENTICALLY — including each tail
-        // (Socket/Listener `poll_park`, Writer `stream_halt`). The single match makes it structurally
-        // impossible to add a handle and forget bodied dispatch (the check-OK/run-fault class): adding a
-        // variant here auto-enables it. EXCLUDES List/Map/Set — they harvest no bodied methods and their
-        // hot `core_method` arm is on the M19 hot path; keep this match precise to the 8 handles.
-        let handle_key = match self.heap.get(h) {
-            Obj::Shared(_) => Some("Shared"),
-            Obj::RwShared(_) => Some("RwShared"),
-            Obj::Atomic(_) => Some("Atomic"),
-            Obj::AtomicInt(_) => Some("AtomicInt"),
-            Obj::Executor(_) => Some("Executor"),
-            Obj::Socket(_) => Some("Socket"),
-            Obj::Listener(_) => Some("Listener"),
-            Obj::Writer(_) => Some("Writer"),
-            Obj::Reader(_) => Some("Reader"),
-            Obj::Str(_)
-            | Obj::Bytes(_)
-            | Obj::ByteArray(_)
-            | Obj::BigInt(_)
-            | Obj::FloatBox(_)
-            | Obj::Iter { .. }
-            | Obj::List(_)
-            | Obj::Tuple(_)
-            | Obj::Map(_)
-            | Obj::Set(_)
-            | Obj::Struct { .. }
-            | Obj::Enum { .. }
-            | Obj::Cell(_)
-            | Obj::Func { .. }
-            | Obj::Closure { .. }
-            | Obj::Module(_)
-            | Obj::Native { .. }
-            | Obj::Builtin(_)
-            | Obj::Cffi(_)
-            | Obj::Ptr(_)
-            | Obj::Channel(_)
-            | Obj::Generator(_) => None,
-        };
+        // UNIFIED NATIVE-HANDLE DISPATCH for every reserved handle (concurrency + io/net):
+        // `Obj::handle_kind` maps the receiver to its kind; a `None` goes straight on to the hot
+        // collection arms below. For a handle, a BODIED Chezzi method compiled to bytecode (generic
+        // like `Executor.submit`, or plain like `Reader.lines`) dispatches FIRST; a miss (`Ok(false)`)
+        // falls through to the native op body below, including each tail (Socket/Listener
+        // `poll_park`, Writer `stream_halt`). EXCLUDES List/Map/Set — they harvest no bodied methods
+        // and their hot `core_method` arm is on the M19 hot path.
+        let handle_key = self.heap.get(h).handle_kind();
         if let Some(key) = handle_key {
-            if self.try_native_bodied_method(key, method, recv, &args, argc, span)? {
+            if self.try_native_bodied_method(key.name(), method, recv, &args, argc, span)? {
                 return Ok(());
             }
             // Native op body per handle — identical to the retired per-arm dispatch, tails included.
             self.sched_seed_point();
             let result = match key {
                 // A box closure on the dispatch loop is a frame: its return pushes the result.
-                "Shared" | "RwShared" => {
-                    let r = if key == "Shared" {
+                HandleKind::Shared | HandleKind::RwShared => {
+                    let r = if key == HandleKind::Shared {
                         self.shared_method(h, method, &args, span)?
                     } else {
                         self.rwshared_method(h, method, &args, span)?
@@ -577,9 +542,9 @@ impl Vm {
                         None => return Ok(()),
                     }
                 }
-                "Atomic" => self.atomic_method(h, method, &args, span)?,
-                "AtomicInt" => self.atomic_int_method(h, method, &args, span)?,
-                "Executor" => {
+                HandleKind::Atomic => self.atomic_method(h, method, &args, span)?,
+                HandleKind::AtomicInt => self.atomic_int_method(h, method, &args, span)?,
+                HandleKind::Executor => {
                     let r = self.executor_method(h, method, &args, span)?;
                     if self.exec_join_suspend.is_some() {
                         return Ok(()); // a parked `shutdown` re-pushed its receiver and rewound.
@@ -589,14 +554,14 @@ impl Vm {
                 // D6: `Socket` / `Listener` ops operate on the fd in the `Arc`'d core and may park the
                 // fiber on the netpoller (a would-block `read`/`write`/`accept`); gate the result-push
                 // on `poll_park` (mirrors the channel `recv` park gate, but routed to the poller).
-                "Socket" => {
+                HandleKind::Socket => {
                     let r = self.socket_method(h, method, &args, span)?;
                     if self.poll_park.is_some() {
                         return Ok(()); // D6: the op `WouldBlock`ed and re-rooted the receiver itself.
                     }
                     r
                 }
-                "Listener" => {
+                HandleKind::Listener => {
                     let r = self.listener_method(h, method, &args, span)?;
                     if self.poll_park.is_some() {
                         return Ok(());
@@ -613,7 +578,7 @@ impl Vm {
                 // W7-5d — gated on THIS call having emitted to stdout, for the reason spelled out at
                 // `invoke_native`: unguarded, a dead stdout also faulted a write to a FILE-backed or
                 // `stderr()`-backed `Writer`, which never touched the broken pipe.
-                "Writer" => {
+                HandleKind::Writer => {
                     let writes_before = self.stdout_writes;
                     let r = self.writer_method(h, method, &args, span)?;
                     if self.stdout_writes != writes_before
@@ -625,8 +590,7 @@ impl Vm {
                 }
                 // R2b: `Reader` ops are synchronous blocking file reads — no netpoller/`poll_park`, and
                 // NO `stream_halt` check (a Reader never emits to stdout/stderr).
-                "Reader" => self.reader_method(h, method, &args, span)?,
-                _ => unreachable!("handle_key yields only the 8 handles above"),
+                HandleKind::Reader => self.reader_method(h, method, &args, span)?,
             };
             self.push(result);
             return Ok(());

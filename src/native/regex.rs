@@ -292,8 +292,8 @@ fn do_find_all_text(pat: &str, s: &str) -> Result<Vec<String>, String> {
 
 // ----- Host seam: thin wrappers mapping (pattern, subject) args → lowered `NativeRet`. -----
 
-/// Lower a `MatchData` to a `Match` struct value (the checker seeds the matching struct shape).
-fn match_to_ret(m: MatchData) -> NativeRet {
+/// Lower a `MatchData` to a `Match` struct value, its fields named as `std/regex.chz` declares.
+pub(super) fn match_to_ret(m: MatchData) -> NativeRet {
     NativeRet::Struct {
         name: "Match".into(),
         fields: vec![

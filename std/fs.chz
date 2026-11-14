@@ -14,9 +14,9 @@
 
 import std.path
 
-# FileInfo — filesystem metadata read by `stat`. FIELD ORDER IS LOAD-BEARING: it is positional across
-# the hand-built runtime layout copies (compiler `Compiler::new`, checker `seed_stdlib_structs`,
-# `native/fs.rs` stat builder). `mode` is the raw unix st_mode (perm + type bits; 0 on non-unix);
+# FileInfo — filesystem metadata read by `stat`. This decl is its one layout: the build reads its
+# field names in order (`NATIVE_STRUCT_LAYOUTS`) for the runtime; the `native/fs.rs` stat builder
+# names each field (its test checks the set), and the checker harvests their types. `mode` is the raw unix st_mode (perm + type bits; 0 on non-unix);
 # `mtime` is UNIX-epoch seconds (0 if pre-epoch/unsupported).
 native struct FileInfo:
     size: int

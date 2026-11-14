@@ -11,7 +11,7 @@
 //! `intercepted` placeholder below never runs. Errors come back as `Result` values (the engine lowers
 //! `NativeRet::Err` to `Err(msg)`), never panics.
 
-use super::{Host, HostError, Kind, NativeFn, NativeRet, expect_args};
+use super::{Host, HostError, IoOp, Kind, NativeFn, NativeRet, expect_args};
 use std::io::Read;
 
 /// Upper bound on `read_file` input, so a huge or unbounded file (`/dev/zero`, a multi-GB log)
@@ -205,10 +205,10 @@ pub const MEMBERS: &[(&str, NativeFn, Kind)] = &[
     ("_write_file", write_file, Kind::Blocking),
     ("_read_bytes", read_bytes, Kind::Blocking),
     ("_write_bytes", write_bytes, Kind::Blocking),
-    ("_create", intercepted, Kind::InterceptIo),
-    ("_append", intercepted, Kind::InterceptIo),
-    ("stdout", intercepted, Kind::InterceptIo),
-    ("stderr", intercepted, Kind::InterceptIo),
-    ("buffered", intercepted, Kind::InterceptIo),
-    ("_open", intercepted, Kind::InterceptIo),
+    ("_create", intercepted, Kind::InterceptIo(IoOp::Create)),
+    ("_append", intercepted, Kind::InterceptIo(IoOp::Append)),
+    ("stdout", intercepted, Kind::InterceptIo(IoOp::Stdout)),
+    ("stderr", intercepted, Kind::InterceptIo(IoOp::Stderr)),
+    ("buffered", intercepted, Kind::InterceptIo(IoOp::Buffered)),
+    ("_open", intercepted, Kind::InterceptIo(IoOp::Open)),
 ];

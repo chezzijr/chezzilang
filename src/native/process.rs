@@ -126,7 +126,7 @@ fn run_args_bytes(h: &mut dyn Host) -> Result<NativeRet, HostError> {
 /// is why `run_bytes`/`run_args_bytes` exist — see the module doc's W6-4 note for why THIS seam must not
 /// Err instead (Err would destroy the captured output, which B1's non-destructive rule forbids; the
 /// bytes twins can afford `Err` because they have no `code`/`stderr` to destroy).
-fn proc_result_ret(out: std::process::Output) -> NativeRet {
+pub(super) fn proc_result_ret(out: std::process::Output) -> NativeRet {
     let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
     let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
     let code = out.status.code().unwrap_or(-1) as i64;

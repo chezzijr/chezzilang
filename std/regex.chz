@@ -11,9 +11,9 @@
 # `src/native/regex.rs`, dispatched via `native_members("std.regex")`). The backends compile NOTHING
 # for a `native fn`/`native struct` — the front-end reads ONLY the signature.
 #
-# FIELD ORDER IS LOAD-BEARING: `Match`'s field order is positional across the remaining hand-built
-# runtime layout copies (compiler `Compiler::new`, `native/regex.rs` match_to_ret),
-# drift-guarded by a checker test. Do not reorder without updating all three copies.
+# This decl is `Match`'s one layout: the build reads its field names in order
+# (`NATIVE_STRUCT_LAYOUTS`) for the runtime; `native/regex.rs` match_to_ret names each field
+# (`native_layout_is_the_std_decl` checks the set), and the checker harvests their types.
 
 native struct Match:
     text: str

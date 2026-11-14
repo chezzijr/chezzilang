@@ -117,6 +117,15 @@ pub enum DrainStep {
     Next,
 }
 
+/// The opcode a bodyless `native fn` of a compiled std module lowers to: such a decl names an engine
+/// operation, not a native member. `None` for every other name (a prelude builtin, say).
+pub fn native_decl_op(name: &str) -> Option<Op> {
+    match name {
+        "_to_json" => Some(Op::JsonToValue),
+        _ => None,
+    }
+}
+
 /// A single VM instruction. Operands are inline (typed), so there is no separate constant pool —
 /// strings and numbers live in the op. Jump targets are absolute indices into the proto's `code`.
 #[derive(Debug, Clone)]

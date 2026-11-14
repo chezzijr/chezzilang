@@ -132,7 +132,9 @@ impl WaitSpec {
             Kind::TimedWait => Some(WaitSpec::Sleep),
             Kind::Blocking => Some(WaitSpec::Offload),
             Kind::HostWait => Some(WaitSpec::HostFd),
-            Kind::Inline | Kind::InterceptIo | Kind::InterceptNet | Kind::InterceptTimer => None,
+            Kind::Inline | Kind::InterceptIo(_) | Kind::InterceptNet(_) | Kind::InterceptTimer => {
+                None
+            }
         }
     }
 
@@ -1636,7 +1638,13 @@ mod tests {
         assert_eq!(WaitSpec::of_native(Kind::Blocking), Some(WaitSpec::Offload));
         assert_eq!(WaitSpec::of_native(Kind::HostWait), Some(WaitSpec::HostFd));
         assert_eq!(WaitSpec::of_native(Kind::Inline), None);
-        assert_eq!(WaitSpec::of_native(Kind::InterceptIo), None);
-        assert_eq!(WaitSpec::of_native(Kind::InterceptNet), None);
+        assert_eq!(
+            WaitSpec::of_native(Kind::InterceptIo(crate::native::IoOp::Create)),
+            None
+        );
+        assert_eq!(
+            WaitSpec::of_native(Kind::InterceptNet(crate::native::NetOp::Connect)),
+            None
+        );
     }
 }

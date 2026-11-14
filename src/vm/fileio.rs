@@ -230,26 +230,27 @@ impl Vm {
     /// `std.net`'s `connect`/`listen`.
     pub(super) fn io_native(
         &mut self,
-        name: &str,
+        op: crate::native::IoOp,
         args: Vec<Value>,
         span: Span,
     ) -> Result<Value, RuntimeError> {
+        use crate::native::IoOp;
         // W7-8 — the path-taking openers are the `_`-prefixed INTERNAL byte seam (`_create`/`_append`/
-        // `_open`); the public names are `PathLike` wrappers in `std/io.chz`. `stdout`/`stderr`/
-        // `buffered` take no path and kept their names.
-        match name {
-            "_create" | "_append" => self.io_open(&name[1..], &args, span),
-            "_open" => self.io_open_reader(&args, span),
-            "stdout" => Ok(self.io_std_handle(Backing::Stdout)),
-            "stderr" => Ok(self.io_std_handle(Backing::Stderr)),
-            "buffered" => self.io_buffered(&args, span),
-            _ => unreachable!("io_native on '{name}'"),
+        // `_open`); the public names are `PathLike` wrappers in `std/io.chz`.
+        match op {
+            IoOp::Create => self.io_open(false, &args, span),
+            IoOp::Append => self.io_open(true, &args, span),
+            IoOp::Open => self.io_open_reader(&args, span),
+            IoOp::Stdout => Ok(self.io_std_handle(Backing::Stdout)),
+            IoOp::Stderr => Ok(self.io_std_handle(Backing::Stderr)),
+            IoOp::Buffered => self.io_buffered(&args, span),
         }
     }
 
     /// R2 — `io.create(path)` = truncate + create; `io.append(path)` = append, create-if-absent (never
     /// truncates). Returns `Ok(Writer)` or a clean `Err` (perms, missing dir).
-    fn io_open(&mut self, verb: &str, args: &[Value], span: Span) -> Result<Value, RuntimeError> {
+    fn io_open(&mut self, append: bool, args: &[Value], span: Span) -> Result<Value, RuntimeError> {
+        let verb = if append { "append" } else { "create" };
         // W7-8 — the opener's path arg is RAW `bytes` now (the public `PathLike` wrapper in
         // `std/io.chz` calls `p.as_path()` first), so a non-UTF-8 filename opens byte-exactly.
         let path = if let Some(v) = args.first()
@@ -262,15 +263,16 @@ impl Vm {
         };
         // M1.5 — an open blocks (a FIFO waits for its reader): it runs through the door.
         let waits = self.wait_door(&[], |_| path_waits(&path));
-        let opened =
-            self.wait_once(WaitSpec::of_fd(waits), FD_WAIT, span, &[], |_| match verb {
-                "create" => std::fs::File::create(&path),
-                "append" => std::fs::OpenOptions::new()
+        let opened = self.wait_once(WaitSpec::of_fd(waits), FD_WAIT, span, &[], |_| {
+            if append {
+                std::fs::OpenOptions::new()
                     .create(true)
                     .append(true)
-                    .open(&path),
-                _ => unreachable!("io_open on '{verb}'"),
-            })?;
+                    .open(&path)
+            } else {
+                std::fs::File::create(&path)
+            }
+        })?;
         match opened {
             Ok(f) => {
                 let core = Arc::new(WriterCore {

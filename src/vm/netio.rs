@@ -228,17 +228,24 @@ impl Vm {
     /// which pops the box frame first). A cancelled task's cleanup fault is swallowed (DEC-147), so
     /// its cut latches the run's verdict at this wait; an uncancelled task's fault reports itself
     /// (TICKET-298).
-    fn guard_cycle_err(&mut self, cycle: GuardCycle, kind: &str, span: Span) -> RuntimeError {
+    fn guard_cycle_err(
+        &mut self,
+        cycle: GuardCycle,
+        kind: core::BoxKind,
+        span: Span,
+    ) -> RuntimeError {
         let site = self
             .is_cancelled()
             .then(|| (super::deadlock::Wait::guard(kind).phrase(), span));
         self.cut_held_guards(site);
         match cycle {
             GuardCycle::SelfHeld => self.err(
-                reentry_text("update", kind, "set/update/write", "update/write"),
+                reentry_text("update", kind.name(), "set/update/write", "update/write"),
                 span,
             ),
-            GuardCycle::ReadHeld => self.err(reentry_text("read", kind, "set/write", "read"), span),
+            GuardCycle::ReadHeld => {
+                self.err(reentry_text("read", kind.name(), "set/write", "read"), span)
+            }
             GuardCycle::Cycle => self.err(
                 "deadlock: two or more tasks each hold a Shared/RwShared update guard the \
                  other is waiting for (a lock cycle)"

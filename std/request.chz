@@ -15,9 +15,9 @@
 # every native default, the call site (or, through a fn value, the callee) fills `None` from this
 # decl. The verb wrappers (put/patch/delete/head) are plain.
 #
-# FIELD ORDER IS LOAD-BEARING: `Response`'s field order is positional across the remaining hand-built
-# runtime layout copies (compiler `Compiler::new`, `native/request.rs` response_ret,
-# and seed_stdlib_structs), drift-guarded by a checker test. Do not reorder without updating all copies.
+# This decl is `Response`'s one layout: the build reads its field names in order
+# (`NATIVE_STRUCT_LAYOUTS`) for the runtime; `native/request.rs` response_ret names each field
+# (`native_layout_is_the_std_decl` checks the set), and the checker harvests their types.
 
 native struct Response:
     status: int

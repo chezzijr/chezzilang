@@ -1473,7 +1473,9 @@ main()
 
 /// A box lock for the guard unit tests below.
 fn test_lock() -> Arc<crate::vm::core::BoxLock> {
-    Arc::new(crate::vm::core::BoxLock::new("RwShared"))
+    Arc::new(crate::vm::core::BoxLock::new(
+        crate::vm::core::BoxKind::RwShared,
+    ))
 }
 
 /// TICKET-016 — a bounded acquire returns `Ok(None)` on timeout instead of blocking, and hands the

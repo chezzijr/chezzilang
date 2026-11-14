@@ -217,41 +217,7 @@ impl Checker {
             | Ty::Listener
             | Ty::Writer
             | Ty::Reader => {
-                let bare = match recv_ty {
-                    Ty::List(_) => "List",
-                    Ty::Map(_, _) => "Map",
-                    Ty::Set(_) => "Set",
-                    Ty::Shared(_) => "Shared",
-                    Ty::RwShared(_) => "RwShared",
-                    Ty::Atomic(_) => "Atomic",
-                    Ty::AtomicInt => "AtomicInt",
-                    Ty::Executor => "Executor",
-                    Ty::Socket => "Socket",
-                    Ty::Listener => "Listener",
-                    Ty::Writer => "Writer",
-                    Ty::Int
-                    | Ty::Float
-                    | Ty::Bool
-                    | Ty::Str
-                    | Ty::Bytes
-                    | Ty::ByteArray
-                    | Ty::Nil
-                    | Ty::Func { .. }
-                    | Ty::Tuple(_)
-                    | Ty::Struct(..)
-                    | Ty::Enum(..)
-                    | Ty::Param(_)
-                    | Ty::Result(..)
-                    | Ty::Option(_)
-                    | Ty::Channel(_)
-                    | Ty::Reader
-                    | Ty::Ptr
-                    | Ty::Width(_)
-                    | Ty::Protocol(..)
-                    | Ty::Module(_)
-                    | Ty::Unknown
-                    | Ty::Var(_) => "Reader",
-                };
+                let bare = BuiltinType::of(recv_ty).map_or("", BuiltinType::name);
                 self.structs
                     .get(bare)
                     .and_then(|info| info.methods.get(method))

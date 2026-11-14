@@ -883,9 +883,9 @@ struct Checker {
     functions: HashMap<String, FnSig>,
     /// Names of functions declared in the CURRENT module (top-level `fn`s only — NOT imported names).
     /// Gates the generic-fn-as-value turbofish B-path (`ident[int]`) so the checker only accepts a
-    /// turbofish on a SAME-MODULE generic fn — the exact set the compiler's `fn_names` erases at
-    /// codegen, keeping checker-accept ⟺ compiler-erase in lockstep (an imported generic-fn turbofish
-    /// stays a clean "cannot index into fn(T) -> T" error, a documented v1 limit). Cleared per-module
+    /// turbofish on a SAME-MODULE generic fn (an imported generic-fn turbofish stays a clean "cannot
+    /// index into fn(T) -> T" error, a documented v1 limit); the compiler lowers the head by its
+    /// recorded `Resolution`. Cleared per-module
     /// with `functions` (`begin_module`) and populated at the same-module fn-sig registration.
     local_fn_names: std::collections::HashSet<String>,
     structs: HashMap<String, StructInfo>,
@@ -1270,45 +1270,19 @@ struct Checker {
         std::collections::HashMap<Span, (BinaryOp, crate::ast::consteval::IntFault)>,
     /// True while checking a `std.*` module — structs hoisted now are tagged `StructOrigin::Builtin`.
     current_module_is_stdlib: bool,
-    /// Phase 4c-net — the harvested `StructInfo` (method table) for std.net's reserved `Socket` /
-    /// `Listener` handles, captured from the file-backed `std/net.chz` harvest the first time std.net is
-    /// checked in the graph. `Socket`/`Listener` resolve to the RESERVED `Ty::Socket`/`Ty::Listener`
-    /// (opaque VM handles, NOT nominal structs), so — unlike Match/Response — their layout is not seeded
-    /// for field access; only the METHOD table is re-seeded (bare, into `self.structs["Socket"]` /
-    /// `["Listener"]`) by [`seed_stdlib_structs`] so `socket.read(...)` / `listener.accept(...)` resolve
-    /// via the normal method path in every module. Bare-name annotation stays import-gated by
-    /// `builtin_binds` + `resolve_type`'s builtin arm — the seed adds NO bare licensing. `None` until
-    /// std.net is harvested (a program that imports no `std.net`).
-    net_socket_seed: Option<StructInfo>,
-    net_listener_seed: Option<StructInfo>,
-    /// R2 — the harvested `StructInfo` (method table) for std.io's reserved `Writer` handle, captured
-    /// from the file-backed `std/io.chz` harvest the first time std.io is checked in the graph. Like
-    /// `net_socket_seed`, `Writer` resolves to the RESERVED `Ty::Writer` (opaque VM handle) — only the
-    /// METHOD table is re-seeded (bare, into `self.structs["Writer"]`) by `seed_stdlib_structs` so
-    /// `w.write(...)` / `w.close(...)` resolve via the normal method path in every module. Bare-name
-    /// annotation is bound by an import (`builtin_binds`). `None` until
-    /// std.io is harvested.
-    io_writer_seed: Option<StructInfo>,
-    /// R2b — the harvested `StructInfo` (method table) for std.io's reserved `Reader` handle — a
-    /// SEPARATE field from `io_writer_seed` (one per type, so neither method table clobbers the other),
-    /// re-seeded bare into `self.structs["Reader"]` by `seed_stdlib_structs`. `None` until std.io is
-    /// harvested.
-    io_reader_seed: Option<StructInfo>,
-    /// Phase 4c-concurrency — the harvested `StructInfo` (method table) for each of std.concurrency's
-    /// four reserved GENERIC handles (`Shared`/`RwShared`/`Atomic`/`Executor`), keyed by bare name,
-    /// captured from the file-backed `std/concurrency.chz` harvest (AFTER `attach_native_module_metadata`
-    /// ran the closure-param metadata port for `RwShared.read`/`Executor.submit`) the first time
-    /// std.concurrency is checked in the graph. Like `net_socket_seed`, these resolve to the RESERVED
-    /// `Ty::Shared`/etc (opaque VM handles, NOT nominal structs) — only the METHOD table is re-seeded
-    /// (bare, into `self.structs[name]`) by [`seed_stdlib_structs`] so `s.set(...)` / `a.cas(...)`
-    /// resolve via the normal method path in every module, with each generic method sig's `Ty::Param`
-    /// substituted with the value's element type at the call site. Bare-name annotation stays
-    /// import-gated by `builtin_binds` + `resolve_type`'s builtin arm. Empty until harvested.
-    concurrency_seeds: HashMap<String, StructInfo>,
+    /// Every `native struct` a native std module declares (`Match`, `Socket`, `Writer`, `Shared`, …),
+    /// keyed by bare name: the module's harvested `StructInfo` (field layout and method table), after
+    /// `attach_native_module_metadata`. Filled when each native module is checked in the graph (a
+    /// module that can hold such a value is checked after it); [`seed_stdlib_structs`] re-seeds it
+    /// into `self.structs` for every later module, so field access (`m.text`) and methods
+    /// (`socket.read(...)`) resolve with no import. Bare-name annotation stays import-gated: no
+    /// `struct_names`/`bare_types` entry is added, and a handle name resolves to its RESERVED `Ty`
+    /// (`Ty::Socket`) through `resolve_type`'s builtin arm.
+    native_struct_seeds: HashMap<String, StructInfo>,
     /// Phase 5a-containers — the harvested `StructInfo` (method table) for each of the three RESERVED
     /// UNIVERSE container types (`List`/`Map`/`Set`), keyed by bare name, captured from the always-linked
     /// `std/prelude.chz`'s `native struct` decls the first time the prelude module is checked in the graph
-    /// (order[0], before entry/all others). Like `concurrency_seeds`, these resolve to
+    /// (order[0], before entry/all others). Like `native_struct_seeds`, these resolve to
     /// the RESERVED `Ty::List`/`Ty::Map`/`Ty::Set` (NOT nominal structs) — only the METHOD table is
     /// re-seeded (bare, into `self.structs[name]`) by [`seed_stdlib_structs`] so `xs.push(...)` /
     /// `m.get(...)` / `s.insert(...)` resolve via the normal method path, with each generic method sig's

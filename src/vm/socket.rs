@@ -191,10 +191,15 @@ impl Vm {
     /// case still returns immediately.
     pub(super) fn net_connect_or_listen(
         &mut self,
-        name: &str,
+        op: crate::native::NetOp,
         args: Vec<Value>,
         span: Span,
     ) -> Result<Value, RuntimeError> {
+        use crate::native::NetOp;
+        let name = match op {
+            NetOp::Connect => "connect",
+            NetOp::Listen => "listen",
+        };
         let addr = if let Some(v) = args.first()
             && let Some(sh) = v.as_obj()
             && let Obj::Str(s) = self.heap.get(sh)
@@ -203,9 +208,9 @@ impl Vm {
         } else {
             return Err(self.err(format!("std.net.{name} expects an address string"), span));
         };
-        match name {
+        match op {
             // Name resolution (`getaddrinfo`) is an off-heap blocking call.
-            "connect" => {
+            NetOp::Connect => {
                 match self.wait_once(Some(WaitSpec::Offload), "a name lookup", span, &[], |_| {
                     crate::native::net::connect_nonblocking(&addr)
                 })? {
@@ -312,7 +317,7 @@ impl Vm {
                     Err(e) => Ok(self.sock_err(format!("{addr}: {e}"))),
                 }
             }
-            "listen" => {
+            NetOp::Listen => {
                 match self.wait_once(Some(WaitSpec::Offload), "a name lookup", span, &[], |_| {
                     crate::native::net::listen_nonblocking(&addr)
                 })? {
@@ -329,7 +334,6 @@ impl Vm {
                     Err(e) => Ok(self.sock_err(format!("{addr}: {e}"))),
                 }
             }
-            _ => unreachable!("net_connect_or_listen on '{name}'"),
         }
     }
 

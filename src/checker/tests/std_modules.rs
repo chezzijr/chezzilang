@@ -385,13 +385,10 @@ fn regex_fn_sigs_exact() {
     assert!(sig.types.contains("Match"));
 }
 
-/// DRIFT GUARD — the file-harvested Match StructInfo (fields, in positional order) must byte-match the
-/// remaining hand-built layout copies. Field ORDER is load-bearing (positional across compiler
-/// `Compiler::new`, `native/regex.rs` match_to_ret, and seed_stdlib_structs), so a
-/// silent drift here would trap at runtime on a field read. Assemble the expected layout once and
-/// compare both the file harvest and seed_stdlib_structs against it.
+/// The file-harvested Match StructInfo (fields, in positional order) is the one checker layout; the
+/// runtime layout reads the same decl (`native::native_struct_layout`).
 #[test]
-fn regex_chz_match_matches_handbuilt_layouts() {
+fn regex_chz_match_harvests_its_layout() {
     let expected: Vec<(String, Ty)> = vec![
         ("text".into(), Ty::Str),
         ("start".into(), Ty::Int),
@@ -413,12 +410,6 @@ fn regex_chz_match_matches_handbuilt_layouts() {
     assert!(matches!(harvested.origin, StructOrigin::Builtin));
     // The harvest must ALSO have populated the 6 fn sigs (whole-module signature source).
     assert_eq!(sig.fns().count(), 6, "std/regex.chz must harvest 6 fns");
-    // seed_stdlib_structs's hand-built Match copy (globally-present layout) must agree.
-    let seeded = c.structs.get("Match").expect("Match must be seeded");
-    assert_eq!(
-        seeded.fields, expected,
-        "seeded Match layout drifted from std/regex.chz"
-    );
     // The harvest must NOT leak `Match` into module-scoped `struct_names` (import-gating preserved):
     // the transient insert during fn-sig resolution is removed.
     assert!(
@@ -613,11 +604,9 @@ fn request_optional_timeout_arg_typechecks() {
     );
 }
 
-/// DRIFT GUARD — the file-harvested `ProcResult` StructInfo (fields, positional order) must byte-match
-/// the remaining hand-built layout copies (seed_stdlib_structs + the runtime copies). A silent reorder
-/// would trap at runtime on a field read.
+/// The file-harvested `ProcResult` StructInfo (fields, positional order) is the one checker layout.
 #[test]
-fn procresult_chz_matches_handbuilt_layouts() {
+fn procresult_chz_harvests_its_layout() {
     let expected: Vec<(String, Ty)> = vec![
         ("stdout".into(), Ty::Str),
         ("stderr".into(), Ty::Str),
@@ -637,9 +626,6 @@ fn procresult_chz_matches_handbuilt_layouts() {
     assert!(matches!(harvested.origin, StructOrigin::Builtin));
     // 3 str-returning fns + the 2 W6-4 bytes twins (`run_bytes` / `run_args_bytes`).
     assert_eq!(sig.fns().count(), 5, "std/process.chz must harvest 5 fns");
-    // seed_stdlib_structs's copy must agree.
-    let seeded = c.structs.get("ProcResult").expect("ProcResult seeded");
-    assert_eq!(seeded.fields, expected, "seeded ProcResult drifted");
     // Import-gating preserved: no bare-name leak.
     assert!(
         !c.struct_names.contains("ProcResult"),
@@ -647,9 +633,33 @@ fn procresult_chz_matches_handbuilt_layouts() {
     );
 }
 
-/// DRIFT GUARD — the file-harvested `Response` StructInfo must byte-match the hand-built copies.
+/// F7 — the harvested native struct seed reaches a module that never imports the owning std module:
+/// a field read on a `Match`/`ProcResult`/`FileInfo` handed over by another module types by its decl.
 #[test]
-fn response_chz_matches_handbuilt_layouts() {
+fn a_harvested_native_struct_reads_without_its_import() {
+    let lib = "import std.regex\nimport std.process\nimport std.fs\nfn m() -> regex.Match!:\n    match regex.find(\"a\", \"a\")?:\n        ?x: return x\n        None: return !\"none\"\nfn p() -> process.ProcResult!:\n    return process.run(\"true\")\nfn f() -> fs.FileInfo!:\n    return fs.stat(\".\")\n";
+    files_ok(&[
+        ("lib.chz", lib),
+        (
+            "main.chz",
+            "import lib\nfn main() -> None!:\n    n: int = lib.m()?.start\n    g: List[str] = lib.m()?.groups\n    c: int = lib.p()?.code\n    d: bool = lib.f()?.is_dir\n    print(\"{n}{g}{c}{d}\")\n",
+        ),
+    ]);
+    files_reject(
+        &[
+            ("lib.chz", lib),
+            (
+                "main.chz",
+                "import lib\nfn main() -> None!:\n    t: str = lib.m()?.start\n",
+            ),
+        ],
+        "int",
+    );
+}
+
+/// The file-harvested `Response` StructInfo is the one checker layout.
+#[test]
+fn response_chz_harvests_its_layout() {
     let expected: Vec<(String, Ty)> = vec![
         ("status".into(), Ty::Int),
         ("body".into(), Ty::Str),
@@ -671,8 +681,6 @@ fn response_chz_matches_handbuilt_layouts() {
     assert!(harvested.methods.is_empty());
     assert!(matches!(harvested.origin, StructOrigin::Builtin));
     assert_eq!(sig.fns().count(), 8, "std/request.chz must harvest 8 fns");
-    let seeded = c.structs.get("Response").expect("Response seeded");
-    assert_eq!(seeded.fields, expected, "seeded Response drifted");
     assert!(
         !c.struct_names.contains("Response"),
         "harvest must not leave Response bare-visible"
@@ -911,14 +919,6 @@ fn math_io_os_rand_fs_runtime_tables_unchanged() {
         .collect();
     consts.sort();
     assert_eq!(consts, vec!["e", "inf", "nan", "pi"]);
-    assert!(crate::native::is_file_backed_native("std.math"));
-    assert!(crate::native::is_file_backed_native("std.regex"));
-    // std.net (4c-net) + std.ffi (4c-ffi) + std.concurrency (4c-concurrency) are FILE-BACKED now —
-    // std.concurrency was the LAST virtual native std module, so EVERY native std module is now file-
-    // backed (there is no virtual one left to assert `!is_file_backed_native` against).
-    assert!(crate::native::is_file_backed_native("std.net"));
-    assert!(crate::native::is_file_backed_native("std.ffi"));
-    assert!(crate::native::is_file_backed_native("std.concurrency"));
 }
 
 /// Phase 4c-net — std.net is FILE-BACKED: its `Socket`/`Listener` native structs carry a harvested

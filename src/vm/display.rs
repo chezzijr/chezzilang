@@ -119,15 +119,15 @@ impl Vm {
                 Obj::Cffi(_) => "function",
                 Obj::Ptr(_) => "ptr",
                 Obj::Channel(_) => "Channel",
-                Obj::Shared(_) => "Shared",
-                Obj::RwShared(_) => "RwShared",
-                Obj::Atomic(_) => "Atomic",
-                Obj::AtomicInt(_) => "AtomicInt",
-                Obj::Executor(_) => "Executor",
-                Obj::Socket(_) => "Socket",
-                Obj::Listener(_) => "Listener",
-                Obj::Writer(_) => "Writer",
-                Obj::Reader(_) => "Reader",
+                o @ (Obj::Shared(_)
+                | Obj::RwShared(_)
+                | Obj::Atomic(_)
+                | Obj::AtomicInt(_)
+                | Obj::Executor(_)
+                | Obj::Socket(_)
+                | Obj::Listener(_)
+                | Obj::Writer(_)
+                | Obj::Reader(_)) => o.handle_kind().map_or("handle", HandleKind::name),
                 Obj::Generator(_) => "generator",
                 // A cell is a transparent by-reference box (never a user-visible operand — reads
                 // `CellLoad` first); defensively report its inner value's type.
