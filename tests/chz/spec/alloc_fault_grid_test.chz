@@ -12,7 +12,7 @@ fn outcome(op: fn() -> int) -> str:
     r := recover: op()
     match r:
         ?n: return "ok {n}"
-        !e: return "fault: {e.message()}"
+        !e: return "fault: {e.error()}"
 
 fn byte_past_u32() -> int:
     b := bytearray.zeroed(4294967297)

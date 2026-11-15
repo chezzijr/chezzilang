@@ -25,7 +25,7 @@ fn blow_up_late_int() -> int:
 fn err_of(r: int!) -> str:
     match r:
         ?_: return "no fault"
-        !e: return e.message()
+        !e: return e.error()
 
 fn guarded_bump(tok: cancel.Token, c: concurrency.AtomicInt):
     if tok.cancelled():
@@ -122,7 +122,7 @@ test fn a_job_may_cancel_its_own_executor():
     r := recover: ex.shutdown()
     match r:
         ?_: pass
-        !e: assert false, "a job that shuts down its own executor must not fault: " + e.message()
+        !e: assert false, "a job that shuts down its own executor must not fault: " + e.error()
 
 test fn an_uncancelled_token_is_a_no_op():
     ex := concurrency.Executor()

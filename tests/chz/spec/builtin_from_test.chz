@@ -49,10 +49,10 @@ test fn a_str_parses_with_try_from():
     assert (float.try_from(" 1.5 ") ?? -1.0) == 1.5, "trims, as to_float"
     match int.try_from("x"):
         ?v: assert false, "parsed {v}"
-        !e: assert e.message() != ""
+        !e: assert e.error() != ""
     match float.try_from("x"):
         ?v: assert false, "parsed {v}"
-        !e: assert e.message() != ""
+        !e: assert e.error() != ""
 
 test fn a_scalar_is_a_try_from_witness():
     assert (parse[int]("7") ?? -1) == 7
@@ -60,10 +60,10 @@ test fn a_scalar_is_a_try_from_witness():
     assert (parsed_sum() ?? -1) == 11
     match parse[int]("x"):
         ?v: assert false, "parsed {v}"
-        !e: assert e.message() != ""
+        !e: assert e.error() != ""
     match parse[Rat]("x"):
         ?v: assert false, "parsed {v.n}"
-        !e: assert e.message() != ""
+        !e: assert e.error() != ""
 
 test fn a_scalar_is_a_from_witness():
     assert lift[int](true) == 1

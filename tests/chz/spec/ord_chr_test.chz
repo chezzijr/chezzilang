@@ -18,12 +18,12 @@ test fn ord_faults_on_anything_but_one_character():
         r := recover: ord(s)
         match r:
             ?_:  assert false, "a multi-character str must fault, not return the first codepoint"
-            !e: assert e.message() == "ord() expects a 1-character str, got {n} characters"
+            !e: assert e.error() == "ord() expects a 1-character str, got {n} characters"
     # The empty case was already guarded; it keeps its own message.
     re := recover: ord("")
     match re:
         ?_:  assert false, "expected a fault"
-        !e: assert e.message() == "ord() of an empty string"
+        !e: assert e.error() == "ord() of an empty string"
 
 test fn chr_round_trips_ord():
     assert chr(97) == "a"
@@ -36,10 +36,10 @@ test fn chr_faults_outside_the_unicode_codepoint_span():
         r := recover: chr(bad)
         match r:
             ?_:  assert false, "chr() must reject a codepoint outside the range 0..0x110000"
-            !e: assert e.message().contains("not a valid Unicode codepoint")
+            !e: assert e.error().contains("not a valid Unicode codepoint")
     # DIVERGENCE, recorded not fixed (docs/reference/stdlib/): CPython returns a lone surrogate here,
     # Chezzi faults — `str` is UTF-8 and cannot hold one. A loud fault, not a wrong value.
     rs := recover: chr(55296)
     match rs:
         ?_:  assert false, "a lone surrogate has no UTF-8 encoding"
-        !e: assert e.message().contains("55296")
+        !e: assert e.error().contains("55296")

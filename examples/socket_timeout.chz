@@ -20,7 +20,7 @@ import std.time
 fn accept_demo(listener: net.Listener):
     match listener.accept(100):
         ?_: print("accept: unexpectedly accepted")
-        !e: print("accept: " + e.message())
+        !e: print("accept: " + e.error())
     listener.close()
 
 # Demo 2: the server accepts but never writes; the client's read(n, timeout_ms) times out.
@@ -35,7 +35,7 @@ fn read_client(addr: str) -> int!:
     sock := net.connect(addr)?
     match sock.read(64, 100):
         ?s: print("read: unexpectedly got " + s)
-        !e: print("read: " + e.message())
+        !e: print("read: " + e.error())
     sock.close()
     return ?0
 
@@ -56,6 +56,6 @@ fn run() -> int!:
 fn main():
     match run():
         ?_: print("done")
-        !e: print("error: " + e.message())
+        !e: print("error: " + e.error())
 
 main()

@@ -26,7 +26,7 @@ test fn local_alias_of_global_element_write_through_alias_lands():
                 write_inner(inner)
             match res:
                 ?_: r.send("no-fault")
-                !e: r.send(e.message())
+                !e: r.send(e.error())
     got := r.recv() else: panic("r closed")
     assert got == "no-fault", got
     assert gl == [[1, 2]]
@@ -39,7 +39,7 @@ fn producer_alias(c: Channel[fn() -> str], fr: Channel[str]):
         xs.push(2)
     match res:
         ?_: fr.send("no-fault")
-        !e: fr.send(e.message())
+        !e: fr.send(e.error())
     c.send(fn() -> str: "{g}")
 
 test fn write_through_local_alias_of_global_lands_and_the_received_closure_reads_it():
@@ -60,7 +60,7 @@ fn add(xs: List[int], fr: Channel[str]):
         xs.push(2)
     match res:
         ?_: fr.send("no-fault")
-        !e: fr.send(e.message())
+        !e: fr.send(e.error())
 
 fn producer_param(c: Channel[fn() -> str], fr: Channel[str]):
     add(h, fr)
@@ -89,7 +89,7 @@ test fn local_alias_of_a_whole_global_write_through_alias_lands():
                 write_a(a[0])
             match res:
                 ?_: r.send("no-fault")
-                !e: r.send(e.message())
+                !e: r.send(e.error())
     got := r.recv() else: panic("r closed")
     assert got == "no-fault", got
     assert gw == [[1, 2]]
@@ -113,7 +113,7 @@ test fn local_alias_of_a_struct_in_a_global_map_write_through_alias_lands():
                 write_p(p)
             match res:
                 ?_: r.send("no-fault")
-                !e: r.send(e.message())
+                !e: r.send(e.error())
     got := r.recv() else: panic("r closed")
     assert got == "no-fault", got
     assert gm["k"].n == 5
@@ -151,7 +151,7 @@ test fn write_through_spawn_adopted_alias_lands():
                 write_a(a)
             match res:
                 ?_: c.send("no-fault")
-                !e: c.send(e.message())
+                !e: c.send(e.error())
     got := c.recv() else: panic("c closed")
     assert got == "no-fault", got
     assert gl2 == [1, 2]
@@ -170,7 +170,7 @@ test fn element_alias_write_lands():
                 write_inner(inner)
             match res:
                 ?_: c.send("no-fault")
-                !e: c.send(e.message())
+                !e: c.send(e.error())
     got := c.recv() else: panic("c closed")
     assert got == "no-fault", got
     assert gl3 == [[1, 2]]
@@ -182,7 +182,7 @@ fn w4(xs: List[int], c: Channel[str]):
         xs.push(2)
     match res:
         ?_: c.send("no-fault")
-        !e: c.send(e.message())
+        !e: c.send(e.error())
 
 test fn spawn_arg_alias_write_lands():
     c := Channel[str](1)
@@ -210,7 +210,7 @@ test fn struct_in_map_alias_write_lands():
                 write_p(p)
             match res:
                 ?_: c.send("no-fault")
-                !e: c.send(e.message())
+                !e: c.send(e.error())
     got := c.recv() else: panic("c closed")
     assert got == "no-fault", got
     assert gm116["k"].n == 5
@@ -228,7 +228,7 @@ test fn closure_built_before_the_alias_push_lands():
                 write_a(a)
             match res:
                 ?_: c.send("no-fault")
-                !e: c.send(e.message())
+                !e: c.send(e.error())
     got := c.recv() else: panic("c closed")
     assert got == "no-fault", got
     assert gl5 == [1, 2]
@@ -245,7 +245,7 @@ test fn nested_nursery_send_lands():
                 write_a(a)
             match res:
                 ?_: c.send("no-fault")
-                !e: c.send(e.message())
+                !e: c.send(e.error())
             parallel:
                 spawn:
                     pass
@@ -265,7 +265,7 @@ test fn executor_job_reads_the_tasks_alias_write():
                 d4_push2(a)
             match res:
                 ?_: r.send("no-fault")
-                !e: r.send(e.message())
+                !e: r.send(e.error())
             _ := ex.submit(fn(): r.send("{gl8}"))
     fault := r.recv() else: panic("r closed")
     assert fault == "no-fault", fault
@@ -286,7 +286,7 @@ test fn two_hop_closure_alias_write_lands():
                 write_a(a)
             match res:
                 ?_: c.send("no-fault")
-                !e: c.send(e.message())
+                !e: c.send(e.error())
             fc.send(fn() -> str: "{gl9}")
         spawn:
             f := fc.recv() else: panic("fc closed")
@@ -308,7 +308,7 @@ fn producer_w13_2(c: Channel[fn() -> str], fr: Channel[str]):
         g2.push(2)
     match res:
         ?_: fr.send("no-fault")
-        !e: fr.send(e.message())
+        !e: fr.send(e.error())
     c.send(fn() -> str: "{g2}")
 
 test fn receiver_own_write_survives_arriving_closure_write():
@@ -335,7 +335,7 @@ fn producer_w13_2_index(c: Channel[fn() -> str], fr: Channel[str]):
         g18.push(2)
     match res:
         ?_: fr.send("no-fault")
-        !e: fr.send(e.message())
+        !e: fr.send(e.error())
     c.send(fn() -> str: "{g18}")
 
 test fn receiver_index_assign_survives_arriving_closure():
@@ -363,7 +363,7 @@ fn producer_w13_2_field(c: Channel[fn() -> str], fr: Channel[str]):
         g22.a = 2
     match res:
         ?_: fr.send("no-fault")
-        !e: fr.send(e.message())
+        !e: fr.send(e.error())
     c.send(fn() -> str: "{g22.a}")
 
 test fn receiver_field_write_survives_arriving_closure():
@@ -387,7 +387,7 @@ fn producer_w13_2_sibling(c: Channel[fn() -> str], fr: Channel[str]):
         g21.push(2)
     match res:
         ?_: fr.send("no-fault")
-        !e: fr.send(e.message())
+        !e: fr.send(e.error())
     c.send(fn() -> str: "{g21}")
 
 fn consumer_w13_2_sibling(c: Channel[fn() -> str], r: Channel[str], fr: Channel[str]):
@@ -396,7 +396,7 @@ fn consumer_w13_2_sibling(c: Channel[fn() -> str], r: Channel[str], fr: Channel[
         g21.push(9)
     match res:
         ?_: fr.send("no-fault")
-        !e: fr.send(e.message())
+        !e: fr.send(e.error())
     r.send("{f()} {g21}")
 
 # The consumer writes after it received the producer's closure, so the two never race.
@@ -423,7 +423,7 @@ fn producer_w13_2_control(c: Channel[fn() -> str], fr: Channel[str]):
         g20.push(2)
     match res:
         ?_: fr.send("no-fault")
-        !e: fr.send(e.message())
+        !e: fr.send(e.error())
     c.send(fn() -> str: "{g20}")
 
 # TICKET-137 — the receiver's `9` is pushed BEFORE the nursery, on the ROOT task; the sender's `2`

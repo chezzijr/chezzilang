@@ -232,7 +232,7 @@ fn program(prelude: &str, cells: &[Cell]) -> String {
     for (i, c) in cells.iter().enumerate() {
         src.push_str(&format!(
             "r{i} := recover: {}\nmatch r{i}:\n    ?x: print(\"{} ok \" + \"{{x}}\")\n    \
-             !e: print(\"{} err \" + e.message())\n",
+             !e: print(\"{} err \" + e.error())\n",
             c.expr, c.name, c.name
         ));
     }

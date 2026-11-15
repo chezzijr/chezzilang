@@ -21,7 +21,7 @@ import crossing_operand_lib as lib
 fn must[T](r: T!) -> T:
     match r:
         ?v: return v
-        !e: panic(e.message())
+        !e: panic(e.error())
 
 fn t189_out(res: !, got: int) -> str:
     match res:

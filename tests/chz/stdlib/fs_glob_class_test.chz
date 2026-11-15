@@ -14,11 +14,11 @@ fn fixture() -> str:
     d := os.temp_dir().str() + "/chz_globclass_{os.getpid()}"
     match fs.mkdir(d):
         ?_: pass
-        !e: assert false, "mkdir: " + e.message()
+        !e: assert false, "mkdir: " + e.error()
     for n in NAMES:
         match fs.atomic_write(d + "/" + n, "x"):
             ?_: pass
-            !e: assert false, "write " + n + ": " + e.message()
+            !e: assert false, "write " + n + ": " + e.error()
     return d
 
 fn cleanup(d: str):
@@ -30,7 +30,7 @@ test fn glob_class_rejects_what_go_rejects():
     for p in ["[]a]", "[^]a]", "[]-a]", "[-a]", "[a-]", "[^-]", "[a-c-e]", "[a-]x", "[]", "[^]", "x["]:
         match fs.glob("nope_globclass/" + p):
             ?m: assert false, p + " must be a bad pattern, got {m}"
-            !e: assert "bad pattern" in e.message(), p + ": " + e.message()
+            !e: assert "bad pattern" in e.error(), p + ": " + e.error()
 
 test fn glob_class_matches_what_go_matches():
     d := fixture()
@@ -43,5 +43,5 @@ test fn glob_class_matches_what_go_matches():
             ?hits:
                 for h in hits:
                     got.push(h.str().strip_prefix(d + "/"))
-            !e: assert false, p + " must not error: " + e.message()
+            !e: assert false, p + " must not error: " + e.error()
         assert got == want, p + ": {got}"

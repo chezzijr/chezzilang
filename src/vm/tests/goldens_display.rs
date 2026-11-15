@@ -173,7 +173,7 @@ fn pad_left_empty_fill_is_recoverable_fault() {
                \x20       \"a\".pad_left(5, \"\")\n\
                \x20   match r:\n\
                \x20       ?v: print(\"ok {v}\")\n\
-               \x20       !e: print(\"caught {e.message()}\")\n\
+               \x20       !e: print(\"caught {e.error()}\")\n\
                main()\n";
     let want = format!("caught {MSG}\n");
     assert_eq!(run_capture(rec).expect("recover"), want);
@@ -583,7 +583,7 @@ fn main():
             spawn use_it(a)
     match r:
         ?_:  print(\"ok: done\")
-        !e: print(\"caught: {e.message()}\")
+        !e: print(\"caught: {e.error()}\")
 main()
 ";
     assert_mc_parity(src, "got 1\nok: done\n");
@@ -608,7 +608,7 @@ fn main():
         ch.send(a)
     match r:
         ?_:  print(\"ok: done\")
-        !e: print(\"caught: {e.message()}\")
+        !e: print(\"caught: {e.error()}\")
 main()
 ";
     assert_mc_parity(chan_src, "ok: done\n");
@@ -626,7 +626,7 @@ fn main():
         s := Shared(a)
     match r:
         ?_:  print(\"ok: done\")
-        !e: print(\"caught: {e.message()}\")
+        !e: print(\"caught: {e.error()}\")
 main()
 ";
     assert_mc_parity(shared_src, "ok: done\n");
@@ -889,7 +889,7 @@ fn main():
         0
     match r:
         ?v: print(\"ok\")
-        !e: print(\"err: {e.message()}\")
+        !e: print(\"err: {e.error()}\")
 main()
 ";
     let out = run_capture(src);
@@ -924,7 +924,7 @@ fn main():
         0
     match r:
         ?v: print(\"ok\")
-        !e: print(\"err: {e.message()}\")
+        !e: print(\"err: {e.error()}\")
 main()
 ";
     let out = run_capture(src);
@@ -953,7 +953,7 @@ fn main():
         0
     match r:
         ?v: print(\"ok\")
-        !e: print(\"err: {e.message()}\")
+        !e: print(\"err: {e.error()}\")
 main()
 ";
     let out = run_capture(src);
@@ -976,7 +976,7 @@ fn crossing_doomed_skip_keeps_a_sibling_backref_and_the_program_crosses() {
     let dir = std::env::temp_dir().join(format!("chezzi_vm_t119_review_{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let entry = dir.join("main.chz");
-    let src = "import Iterator from std.iter\nstruct N:\n    next: N?\nstruct Last:\n    count: fn() -> int\n    tail: N\nstruct P:\n    next: P?\n    last: Last?\nstruct Holder:\n    gen: Iterator[int]\n    x: N\n    y: P\nstruct C:\n    g: Iterator[int]?\nfn spin(c: C) -> Iterator[int]:\n    yield 1\nfn make() -> fn() -> int:\n    c := C(None)\n    g := spin(c)\n    c.g = ?g\n    p := [g]\n    fn count() -> int:\n        return p.len()\n    return count\nfn mk(k: int) -> N:\n    head := N(None)\n    cur := head\n    for i in 0..k:\n        n := N(None)\n        cur.next = ?n\n        cur = n\n    return head\nfn chain_to(k: int, tail: N) -> N:\n    head := N(None)\n    cur := head\n    for i in 0..k:\n        n := N(None)\n        cur.next = ?n\n        cur = n\n    cur.next = ?tail\n    return head\nfn nth(h: N, i: int) -> N:\n    cur := h\n    for j in 0..i:\n        match cur.next:\n            ?n: cur = n\n            None: return cur\n    return cur\nfn drive(deep: N) -> Iterator[int]:\n    yield 1\n    match deep.next:\n        ?n: yield 2\n        None: yield 0\nfn build() -> Holder:\n    h := mk(3000)\n    y := P(None, ?Last(make(), h))\n    for i in 0..2600:\n        y = P(?y, None)\n    return Holder(drive(chain_to(2500, h)), nth(h, 1000), y)\nholder: Holder = build()\nstarted := holder.gen.next()\nfn main():\n    r := recover:\n        parallel:\n            spawn:\n                print(\"crossed\")\n        0\n    match r:\n        ?v: print(\"ok\")\n        !e: print(\"err: {e.message()}\")\nmain()\n";
+    let src = "import Iterator from std.iter\nstruct N:\n    next: N?\nstruct Last:\n    count: fn() -> int\n    tail: N\nstruct P:\n    next: P?\n    last: Last?\nstruct Holder:\n    gen: Iterator[int]\n    x: N\n    y: P\nstruct C:\n    g: Iterator[int]?\nfn spin(c: C) -> Iterator[int]:\n    yield 1\nfn make() -> fn() -> int:\n    c := C(None)\n    g := spin(c)\n    c.g = ?g\n    p := [g]\n    fn count() -> int:\n        return p.len()\n    return count\nfn mk(k: int) -> N:\n    head := N(None)\n    cur := head\n    for i in 0..k:\n        n := N(None)\n        cur.next = ?n\n        cur = n\n    return head\nfn chain_to(k: int, tail: N) -> N:\n    head := N(None)\n    cur := head\n    for i in 0..k:\n        n := N(None)\n        cur.next = ?n\n        cur = n\n    cur.next = ?tail\n    return head\nfn nth(h: N, i: int) -> N:\n    cur := h\n    for j in 0..i:\n        match cur.next:\n            ?n: cur = n\n            None: return cur\n    return cur\nfn drive(deep: N) -> Iterator[int]:\n    yield 1\n    match deep.next:\n        ?n: yield 2\n        None: yield 0\nfn build() -> Holder:\n    h := mk(3000)\n    y := P(None, ?Last(make(), h))\n    for i in 0..2600:\n        y = P(?y, None)\n    return Holder(drive(chain_to(2500, h)), nth(h, 1000), y)\nholder: Holder = build()\nstarted := holder.gen.next()\nfn main():\n    r := recover:\n        parallel:\n            spawn:\n                print(\"crossed\")\n        0\n    match r:\n        ?v: print(\"ok\")\n        !e: print(\"err: {e.error()}\")\nmain()\n";
     std::fs::write(&entry, src).unwrap();
     let graph = crate::resolver::build_graph(&entry).expect("resolve");
     let checked = crate::checker::check_graph(&graph);
@@ -1035,7 +1035,7 @@ fn main():
         0
     match r:
         ?v: print(\"ok\")
-        !e: print(\"err: {e.message()}\")
+        !e: print(\"err: {e.error()}\")
 main()
 ";
     assert_eq!(run(src), "crossed\nok\n");
@@ -1113,7 +1113,7 @@ fn main():
         0
     match r:
         ?v: print(\"ok\")
-        !e: print(\"err: {e.message()}\")
+        !e: print(\"err: {e.error()}\")
 main()
 ";
     assert_eq!(run(src), "crossed\nok\n");
@@ -1471,7 +1471,7 @@ fn main():
             spawn worker()
     match r:
         ?_:  print(\"ok: done\")
-        !e: print(\"caught: {e.message()}\")
+        !e: print(\"caught: {e.error()}\")
 main()
 ";
     let out = run_capture(src).expect("M:N run should not crash");
@@ -1887,7 +1887,7 @@ r := recover:
     print(a)
 match r:
     ?v: print(\"ok\")
-    !e: print(\"caught: {e.message()}\")
+    !e: print(\"caught: {e.error()}\")
 ";
     assert_eq!(run(src), "Node(next=[Node(next=[...])])\nok\n");
 }

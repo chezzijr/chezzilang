@@ -42,7 +42,7 @@ fn run(accounts: Map[str, Account], txns: List[Txn]):
     for t in txns:
         match apply(accounts, t):
             ?msg: print(msg)
-            !e:  print("REJECTED: {e.message()}")
+            !e:  print("REJECTED: {e.error()}")
 
 # Summary report: total, a balance-descending ranking, and a guarded comprehension.
 fn report(accounts: Map[str, Account]):

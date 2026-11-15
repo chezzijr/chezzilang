@@ -14,7 +14,7 @@ import Comparable, Eq from std.cmp
 fn msg_of[T](r: T!Error, where_: str) -> str:
     match r:
         ?_: assert false, where_ + " must fault"
-        !e: return e.message()
+        !e: return e.error()
     return ""
 
 # ---- the acceptance program: `<`, `>`, `==` must agree on ONE identity ----

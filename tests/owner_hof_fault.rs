@@ -151,7 +151,7 @@ fn a_recover_outside_the_parallel_still_catches_the_child_fault() {
         "            print(\"owner finished map len={ys.len()}\")",
         "    match r:",
         "        ?_: print(\"UNEXPECTED Ok\")",
-        "        !e: print(\"outer caught {e.message()}\")",
+        "        !e: print(\"outer caught {e.error()}\")",
         "    zs := xs.map(fn(x) -> int: x * 3)",
         "    print(\"after recover map len={zs.len()}\")",
         "main()",

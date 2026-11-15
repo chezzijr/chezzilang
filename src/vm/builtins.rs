@@ -112,7 +112,7 @@ impl Vm {
 
     /// The error `panic(msg)` raises: the SAME recoverable `RuntimeError` (`self.err`) the runtime
     /// uses for overflow/OOB/decode, so it unwinds (running `defer`s) to the nearest `recover:` as
-    /// `Err(e)` with `e.message() == msg`, else aborts. The checker guarantees a single `str` arg;
+    /// `Err(e)` with `e.error() == msg`, else aborts. The checker guarantees a single `str` arg;
     /// a non-str falls back to the value's type name. Shared by the direct call and the value call.
     pub(super) fn builtin_panic(&mut self, args: &[Value], span: Span) -> RuntimeError {
         let message = match args.first().copied() {

@@ -1,0 +1,41 @@
+# tests/chz/spec/error_name_grid_test.chz — `protocol Error`'s one requirement is `error(self) -> str`
+# (Go's `Error() string`). Each row is one way a value answers it: a user struct raised by `!`, a bare
+# `str`, the std `RecvError`, and a str error re-raised by `panic(e.error())`, which keeps its origin.
+
+struct DiskErr:
+    code: int
+    fn error(self) -> str:
+        return "disk {self.code}"
+
+test fn a_struct_with_error_is_an_error():
+    fn boom() -> int!:
+        return !DiskErr(5)
+    match boom():
+        ?_: assert false, "expected Err"
+        !e: assert e.error() == "disk 5"
+
+test fn a_str_answers_error_with_itself():
+    assert "boom".error() == "boom"
+
+test fn recv_error_answers_error():
+    ch := Channel[int](1)
+    ch.close()
+    match ch.recv():
+        ?_: assert false, "expected RecvError"
+        !e: assert e.error() == "receiving on a closed channel"
+
+test fn panic_of_a_str_error_keeps_its_origin():
+    fn inner() -> int!:
+        return !"boom"
+    fn outer() -> int:
+        match inner():
+            ?v: return v
+            !e: panic(e.error())
+    r := recover: outer()
+    match r:
+        ?_: assert false, "expected a fault"
+        !e:
+            assert e.error() == "boom"
+            match e.origin():
+                None: assert false, "expected the origin of `!\"boom\"`"
+                ?o: assert o.line == 29, "line: {o.line}"

@@ -1932,6 +1932,15 @@ fn prefix_bang_operand_must_satisfy_error() {
 }
 
 #[test]
+fn a_struct_with_only_message_is_not_an_error() {
+    // `Error`'s requirement is `error(self) -> str`; the old name `message` satisfies nothing.
+    entry_rejects(
+        "struct M:\n    fn message(self) -> str:\n        return \"m\"\nfn main():\n    e: Error = M()\n    print(e)\n",
+        "does not satisfy Error",
+    );
+}
+
+#[test]
 fn prefix_bang_applies_to_the_whole_postfix_operand() {
     use crate::ast::{ExprKind, StmtKind, UnaryOp};
     let m = parser::parse(lexer::tokenize("x := !a.b(c)\n").expect("lex")).expect("parse");

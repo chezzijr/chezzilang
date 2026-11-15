@@ -53,7 +53,7 @@ fn run(n: int) -> int!:
 
 fn main():
     served := run(50) else e:
-        print("error: " + e.message())
+        print("error: " + e.error())
         return
     print("echo server handled {served} connections, one fiber each")
 

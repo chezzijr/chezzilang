@@ -170,7 +170,7 @@ test fn body_defer_fault_above_an_implicit_nursery_is_reported():
     log := Shared("")
     r := recover: impl_fault(log)
     match r:
-        !e: assert e.message().contains("body cleanup failed")
+        !e: assert e.error().contains("body cleanup failed")
         ?_: assert false
     assert log.get() == "CO"
 

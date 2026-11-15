@@ -19,7 +19,7 @@ import memoize1 from std.memoize
 fn must[T](r: T!) -> T:
     match r:
         ?v: return v
-        !e: panic(e.message())
+        !e: panic(e.error())
 
 struct P:
     n: int
@@ -196,7 +196,7 @@ fn _child_memo[K: Hashable + Eq](m: fn(K) -> str, keys: List[K], ch: Channel[str
     r := recover: _call_all(m, keys)
     match r:
         ?v: ch.send(v)
-        !e: ch.send(e.message())
+        !e: ch.send(e.error())
 
 fn _call_all[K: Hashable + Eq](m: fn(K) -> str, keys: List[K]) -> str:
     s := ""

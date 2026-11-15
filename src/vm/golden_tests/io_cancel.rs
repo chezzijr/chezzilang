@@ -340,7 +340,7 @@ fn writer_use_after_close_clean_err() {
     let t = TmpDir::new();
     let f = t.0.join("x.txt");
     let src = format!(
-        "import create from std.io\nfn main():\n    w := create(\"{f}\")?\n    w.close()?\n    match w.write(\"z\"):\n        ?n: print(\"wrote \" + \"{{n}}\")\n        !e: print(\"ERR:\" + e.message())\nmain()\n",
+        "import create from std.io\nfn main():\n    w := create(\"{f}\")?\n    w.close()?\n    match w.write(\"z\"):\n        ?n: print(\"wrote \" + \"{{n}}\")\n        !e: print(\"ERR:\" + e.error())\nmain()\n",
         f = f.display()
     );
     let entry = t.write("main.chz", &src);
@@ -575,7 +575,7 @@ fn reader_use_after_close_clean_err() {
     let f = t.0.join("x.txt");
     std::fs::write(&f, "data").unwrap();
     let src = format!(
-        "import open from std.io\nfn main():\n    r := open(\"{f}\")?\n    r.close()?\n    match r.read_bytes(4):\n        ?b: print(\"got \" + \"{{b.len()}}\")\n        !e: print(\"ERR:\" + e.message())\nmain()\n",
+        "import open from std.io\nfn main():\n    r := open(\"{f}\")?\n    r.close()?\n    match r.read_bytes(4):\n        ?b: print(\"got \" + \"{{b.len()}}\")\n        !e: print(\"ERR:\" + e.error())\nmain()\n",
         f = f.display()
     );
     let entry = t.write("main.chz", &src);
@@ -596,7 +596,7 @@ fn reader_open_missing_file_clean_err() {
     let t = TmpDir::new();
     let f = t.0.join("no_such_dir").join("x.txt");
     let src = format!(
-        "import open from std.io\nfn main():\n    match open(\"{f}\"):\n        ?r: print(\"opened\")\n        !e: print(\"ERR:\" + e.message())\nmain()\n",
+        "import open from std.io\nfn main():\n    match open(\"{f}\"):\n        ?r: print(\"opened\")\n        !e: print(\"ERR:\" + e.error())\nmain()\n",
         f = f.display()
     );
     let entry = t.write("main.chz", &src);
@@ -1027,7 +1027,7 @@ fn run() -> int!:
         _ := x * 2
     match r:
         ?v: return ?v
-        !e: print(e.message())
+        !e: print(e.error())
     return ?0
 fn main():
     _ := run()

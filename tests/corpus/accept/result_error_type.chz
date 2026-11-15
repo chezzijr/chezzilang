@@ -1,7 +1,7 @@
 # rule: type
 struct DbErr:
     code: int
-    fn message(self) -> str:
+    fn error(self) -> str:
         return "db {self.code}"
 fn q() -> int!DbErr:
     return !DbErr(1)

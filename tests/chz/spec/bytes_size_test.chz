@@ -6,7 +6,7 @@ fn fault(op: fn() -> int) -> str:
     r := recover: op()
     match r:
         ?n: return "ok {n}"
-        !e: return e.message()
+        !e: return e.error()
 
 test fn bytes_of_a_size_is_that_many_zero_bytes():
     assert bytes.zeroed(2) == b"\x00\x00"

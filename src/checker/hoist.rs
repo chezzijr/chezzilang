@@ -870,6 +870,113 @@ impl Checker {
             self.discharge_obligation(ob);
             self.type_params = saved;
         }
+        // Every method sig is final and every conformance question discharged: the member rule.
+        for s in stmts {
+            self.check_default_members(s);
+        }
+    }
+
+    /// The member rule (Rust: a trait's provided method): a struct or enum that satisfies a std
+    /// protocol cannot hold a member named after one of that protocol's `native fn` defaults
+    /// ([`ProtocolInfo::defaults`], `Error.origin`) unless it is a method with the default's
+    /// signature, which then wins. A field of the name, or a method of another signature, is a type
+    /// error: the runtime's method table puts the field or the method in the default's slot
+    /// (`MethodTable::build`), so a call through the protocol, typed by the default, would get it.
+    fn check_default_members(&mut self, s: &Stmt) {
+        let (name, fields, methods, ty, is_struct) = match &s.kind {
+            StmtKind::Struct {
+                name,
+                fields,
+                methods,
+                ..
+            } => (name, &fields[..], methods, self.struct_self_ty(name), true),
+            StmtKind::Enum { name, methods, .. } => {
+                (name, &[][..], methods, self.enum_self_ty(name), false)
+            }
+            StmtKind::Let { .. }
+            | StmtKind::Assign { .. }
+            | StmtKind::Fn(_)
+            | StmtKind::Protocol { .. }
+            | StmtKind::TypeAlias { .. }
+            | StmtKind::If { .. }
+            | StmtKind::For { .. }
+            | StmtKind::While { .. }
+            | StmtKind::Match { .. }
+            | StmtKind::Return(_)
+            | StmtKind::Yield(_)
+            | StmtKind::Defer(_)
+            | StmtKind::Parallel { .. }
+            | StmtKind::Spawn(_)
+            | StmtKind::Wait { .. }
+            | StmtKind::Break
+            | StmtKind::Continue
+            | StmtKind::Pass
+            | StmtKind::Import(_)
+            | StmtKind::Extern { .. }
+            | StmtKind::Native(_)
+            | StmtKind::NativeStruct { .. }
+            | StmtKind::NativeEnum { .. }
+            | StmtKind::NativeType { .. }
+            | StmtKind::Assert { .. }
+            | StmtKind::Expr(_) => return,
+        };
+        let mut protocols: Vec<String> = self
+            .protocols
+            .iter()
+            .filter(|(_, p)| !p.defaults.is_empty())
+            .map(|(n, _)| n.clone())
+            .collect();
+        protocols.sort();
+        for protocol in protocols {
+            if self.satisfies(&ty, &protocol).is_err() {
+                continue;
+            }
+            let defaults = self.protocols[&protocol].defaults.clone();
+            let shown = crate::base::words::bare_display(&protocol).to_string();
+            for (dname, dsig) in defaults.iter() {
+                let sig = {
+                    let map = HashMap::from([("Self".to_string(), ty.clone())]);
+                    let rest: Vec<String> = dsig
+                        .params
+                        .iter()
+                        .skip(1)
+                        .map(|p| format!(", {}", subst(p, &map)))
+                        .collect();
+                    format!(
+                        "fn {dname}(self{}) -> {}",
+                        rest.concat(),
+                        subst(&dsig.ret, &map)
+                    )
+                };
+                if let Some(f) = fields.iter().find(|f| f.name == *dname) {
+                    self.error(
+                        f.name_span,
+                        format!(
+                            "'{name}' satisfies {shown}, so it cannot have a field '{dname}': \
+                             every {shown} answers `{shown}.{dname}` (`{sig}`); rename the field"
+                        ),
+                    );
+                }
+                let Some(m) = methods.iter().find(|m| m.name == *dname) else {
+                    continue;
+                };
+                let key = self.bare_key(name);
+                let declared = if is_struct {
+                    self.structs.get(&key).and_then(|i| i.methods.get(dname))
+                } else {
+                    self.enum_methods.get(&key).and_then(|ms| ms.get(dname))
+                };
+                if declared.is_some_and(|actual| !self.method_matches(dsig, actual, &ty)) {
+                    self.error(
+                        m.name_span,
+                        format!(
+                            "'{name}' satisfies {shown}, so its method '{dname}' must be \
+                             `{shown}.{dname}`: `{sig}`"
+                        ),
+                    );
+                }
+            }
+        }
     }
 
     /// Register one `native fn`/`native ctor` decl's signature into [`Checker::native_prelude_sigs`]

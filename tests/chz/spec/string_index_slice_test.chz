@@ -28,7 +28,7 @@ test fn index_out_of_bounds_faults():
     r := recover: "abc"[5]
     match r:
         ?_: assert false, "expected a fault"
-        !e: assert e.message() == "index 5 out of bounds (len 3)"
+        !e: assert e.error() == "index 5 out of bounds (len 3)"
 
 test fn str_methods_count_codepoints_not_bytes():
     assert "héllo".len() == 5

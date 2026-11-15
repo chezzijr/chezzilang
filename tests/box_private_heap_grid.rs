@@ -240,7 +240,7 @@ fn a_deadlock_inside_a_box_closure_is_judged_as_on_the_caller() {
 /// the payload must render with the cycle marker and exit 1; on the base binary it hung.
 #[test]
 fn a_fault_message_renders_a_box_cycle_and_terminates() {
-    let decl = "import Shared from std.concurrency\nstruct N:\n    id: int\n    box: Shared[N?]\n    fn message(self) -> str:\n        return \"m\"\nfn f(n: N) -> int!N:\n    return !n\nb: Shared[N?] = Shared(None)\nn := N(1, b)\n";
+    let decl = "import Shared from std.concurrency\nstruct N:\n    id: int\n    box: Shared[N?]\n    fn error(self) -> str:\n        return \"m\"\nfn f(n: N) -> int!N:\n    return !n\nb: Shared[N?] = Shared(None)\nn := N(1, b)\n";
     let cyc = write_program(
         "cycle",
         &format!("{decl}b.set(?n)\nprint(\"stored\")\nx := f(n)?\nprint(\"unreachable\")\n"),

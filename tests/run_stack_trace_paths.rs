@@ -203,7 +203,7 @@ fn std_native_fault_in_a_nursery_fiber_names_the_users_call() {
 }
 
 /// TICKET-148 (owner requirement 1) — the same native fault on the MAIN thread: the uncaught
-/// headline and the caught `e.file()`/`line()`/`col()` name the same user coordinate, and the
+/// headline and the caught `e.origin()` name the same user coordinate, and the
 /// trace keeps its frames.
 #[test]
 fn std_native_fault_on_main_headline_and_caught_origin_agree() {
@@ -232,10 +232,14 @@ fn std_native_fault_on_main_headline_and_caught_origin_agree() {
     t.write(
         "caught.chz",
         &format!(
-            "{head}r := recover: concurrency.Executor(0)\nmatch r:\n    ?_: print(\"no fault\")\n    !e: print(\"{{e.file()}} {{e.line()}} {{e.col()}}\")\n"
+            "{head}r := recover: concurrency.Executor(0)\nmatch r:\n    ?_: print(\"no fault\")\n    !e: print(e.origin())\n"
         ),
     );
     let (stdout, stderr, ok) = run(&t.0, &["run", "caught.chz"]);
     assert!(ok, "the recovered program must succeed, got:\n{stderr}");
-    assert_eq!(stdout.trim(), "caught.chz 2 15", "caught origin");
+    assert_eq!(
+        stdout.trim(),
+        "Location(line=2, col=15, file='caught.chz')",
+        "caught origin"
+    );
 }

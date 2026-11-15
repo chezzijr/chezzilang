@@ -940,7 +940,7 @@ fn t187_cells() -> Vec<Cell> {
 
 /// TICKET-300 (P4-1): `import a.b` binds the module path `a.b`; a binder named `a` hides it, so
 /// `a.b.K` reads the binder's field chain (Go `fmt := 1; fmt.Println` fails: the local wins).
-const FULL_HEAD: &str = "import a.b\nstruct B:\n    K: int\nstruct A:\n    b: B\n    fn message(self) -> str:\n        return \"e\"\n";
+const FULL_HEAD: &str = "import a.b\nstruct B:\n    K: int\nstruct A:\n    b: B\n    fn error(self) -> str:\n        return \"e\"\n";
 
 /// A program that binds `a` with `binder` and reads `a.b.K`; `V` is `A(b=B(K=9))`.
 fn full_path_body(b: Binder) -> &'static str {

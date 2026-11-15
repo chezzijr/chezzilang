@@ -26,7 +26,7 @@ test fn captured_scalar_write_inside_spawn_lands():
                 write_n()
             match res:
                 ?_: r.send("no-fault")
-                !e: r.send(e.message())
+                !e: r.send(e.error())
     got := r.recv() else: panic("r closed")
     assert got == "no-fault", got
     assert n == 5
@@ -41,7 +41,7 @@ test fn captured_list_push_inside_spawn_lands():
                 write_xs(xs)
             match res:
                 ?_: r.send("no-fault")
-                !e: r.send(e.message())
+                !e: r.send(e.error())
     got := r.recv() else: panic("r closed")
     assert got == "no-fault", got
     assert xs == [1, 2]
@@ -65,7 +65,7 @@ test fn struct_method_write_on_a_spawned_struct_lands():
                 write_c(c)
             match res:
                 ?_: r.send("no-fault")
-                !e: r.send(e.message())
+                !e: r.send(e.error())
     got := r.recv() else: panic("r closed")
     assert got == "no-fault", got
     assert c.n == 2
@@ -84,7 +84,7 @@ test fn module_global_slot_store_in_a_task_lands():
                 write_r3()
             match res:
                 ?_: r.send("no-fault")
-                !e: r.send(e.message())
+                !e: r.send(e.error())
     got := r.recv() else: panic("r closed")
     assert got == "no-fault", got
     assert r3_n == 5, "the task's write is lost: {r3_n}"
@@ -103,7 +103,7 @@ test fn module_global_list_push_in_a_task_lands():
                 write_r4()
             match res:
                 ?_: r.send("no-fault")
-                !e: r.send(e.message())
+                !e: r.send(e.error())
     got := r.recv() else: panic("r closed")
     assert got == "no-fault", got
     assert r4_xs == [1, 2], "the task's push is lost: {r4_xs}"
@@ -122,7 +122,7 @@ test fn a_top_level_binding_written_in_spawn_lands():
                 write_r1()
             match res:
                 ?_: r.send("no-fault")
-                !e: r.send(e.message())
+                !e: r.send(e.error())
     got := r.recv() else: panic("r closed")
     assert got == "no-fault", got
     assert r1_g == 5, "the task's write is lost: {r1_g}"
@@ -137,7 +137,7 @@ test fn a_captured_closure_that_pushes_lands():
                 d4_invoke(f)
             match res:
                 ?_: r.send("no-fault")
-                !e: r.send(e.message())
+                !e: r.send(e.error())
     got := r.recv() else: panic("r closed")
     assert got == "no-fault", got
     assert xs == [1, 2]
@@ -155,7 +155,7 @@ test fn a_channel_sent_closure_pushing_a_captured_alias_lands():
             inner.push(2)
         match res:
             ?_: return "no-fault"
-            !e: return e.message()
+            !e: return e.error()
     parallel:
         spawn:
             f := c.recv() else: panic("c closed")
@@ -175,7 +175,7 @@ test fn a_nested_element_push_lands():
                 write_element(xs[0])
             match res:
                 ?_: r.send("no-fault")
-                !e: r.send(e.message())
+                !e: r.send(e.error())
     got := r.recv() else: panic("r closed")
     assert got == "no-fault", got
     assert xs == [[1, 2]]
@@ -231,7 +231,7 @@ fn push_arg(ys: List[int], r: Channel[str]):
         ys.push(9)
     match res:
         ?_: r.send("no-fault")
-        !e: r.send(e.message())
+        !e: r.send(e.error())
 
 test fn a_spawn_arg_written_by_the_callee_lands():
     xs := [1]
@@ -258,7 +258,7 @@ test fn a_nested_struct_method_write_lands():
                 write_holder(h)
             match res:
                 ?_: r.send("no-fault")
-                !e: r.send(e.message())
+                !e: r.send(e.error())
     got := r.recv() else: panic("r closed")
     assert got == "no-fault", got
     assert h.c.n == 2
@@ -268,7 +268,7 @@ fn executor_job(xs: List[int], r: Channel[str]):
         xs.push(2)
     match res:
         ?_: r.send("no-fault")
-        !e: r.send(e.message())
+        !e: r.send(e.error())
 
 test fn an_executor_job_writing_a_capture_lands():
     xs := [1]
@@ -292,7 +292,7 @@ test fn a_nested_nursery_inner_task_write_to_a_parent_task_object_lands():
                         write_ys(ys)
                     match res:
                         ?_: r.send("no-fault")
-                        !e: r.send(e.message())
+                        !e: r.send(e.error())
             r.send("{ys}")
     got := r.recv() else: panic("r closed")
     assert got == "no-fault", got
@@ -312,7 +312,7 @@ test fn a_handle_holding_global_list_push_in_a_task_lands():
                 write_hl()
             match res:
                 ?_: r.send("no-fault")
-                !e: r.send(e.message())
+                !e: r.send(e.error())
     got := r.recv() else: panic("r closed")
     assert got == "no-fault", got
     assert r_hl.len() == 2, "the task's push is lost: {r_hl.len()}"
@@ -335,7 +335,7 @@ test fn a_handle_holding_global_struct_field_write_in_a_task_lands():
                 write_hs()
             match res:
                 ?_: r.send("no-fault")
-                !e: r.send(e.message())
+                !e: r.send(e.error())
     got := r.recv() else: panic("r closed")
     assert got == "no-fault", got
     assert r_hs.n == 2, "the task's write is lost: {r_hs.n}"
@@ -357,12 +357,12 @@ test fn a_closure_visited_first_in_one_channel_send_shares_the_capture():
                 p.0()
             match res1:
                 ?_: r1.send("no-fault")
-                !e: r1.send(e.message())
+                !e: r1.send(e.error())
             res2 := recover:
                 p.1.push(3)
             match res2:
                 ?_: r2.send("no-fault")
-                !e: r2.send(e.message())
+                !e: r2.send(e.error())
     got1 := r1.recv() else: panic("r1 closed")
     got2 := r2.recv() else: panic("r2 closed")
     assert got1 == "no-fault", got1

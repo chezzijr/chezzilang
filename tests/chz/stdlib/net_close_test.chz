@@ -8,7 +8,7 @@ import std.net
 fn err_text[T](r: T!) -> str:
     match r:
         ?_: return "returned Ok"
-        !e: return e.message()
+        !e: return e.error()
 
 fn accept_racing_close(timeout_ms: int) -> str!:
     ln := net.listen("127.0.0.1:0")?

@@ -7,7 +7,7 @@
 fn msg_of(r: str!Error) -> str:
     match r:
         ?_: return "no fault"
-        !e: return e.message()
+        !e: return e.error()
     return ""
 
 test fn nested_width_matches_cpython():

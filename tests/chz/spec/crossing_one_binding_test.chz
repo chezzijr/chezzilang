@@ -153,7 +153,7 @@ test fn channel_send_to_a_different_task_shares_the_binding():
                 d.inc()
             match res:
                 ?_: done.send("no-fault")
-                !e: done.send(e.message())
+                !e: done.send(e.error())
         ch.send(c)
     msg := done.recv() else: panic("done closed")
     assert msg == "no-fault", msg
@@ -169,7 +169,7 @@ test fn spawn_named_args_keep_one_binding():
             i()
         match res:
             ?_: out.send("no-fault")
-            !e: out.send(e.message())
+            !e: out.send(e.error())
     parallel:
         spawn work(c.inc, c.get, r)
     got := r.recv() else: panic("r closed")
@@ -188,7 +188,7 @@ test fn spawn_block_two_captures_keeps_one_binding():
                 gi()
             match res:
                 ?_: r.send("no-fault")
-                !e: r.send(e.message())
+                !e: r.send(e.error())
     got := r.recv() else: panic("r closed")
     assert got == "no-fault", got
     assert gg() == 1
@@ -205,7 +205,7 @@ test fn module_global_snapshot_keeps_one_binding():
                 _w74i()
             match res:
                 ?_: r.send("no-fault")
-                !e: r.send(e.message())
+                !e: r.send(e.error())
             seen.send(_w74g())
     got := r.recv() else: panic("r closed")
     assert got == "no-fault", got
@@ -247,7 +247,7 @@ test fn separate_tasks_share_the_parents_binding():
                 c.inc()
             match res:
                 ?_: r.send("no-fault")
-                !e: r.send(e.message())
+                !e: r.send(e.error())
     parallel:
         spawn:
             r2.send(c.get())
@@ -269,7 +269,7 @@ test fn module_global_plus_local_capture_shares_its_binding():
                 _w74i()
             match res:
                 ?_: r.send("no-fault")
-                !e: r.send(e.message())
+                !e: r.send(e.error())
             r.send("{gg()}")
     got := r.recv() else: panic("r closed")
     assert got == "no-fault", got
@@ -326,7 +326,7 @@ test fn data_dag_alias_across_spawn_args_lands():
             a.push(2)
         match res:
             ?_: out.send("no-fault")
-            !e: out.send(e.message())
+            !e: out.send(e.error())
     parallel:
         spawn work(xs, xs, r)
     got := r.recv() else: panic("r closed")
@@ -385,4 +385,4 @@ test fn spawn_passes_a_deep_arg_and_a_cyclic_capture_by_handle():
             spawn callee(d)
     match r:
         ?_: pass
-        !e: assert false, e.message()
+        !e: assert false, e.error()

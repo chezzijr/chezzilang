@@ -1100,7 +1100,7 @@ impl Vm {
         // boundary's `done` label receives a ready `Result`.
         let sp = rte.span;
         let msg = self.alloc_str(rte.message);
-        // W8-22 — stamp the fault's origin on the message handle so `e.line()` etc.
+        // W8-22 — stamp the fault's origin on the message handle so `e.origin()`
         // can read it back later. `msg` is always a fresh `Obj::Str`
         // (`alloc_str` allocates one per call), so this can never alias an
         // unrelated string's span. A stdlib-raised span is not stamped

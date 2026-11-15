@@ -1875,7 +1875,7 @@ fn receiver_write_table_matches_observed_behavior() {
                 "upper()",
                 "lower()",
                 "trim()",
-                "message()",
+                "error()",
                 r#"split(",")"#,
                 "chars()",
                 r#"join(["x", "y"])"#,

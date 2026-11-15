@@ -9,7 +9,7 @@ import memoize1 from std.memoize
 fn must[T](r: T!) -> T:
     match r:
         ?v: return v
-        !e: panic(e.message())
+        !e: panic(e.error())
 
 fn t190_gen() -> Iterator[int]:
     acc: List[int] = []
@@ -26,7 +26,7 @@ fn t190_drain(g: Iterator[int]) -> str:
         res_v = total
     match res:
         ?_: return "{res_v}"
-        !e: return e.message()
+        !e: return e.error()
 
 test fn started_generator_drained_in_executor_job_runs():
     g := t190_gen()
@@ -172,7 +172,7 @@ fn t190_route(route: str, g: Iterator[int]) -> str:
             spawn:
                 match t.get():
                     ?x: out.send(t190_cell(x))
-                    !e: out.send("err: {e.message()}")
+                    !e: out.send("err: {e.error()}")
     elif route == "memoize":
         m := memoize1(fn(k: int) -> Iterator[int]: g)
         parallel:
@@ -390,7 +390,7 @@ test fn task_get_copy_of_frame_local_generator_runs():
         spawn:
             match t.get():
                 ?g: out.send(t190_cell(g))
-                !e: out.send("err: {e.message()}")
+                !e: out.send("err: {e.error()}")
     assert out.recv() == ?"2"
 
 # TICKET-220: a copy's memoize1 cache HIT (a key another task filled) runs the frame-local
@@ -429,7 +429,7 @@ test fn a_second_task_next_on_a_running_shared_generator_faults():
                 _ := g.next()
             match res:
                 ?_: out.send("b ok")
-                !e: out.send("b {e.message()}")
+                !e: out.send("b {e.error()}")
             gate.send(1)
     a := out.recv() else: panic("out closed")
     b := out.recv() else: panic("out closed")

@@ -24,14 +24,14 @@ fn some(o: (fn() -> None)?) -> fn() -> None:
 fn ok(o: (fn() -> None)!) -> fn() -> None:
     match o:
         ?v: return v
-        !e: panic(e.message())
+        !e: panic(e.error())
 
 # The fault message of `g()`, or "no-fault".
 fn outcome(g: fn() -> None) -> str:
     res := recover: g()
     match res:
         ?_: return "no-fault"
-        !e: return e.message()
+        !e: return e.error()
 
 # Store `f` behind `name` and return the reader that takes it back out.
 fn route(name: str, f: fn() -> None) -> fn() -> fn() -> None:

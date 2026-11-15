@@ -75,19 +75,22 @@ fn main():
 ```
 
 **The `Error` type (Go-style).** `E` defaults to the built-in `Error` protocol, with one method
-`message(self) -> str`. `str` conforms (its message is itself), so `!"…"` works everywhere. For a
-structured error, define a struct with `message` and name it in `T!E`:
+`error(self) -> str` (Go's `Error() string`). `str` conforms (its `error()` is itself), so `!"…"`
+works everywhere. For a structured error, define a struct with `error()` and name it in `T!E`:
 
 ```chezzi
 protocol Error:                 # built-in; shown for reference
-    fn message(self) -> str
-    native fn line(self) -> int?  # runtime-answered defaults, not requirements
-    native fn col(self) -> int?
-    native fn file(self) -> str?
+    fn error(self) -> str
+    native fn origin(self) -> Location?  # a runtime-answered default, not a requirement
+
+struct Location:                # built-in; what `origin()` gives
+    line: int
+    col: int
+    file: str
 
 struct DbErr:
     code: int
-    fn message(self) -> str:
+    fn error(self) -> str:
         return "db error {self.code}"
 
 fn query() -> Row!DbErr:        # Row!DbErr
@@ -95,10 +98,11 @@ fn query() -> Row!DbErr:        # Row!DbErr
 
 match query():
     ?row: use(row)
-    !e:  print(e.message())   # message() is declared by DbErr itself
-         print(e.line())      # the line of `return !DbErr(503)` (see below)
-# `line()` / `col()` / `file()` are `Error`'s `native fn` defaults: every type that satisfies `Error`
-# has them, `DbErr` and `Error` alike, unless the type declares its own method of the name.
+    !e:  print(e.error())   # error() is declared by DbErr itself
+         print(e.origin())    # Location(line=…, col=…, file=…) of `return !DbErr(503)` (see below)
+# `origin()` is `Error`'s `native fn` default: every type that satisfies `Error` has it, `DbErr` and
+# `Error` alike. DbErr may keep its own `line`/`col` fields; it may not declare a member `origin`
+# other than `fn origin(self) -> Location?`.
 ```
 
 **`?` must match the enclosing function's return kind.** A `T!E`-`?` needs a `T!E`-returning fn (its
@@ -210,7 +214,7 @@ r := recover:
     total = rows[0] / rows[1] # OOB / divide-by-zero is caught here
 match r:
     ?_:  print(total)      # success: the block ran to its end
-    !e: print("recovered: {e.message()}")   # a fault becomes !message
+    !e: print("recovered: {e.error()}")   # a fault becomes !message
 ```
 
 **The inline form** `recover: expr` is an expression of type `T!`, legal in every expression position:
@@ -235,7 +239,7 @@ fn run() -> str:                       # not a `T!E`-returning function
         n = parse_int(input)? * 2      # an error here lands in `r`, not propagated out of run()
     match r:
         ?_:  return "got {n}"
-        !e: return "failed: {e.message()}"
+        !e: return "failed: {e.error()}"
 ```
 
 `return`/`break`/`continue` that would leave a `recover:` are rejected (`'break' is not allowed
@@ -244,7 +248,7 @@ inside a recover block: a recover block produces a value and cannot leave to the
 `T!E`/`?` for expected failures.
 
 **`panic(msg: str)` raises the same recoverable fault from your code.** It unwinds and returns no value
-(it is not `return !e`). The nearest `recover:` catches it as `!e` with `e.message() == msg`;
+(it is not `return !e`). The nearest `recover:` catches it as `!e` with `e.error() == msg`;
 uncaught, it ends the program with that message and a non-zero exit code. `defer`s run during the
 unwind; if a `defer` panics during the unwind, the newer panic replaces the old one. `panic` is
 bottom-typed: it fits any position (a statement, the tail of a branch with no `return`, or
@@ -255,24 +259,36 @@ r := recover:
     panic("boom")                 # raised here, caught at the boundary
 match r:
     ?_:  print("ok")
-    !e: print("recovered: {e.message()}")   # → recovered: boom
+    !e: print("recovered: {e.error()}")   # → recovered: boom
 ```
 
-**An error carries its origin:** `e.line() -> int?`, `e.col() -> int?`, `e.file() -> str?`. For a
-fault caught by `recover:` it is the coordinate an uncaught fault prints
-(`runtime error (file:line:col): message`). For a value it is where `!x` first made it an error
-(Python's rule: the traceback starts at the `raise`). They are `native fn` lines of
-`protocol Error` (`std/prelude.chz`): not requirements, so a type with only `message()` still
-satisfies `Error`, and a type that declares its own `line()` answers with it.
+**An error carries its origin:** `e.origin() -> Location?`, with `Location(line, col, file)` (Rust's
+`panic::Location`, Python's `__traceback__`). For a fault caught by `recover:` it is the coordinate an
+uncaught fault prints (`runtime error (file:line:col): message`). For a value it is where `!x` first
+made it an error (Python's rule: the traceback starts at the `raise`). It is a `native fn` line of
+`protocol Error` (`std/prelude.chz`): not a requirement, so a type with only `error()` still
+satisfies `Error`.
+
+```chezzi
+match e.origin():
+    ?o:   print("{o.file}:{o.line}:{o.col}")
+    None: print("no origin")
+```
+
+- **The member rule** (Rust's trait default methods): a type that satisfies `Error` may declare
+  `fn origin(self) -> Location?`, and then it answers with it. Any other member named `origin` is a
+  type error at the declaration: a field (`origin: str`), or a method of another signature
+  (`fn origin(self) -> str`). A type that does not satisfy `Error` has no rule. Fields named `line`,
+  `col` or `file` are the type's own.
 
 - The first stamp wins: a `?`, a later `!e` of the same value and a `recover:` keep it. A value
   made once and raised from two places names the first.
 - A value never made an error (`MyErr(1)` held as an `Error`), and an `int`/`float`/`bool` payload,
-  have `None` for all three.
+  have `None`.
 - A `!x` inside the stdlib names no origin (`None`), so your own `!e` of a std error is its origin.
-- `panic(e.message())` re-raises at `e`'s origin, not at the `panic` line, when `e` is a `str`
-  error or a fault caught by `recover:`. A struct error's `message()` builds a new `str`, so that
-  `panic` names its own line (`e.line()` still gives the struct's origin).
+- `panic(e.error())` re-raises at `e`'s origin, not at the `panic` line, when `e` is a `str`
+  error or a fault caught by `recover:`. A struct error's `error()` builds a new `str`, so that
+  `panic` names its own line (`e.origin()` still gives the struct's origin).
 - A fault raised inside a stdlib function (for example `submit` on a shut-down `Executor`) is located
   at your call into the stdlib (Rust's `#[track_caller]`), caught or uncaught; the trace keeps its
   frames. A stdlib `panic(...)` stays unstamped (`None`).

@@ -28,7 +28,7 @@ closedch.close()  # Go: close(closedch)
 fn expect_fault(r: !, what: str):
     match r:
         ?_: assert false, "{what}: expected a fault"
-        !e: assert "send on a closed channel" in e.message(), "{what}: got {e.message()}"
+        !e: assert "send on a closed channel" in e.error(), "{what}: got {e.error()}"
 
 # sending/receiving from a nil channel inside a select is never selected
 test fn nil_select_with_default():
@@ -53,7 +53,7 @@ test fn recv_on_closed_never_blocks():
     for _ in 0..10:  # Go: for i := 0; i < 10; i++ {
         match closedch.recv():  # Go: if <-closedch != 0 / x, ok := <-closedch; x != 0 || ok
             ?x: assert false, "expected an error when reading from closed channel, got {x}"
-            !e: assert e.message() == "receiving on a closed channel"
+            !e: assert e.error() == "receiving on a closed channel"
 
 # sending to a closed channel panics.
 test fn send_on_closed_panics():

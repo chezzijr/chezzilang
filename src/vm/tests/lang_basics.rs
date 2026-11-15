@@ -465,7 +465,7 @@ fn inline_panic_body_faults() {
     assert_eq!(out, "start\n");
     assert_eq!(res.unwrap_err().message, "x");
     // A `recover:` around the call catches it as `Err("x")` — recoverable.
-    let rec = "fn boom(): panic(\"x\")\nfn main():\n    r := recover:\n        boom()\n        0\n    match r:\n        ?v: print(\"ok {v}\")\n        !e: print(\"caught {e.message()}\")\nmain()\n";
+    let rec = "fn boom(): panic(\"x\")\nfn main():\n    r := recover:\n        boom()\n        0\n    match r:\n        ?v: print(\"ok {v}\")\n        !e: print(\"caught {e.error()}\")\nmain()\n";
     assert_eq!(run_capture(rec).unwrap(), "caught x\n");
 }
 
@@ -1253,7 +1253,7 @@ fn consteval_matches_vm_arith() {
     let mut src = String::new();
     for (i, (_, sym)) in ops.iter().enumerate() {
         src += &format!(
-            "fn t{i}(a: int, b: int):\n    r := recover: a {sym} b\n    match r:\n        ?v: print(\"{{v}}\")\n        !e: print(\"F \" + e.message())\n"
+            "fn t{i}(a: int, b: int):\n    r := recover: a {sym} b\n    match r:\n        ?v: print(\"{{v}}\")\n        !e: print(\"F \" + e.error())\n"
         );
     }
     let mut want = Vec::new();
@@ -1574,7 +1574,7 @@ fn int_fault_one_message_per_op_at_every_site() {
             for line in body.split("; ") {
                 defs += &format!("        {line}\n");
             }
-            defs += "    match r:\n        ?v: print(\"{v}\")\n        !e: print(e.message())\n";
+            defs += "    match r:\n        ?v: print(\"{v}\")\n        !e: print(e.error())\n";
             calls += &format!("c{i}({a}, {b})\n");
             want.push((g.clone(), body));
         }

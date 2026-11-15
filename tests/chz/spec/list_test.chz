@@ -154,7 +154,7 @@ test fn sort_rejects_mutation_from_an_enum_compare():
     r := recover: w104_es.sort()
     match r:
         ?_: assert false, "enum sort with a mutating compare did not fault"
-        !e: assert e.message().contains("list modified during 'sort'"), e.message()
+        !e: assert e.error().contains("list modified during 'sort'"), e.error()
 
 # ---- unique / dedup ----
 
@@ -470,13 +470,13 @@ test fn sort_by_rejects_an_element_write_during_sort():
     r := recover: xs.sort_by(cmp)
     match r:
         ?_: assert false, "element write during sort_by did not fault"
-        !e: assert e.message().contains("list modified during 'sort_by'"), e.message()
+        !e: assert e.error().contains("list modified during 'sort_by'"), e.error()
 
 test fn sort_rejects_mutation_from_a_struct_compare():
     r := recover: w84_ns.sort()
     match r:
         ?_: assert false, "struct sort with a mutating compare did not fault"
-        !e: assert e.message().contains("list modified during 'sort'"), e.message()
+        !e: assert e.error().contains("list modified during 'sort'"), e.error()
 
 # `extend` mutates through a loop variable and a `const` binding; `+=` rebinds, so the checker rejects
 # it there (`checker::tests::list_plus_equals_rejected_*`).
@@ -527,4 +527,4 @@ test fn non_empty_list_repeat_contract_unchanged():
     r := recover: [1].repeat(100000000000)
     match r:
         ?_: assert false, "expected a capacity fault"
-        !e: assert e.message() == "list repeat capacity overflow"
+        !e: assert e.error() == "list repeat capacity overflow"

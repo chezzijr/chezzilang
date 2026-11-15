@@ -212,7 +212,7 @@ fn wr_recovered():
     r := recover: xs.push(9)
     match r:
         ?_: out.send(\"no fault\")
-        !e: out.send(e.message())
+        !e: out.send(e.error())
 fn parked():
     hs.send(1)
     _ := stuck.recv()
@@ -406,7 +406,7 @@ const HANDLE_DECLS: &str = "fn h(e: Executor):
     t := e.submit(bad_int)
     match t.get():
         ?_: print(\"ok\")
-        !x: print(\"err \" + x.message())
+        !x: print(\"err \" + x.error())
     hs.send(1)
 fn h_own():
     e := Executor()
@@ -790,7 +790,7 @@ fn the_grid_holds_inside_a_test_fn() {
                 "t := ex.submit(bad_int)",
                 "match t.get():",
                 "    ?_: assert false",
-                "    !e: assert e.message().contains(\"boom\")",
+                "    !e: assert e.error().contains(\"boom\")",
                 "$S(parked)",
                 "_ := hs.recv()",
                 "ex.cancel()",
@@ -1013,7 +1013,7 @@ fn at_cpu(started: Channel[int]) -> int:
 "#;
 
 const READ_TASK: &str =
-    "match t.get():\n    ?v: print(\"ok {v}\")\n    !e: print(\"err {e.message()}\")\n";
+    "match t.get():\n    ?v: print(\"ok {v}\")\n    !e: print(\"err {e.error()}\")\n";
 
 /// One grid cell: `form` x `outcome` x main `step`. Returns the program and the stdout lines
 /// (as a multiset: a sibling job prints on its own schedule).
@@ -1077,7 +1077,7 @@ fn submit_cell(form: &str, outcome: &str, step: &str) -> (String, Vec<String>) {
         "shutdown" => m += "ex.shutdown()\n",
         "recover" => {
             m += "r := recover: ex.shutdown()\n";
-            m += "match r:\n    ?_: print(\"clean\")\n    !e: print(\"caught {e.message()}\")\n";
+            m += "match r:\n    ?_: print(\"clean\")\n    !e: print(\"caught {e.error()}\")\n";
             want.push("clean".into());
         }
         "exit" => {}
@@ -1091,7 +1091,7 @@ fn submit_cell(form: &str, outcome: &str, step: &str) -> (String, Vec<String>) {
     if tcancel {
         want.push("sib ok 1".into());
         want.push("sib done".into());
-        m += "match s.get():\n    ?v: print(\"sib ok {v}\")\n    !e: print(\"sib err {e.message()}\")\n";
+        m += "match s.get():\n    ?v: print(\"sib ok {v}\")\n    !e: print(\"sib err {e.error()}\")\n";
     }
     if form == "kept" {
         m += READ_TASK;
@@ -1183,7 +1183,7 @@ fn a_refused_submit_is_a_settled_task() {
     print("inner {{t2.done()}}")
     match t2.get():
         ?v: print("inner ok {{v}}")
-        !e: print("inner !{{e.message()}}")
+        !e: print("inner !{{e.error()}}")
 fn maker(started: Channel[int], go: Channel[int]) -> int:
     inner := Executor(1)
     defer report(inner)
@@ -1199,7 +1199,7 @@ outer.cancel()
 outer.shutdown()
 match t.get():
     ?v: print("ok {{v}}")
-    !e: print("!{{e.message()}}")
+    !e: print("!{{e.error()}}")
 "#
     );
     let want: Vec<String> = vec![
@@ -1233,7 +1233,7 @@ ex.shutdown()
 print("after")
 match t.get():
     ?v: print("ok {{v}}")
-    !e: print("!{{e.message()}}")
+    !e: print("!{{e.error()}}")
 "#
     );
     let want: Vec<String> = vec!["after".into(), "!cleanup boom".into()];

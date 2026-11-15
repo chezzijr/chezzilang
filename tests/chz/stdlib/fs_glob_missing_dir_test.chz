@@ -11,7 +11,7 @@ import std.os
 test fn glob_on_missing_directory_is_ok_empty():
     match fs.glob("nope_dir_xyz_ticket046/*.c"):
         ?matches: assert matches == [], "expected no matches, got {matches}"
-        !e: assert false, "missing directory must not error: " + e.message()
+        !e: assert false, "missing directory must not error: " + e.error()
 
 test fn glob_malformed_pattern_still_errs():
     match fs.glob("[unterminated"):
@@ -28,18 +28,18 @@ test fn glob_whose_directory_component_is_a_file_is_ok_empty():
     f := os.temp_dir().str() + "/chz_t046_file_{os.getpid()}"
     match fs.atomic_write(f, "x"):
         ?_: pass
-        !e: assert false, "setup write failed: " + e.message()
+        !e: assert false, "setup write failed: " + e.error()
     defer drop_file(f)
     match fs.glob(f + "/*.c"):
         ?matches: assert matches == [], "expected no matches, got {matches}"
-        !e: assert false, "a file as the directory component must not error: " + e.message()
+        !e: assert false, "a file as the directory component must not error: " + e.error()
 
 test fn glob_with_a_wildcard_in_a_non_final_component_is_ok_empty():
     d := os.temp_dir().str() + "/chz_t046_dir_{os.getpid()}"
     match fs.mkdir(d):
         ?_: pass
-        !e: assert false, "setup mkdir failed: " + e.message()
+        !e: assert false, "setup mkdir failed: " + e.error()
     defer drop_dir(d)
     match fs.glob(d + "/*/a.c"):
         ?matches: assert matches == [], "expected no matches, got {matches}"
-        !e: assert false, "a wildcard in a non-final component must not error: " + e.message()
+        !e: assert false, "a wildcard in a non-final component must not error: " + e.error()

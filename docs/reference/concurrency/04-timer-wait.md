@@ -66,7 +66,7 @@ for _ in 0..2:
         r := c.recv():
             match r:
                 ?v: print("got", v)          # got 5 — the buffered value first
-                !e: print(e.message())       # receiving on a closed channel
+                !e: print(e.error())       # receiving on a closed channel
         _ := idle.recv(): print("idle")      # never: the closed arm above is ready
 ```
 

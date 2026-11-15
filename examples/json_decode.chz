@@ -29,18 +29,18 @@ match json.decode[User](src):
             ?n: print("nick=" + n)
             None: print("no nick")
     !e:
-        print("decode failed: " + e.message())
+        print("decode failed: " + e.error())
 
 # Decode straight into a typed map and a list.
 match json.decode[Map[str, int]]("{{\"a\":1,\"b\":2,\"c\":3}}"):
     ?m: print("map total={m["a"] + m["b"] + m["c"]}")
-    !e: print("err: " + e.message())
+    !e: print("err: " + e.error())
 
 match json.decode[List[float]]("[1.5, 2.5, 3.0]"):
     ?xs: print("list len={xs.len()}")
-    !e: print("err: " + e.message())
+    !e: print("err: " + e.error())
 
 # Type mismatches and missing keys come back as an error with a path.
 match json.decode[User]("{{\"name\":\"x\",\"age\":\"oops\"}}"):
     ?u: print(u.name)
-    !e: print("rejected: " + e.message())
+    !e: print("rejected: " + e.error())

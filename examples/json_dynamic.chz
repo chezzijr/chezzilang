@@ -25,16 +25,16 @@ match json.parse(src):
         print("{json.as_float(stars)?}")
         print("{json.is_null(json.get(json.get(doc, "meta")?, "home")?)}")
     !e:
-        print("parse failed: " + e.message())
+        print("parse failed: " + e.error())
 
 # Malformed syntax comes back as an error, never a crash. `parse` is recursive-descent, so nesting depth
 # in the input becomes call-stack depth in the program; past MAX_NEST_DEPTH (2000) it returns a
 # clean !"exceeded max depth" instead of aborting — see docs/reference/stdlib/ §std.json.
 match json.parse("[1, 2,]"):
     ?j: print(json.stringify(j))
-    !e: print("error: " + e.message())
+    !e: print("error: " + e.error())
 
 # Unicode escapes (incl. surrogate pairs) decode to real codepoints.
 match json.parse("\"sn\\u00f6 \\ud83d\\ude04\""):
     ?j: print(json.as_str(j)?)
-    !e: print("error: " + e.message())
+    !e: print("error: " + e.error())

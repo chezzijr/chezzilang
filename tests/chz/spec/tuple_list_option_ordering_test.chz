@@ -89,7 +89,7 @@ test fn sort_mutation_through_tuple_faults():
     r := recover: mut_xs.sort()
     match r:
         ?_: assert false, "tuple sort with a mutating compare did not fault"
-        !e: assert e.message().contains("modified during"), e.message()
+        !e: assert e.error().contains("modified during"), e.error()
 
 # CPython 3.14.7: sorted([(1, 0.0), (1, -0.0)]) -> [(1, 0.0), (1, -0.0)]
 #                 min([(0, 0.0), (0, -0.0)])    -> (0, 0.0)

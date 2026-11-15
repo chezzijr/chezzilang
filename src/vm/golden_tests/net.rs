@@ -6,7 +6,7 @@ use super::*;
 /// D6c — `conn.read(n, timeout_ms)` returns `Err("timeout")` when the peer accepts but never
 /// writes. The server accepts the connection and then sleeps past the client's read timeout; the
 /// client's `read(64, 100)` parks on the netpoller with a 100 ms deadline, the deadline fires
-/// before any data, and the rewound op returns `Err` with `e.message() == "timeout"`.
+/// before any data, and the rewound op returns `Err` with `e.error() == "timeout"`.
 #[test]
 fn read_timeout_returns_err() {
     let src = "\
@@ -24,7 +24,7 @@ fn client(addr: str):
     sock := net.connect(addr)?
     match sock.read(64, 100):
         ?s: print(\"GOT:\" + s)
-        !e: print(\"ERR:\" + e.message())
+        !e: print(\"ERR:\" + e.error())
     sock.close()
 
 fn run() -> int!:
@@ -38,7 +38,7 @@ fn run() -> int!:
 fn main():
     match run():
         ?_: print(\"\")
-        !e: print(\"RUN-ERR:\" + e.message())
+        !e: print(\"RUN-ERR:\" + e.error())
 
 main()
 ";
@@ -92,7 +92,7 @@ fn run() -> int!:
 fn main():
     match run():
         ?_: print(\"done\")
-        !e: print(\"net error: \" + e.message())
+        !e: print(\"net error: \" + e.error())
 
 main()
 ";
@@ -140,7 +140,7 @@ fn client() -> int!:
     while i < 3:
         match sock.read(64):
             ?s: print(\"GOT:[\" + s + \"]\")
-            !e: print(\"ERR:\" + e.message())
+            !e: print(\"ERR:\" + e.error())
         i = i + 1
     sock.close()
     return ?0
@@ -153,7 +153,7 @@ fn run() -> int!:
 fn main():
     match run():
         ?_: print(\"done\")
-        !e: print(\"net error: \" + e.message())
+        !e: print(\"net error: \" + e.error())
 
 main()
 "
@@ -204,7 +204,7 @@ fn client() -> int!:
     sock.close()
     match sock.read(0):
         ?s: print(\"OK:[\" + s + \"]\")
-        !e: print(\"ERR:\" + e.message())
+        !e: print(\"ERR:\" + e.error())
     return ?0
 
 fn run() -> int!:
@@ -215,7 +215,7 @@ fn run() -> int!:
 fn main():
     match run():
         ?_: print(\"done\")
-        !e: print(\"net error: \" + e.message())
+        !e: print(\"net error: \" + e.error())
 
 main()
 "
@@ -267,7 +267,7 @@ fn client() -> int!:
                     break
                 acc = acc + s
             !e:
-                m := e.message()
+                m := e.error()
                 if m != \"timeout\" and seen == 0:
                     print(\"ERR:\" + m)
                     seen = 1
@@ -283,7 +283,7 @@ fn run() -> int!:
 fn main():
     match run():
         ?_: print(\"done\")
-        !e: print(\"net error: \" + e.message())
+        !e: print(\"net error: \" + e.error())
 
 main()
 "
@@ -330,7 +330,7 @@ import std.net
 fn grab(s: net.Socket) -> str:
     match s.read(8, 200):
         ?v: return \"GOT:\" + v
-        !e: return \"ERR:\" + e.message()
+        !e: return \"ERR:\" + e.error()
 
 fn client() -> int!:
     sock := net.connect(\"{addr}\")?
@@ -347,7 +347,7 @@ fn run() -> int!:
 fn main():
     match run():
         ?_: print(\"done\")
-        !e: print(\"net error: \" + e.message())
+        !e: print(\"net error: \" + e.error())
 
 main()
 "
@@ -443,7 +443,7 @@ fn serve() -> int!:
 fn main():
     match serve():
         ?_: print(\"done\")
-        !e: print(\"ERR:\" + e.message())
+        !e: print(\"ERR:\" + e.error())
 
 main()
 "
@@ -481,7 +481,7 @@ fn serve() -> int!:
 fn main():
     match serve():
         ?_: print(\"done\")
-        !e: print(\"ERR:\" + e.message())
+        !e: print(\"ERR:\" + e.error())
 
 main()
 "
@@ -522,7 +522,7 @@ fn client() -> int!:
                     break
                 print(\"GOT:\" + s)
             !e:
-                print(\"ERR:\" + e.message())
+                print(\"ERR:\" + e.error())
                 break
     sock.close()
     return ?0
@@ -535,7 +535,7 @@ fn run() -> int!:
 fn main():
     match run():
         ?_: print(\"done\")
-        !e: print(\"net error: \" + e.message())
+        !e: print(\"net error: \" + e.error())
 
 main()
 "
@@ -593,7 +593,7 @@ fn run() -> int!:
 fn main():
     match run():
         ?_: print(\"done\")
-        !e: print(\"net error: \" + e.message())
+        !e: print(\"net error: \" + e.error())
 
 main()
 ";
@@ -644,8 +644,8 @@ fn drain(sock: net.Socket, seen: Shared[int], bad: Shared[int]) -> int!:
                 # codepoint — retained, the next read finishes it) are both benign poll-once retry
                 # signals. \"invalid utf-8\" is THE bug this test guards: valid text mis-decoded
                 # because two fibers took bytes out of wire order.
-                if e.message().starts_with(\"invalid utf-8\"):
-                    print(\"ERR:\" + e.message())
+                if e.error().starts_with(\"invalid utf-8\"):
+                    print(\"ERR:\" + e.error())
                     bad.update(fn(v: int) -> int: v + 1)
     return ?0
 
@@ -670,7 +670,7 @@ fn run() -> int!:
 fn main():
     match run():
         ?_: print(\"done\")
-        !e: print(\"net error: \" + e.message())
+        !e: print(\"net error: \" + e.error())
 
 main()
 ";
@@ -721,7 +721,7 @@ fn client() -> int!:
     sock := net.connect(\"{addr}\")?
     match sock.read(64, 400):
         ?s: print(\"GOT:\" + s)
-        !e: print(\"ERR:\" + e.message())
+        !e: print(\"ERR:\" + e.error())
     sock.close()
     return ?0
 
@@ -733,7 +733,7 @@ fn run() -> int!:
 fn main():
     match run():
         ?_: print(\"done\")
-        !e: print(\"net error: \" + e.message())
+        !e: print(\"net error: \" + e.error())
 
 main()
 "
@@ -779,7 +779,7 @@ fn client(addr: str):
         match sock.write(payload, 300):
             ?n: total = total + n
             !e:
-                print(\"ERR:\" + e.message())
+                print(\"ERR:\" + e.error())
                 break
         i = i + 1
     sock.close()
@@ -795,7 +795,7 @@ fn run() -> int!:
 fn main():
     match run():
         ?_: print(\"done\")
-        !e: print(\"net error:\" + e.message())
+        !e: print(\"net error:\" + e.error())
 
 main()
 ";
@@ -838,10 +838,10 @@ fn client() -> int!:
     sock := net.connect(\"{addr}\")?
     match sock.read(8, 200):
         ?s: print(\"A-OK:\" + s)
-        !e: print(\"A:\" + e.message())
+        !e: print(\"A:\" + e.error())
     match sock.read(8, 200):
         ?s: print(\"B-OK:\" + s)
-        !e: print(\"B:\" + e.message())
+        !e: print(\"B:\" + e.error())
     sock.close()
     return ?0
 
@@ -853,7 +853,7 @@ fn run() -> int!:
 fn main():
     match run():
         ?_: print(\"done\")
-        !e: print(\"net error:\" + e.message())
+        !e: print(\"net error:\" + e.error())
 
 main()
 "
@@ -885,7 +885,7 @@ import std.net
 fn server(listener: net.Listener):
     match listener.accept(100):
         ?_: print(\"ACCEPTED\")
-        !e: print(\"ERR:\" + e.message())
+        !e: print(\"ERR:\" + e.error())
     listener.close()
 
 fn run() -> int!:
@@ -897,7 +897,7 @@ fn run() -> int!:
 fn main():
     match run():
         ?_: print(\"done\")
-        !e: print(\"RUN-ERR:\" + e.message())
+        !e: print(\"RUN-ERR:\" + e.error())
 
 main()
 ";
@@ -935,7 +935,7 @@ fn client(addr: str):
     sock := net.connect(addr)?
     match sock.read(64):
         ?s: print(\"GOT:\" + s)
-        !e: print(\"ERR:\" + e.message())
+        !e: print(\"ERR:\" + e.error())
     sock.close()
 
 fn run() -> int!:
@@ -949,7 +949,7 @@ fn run() -> int!:
 fn main():
     match run():
         ?_: print(\"\")
-        !e: print(\"RUN-ERR:\" + e.message())
+        !e: print(\"RUN-ERR:\" + e.error())
 
 main()
 ";
@@ -1019,7 +1019,7 @@ fn run() -> int!:
 fn main():
     match run():
         ?_: print("joined ok")
-        !e: print("caught: " + e.message())
+        !e: print("caught: " + e.error())
 
 main()
 "#;
@@ -1063,7 +1063,7 @@ fn run() -> int!:
 fn main():
     match run():
         ?_: print("joined ok")
-        !e: print("caught: " + e.message())
+        !e: print("caught: " + e.error())
 
 main()
 "#;
@@ -1086,7 +1086,7 @@ main()
 /// A dead LOOPBACK port still reports `EINPROGRESS` (measured: `connect_ex(('127.0.0.1', <closed>))`
 /// → `115 EINPROGRESS`), so this really does reach the would-block gate rather than the synchronous
 /// arm — which is what makes it the pin for `W7-59`. The pre-`W7-59` version asserted only that the
-/// `Err` arm was taken and discarded `e.message()`, so it passed identically before and after the
+/// `Err` arm was taken and discarded `e.error()`, so it passed identically before and after the
 /// change and would not have noticed the engine losing its answer.
 ///
 /// The engine must report the kernel's refusal. `W7-59` narrowed the block-in-place gate to
@@ -1105,7 +1105,7 @@ fn net_connect_top_level_dead_port_errors_not_hangs() {
         l.local_addr().unwrap()
     };
     let src = format!(
-        "import std.net\nfn main():\n    match net.connect(\"{dead}\"):\n        ?_: print(\"connected\")\n        !e: print(\"ERR: {{e.message()}}\")\nmain()\n"
+        "import std.net\nfn main():\n    match net.connect(\"{dead}\"):\n        ?_: print(\"connected\")\n        !e: print(\"ERR: {{e.error()}}\")\nmain()\n"
     );
     let want = "connect failed: ";
     let (tx, rx) = std::sync::mpsc::channel();
@@ -1171,7 +1171,7 @@ fn run(n: int) -> int!:
 fn main():
     match run(100):
         ?served: print("all served: {served}")
-        !e: print("error: " + e.message())
+        !e: print("error: " + e.error())
 
 main()
 "#;
@@ -1240,7 +1240,7 @@ fn run(n: int) -> int!:
 fn main():
     match run(100):
         ?served: print("all served: {served}")
-        !e: print("error: " + e.message())
+        !e: print("error: " + e.error())
 
 main()
 "#;
@@ -1314,7 +1314,7 @@ fn run(n: int) -> int!:
 fn main():
     match run(8):
         ?served: print("all served: {served}")
-        !e: print("error: " + e.message())
+        !e: print("error: " + e.error())
 
 main()
 "#;
@@ -1388,7 +1388,7 @@ fn run(n: int) -> int!:
 fn main():
     match run(6):
         ?_: print("all served")
-        !e: print("error: " + e.message())
+        !e: print("error: " + e.error())
 
 main()
 "#;
@@ -1495,7 +1495,7 @@ fn run(servers: int, conns: int) -> int!:
 fn main():
     match run(4, 12):
         ?served: print("all servers done: {served}")
-        !e: print("error: " + e.message())
+        !e: print("error: " + e.error())
 
 main()
 "#;

@@ -50,7 +50,7 @@ test fn cmp_clamp_faults_on_inverted_bounds():
     r := recover: cmp.clamp(5, 10, 1)
     match r:
         ?_: assert false, "clamp should fault"
-        !e: assert e.message() == "cmp.clamp: inverted bounds (lo > hi)", "clamp fault message"
+        !e: assert e.error() == "cmp.clamp: inverted bounds (lo > hi)", "clamp fault message"
     assert cmp.clamp(5, 1, 10) == 5, "clamp(5, 1, 10)"
     assert cmp.clamp(15, 0, 10) == 10, "clamp(15, 0, 10)"
     assert cmp.clamp(-4, 0, 10) == 0, "clamp(-4, 0, 10)"
@@ -59,10 +59,10 @@ test fn cmp_clamp_faults_on_inverted_bounds():
 test fn fs_mkdir_empty_path_message():
     match fs.mkdir(""):
         ?_: assert false, "mkdir empty should be Err"
-        !e: assert e.message() == ": No such file or directory (os error 2)", "mkdir empty message"
+        !e: assert e.error() == ": No such file or directory (os error 2)", "mkdir empty message"
     match fs.mkdir("."):
         ?_: pass
-        !e: assert false, "mkdir . must stay Ok: " + e.message()
+        !e: assert false, "mkdir . must stay Ok: " + e.error()
 
 test fn csv_format_quotes_a_sole_empty_field():
     assert csv.format([[""]]).len() == 4, "csv.format([[\"\"]]) length"
@@ -78,15 +78,15 @@ test fn path_with_ext_rejects_an_invalid_extension():
     r1 := recover: path.with_ext("a.b", ".")
     match r1:
         ?_: assert false, "with_ext(a.b, .) should fault"
-        !e: assert e.message() == "with_ext: invalid extension: '.'", "with_ext(a.b, .) message"
+        !e: assert e.error() == "with_ext: invalid extension: '.'", "with_ext(a.b, .) message"
     r2 := recover: path.with_ext("a.b", "/x")
     match r2:
         ?_: assert false, "with_ext(a.b, /x) should fault"
-        !e: assert e.message() == "with_ext: invalid extension: '/x'", "with_ext(a.b, /x) message"
+        !e: assert e.error() == "with_ext: invalid extension: '/x'", "with_ext(a.b, /x) message"
     r3 := recover: path.with_ext("a.b", "..")
     match r3:
         ?_: assert false, "with_ext(a.b, ..) should fault"
-        !e: assert e.message() == "with_ext: invalid extension: '..'", "with_ext(a.b, ..) message"
+        !e: assert e.error() == "with_ext: invalid extension: '..'", "with_ext(a.b, ..) message"
     assert "{path.with_ext("a.b", "")}" == "a", "with_ext(a.b, \"\")"
     assert "{path.with_ext("a.b", "md")}" == "a.md", "with_ext(a.b, md)"
     assert "{path.with_ext("a.b", ".md")}" == "a.md", "with_ext(a.b, .md)"

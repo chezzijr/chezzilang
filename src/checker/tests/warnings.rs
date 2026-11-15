@@ -271,7 +271,7 @@ fn a_bound_carrier_does_not_warn() {
     ));
     // A carrier consumed by `match` / `?` is handled, not discarded.
     no_warn(&format!(
-        "{g}fn f():\n    match g():\n        ?v: print(v)\n        !e: print(e.message())\nf()\n"
+        "{g}fn f():\n    match g():\n        ?v: print(v)\n        !e: print(e.error())\nf()\n"
     ));
     no_warn(&format!(
         "{g}fn f() -> int!Error:\n    v := g()?\n    return ?v\nprint(f())\n"

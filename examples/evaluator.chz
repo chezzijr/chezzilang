@@ -178,6 +178,6 @@ fn main():
     for src in inputs:
         match calc(src):
             ?v:  print("{src} = {v}")
-            !e: print("{src} -> error: {e.message()}")
+            !e: print("{src} -> error: {e.error()}")
 
 main()

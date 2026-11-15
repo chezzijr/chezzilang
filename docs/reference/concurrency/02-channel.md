@@ -131,7 +131,7 @@ c := bch.cap()             # capacity: 2 here; 0 for a rendezvous Channel[T](0);
 - **`close()`** — idempotent, wakes every parked/demoted receiver.
 - **`send` after close → faults** `"send on a closed channel"`.
 - **`recv` on a closed channel drains buffered values first**, then returns `!RecvError` on every
-  later call, with no fault. `RecvError` is a prelude struct (no import); its `message()` is
+  later call, with no fault. `RecvError` is a prelude struct (no import); its `error()` is
   `receiving on a closed channel`. This is Rust's `Receiver::recv` returning a `RecvError` and Go's
   `v, ok := <-ch` → zero, `false`. Handle it like any `T!E`:
 
@@ -151,7 +151,7 @@ c := bch.cap()             # capacity: 2 here; 0 for a rendezvous Channel[T](0);
   done.close()
   match done.recv():
       ?v: print("got", v)
-      !e: print(e.message())       # receiving on a closed channel
+      !e: print(e.error())       # receiving on a closed channel
   _ := done.recv()                 # wait for a signal (a close also ends the wait)
   ```
 
@@ -214,7 +214,7 @@ future-style handle (every copy of the handle, in any task, reads the same chann
   a task holds the parent's handle, not a copy). `get()` never faults: a job that returned `v` gives `?v`, and a job
   that faulted gives `!message` with the job's own fault text (CPython's `Future.result()`, with a
   `T!` in place of a raise) — handle it with `match`, `else e:` or `?`. M3.2: it is the job's own
-  error, so `file()`/`line()`/`col()` give the job's fault site, as a local `recover:` does
+  error, so `origin()` gives the job's fault site, as a local `recover:` does
   (CPython: the future's exception keeps its traceback). A refused or cancelled Task's error has none. A job fault appears ONLY here: `shutdown()` returns normally (measured: `shutdown ok`,
   then `get()` gives `!boom`) and a job fault never cancels a sibling. A task `cancel()` cancelled
   gives `!"task cancelled: cancel() stopped it before it finished"` at once, never hangs (CPython:
@@ -243,7 +243,7 @@ over `Channel`, `Shared` and `AtomicInt`; the runtime has no broadcast code.
 | `subscribe` | `subscribe(self) -> Receiver[T]` | A receiver for every value sent after this call, in send order. After `close` it is closed and empty |
 | `send` | `send(self, v: T) -> None` | Does not wait for receivers; it waits only while another `send`, `subscribe` or `close` holds the hub guard. Every receiver gets `v` itself, by handle (M3.3), as from a channel. A full mailbox drops its oldest value. With no receiver the value is dropped. After `close` it faults `send on a closed Broadcast` |
 | `close` | `close(self) -> None` | Idempotent. Every receiver's `for` ends after the values already sent |
-| `Receiver.recv` | `recv(self) -> T!BroadcastError` | Blocks. `?v`, or `!BroadcastError.Lagged(l)` when the broadcast dropped `l.missed` values before the next one. On a closed and drained broadcast it gives `!BroadcastError.Closed` on every call, with no fault (tokio `RecvError::{Closed, Lagged}`). `message()` is `receiving on a closed channel` for `Closed` and the `Lagged` message for `Lagged` |
+| `Receiver.recv` | `recv(self) -> T!BroadcastError` | Blocks. `?v`, or `!BroadcastError.Lagged(l)` when the broadcast dropped `l.missed` values before the next one. On a closed and drained broadcast it gives `!BroadcastError.Closed` on every call, with no fault (tokio `RecvError::{Closed, Lagged}`). `error()` is `receiving on a closed channel` for `Closed` and the `Lagged` message for `Lagged` |
 | `Receiver.try_recv` | `try_recv(self) -> (T!Lagged)?` | Never blocks. `None` when no value waits, when another task is inside a receive on this receiver, or when the broadcast is closed and drained |
 | `for r in rx:` | `r: T!Lagged` | `?v` or `!Lagged(missed)`, until the broadcast is closed and drained. `Receiver[T]` is an `Iterable[T!Lagged]` |
 

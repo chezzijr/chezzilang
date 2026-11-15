@@ -1,8 +1,8 @@
 # tests/chz/stdlib/std_fault_origin_test.chz — TICKET-148 (W14-35 part).
 #
 # A NATIVE fault raised inside a std function is stamped at the user's call into std (Rust's
-# `#[track_caller]`). A `panic(...)` raised from std code stays unstamped: `file()`/`line()`/`col()`
-# answer `None`, whether std calls `panic` directly or calls it as a first-class callback value.
+# `#[track_caller]`). A `panic(...)` raised from std code stays unstamped: `origin()` answers `None`,
+# whether std calls `panic` directly or calls it as a first-class callback value.
 # A job's fault reaches the user only through its Task: the job's own error, with its origin (M3.2).
 
 import std.cmp
@@ -14,12 +14,12 @@ test fn a_native_std_fault_is_located_at_the_users_call():
     match r:
         ?_: assert false, "is_settled(5) must fault"
         !e:
-            assert e.message().contains("Channel"), e.message()
-            assert e.line() == ?13, "line must be the is_settled call"
-            assert e.col() == ?19, "col must be the is_settled call"
-            match e.file():
-                None: assert false, "expected the user's file"
-                ?p: assert p.ends_with("std_fault_origin_test.chz"), "file: {p}"
+            assert e.error().contains("Channel"), e.error()
+            match e.origin():
+                None: assert false, "expected the user's call"
+                ?o:
+                    assert o.line == 13 and o.col == 19, "must be the is_settled call: {o}"
+                    assert o.file.ends_with("std_fault_origin_test.chz"), "file: {o.file}"
 
 test fn a_submit_on_a_shut_down_executor_settles_its_task_with_the_refusal():
     ex := concurrency.Executor()
@@ -29,8 +29,8 @@ test fn a_submit_on_a_shut_down_executor_settles_its_task_with_the_refusal():
     match t.get():
         ?_: assert false, "submit on a shut-down Executor must settle with the refusal"
         !e:
-            assert e.message() == "submit on a shut-down Executor (it no longer accepts work)"
-            assert e.file() == None, "a Task's error carries the message only"
+            assert e.error() == "submit on a shut-down Executor (it no longer accepts work)"
+            assert e.origin() == None, "a Task's error carries the message only"
 
 test fn a_native_std_fault_in_a_job_reaches_only_the_task():
     outer := concurrency.Executor()
@@ -39,26 +39,23 @@ test fn a_native_std_fault_in_a_job_reaches_only_the_task():
     match t.get():
         ?_: assert false, "the job must fault"
         !e:
-            assert e.message().contains("Channel"), e.message()
-            assert e.line() == ?37, "line must be the is_settled call in the job"
-            assert e.col() == ?29, "col must be the is_settled call in the job"
+            assert e.error().contains("Channel"), e.error()
+            match e.origin():
+                None: assert false, "expected the job's call"
+                ?o: assert o.line == 37 and o.col == 29, "must be the is_settled call in the job: {o}"
 
 test fn a_std_panic_stays_unstamped():
     r := recover: cmp.clamp(5, 3, 1)
     match r:
         ?_: assert false, "inverted bounds must fault"
         !e:
-            assert e.message() == "cmp.clamp: inverted bounds (lo > hi)"
-            assert e.file() == None, "a std panic names no file"
-            assert e.line() == None, "a std panic names no line"
-            assert e.col() == None, "a std panic names no col"
+            assert e.error() == "cmp.clamp: inverted bounds (lo > hi)"
+            assert e.origin() == None, "a std panic names no origin"
 
 test fn a_first_class_panic_called_inside_std_stays_unstamped():
     r: List[int]!Error = recover: iter.map(["boom"], panic)
     match r:
         ?_: assert false, "a panic callback must fault"
         !e:
-            assert e.message() == "boom"
-            assert e.file() == None, "a panic names no file: {e.file()}"
-            assert e.line() == None, "a panic names no line: {e.line()}"
-            assert e.col() == None, "a panic names no col: {e.col()}"
+            assert e.error() == "boom"
+            assert e.origin() == None, "a panic names no origin: {e.origin()}"

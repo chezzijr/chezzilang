@@ -109,7 +109,7 @@ ready `recv` completes after a cancel. Grid: `tests/executor_stop_grid.rs`.
 #### Faults and the drain contract
 
 - **A job fault or cancel appears only in `t.get()`.** `get()` returns the value or the `!e` of the
-  fault: the job's own error (M3.2), whose `file()`/`line()` give the job's fault site. `shutdown()`, the run end and the end of a test raise no
+  fault: the job's own error (M3.2), whose `origin()` gives the job's fault site. `shutdown()`, the run end and the end of a test raise no
   ordinary job fault. An unused `Task` gets the discard warning: bind it (`t := …`) or discard it
   (`_ := …`).
 - **A job fault costs only its own result.** Its siblings still run (Python's
@@ -127,7 +127,7 @@ ready `recv` completes after a cancel. Grid: `tests/executor_stop_grid.rs`.
   ex.shutdown()              # no fault here
   match bad_t.get():
       ?_: pass
-      !e: print(e.message())   # index 5 out of bounds (len 1)
+      !e: print(e.error())   # index 5 out of bounds (len 1)
   ```
 
 - **Want the siblings to stop?** Thread a `std.cancel.Token` through the closures and poll

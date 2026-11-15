@@ -27,20 +27,20 @@ fn paths(r: List[path.Path]!) -> List[path.Path]:
     match r:
         ?v: return v
         !e:
-            assert false, "expected Ok, got Err: " + e.message()
+            assert false, "expected Ok, got Err: " + e.error()
             return []
 
 fn one(r: path.Path!) -> path.Path:
     match r:
         ?v: return v
         !e:
-            assert false, "expected Ok, got Err: " + e.message()
+            assert false, "expected Ok, got Err: " + e.error()
             return path.Path(b"")
 
 fn ok_nil(r: None!, what: str):
     match r:
         ?_: pass
-        !e: assert false, what + ": " + e.message()
+        !e: assert false, what + ": " + e.error()
 
 # Make a per-test scratch dir holding exactly one file named BAD; hand back the dir path (raw bytes).
 fn fixture(name: str) -> bytes:
@@ -118,16 +118,16 @@ test fn stat_and_reads_take_a_non_utf8_path():
         ?info:
             assert info.size == 2
             assert info.is_file
-        !e: assert false, "stat: " + e.message()
+        !e: assert false, "stat: " + e.error()
     match fs.size(f):
         ?n: assert n == 2
-        !e: assert false, "size: " + e.message()
+        !e: assert false, "size: " + e.error()
     match io.read_bytes(f):
         ?b: assert b == b"hi"
-        !e: assert false, "read_bytes: " + e.message()
+        !e: assert false, "read_bytes: " + e.error()
     match io.read_file(f):
         ?s: assert s == "hi"
-        !e: assert false, "read_file: " + e.message()
+        !e: assert false, "read_file: " + e.error()
 
 # W7-19 — `fs.stat` is `Kind::Blocking`, so under M:N a call from a FIBER is offloaded to the dirty
 # pool (args extracted to primitives, run with no `Vm`, `NativeRet` lowered by the resuming worker),
@@ -148,7 +148,7 @@ test fn stat_survives_the_offload_boundary():
         ?info:
             inline_size = info.size
             inline_is_file = info.is_file
-        !e: assert false, "stat (top level): " + e.message()
+        !e: assert false, "stat (top level): " + e.error()
 
     off_size := Shared(-1)
     off_is_file := Shared(false)
@@ -158,7 +158,7 @@ test fn stat_survives_the_offload_boundary():
                 ?info:
                     off_size.set(info.size)
                     off_is_file.set(info.is_file)
-                !e: assert false, "stat (offloaded): " + e.message()
+                !e: assert false, "stat (offloaded): " + e.error()
     assert off_size.get() == inline_size, "offloaded stat.size must match the inline one"
     assert off_is_file.get() == inline_is_file, "offloaded stat.is_file must match the inline one"
 

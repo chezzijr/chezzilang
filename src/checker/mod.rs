@@ -654,9 +654,10 @@ struct ProtocolInfo {
     /// Shared: a copy of the table (each checker's seed of the std protocols, an import) copies
     /// no signature.
     methods: std::sync::Arc<Vec<(String, FnSig)>>,
-    /// The `native fn` lines of a std protocol (`Error`'s `line`/`col`/`file`): methods the runtime
-    /// answers for every type that satisfies it. NOT requirements, so `methods` stays the
-    /// satisfaction set; a type's own method of the name wins ([`Checker::intrinsic_method`]).
+    /// The `native fn` lines of a std protocol (`Error`'s `origin`): methods the runtime answers for
+    /// every type that satisfies it. NOT requirements, so `methods` stays the satisfaction set; a
+    /// type's own method of the name wins ([`Checker::intrinsic_method`]), and the member rule
+    /// ([`Checker::check_default_members`]) admits only a method of the default's signature.
     defaults: std::sync::Arc<Vec<(String, FnSig)>>,
     /// Embedded (super-)protocols (M22): `protocol Vector: Add + Sub` carries `[Add, Sub]`. A type
     /// satisfies this protocol iff it satisfies every embed (transitively) AND has every OWN method

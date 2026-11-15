@@ -1788,7 +1788,7 @@ fn a_netpoller_aborted_task_still_runs_its_defers() {
                          defer:\n                \
                              match conn.write(\"bye\"):\n                    \
                                  ?n: print(\"DEFER-WROTE {n}\")\n                    \
-                                 !e: print(\"DEFER-ERR:\" + e.message())\n            \
+                                 !e: print(\"DEFER-ERR:\" + e.error())\n            \
                          _ := conn.read(64)\n        \
                      !e: print(\"NOACCEPT\")\n\
              fn client(addr: str):\n    \
@@ -2034,7 +2034,7 @@ fn timeout_aborts_a_top_level_connect() {
              test fn t():\n    \
                  match net.connect(\"192.0.2.1:9\"):\n        \
                      ?s: print(\"CONNECTED\")\n        \
-                     !e: print(\"ERR:\" + e.message())\n    \
+                     !e: print(\"ERR:\" + e.error())\n    \
                  assert false, \"SWALLOWED\"\n",
     );
     let (text, passed) = run_tests_timed_watchdog("netconnecttop_test.chz", &f, 300);
@@ -2073,7 +2073,7 @@ fn a_socket_timeout_is_still_catchable_under_a_generous_timeout() {
              fn serve(server: net.Listener, out: Channel[str]):\n    \
                  match server.accept(150):\n        \
                      ?conn: out.send(\"UNEXPECTED CONNECTION\")\n        \
-                     !e: out.send(\"ERR:\" + e.message())\n\
+                     !e: out.send(\"ERR:\" + e.error())\n\
              test fn t():\n    \
                  out := Channel[str](1)\n    \
                  match net.listen(\"127.0.0.1:0\"):\n        \
@@ -2789,7 +2789,7 @@ fn a_tests_detached_executor_is_joined_and_its_job_fault_stays_in_its_task() {
         "import std.concurrency\n\nfn boom() -> int:\n    return [1][9]\n\n\
          test fn t():\n    ex := concurrency.Executor()\n    _ := ex.submit(boom)\n\n\
          test fn kept():\n    ex := concurrency.Executor()\n    t := ex.submit(boom)\n    ex.shutdown()\n    \
-         match t.get():\n        ?v: assert false, \"value {v}\"\n        !e: assert e.message().contains(\"index 9 out of bounds (len 1)\")\n",
+         match t.get():\n        ?v: assert false, \"value {v}\"\n        !e: assert e.error().contains(\"index 9 out of bounds (len 1)\")\n",
     );
     let report = run_tests(&f);
     assert!(report.passed, "report:\n{}", report.text);
@@ -2948,7 +2948,7 @@ fn a_defer_fault_before_the_deadline_is_still_caught_by_recover() {
                  r := recover: owner()\n    \
                  match r:\n        \
                      ?_: assert false, \"no fault\"\n        \
-                     !e: assert e.message() == \"cleanup\"\n",
+                     !e: assert e.error() == \"cleanup\"\n",
     );
     let (text, passed) = run_tests_timed_watchdog("recover_defer_fault", &f, 5000);
     assert!(passed, "report:\n{text}");

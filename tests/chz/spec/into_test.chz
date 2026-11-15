@@ -52,7 +52,7 @@ test fn try_into_returns_an_error_value():
     assert (as_int(Rat(4, 1)) ?? -1) == 5
     match Rat(1, 2).try_into[int]():
         ?v: assert false, "converted {v}"
-        !e: assert e.message() == "1/2 is not an int"
+        !e: assert e.error() == "1/2 is not an int"
 
 test fn an_enum_has_an_into():
     assert Sign.Pos.into[int]() == 1

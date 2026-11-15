@@ -189,7 +189,7 @@ const CELLS: &[(&str, &str, &str)] = &[
     ),
     (
         "error-value-under-user-Error-protocol",
-        "protocol Error:\n    fn code(self) -> int\nfn f(x: int) -> int!:\n    return !\"bad\"\nmatch f(0):\n    ?v: print(v)\n    !e: print(e.message())\n",
+        "protocol Error:\n    fn code(self) -> int\nfn f(x: int) -> int!:\n    return !\"bad\"\nmatch f(0):\n    ?v: print(v)\n    !e: print(e.error())\n",
         "bad\n",
     ),
     (

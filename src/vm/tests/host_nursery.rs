@@ -207,7 +207,7 @@ fn parallel_faulting_task_flushes_partial_output_3engine() {
                    \x20           spawn bad()\n\
                    \x20   match r:\n\
                    \x20       ?v: print(\"ok\")\n\
-                   \x20       !e: print(\"caught {e.message()}\")\n\
+                   \x20       !e: print(\"caught {e.error()}\")\n\
                    main()\n";
     assert_mc_parity(src, "SOLO-PARTIAL\ncaught boom\n");
 }

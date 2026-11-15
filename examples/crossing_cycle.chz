@@ -27,7 +27,7 @@ spawn_r := recover:
     spawn_r_v = "done"
 match spawn_r:
     ?_:  print("spawn ok: {spawn_r_v}")
-    !e: print("spawn caught: {e.message()}")
+    !e: print("spawn caught: {e.error()}")
 
 # 2) the same cycle handed to `Channel.send` now crosses.
 chan_r_v := ""
@@ -41,7 +41,7 @@ chan_r := recover:
     chan_r_v = "done"
 match chan_r:
     ?_:  print("channel ok: {chan_r_v}")
-    !e: print("channel caught: {e.message()}")
+    !e: print("channel caught: {e.error()}")
 
 # 3) the same cycle wrapped in `Shared(...)` now crosses.
 shared_r_v := ""
@@ -54,7 +54,7 @@ shared_r := recover:
     shared_r_v = "done"
 match shared_r:
     ?_:  print("shared ok: {shared_r_v}")
-    !e: print("shared caught: {e.message()}")
+    !e: print("shared caught: {e.error()}")
 
 # 4) a wide, ACYCLIC list (100k shallow siblings) reaches a task as one handle.
 wide_v := ""
@@ -67,4 +67,4 @@ wide := recover:
     wide_v = "crossed"
 match wide:
     ?_:  print("wide ok: {wide_v}")
-    !e: print("wide caught: {e.message()}")
+    !e: print("wide caught: {e.error()}")

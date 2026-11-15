@@ -31,7 +31,7 @@ import Executor from std.concurrency
 fn must[T](r: T!) -> T:
     match r:
         ?v: return v
-        !e: panic(e.message())
+        !e: panic(e.error())
 
 fn writer(path: str, share: Channel[io.Writer]):
     w := must(io.create(path))
@@ -39,7 +39,7 @@ fn writer(path: str, share: Channel[io.Writer]):
     _ := must(w.write(\"x\".repeat(200000)))
     match w.close():
         ?_: pass
-        !e: panic(e.message())
+        !e: panic(e.error())
 
 fn next_writer(share: Channel[io.Writer]) -> io.Writer:
     w := share.recv() else: panic(\"share closed\")

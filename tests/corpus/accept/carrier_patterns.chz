@@ -1,7 +1,7 @@
 # Carrier patterns: `?v` (present / success), `!e` (error), `None` (absent), nested.
 struct IoErr:
     code: int
-    fn message(self) -> str:
+    fn error(self) -> str:
         return "io {self.code}"
 
 fn show(o: int?) -> str:

@@ -26,24 +26,35 @@ impl Vm {
     ) -> Result<Option<Value>, RuntimeError> {
         let hook = match which {
             Intrinsic::Hook(hook) => hook,
-            // `Error`'s `native fn` defaults (`std/prelude.chz`): where the value was first made an
+            // `Error`'s `native fn` default (`std/prelude.chz`): where the value was first made an
             // error, stamped on its handle by its first `!x` or by the `recover:` boundary that
-            // caught it ([`Vm::stamp_err_span`]). `None` for a receiver never stamped. `file()`
-            // resolves the span's file to a display path, the text `lexer::render_span` prints for
-            // an uncaught fault; `None` when the span's file has no coordinate (`file` 0).
-            Intrinsic::Error(m) if args.is_empty() => {
+            // caught it ([`Vm::stamp_err_span`]), as `Some(Location(line, col, file))`, `file` the
+            // display path `lexer::render_span` prints for an uncaught fault. `None` for a receiver
+            // never stamped, or stamped with a span that has no file coordinate (`file` 0: a
+            // synthesized span, or the standalone test graph's entry), so `Location.file` is a path.
+            Intrinsic::Error(ErrorMethod::Origin) if args.is_empty() => {
                 let sp = recv.as_obj().and_then(|r| self.heap.err_span(r));
-                let answer = sp.and_then(|sp| match m {
-                    ErrorMethod::Line => Some(Value::int(sp.line as i64)),
-                    ErrorMethod::Col => Some(Value::int(sp.col as i64)),
-                    ErrorMethod::File => self
-                        .program
-                        .file_path(sp.file)
-                        .map(|p| crate::lexer::display_path(p).to_string_lossy().into_owned())
-                        .map(|p| self.alloc_str(p)),
+                let at = sp.and_then(|sp| {
+                    let path = self.program.file_path(sp.file)?;
+                    Some((
+                        sp,
+                        crate::lexer::display_path(path)
+                            .to_string_lossy()
+                            .into_owned(),
+                    ))
                 });
-                return Ok(Some(match answer {
-                    Some(v) => self.alloc_enum("Option", "Some", &[v]),
+                return Ok(Some(match at {
+                    Some((sp, path)) => {
+                        let file = self.alloc_str(path);
+                        let tid = self.struct_tid(&self.program.location_key);
+                        let fields =
+                            vec![Value::int(sp.line as i64), Value::int(sp.col as i64), file];
+                        let loc = self.heap.alloc(Obj::Struct {
+                            tid,
+                            fields: Fields::from_vec(fields),
+                        });
+                        self.alloc_enum("Option", "Some", &[Value::obj(loc)])
+                    }
                     None => self.alloc_enum("Option", "None", &[]),
                 }));
             }
@@ -444,7 +455,7 @@ impl Vm {
                     StrMethod::Upper
                     | StrMethod::Lower
                     | StrMethod::Trim
-                    | StrMethod::Message
+                    | StrMethod::Error
                     | StrMethod::Split
                     | StrMethod::Chars
                     | StrMethod::Join
@@ -483,11 +494,11 @@ impl Vm {
                         self.arity_err("trim", args, 0, span)?;
                         Ok(self.alloc_str(s.trim_matches(py_blank).to_string()))
                     }
-                    // `str` conforms to `Error`: `message()` returns the string itself. It copies
+                    // `str` conforms to `Error`: `error()` returns the string itself. It copies
                     // the receiver's stamped origin onto the fresh string it allocates
-                    // (TICKET-045), so a `panic(e.message())` re-raise can still recover it.
-                    StrMethod::Message => {
-                        self.arity_err("message", args, 0, span)?;
+                    // (TICKET-045), so a `panic(e.error())` re-raise can still recover it.
+                    StrMethod::Error => {
+                        self.arity_err("error", args, 0, span)?;
                         let sp = self.heap.err_span(h);
                         let out = self.alloc_str(s.to_string());
                         if let (Some(sp), Some(oh)) = (sp, out.as_obj()) {

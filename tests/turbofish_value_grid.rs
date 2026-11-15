@@ -900,7 +900,7 @@ fn okv[T](r: T!) -> T:
         ?v:
             return v
         !e:
-            panic(e.message())
+            panic(e.error())
 fn un[T](e: E[T]) -> T:
     match e:
         E.A(v):

@@ -91,7 +91,7 @@ fn main():
                 _ := ex.submit(fn() -> None:
                     match ch.recv():
                         ?v: total.send(v)
-                        !e: print(e.message())
+                        !e: print(e.error())
                 )
                 ex.shutdown()
         for _ in 0..100:
@@ -101,7 +101,7 @@ fn main():
     for _ in 0..100:
         match total.recv():
             ?v: n += v
-            !e: print(e.message())
+            !e: print(e.error())
     print(n)
 main()
 ";
@@ -265,7 +265,7 @@ fn main():
         spawn:
             match ch.recv():
                 ?x: print(\"sib got\", x)
-                !e: print(e.message())
+                !e: print(e.error())
     print(s.get())
 main()
 ";

@@ -50,7 +50,7 @@ test fn a_deep_acyclic_nest_still_faults_recoverably():
     r := recover: "{x}"
     match r:
         ?_: assert false, "a 12000-deep nest must hit the structural depth cap"
-        !e: assert e.message().contains("maximum structural depth"), e.message()
+        !e: assert e.error().contains("maximum structural depth"), e.error()
 
 test fn a_faulted_render_leaves_no_open_object_behind():
     x: Any = 0
@@ -63,4 +63,4 @@ test fn a_faulted_render_leaves_no_open_object_behind():
     second := recover: "{x}"
     match second:
         ?s: assert false, "a stale open entry rendered the nest instead of faulting: " + s
-        !e: assert e.message().contains("maximum structural depth"), e.message()
+        !e: assert e.error().contains("maximum structural depth"), e.error()

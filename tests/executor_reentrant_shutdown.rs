@@ -73,7 +73,7 @@ fn executor_reentrant_cancel_during_drain() {
     let path = dir.join("main.chz");
     std::fs::write(
         &path,
-        "import Executor from std.concurrency\nfn stop(e: Executor):\n    e.cancel()\nfn main():\n    ex := Executor()\n    _ := ex.submit(fn(): print(\"A\"))\n    _ := ex.submit(fn(): stop(ex))\n    t := ex.submit(fn(): print(\"C\"))\n    ex.shutdown()\n    match t.get():\n        ?_: pass\n        !e: print(\"refused {e.message()}\")\n    print(\"end\")\nmain()\n",
+        "import Executor from std.concurrency\nfn stop(e: Executor):\n    e.cancel()\nfn main():\n    ex := Executor()\n    _ := ex.submit(fn(): print(\"A\"))\n    _ := ex.submit(fn(): stop(ex))\n    t := ex.submit(fn(): print(\"C\"))\n    ex.shutdown()\n    match t.get():\n        ?_: pass\n        !e: print(\"refused {e.error()}\")\n    print(\"end\")\nmain()\n",
     )
     .expect("write program");
 
@@ -126,7 +126,7 @@ fn executor_cancel_never_cancels_a_dispatched_job() {
     let path = dir.join("main.chz");
     std::fs::write(
         &path,
-        "import Executor from std.concurrency\nfn stop(e: Executor):\n    e.cancel()\nfn main():\n    ex := Executor()\n    _ := ex.submit(fn(): print(\"A\"))\n    _ := ex.submit(fn(): stop(ex))\n    t := ex.submit(fn(): print(\"C\"))\n    ex.shutdown()\n    match t.get():\n        ?_: pass\n        !e: print(\"refused {e.message()}\")\n    print(\"end\")\nmain()\n",
+        "import Executor from std.concurrency\nfn stop(e: Executor):\n    e.cancel()\nfn main():\n    ex := Executor()\n    _ := ex.submit(fn(): print(\"A\"))\n    _ := ex.submit(fn(): stop(ex))\n    t := ex.submit(fn(): print(\"C\"))\n    ex.shutdown()\n    match t.get():\n        ?_: pass\n        !e: print(\"refused {e.error()}\")\n    print(\"end\")\nmain()\n",
     )
     .expect("write program");
     let mut dropped = 0;

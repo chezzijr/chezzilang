@@ -110,7 +110,7 @@ test fn closing_a_listener_from_a_task_is_silent():
                         l.close()
                     match res:
                         ?_: r.send("no-fault")
-                        !e: r.send(e.message())
+                        !e: r.send(e.error())
             assert r.recv() == ?"no-fault"
         !_: assert false, "setup failed: could not bind a listener"
 
@@ -175,7 +175,7 @@ test fn a_copied_struct_set_index_writing_through_a_shared_field_is_silent():
                 t[0] = 5
             match res:
                 ?_: r.send("no-fault")
-                !e: r.send(e.message())
+                !e: r.send(e.error())
     assert r.recv() == ?"no-fault"
     assert t.s.get() == 5
 
@@ -197,12 +197,12 @@ test fn a_list_visited_first_in_one_channel_send_shares_the_capture():
                 p.1()
             match res1:
                 ?_: r1.send("no-fault")
-                !e: r1.send(e.message())
+                !e: r1.send(e.error())
             res2 := recover:
                 p.0.push(3)
             match res2:
                 ?_: r2.send("no-fault")
-                !e: r2.send(e.message())
+                !e: r2.send(e.error())
     assert r1.recv() == ?"no-fault"
     assert r2.recv() == ?"no-fault"
     assert xs == [1, 2, 3]

@@ -23,7 +23,7 @@ import Into from std.convert
 
 struct MyErr:
     code: int
-    fn message(self) -> str:
+    fn error(self) -> str:
         return "err {self.code}"
 
 struct Box:
@@ -107,7 +107,7 @@ test fn result_carrier_method_call_with_args():
     assert "{add_dot_err()}" == "{add_spaced_err()}"
     match add_dot_err():
         ?_: assert false, "expected Err"
-        !e: assert e.message() == "err 3", "got {e.message()}"
+        !e: assert e.error() == "err 3", "got {e.error()}"
 
 # ---- 4: NAMED args + an OMITTED default, on a `T!E` value AND on a `T?` value ----
 #
@@ -244,13 +244,13 @@ test fn result_coalesce_in_a_spliced_default():
 # ---- 6: `?.` on a `T!E` value inside `recover:` ----
 #
 # Inside a `recover:` block a `?` short-circuits to the BOUNDARY (try-block style), so the block's
-# `T!E` carries the propagated error. Its error slot is the `Error` existential → `e.message()`.
+# `T!E` carries the propagated error. Its error slot is the `Error` existential → `e.error()`.
 
 test fn result_carrier_inside_recover_short_circuits_to_the_boundary():
     r := recover: berr()?.add(1)
     match r:
         ?_: assert false, "expected Err from the propagated error"
-        !e: assert e.message() == "err 3", "got {e.message()}"
+        !e: assert e.error() == "err 3", "got {e.error()}"
     spaced := recover: berr()? .add(1)
     assert "{r}" == "{spaced}", "`?.` and `? .` must agree inside recover:"
     good := recover: bok()?.add(1)
@@ -585,7 +585,7 @@ test fn an_optchain_call_on_a_result_takes_type_arguments():
         ?v:
             assert false, "got ?{v}"
         !e:
-            assert e.message() == "no rat", "got {e.message()}"
+            assert e.error() == "no rat", "got {e.error()}"
 
 test fn an_optchain_bracket_on_a_data_member_still_indexes():
     k := 1

@@ -107,7 +107,7 @@ test fn close_ends_every_loop_after_the_values_sent():
         b.send(3)
     match res:
         ?_: assert false
-        !e: assert e.message() == "send on a closed Broadcast"
+        !e: assert e.error() == "send on a closed Broadcast"
 
 fn count_items(xs: Iterable[int!Lagged]) -> int:
     n := 0
@@ -129,7 +129,7 @@ test fn a_capacity_below_one_faults():
         Broadcast[int].new(0)
     match res:
         ?_: assert false
-        !e: assert e.message() == "Broadcast capacity must be at least 1, got 0"
+        !e: assert e.error() == "Broadcast capacity must be at least 1, got 0"
 
 fn collect_into(rx: Receiver[int], out: Channel[List[str]]):
     out.send(take_all(rx))
@@ -434,7 +434,7 @@ fn faulting_nursery_then_rest(b: Broadcast[int], rx: Receiver[int], half: int, n
                 fault_after(half, taken, first, go)
     match res:
         ?_: assert false, "the reader nursery did not fault"
-        !e: assert e.message() == "reader nursery faults"
+        !e: assert e.error() == "reader nursery faults"
     for i in half..n:
         b.send(i)
     b.close()
@@ -480,7 +480,7 @@ test fn recv_on_a_closed_and_drained_receiver_gives_closed():
             ?v: assert false, "got {v}"
             !e:
                 assert e == BroadcastError.Closed
-                assert e.message() == "receiving on a closed channel"
+                assert e.error() == "receiving on a closed channel"
     assert rx.try_recv() == None
 
 fn note(r: int!Lagged, got: List[int], taken: AtomicInt):

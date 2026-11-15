@@ -8,7 +8,7 @@ import std.time
 fn recv_text(c: Channel[int]) -> str:
     match c.recv():
         ?v: return "value {v}"
-        !e: return e.message()
+        !e: return e.error()
     return ""
 
 # Received on the OS thread that runs the module's top level.
@@ -28,7 +28,7 @@ test fn a_buffered_value_is_received_before_the_close_is_seen():
     assert c.recv() == ?5
     match c.recv():
         ?v: assert false, "got {v} after the close"
-        !e: assert e.message() == "receiving on a closed channel"
+        !e: assert e.error() == "receiving on a closed channel"
 
 test fn repeated_recv_on_a_closed_channel_keeps_returning_the_error():
     c := Channel[int]()
@@ -43,7 +43,7 @@ test fn match_binds_a_recv_error():
         ?v: assert false, "got {v}"
         !e:
             err: RecvError = e
-            assert err.message() == "receiving on a closed channel"
+            assert err.error() == "receiving on a closed channel"
 
 test fn a_parked_receiver_wakes_with_the_error_when_another_task_closes():
     c := Channel[int](0)
@@ -62,7 +62,7 @@ test fn top_level_and_executor_job_recv_behave_the_same():
     ex.shutdown()
     match t.get():
         ?s: assert s == "receiving on a closed channel"
-        !e: assert false, e.message()
+        !e: assert false, e.error()
 
 test fn for_over_a_channel_still_ends_cleanly_on_close():
     c := Channel[int](3)
@@ -86,4 +86,4 @@ test fn task_get_returns_the_job_value_and_the_job_error():
     assert ok.get() == ?7
     match bad.get():
         ?v: assert false, "got {v}"
-        !e: assert e.message().contains("job failed"), e.message()
+        !e: assert e.error().contains("job failed"), e.error()

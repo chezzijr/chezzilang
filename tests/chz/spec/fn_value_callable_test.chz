@@ -15,4 +15,4 @@ test fn native_fn_value_spawns():
         ?_:
             assert true
         !e:
-            assert false, e.message()
+            assert false, e.error()

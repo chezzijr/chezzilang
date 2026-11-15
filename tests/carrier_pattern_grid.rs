@@ -11,7 +11,7 @@ use grid_cell::{Cell, Expect, run_grid};
 /// The functions every cell may call.
 const LIB: &str = "struct IoErr:
     code: int
-    fn message(self) -> str:
+    fn error(self) -> str:
         return \"io\"
 enum C:
     Red

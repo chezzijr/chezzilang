@@ -11,7 +11,7 @@ import std.time
 fn msg_of[T](r: T!Error, where_: str) -> str:
     match r:
         ?_: assert false, where_ + " must fault"
-        !e: return e.message()
+        !e: return e.error()
     return ""
 
 # ---- rule 3: an AB-BA cycle in ONE task is a fatal deadlock ----
@@ -231,8 +231,8 @@ fn feed_one(addr: str, go: Channel[int]):
             _ := go.recv()
             match c.write("7"):
                 ?_: c.close()
-                !e: panic(e.message())
-        !e: panic(e.message())
+                !e: panic(e.error())
+        !e: panic(e.error())
 
 fn take_one(ln: net.Listener, go: Channel[int]) -> int:
     match ln.accept():
@@ -251,12 +251,12 @@ fn take_one(ln: net.Listener, go: Channel[int]) -> int:
 fn listen_local() -> net.Listener:
     match net.listen("127.0.0.1:0"):
         ?ln: return ln
-        !e: panic(e.message())
+        !e: panic(e.error())
 
 fn addr_of(ln: net.Listener) -> str:
     match ln.addr():
         ?a: return a
-        !e: panic(e.message())
+        !e: panic(e.error())
 
 test fn a_socket_wait_inside_a_shared_update_closure_completes():
     ln := listen_local()

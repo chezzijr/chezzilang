@@ -28,12 +28,12 @@ import Executor from std.concurrency
 fn must[T](r: T!) -> T:
     match r:
         ?v: return v
-        !e: panic(e.message())
+        !e: panic(e.error())
 
 fn close_it(w: io.Writer):
     match w.close():
         ?_: pass
-        !e: panic(e.message())
+        !e: panic(e.error())
 
 fn drain(r: io.Reader) -> int:
     total := 0
@@ -85,7 +85,7 @@ const FLUSH_FULL: &str = "fn writer(path: str):
     _ := must(b.write(\"x\".repeat(200000)))
     match b.flush():
         ?_: pass
-        !e: panic(e.message())
+        !e: panic(e.error())
     close_it(w)
 
 got := Channel[int](1)

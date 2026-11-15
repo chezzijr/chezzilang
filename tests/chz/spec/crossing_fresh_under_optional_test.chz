@@ -6,7 +6,7 @@ fn opt_push(r: Channel[str], acc: List[int]?):
                 a.push(1)
             match res:
                 ?_: r.send("ok")
-                !e: r.send(e.message())
+                !e: r.send(e.error())
         None: r.send("none")
 
 test fn fresh_list_under_optional_param_is_writable():

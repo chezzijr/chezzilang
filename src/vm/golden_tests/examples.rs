@@ -329,7 +329,7 @@ fn flag_parse_value_and_eq_form_parity() {
          \x20       print(fs.get_int(\"count\"))\n\
          \x20       print(p[0])\n\
          \x20   !e:\n\
-         \x20       print(e.message())\n",
+         \x20       print(e.error())\n",
     );
     assert_eq!(out, "alice\n3\npos1\n");
 }
@@ -346,7 +346,7 @@ fn flag_bool_presence_and_terminator_parity() {
          \x20       print(fs.get_bool(\"verbose\"))\n\
          \x20       print(\" \".join(fs.positionals()))\n\
          \x20   !e:\n\
-         \x20       print(e.message())\n",
+         \x20       print(e.error())\n",
     );
     assert_eq!(out, "true\n--notaflag x\n");
 }
@@ -359,7 +359,7 @@ fn flag_error_paths_parity() {
          fs := flag.new()\n\
          match fs.parse([\"--nope\"]):\n\
          \x20   ?p: print(\"ok\")\n\
-         \x20   !e: print(e.message())\n",
+         \x20   !e: print(e.error())\n",
     );
     assert_eq!(unknown, "unknown flag --nope\n");
 
@@ -369,7 +369,7 @@ fn flag_error_paths_parity() {
          fs.str_flag(\"name\", \"\", \"n\")\n\
          match fs.parse([\"--name\"]):\n\
          \x20   ?p: print(\"ok\")\n\
-         \x20   !e: print(e.message())\n",
+         \x20   !e: print(e.error())\n",
     );
     assert_eq!(missing, "flag --name: missing value\n");
 
@@ -488,7 +488,7 @@ fn main():
         iter.reduce(e, fn(a: int, b: int) -> int: a + b)
     match r:
         ?v: print("no fault {v}")
-        !err: print("caught: {err.message()}")
+        !err: print("caught: {err.error()}")
     print(iter.reduce([1, 2, 3], fn(a: int, b: int) -> int: a + b))
     print(iter.reduce([7], fn(a: int, b: int) -> int: a + b))
 main()
@@ -1270,7 +1270,7 @@ fn executor_task_fault_trace_matches() {
 
     // Executor.submit path (TICKET-289): the job's fault is its Task's outcome. The run does not
     // fault and `t.get()` gives the message.
-    let ex_src = "import Executor from std.concurrency\nfn boom():\n    panic(\"kaboom\")\nfn main():\n    ex := Executor()\n    t := ex.submit(fn(): boom())\n    ex.shutdown()\n    match t.get():\n        ?_: print(\"value\")\n        !e: print(\"task {e.message()}\")\nmain()\n";
+    let ex_src = "import Executor from std.concurrency\nfn boom():\n    panic(\"kaboom\")\nfn main():\n    ex := Executor()\n    t := ex.submit(fn(): boom())\n    ex.shutdown()\n    match t.get():\n        ?_: print(\"value\")\n        !e: print(\"task {e.error()}\")\nmain()\n";
     let ex_path = dir.join("ex.chz");
     std::fs::write(&ex_path, ex_src).unwrap();
     let (so, _e, se, _) = run_file(&ex_path);

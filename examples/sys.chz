@@ -19,11 +19,11 @@ fn shown(ps: List[path.Path]) -> str:
 # --- std.process: a command's output comes back as str! (success=stdout, an error=stderr) ---
 match process.cmd("echo hello from the shell"):
     ?out: print("stdout: " + out.trim())
-    !e: print("error: " + e.message().trim())
+    !e: print("error: " + e.error().trim())
 
 match process.cmd("exit 7"):
     ?out: print("ok: " + out)
-    !e: print("failed: " + e.message())
+    !e: print("failed: " + e.error())
 
 # --- std.fs: existence, type, size, listing, and a simple */? glob ---
 print("exists(Cargo.toml): {fs.exists("Cargo.toml")}")
@@ -33,15 +33,15 @@ print("is_file(examples): {fs.is_file("examples")}")
 
 match fs.list_dir("examples/sysfixture"):
     ?names: print("list: " + shown(names))
-    !e: print("error: " + e.message())
+    !e: print("error: " + e.error())
 
 match fs.glob("examples/sysfixture/*.txt"):
     ?hits: print("glob: " + shown(hits))
-    !e: print("error: " + e.message())
+    !e: print("error: " + e.error())
 
 match fs.size("examples/sysfixture/a.txt"):
     ?n: print("size: {n}")
-    !e: print("error: " + e.message())
+    !e: print("error: " + e.error())
 
 # --- std.time: wall clock (non-deterministic → booleans), then deterministic formatting ---
 print("now > 0: {time.now() > 0}")

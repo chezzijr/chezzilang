@@ -472,27 +472,27 @@ const PROGRAMS: &[(&str, Result<&str, &str>)] = &[
         "print(\"abcd\".len())\nprint(\"Hi There\".upper())\nprint(\"Hi There\".lower())\nprint(\"  pad  \".trim())",
         Ok("4\nHI THERE\nhi there\npad\n"),
     ),
-    // str conforms to Error: message() returns the string itself
-    ("print(\"boom\".message())", Ok("boom\n")),
-    // Go-style Result[T, E]: custom struct error (T!E), match, message() dispatch
+    // str conforms to Error: error() returns the string itself
+    ("print(\"boom\".error())", Ok("boom\n")),
+    // Go-style Result[T, E]: custom struct error (T!E), match, error() dispatch
     (
-        "struct DbErr:\n    code: int\n    fn message(self) -> str:\n        return \"db {self.code}\"\nfn q(ok: bool) -> int!DbErr:\n    if ok:\n        return ?1\n    return !DbErr(503)\nfn main():\n    match q(false):\n        ?v: print(v)\n        !e: print(e.message())\n    match q(true):\n        ?v: print(v)\n        !e: print(e.message())\nmain()",
+        "struct DbErr:\n    code: int\n    fn error(self) -> str:\n        return \"db {self.code}\"\nfn q(ok: bool) -> int!DbErr:\n    if ok:\n        return ?1\n    return !DbErr(503)\nfn main():\n    match q(false):\n        ?v: print(v)\n        !e: print(e.error())\n    match q(true):\n        ?v: print(v)\n        !e: print(e.error())\nmain()",
         Ok("db 503\n1\n"),
     ),
-    // default-Error path: Err(str) flows as Result[int, Error], consumed via message()
+    // default-Error path: Err(str) flows as Result[int, Error], consumed via error()
     (
-        "fn parse(ok: bool) -> int!:\n    if ok:\n        return ?42\n    return !\"bad input\"\nfn main():\n    match parse(false):\n        ?v: print(v)\n        !e: print(e.message())\nmain()",
+        "fn parse(ok: bool) -> int!:\n    if ok:\n        return ?42\n    return !\"bad input\"\nfn main():\n    match parse(false):\n        ?v: print(v)\n        !e: print(e.error())\nmain()",
         Ok("bad input\n"),
     ),
     // ----- M11 Phase B: recover boundary -----
     // recover catches index-OOB; Ok path wraps the trailing value
     (
-        "fn main():\n    r := recover:\n        [1, 2][9]\n    match r:\n        ?v: print(\"ok {v}\")\n        !e: print(\"recovered: {e.message()}\")\nmain()",
+        "fn main():\n    r := recover:\n        [1, 2][9]\n    match r:\n        ?v: print(\"ok {v}\")\n        !e: print(\"recovered: {e.error()}\")\nmain()",
         Ok("recovered: index 9 out of bounds (len 2)\n"),
     ),
     // recover catches divide-by-zero
     (
-        "fn main():\n    r := recover:\n        10 / 0\n    match r:\n        ?v: print(v)\n        !e: print(\"err: {e.message()}\")\nmain()",
+        "fn main():\n    r := recover:\n        10 / 0\n    match r:\n        ?v: print(v)\n        !e: print(\"err: {e.error()}\")\nmain()",
         Ok("err: division by zero\n"),
     ),
     // recover catches integer overflow
@@ -514,12 +514,12 @@ const PROGRAMS: &[(&str, Result<&str, &str>)] = &[
     // AFTER the recover still runs — the enclosing fn returns a plain str, so this only works
     // if `?` did NOT exit the function.
     (
-        "fn d(b: int) -> int!:\n    if b == 0:\n        return !\"zero\"\n    return ?(10 / b)\nfn use() -> str:\n    r := recover:\n        x := d(0)?\n        x + 1\n    match r:\n        ?v: return \"ok\"\n        !e: return \"caught {e.message()}\"\nfn main():\n    print(use())\nmain()",
+        "fn d(b: int) -> int!:\n    if b == 0:\n        return !\"zero\"\n    return ?(10 / b)\nfn use() -> str:\n    r := recover:\n        x := d(0)?\n        x + 1\n    match r:\n        ?v: return \"ok\"\n        !e: return \"caught {e.error()}\"\nfn main():\n    print(use())\nmain()",
         Ok("caught zero\n"),
     ),
     // `?` Ok path inside recover: value unwrapped, trailing expression becomes the Ok result
     (
-        "fn d(b: int) -> int!:\n    return ?(10 / b)\nfn main():\n    y := 0\n    r := recover:\n        x := d(2)?\n        y = x + 1\n    match r:\n        ?_: print(\"ok {y}\")\n        !e: print(e.message())\nmain()",
+        "fn d(b: int) -> int!:\n    return ?(10 / b)\nfn main():\n    y := 0\n    r := recover:\n        x := d(2)?\n        y = x + 1\n    match r:\n        ?_: print(\"ok {y}\")\n        !e: print(e.error())\nmain()",
         Ok("ok 6\n"),
     ),
     // side effects before a caught fault PERSIST (keep semantics)
@@ -534,7 +534,7 @@ const PROGRAMS: &[(&str, Result<&str, &str>)] = &[
     ),
     // recovered value composes with `?` after the boundary\n
     (
-        "fn run() -> int!:\n    r := recover: [10, 20][0]\n    v := r?\n    return ?(v + 1)\nfn main():\n    match run():\n        ?v: print(v)\n        !e: print(e.message())\nmain()",
+        "fn run() -> int!:\n    r := recover: [10, 20][0]\n    v := r?\n    return ?(v + 1)\nfn main():\n    match run():\n        ?v: print(v)\n        !e: print(e.error())\nmain()",
         Ok("11\n"),
     ),
     (

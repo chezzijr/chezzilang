@@ -33,91 +33,91 @@ test fn range_faults():
     r1 := recover: List.from_iter(Range(0, 5, 0))
     match r1:
         ?_: assert false, "step 0 must fault"
-        !e: assert e.message() == "Range() step cannot be zero"
+        !e: assert e.error() == "Range() step cannot be zero"
     # A range with no start cannot be iterated; `len` needs both bounds.
     r2 := recover: List.from_iter(..5)
     match r2:
         ?_: assert false, "no start must fault"
-        !e: assert e.message() == "a range with no start cannot be iterated"
+        !e: assert e.error() == "a range with no start cannot be iterated"
     endless := 5..
     r3 := recover: endless.len()
     match r3:
         ?_: assert false, "no end must fault"
-        !e: assert e.message() == "len() needs a range with a start and an end"
+        !e: assert e.error() == "len() needs a range with a start and an end"
 
 test fn math_number_theory_overflow():
     r1 := recover: math.lcm(9223372036854775807, 9223372036854775806)
     match r1:
         ?_: assert false, "lcm must overflow i64"
-        !e: assert e.message() == "integer overflow in lcm"
+        !e: assert e.error() == "integer overflow in lcm"
     r2 := recover: math.gcd(-9223372036854775807 - 1, 0)
     match r2:
         ?_: assert false, "gcd(i64::MIN, 0) must overflow i64"
-        !e: assert e.message() == "integer overflow in gcd"
+        !e: assert e.error() == "integer overflow in gcd"
     r3 := recover: math.abs(-9223372036854775807 - 1)
     match r3:
         ?_: assert false, "abs(i64::MIN) must overflow i64"
-        !e: assert e.message() == "integer overflow in abs"
+        !e: assert e.error() == "integer overflow in abs"
 
 test fn math_trunc_faults():
     r1 := recover: math.trunc(math.nan)
     match r1:
         ?_: assert false, "trunc(NaN) must fault"
-        !e: assert e.message() == "trunc(): NaN is out of integer range"
+        !e: assert e.error() == "trunc(): NaN is out of integer range"
     r2 := recover: math.trunc(math.inf)
     match r2:
         ?_: assert false, "trunc(inf) must fault"
-        !e: assert e.message() == "trunc(): inf is out of integer range"
+        !e: assert e.error() == "trunc(): inf is out of integer range"
     # one past i64::MAX as a float (2**63) — out of i64 range, not non-finite
     r3 := recover: math.trunc(9223372036854775808.0)
     match r3:
         ?_: assert false, "trunc(2**63) must fault"
-        !e: assert e.message() == "trunc(): 9223372036854776000 is out of integer range"
+        !e: assert e.error() == "trunc(): 9223372036854776000 is out of integer range"
 
 test fn math_divmod_zero_faults():
     r := recover: math.divmod(10, 0)
     match r:
         ?_: assert false, "divmod by zero must fault"
-        !e: assert e.message() == "division by zero"
+        !e: assert e.error() == "division by zero"
 
 test fn list_sum_overflow_faults():
     r := recover: [9223372036854775807, 1].sum()
     match r:
         ?_: assert false, "sum overflow must fault"
-        !e: assert e.message() == "integer overflow in Add"
+        !e: assert e.error() == "integer overflow in Add"
 
 test fn string_repeat_overflow_faults():
     # receiver method form
     r1 := recover: "ab".repeat(9223372036854775807)
     match r1:
         ?_: assert false, "huge repeat must fault"
-        !e: assert e.message() == "string repeat capacity overflow"
+        !e: assert e.error() == "string repeat capacity overflow"
     # std.string free-fn form (delegates to the same native method)
     r2 := recover: s.repeat("ab", 9223372036854775807)
     match r2:
         ?_: assert false, "huge repeat must fault"
-        !e: assert e.message() == "string repeat capacity overflow"
+        !e: assert e.error() == "string repeat capacity overflow"
 
 test fn string_pad_left_faults():
     r1 := recover: "a".pad_left(4, "")
     match r1:
         ?_: assert false, "empty fill must fault"
-        !e: assert e.message() == "pad_left: fill must not be empty"
+        !e: assert e.error() == "pad_left: fill must not be empty"
     r2 := recover: s.pad_left("a", 4, "")
     match r2:
         ?_: assert false, "empty fill must fault"
-        !e: assert e.message() == "pad_left: fill must not be empty"
+        !e: assert e.error() == "pad_left: fill must not be empty"
     # A huge width faults with the same capacity guard through BOTH spellings. The free fn used to
     # hand-roll the pad loop with no guard and HUNG here (measured 2026-08-18: still running at 15s);
     # it now delegates to the method, so this pair is what keeps the two from diverging again.
     r3 := recover: "a".pad_left(9223372036854775807, "x")
     match r3:
         ?_: assert false, "huge width must fault"
-        !e: assert e.message() == "string pad capacity overflow"
+        !e: assert e.error() == "string pad capacity overflow"
     r4 := recover: s.pad_left("a", 9223372036854775807, "x")
     match r4:
         ?_: assert false, "huge width must fault through the free fn too"
-        !e: assert e.message() == "string pad capacity overflow"
+        !e: assert e.error() == "string pad capacity overflow"
 
     # The delegation must preserve every documented behaviour, not just the fault: the pad cycle,
     # the exact-width truncation, and the never-shrink early-out.
@@ -138,84 +138,84 @@ test fn string_pad_right_mirrors_pad_left():
     r1 := recover: "a".pad_right(4, "")
     match r1:
         ?_: assert false, "empty fill must fault"
-        !e: assert e.message() == "pad_right: fill must not be empty"
+        !e: assert e.error() == "pad_right: fill must not be empty"
     r2 := recover: s.pad_right("a", 9223372036854775807, "x")
     match r2:
         ?_: assert false, "huge width must fault"
-        !e: assert e.message() == "string pad capacity overflow"
+        !e: assert e.error() == "string pad capacity overflow"
 
 test fn string_split_rsplit_empty_sep_faults():
     r1 := recover: s.split("abc", "")
     match r1:
         ?_: assert false, "empty sep must fault"
-        !e: assert e.message() == "split: sep must not be empty"
+        !e: assert e.error() == "split: sep must not be empty"
     r2 := recover: s.rsplit("abc", "")
     match r2:
         ?_: assert false, "empty sep must fault"
-        !e: assert e.message() == "rsplit: sep must not be empty"
+        !e: assert e.error() == "rsplit: sep must not be empty"
 
 test fn crypto_token_hex_out_of_range_faults():
     r1 := recover: crypto.token_hex(-1)
     match r1:
         ?_: assert false, "negative n must fault"
-        !e: assert e.message() == "token_hex: n must be >= 0, got -1"
+        !e: assert e.error() == "token_hex: n must be >= 0, got -1"
     r2 := recover: crypto.token_hex(1048577)
     match r2:
         ?_: assert false, "n over the 1MiB cap must fault"
-        !e: assert e.message() == "token_hex: n exceeds the 1048576-byte cap, got 1048577"
+        !e: assert e.error() == "token_hex: n exceeds the 1048576-byte cap, got 1048577"
 
 test fn datetime_days_in_month_faults():
     r1 := recover: dt.days_in_month(2024, 0)
     match r1:
         ?_: assert false, "month 0 must fault"
-        !e: assert e.message() == "days_in_month: month out of range: 0"
+        !e: assert e.error() == "days_in_month: month out of range: 0"
     r2 := recover: dt.days_in_month(2024, 13)
     match r2:
         ?_: assert false, "month 13 must fault"
-        !e: assert e.message() == "days_in_month: month out of range: 13"
+        !e: assert e.error() == "days_in_month: month out of range: 13"
 
 test fn datetime_weekday_name_faults():
     r1 := recover: dt.weekday_name(-1)
     match r1:
         ?_: assert false, "wd -1 must fault"
-        !e: assert e.message() == "weekday_name: wd must be 0..6 (0=Sunday), got -1"
+        !e: assert e.error() == "weekday_name: wd must be 0..6 (0=Sunday), got -1"
     r2 := recover: dt.weekday_name(7)
     match r2:
         ?_: assert false, "wd 7 must fault"
-        !e: assert e.message() == "weekday_name: wd must be 0..6 (0=Sunday), got 7"
+        !e: assert e.error() == "weekday_name: wd must be 0..6 (0=Sunday), got 7"
 
 test fn datetime_fdiv_fmod_zero_faults():
     r1 := recover: dt.fdiv(10, 0)
     match r1:
         ?_: assert false, "fdiv by zero must fault"
-        !e: assert e.message() == "division by zero"
+        !e: assert e.error() == "division by zero"
     r2 := recover: dt.fmod(10, 0)
     match r2:
         ?_: assert false, "fmod by zero must fault"
-        !e: assert e.message() == "division by zero"
+        !e: assert e.error() == "division by zero"
 
 test fn datetime_to_uint_overflow_faults():
     r := recover: dt.to_uint("999999999999999999999999999999")
     match r:
         ?_: assert false, "long digit string must overflow i64"
-        !e: assert e.message() == "integer overflow in Mul"
+        !e: assert e.error() == "integer overflow in Mul"
 
 test fn atomic_add_sub_overflow_faults():
     a := Atomic(9223372036854775807)
     r1 := recover: a.add(1)
     match r1:
         ?_: assert false, "Atomic[int].add overflow must fault"
-        !e: assert e.message() == "integer overflow in Add"
+        !e: assert e.error() == "integer overflow in Add"
     ai := AtomicInt(9223372036854775807)
     r2 := recover: ai.add(1)
     match r2:
         ?_: assert false, "AtomicInt.add overflow must fault"
-        !e: assert e.message() == "integer overflow in Add"
+        !e: assert e.error() == "integer overflow in Add"
     ai2 := AtomicInt(-9223372036854775807 - 1)
     r3 := recover: ai2.sub(1)
     match r3:
         ?_: assert false, "AtomicInt.sub overflow must fault"
-        !e: assert e.message() == "integer overflow in Sub"
+        !e: assert e.error() == "integer overflow in Sub"
 
 test fn channel_send_closed_faults_recv_closed_errors():
     ch := Channel[int]()
@@ -223,23 +223,23 @@ test fn channel_send_closed_faults_recv_closed_errors():
     r1 := recover: ch.send(1)
     match r1:
         ?_: assert false, "send on a closed channel must fault"
-        !e: assert e.message() == "send on a closed channel"
+        !e: assert e.error() == "send on a closed channel"
     ch2 := Channel[int]()
     ch2.close()
     # recv on a closed+drained channel does not fault: it returns `!RecvError` (Rust gives a `RecvError`).
     match ch2.recv():
         ?_: assert false, "recv on a closed+drained channel must give !RecvError"
-        !e: assert e.message() == "receiving on a closed channel"
+        !e: assert e.error() == "receiving on a closed channel"
 
 test fn json_stringify_faults():
     r1 := recover: json.stringify(json.Json.Num(math.nan))
     match r1:
         ?_: assert false, "NaN must fault"
-        !e: assert e.message() == "cannot serialize non-finite float to JSON"
+        !e: assert e.error() == "cannot serialize non-finite float to JSON"
     r2 := recover: json.stringify(json.Json.Num(math.inf))
     match r2:
         ?_: assert false, "inf must fault"
-        !e: assert e.message() == "cannot serialize non-finite float to JSON"
+        !e: assert e.error() == "cannot serialize non-finite float to JSON"
     j: json.Json = json.Json.Num(1.0)
     i := 0
     while i < 2500:
@@ -248,22 +248,22 @@ test fn json_stringify_faults():
     r3 := recover: json.stringify(j)
     match r3:
         ?_: assert false, "past the depth ceiling must fault"
-        !e: assert e.message() == "json.stringify: exceeded max depth"
+        !e: assert e.error() == "json.stringify: exceeded max depth"
 
 test fn flag_get_unregistered_faults():
     fs := flag.new()
     r1 := recover: fs.get_str("nope")
     match r1:
         ?_: assert false, "unregistered str flag must fault"
-        !e: assert e.message() == "flag: unregistered str flag --nope"
+        !e: assert e.error() == "flag: unregistered str flag --nope"
     r2 := recover: fs.get_bool("nope")
     match r2:
         ?_: assert false, "unregistered bool flag must fault"
-        !e: assert e.message() == "flag: unregistered bool flag --nope"
+        !e: assert e.error() == "flag: unregistered bool flag --nope"
     r3 := recover: fs.get_int("nope")
     match r3:
         ?_: assert false, "unregistered int flag must fault"
-        !e: assert e.message() == "flag: unregistered int flag --nope"
+        !e: assert e.error() == "flag: unregistered int flag --nope"
 
 # `os.setenv` is the "swallow" direction, not a fault — it never validates its key/value (it writes an
 # in-process Map, not the real OS environment), so a key Python/Go would reject is silently accepted.

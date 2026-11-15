@@ -35,7 +35,7 @@ fn describe_result(r: int!) -> str:
         ?v:
             return "ok {v}"
         !e:
-            return "err {e.message()}"
+            return "err {e.error()}"
 
 # Exhaustive match on a `T?` value.
 fn describe_option(o: int?) -> str:

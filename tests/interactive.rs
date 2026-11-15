@@ -569,7 +569,7 @@ fn dead_stdout_does_not_cancel_sibling_executor_jobs(threads: Option<usize>, wri
 fn dead_stdout_under_an_executor(threads: Option<usize>, writes: usize, handle: bool) {
     let tail = if handle {
         "t := ex.submit(spew)\n_ := ex.submit(markers)\nex.shutdown()\n\
-         match t.get():\n    ?_: pass\n    !e: panic(e.message())\n"
+         match t.get():\n    ?_: pass\n    !e: panic(e.error())\n"
     } else {
         "_ := ex.submit(spew)\n_ := ex.submit(markers)\nex.shutdown()\n"
     };
@@ -1197,7 +1197,7 @@ fn read_all_faults_recoverably_on_non_utf8_stdin() {
     let t = TmpDir::new();
     let entry = t.write(
         "readall.chz",
-        "import std.io\n\nr := recover: io.read_all()\nmatch r:\n    ?v: print(\"ok len \" + \"{v.len()}\")\n    !e: print(\"err: \" + e.message())\n",
+        "import std.io\n\nr := recover: io.read_all()\nmatch r:\n    ?v: print(\"ok len \" + \"{v.len()}\")\n    !e: print(\"err: \" + e.error())\n",
     );
 
     // Invalid UTF-8: 0xff/0xfe can never appear in a well-formed UTF-8 stream.

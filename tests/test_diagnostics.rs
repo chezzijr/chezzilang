@@ -183,7 +183,7 @@ fn detached_executor_job_fault_errors_the_test_only_through_get() {
     );
     let read = t.write(
         "f7b_test.chz",
-        &format!("{head}    match task.get():\n        ?_: pass\n        !e: panic(e.message())\n"),
+        &format!("{head}    match task.get():\n        ?_: pass\n        !e: panic(e.error())\n"),
     );
     let (stdout, _stderr) = run_test(&[read.to_str().unwrap()]);
     assert!(

@@ -23,7 +23,7 @@ fn busy(n: int) -> int:
 fn must[T](r: T!) -> T:
     match r:
         ?v: return v
-        !e: panic(e.message())
+        !e: panic(e.error())
 
 fn feed(ch: Channel[List[int]], n: int):
     for i in 1..n + 1:

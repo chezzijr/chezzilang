@@ -37,7 +37,7 @@ test fn nested_generic_type_argument_on_decode():
         ?m:
             assert m == {"a": 1}
         !e:
-            assert false, e.message()
+            assert false, e.error()
 
 test fn nested_generic_type_argument_on_a_type_head():
     assert Bx[Map[str, int]].make({"a": 1}).v == {"a": 1}
@@ -58,7 +58,7 @@ test fn parenthesised_turbofish_callee():
         ?n:
             assert n == 3
         !e:
-            assert false, e.message()
+            assert false, e.error()
 
 test fn a_value_head_indexes():
     fs := [inc, idt[int]]

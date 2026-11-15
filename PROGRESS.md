@@ -110,12 +110,16 @@ workspace crates, the blocking-point table (`block::wait_steps`) and the boundar
    `Listener`, `Writer`, `Reader`, `ptr`) are `Eq` and `Stringable` (`RecvKind::Handle`), so
    `List.contains`/`index_of`/`dedup`/`unique` carry `where T: Eq` on their decls.
    Error origin landed (2026-11-15, owner decision): every error records where `!x` first made it
-   (first stamp wins, none in a std file); `line()`/`col()`/`file()` are `native fn` defaults of
-   `protocol Error`, so `MyErr(1).line()` type-checks and a declared `line()` wins. Method ids and
+   (first stamp wins, none in a std file); `origin() -> Location?` is the one `native fn` default
+   of `protocol Error` (2026-11-15, owner decision, replacing `line()`/`col()`/`file()`), so an
+   error struct keeps its own `line`/`col` fields; a type that satisfies `Error` may declare only
+   `fn origin(self) -> Location?` under that name (the member rule). Method ids and
    one VM method table landed (2026-11-15, same plan, Task 2): a method call carries an interned
    `MethodId` and `Vm::do_method_call` reads one dense entry of `Program::methods`
    (`base/method_table.rs`), built from the std decls, the intrinsic rows (moved to
    `base/intrinsic.rs`) and the program's types; the VM's 13 name-keyed deciders are gone.
+   `Error`'s requirement is `error(self) -> str` (2026-11-15, owner decision, Go's `Error() string`):
+   `message()` is renamed with no alias, so a type with only `message()` no longer satisfies `Error`.
 1. **TICKET-266, a `never` return type.** `exit` and `panic` declare `-> never`, and a call of that
    type leaves its block (Rust `-> !`). It deletes the `panic("unreachable")` lines after `os.exit`.
    Escalated; branch `ticket/266` kept.

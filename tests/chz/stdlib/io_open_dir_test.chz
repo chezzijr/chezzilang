@@ -13,7 +13,7 @@ test fn open_directory_errs_at_the_call():
     d := os.temp_dir()
     match io.open(d):
         ?_: assert false, "io.open on a directory must Err at the call, not defer to reads"
-        !e: assert e.message().contains("Is a directory"), "wrong message: {e.message()}"
+        !e: assert e.error().contains("Is a directory"), "wrong message: {e.error()}"
 
 test fn open_directory_matches_read_file():
     # The two entry points agree: neither hands back a usable handle for a directory.
@@ -38,4 +38,4 @@ test fn open_regular_file_still_ok():
     defer fs.remove_file(p)
     match write_then_read_line(p):
         ?line: assert line == "hello", "got: {line}"
-        !e: assert false, e.message()
+        !e: assert false, e.error()

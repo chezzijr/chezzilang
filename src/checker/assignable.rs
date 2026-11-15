@@ -225,7 +225,7 @@ impl Checker {
     /// And it adds the arm `assignable` cannot have: **two existentials co-inhabit**. `assignable`
     /// only passes `Protocol` vs `Protocol` when one embeds the other (a `Shape` slot really can't
     /// hold an arbitrary `Error`), but ONE concrete type can conform to two unrelated protocols — a
-    /// `Sq` that has both `area` and `message` is simultaneously a `Shape` and an `Error` — so the
+    /// `Sq` that has both `area` and `error` is simultaneously a `Shape` and an `Error` — so the
     /// pair is inhabited and `Shape == Error` must compile.
     ///
     /// An existential against a CONCRETE is still decided by conformance, so this is not a free pass:

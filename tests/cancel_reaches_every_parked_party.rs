@@ -98,7 +98,7 @@ import std.concurrency\nimport Executor, Shared from std.concurrency
 fn must[T](r: T!) -> T:
     match r:
         ?v: return v
-        !e: panic(e.message())
+        !e: panic(e.error())
 stuck := Channel[int](0)
 fc := Channel[int](1)
 g := Shared[int](0)

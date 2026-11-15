@@ -30,7 +30,7 @@ test fn parse_large_string_is_not_quadratic():
     d := time.monotonic() - t0
     match r:
         ?_: assert true
-        !e: assert false, "expected Ok: " + e.message()
+        !e: assert false, "expected Ok: " + e.error()
     assert d < 4.0, "json.parse({n}-char string) took {d}s, expected < 4.0s"
 
 # The stringify bound is `< 4.0s` for the same reason as the parse bound above: full-gate runs measured
@@ -47,7 +47,7 @@ test fn parse_at_depth_limit_still_ok():
     doc := "[".repeat(2000) + "]".repeat(2000)
     match json.parse(doc):
         ?_: assert true
-        !e: assert false, "expected Ok exactly at the depth limit: " + e.message()
+        !e: assert false, "expected Ok exactly at the depth limit: " + e.error()
 
 test fn parse_past_depth_limit_returns_err_and_keeps_running():
     # No `recover:` needed here — the whole point of the fix is that the depth guard turns what
@@ -55,7 +55,7 @@ test fn parse_past_depth_limit_returns_err_and_keeps_running():
     deep := "[".repeat(2001) + "]".repeat(2001)
     match json.parse(deep):
         ?_: assert false, "expected Err past the depth limit"
-        !e: assert e.message() == "exceeded max depth"
+        !e: assert e.error() == "exceeded max depth"
     # the program is still alive: this assertion must execute
     assert true, "still alive"
 
@@ -64,7 +64,7 @@ test fn parse_original_repro_stays_alive():
     huge := "[".repeat(100000) + "]".repeat(100000)
     match json.parse(huge):
         ?_: assert false, "expected Err on a 100k-deep document"
-        !e: assert e.message() == "exceeded max depth"
+        !e: assert e.error() == "exceeded max depth"
     assert true, "still alive"
 
 test fn stringify_past_depth_limit_faults_with_own_name():
@@ -76,7 +76,7 @@ test fn stringify_past_depth_limit_faults_with_own_name():
     r := recover: json.stringify(j)
     match r:
         ?_: assert false, "expected a depth fault"
-        !e: assert e.message() == "json.stringify: exceeded max depth"
+        !e: assert e.error() == "json.stringify: exceeded max depth"
     # the process survives a stringify depth fault same as a parse one
     assert true, "still alive"
 
@@ -88,17 +88,17 @@ test fn len_containers_count_scalars_fault():
     r1 := recover: json.len(json.Json.Null)
     match r1:
         ?_: assert false, "Null has no length"
-        !e: assert e.message() == "json.len: Null has no length"
+        !e: assert e.error() == "json.len: Null has no length"
 
     r2 := recover: json.len(json.Json.Bool(true))
     match r2:
         ?_: assert false, "Bool has no length"
-        !e: assert e.message() == "json.len: Bool has no length"
+        !e: assert e.error() == "json.len: Bool has no length"
 
     r3 := recover: json.len(json.Json.Num(3.0))
     match r3:
         ?_: assert false, "Num has no length"
-        !e: assert e.message() == "json.len: Num has no length"
+        !e: assert e.error() == "json.len: Num has no length"
 
 test fn stringify_round_trips_negative_zero_and_large_int():
     # W8-35 — numbers go through f64, so -0.0 loses its sign and a 19-digit
@@ -106,10 +106,10 @@ test fn stringify_round_trips_negative_zero_and_large_int():
     # (docs/contributing/gaps.md W8-35; CPython and Go both round-trip these).
     match json.parse("-0.0"):
         ?j: assert json.stringify(j) == "-0.0"
-        !e: assert false, "expected Ok: " + e.message()
+        !e: assert false, "expected Ok: " + e.error()
     match json.parse("9223372036854775000"):
         ?j: assert json.stringify(j) == "9223372036854775000"
-        !e: assert false, "expected Ok: " + e.message()
+        !e: assert false, "expected Ok: " + e.error()
 
 test fn parse_error_names_a_location():
     # W8-36 — a json.parse error carries no line/column/offset, so a failure
@@ -117,4 +117,4 @@ test fn parse_error_names_a_location():
     match json.parse(r'{"a": 1,
  "b": }'):
         ?_: assert false, "expected a parse Err"
-        !e: assert e.message().contains("line") and e.message().contains("column")
+        !e: assert e.error().contains("line") and e.error().contains("column")

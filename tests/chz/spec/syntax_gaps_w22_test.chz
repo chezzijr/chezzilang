@@ -35,21 +35,21 @@ test fn fused_bang_eq_after_a_let_type():
     y: int!= 6
     match y:
         ?v: assert v == 6
-        !e: assert false, "y is an error: {e.message()}"
+        !e: assert false, "y is an error: {e.error()}"
     same: bool!= 1 != 2
     match same:
         ?v: assert v
-        !e: assert false, "same is an error: {e.message()}"
+        !e: assert false, "same is an error: {e.error()}"
 
 test fn fused_bang_eq_after_a_param_type():
     match fused_default():
         ?v: assert v == 5
-        !e: assert false, "default is an error: {e.message()}"
+        !e: assert false, "default is an error: {e.error()}"
 
 test fn fused_bang_eq_after_a_field_type():
     match Fused().a:
         ?v: assert v == 5
-        !e: assert false, "field is an error: {e.message()}"
+        !e: assert false, "field is an error: {e.error()}"
 
 fn r2(n: int) -> (int, int)!str:
     if n < 0:

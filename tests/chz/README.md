@@ -46,7 +46,7 @@ assertable in Chezzi (OOB indexing, overflow, bad chunk size):
 r := recover: [1, 2].chunk(0)
 match r:
     ?_:  assert false, "expected a fault"
-    !e: assert e.message().contains("chunk")
+    !e: assert e.error().contains("chunk")
 ```
 
 (Not every empty-collection case is a fault: `min`/`max`/`min_by`/`max_by`, like `first`/`last`/`pop`,

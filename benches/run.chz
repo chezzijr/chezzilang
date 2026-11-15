@@ -19,14 +19,14 @@ fn bench(name: str):
     cmd := "hyperfine --warmup 2 -N --export-markdown benches/last-{name}.md '{chz}' '{py}'"
     match process.cmd(cmd):
         ?out: print(out)
-        !e: print("FAILED [{name}]: {e.message()}")
+        !e: print("FAILED [{name}]: {e.error()}")
 
 fn main():
     print("building release binary (cargo build --release)...")
     match process.cmd("cargo build --release"):
         ?_: print("build ok\n")
         !e:
-            print("build failed: {e.message()}")
+            print("build failed: {e.error()}")
             return
 
     benches := ["fib", "str", "primes", "loop", "list", "struct", "poly_method", "map", "map_str", "unique", "empty"]

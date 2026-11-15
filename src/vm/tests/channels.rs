@@ -715,7 +715,7 @@ fn task_submit_get_submission_order() {
                \x20   for t in ts:\n\
                \x20       match t.get():\n\
                \x20           ?v: print(v)\n\
-               \x20           !e: print(e.message())\n\
+               \x20           !e: print(e.error())\n\
                main()\n";
     assert_eq!(pmap_both("task_order", src), "1\n4\n9\n16\n25\n");
 }
@@ -732,10 +732,10 @@ fn task_get_idempotent_and_done() {
                \x20   print(t.done())\n\
                \x20   match t.get():\n\
                \x20       ?v: print(v)\n\
-               \x20       !e: print(e.message())\n\
+               \x20       !e: print(e.error())\n\
                \x20   match t.get():\n\
                \x20       ?v: print(v)\n\
-               \x20       !e: print(e.message())\n\
+               \x20       !e: print(e.error())\n\
                \x20   print(t.done())\n\
                main()\n";
     assert_eq!(pmap_both("task_idem", src), "true\n42\n42\ntrue\n");
@@ -793,10 +793,10 @@ fn main():
     b := ch.recv() else: panic(\"ch closed\")
     match a:
         ?v: print(\"ok {v}\")
-        !e: print(\"err {e.message()}\")
+        !e: print(\"err {e.error()}\")
     match b:
         ?v: print(\"ok {v}\")
-        !e: print(\"err {e.message()}\")
+        !e: print(\"err {e.error()}\")
 
 main()
 ";
@@ -823,7 +823,7 @@ struct Impl:
 
 struct GErr:
     w: Odd
-    fn message(self) -> str:
+    fn error(self) -> str:
         return \"x\"
 
 fn f(x: int) -> int!GErr:
@@ -834,10 +834,10 @@ fn f(x: int) -> int!GErr:
 fn main():
     match f(0):
         ?v: print(v)
-        !e: print(e.message())
+        !e: print(e.error())
     match f(1):
         ?v: print(v)
-        !e: print(e.message())
+        !e: print(e.error())
 
 main()
 ";
@@ -1156,7 +1156,7 @@ fn main():
     _ := churn()
     match t.get():
         ?m: print("sealed", m.len(), m["k49"])
-        !e: print(e.message())
+        !e: print(e.error())
     cc := Channel[Channel[Map[str, int]]](1)
     gate := Channel[int](1)
     ex2 := Executor()

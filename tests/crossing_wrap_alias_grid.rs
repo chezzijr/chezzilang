@@ -53,7 +53,7 @@ const ROOTS: [(&str, &str, &str, &str, &str); 6] = [
         "S",
         "S([0])",
         "buf.xs = [1]",
-        "struct S:\n    xs: List[int]\n    fn message(self) -> str:\n        return \"e\"\n",
+        "struct S:\n    xs: List[int]\n    fn error(self) -> str:\n        return \"e\"\n",
     ),
 ];
 
@@ -107,7 +107,7 @@ const CROSSINGS: [(&str, &str); 3] = [
     ),
     (
         "executor",
-        "    ex := Executor(1)\n    t := ex.submit(fn(): resume(it))\n    ex.shutdown()\n    match t.get():\n        ?_: pass\n        !e: panic(e.message())\n",
+        "    ex := Executor(1)\n    t := ex.submit(fn(): resume(it))\n    ex.shutdown()\n    match t.get():\n        ?_: pass\n        !e: panic(e.error())\n",
     ),
 ];
 

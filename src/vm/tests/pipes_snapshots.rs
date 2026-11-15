@@ -89,7 +89,7 @@ fn go() -> int!:
 fn main():
     match go():
         ?_: print(\"ok\")
-        !e: print(\"ERR:\" + e.message())
+        !e: print(\"ERR:\" + e.error())
 main()
 ";
     assert_mc_parity_file("r1_ret_bytes", src, "3\n0\n255\nok\n");
@@ -197,13 +197,13 @@ fn go() -> int!:
     print(back == b)
     match io.read_file(\"{p}\"):
         ?s: print(\"decoded?! \" + s)
-        !e: print(e.message().contains(\"read_bytes\"))
+        !e: print(e.error().contains(\"read_bytes\"))
     return ?0
 
 fn main():
     match go():
         ?_: print(\"ok\")
-        !e: print(\"ERR:\" + e.message())
+        !e: print(\"ERR:\" + e.error())
 main()
 "
     );
@@ -1235,7 +1235,7 @@ fn peek(v: int) -> int:
 r := recover: s.update(peek)
 match r:
     ?_: print(\"no fault\")
-    !e: print(e.message().contains(\"already holds the update guard\"))
+    !e: print(e.error().contains(\"already holds the update guard\"))
 print(s.get())
 ";
     let entry = write_temp_chz("ticket016_get_inside_update", src);
@@ -1273,13 +1273,13 @@ for f in [peek, peek_read]:
     r := recover: s.write(f)
     match r:
         ?_: print(\"no fault\")
-        !e: print(e.message().contains(\"already holds the update guard\"))
+        !e: print(e.error().contains(\"already holds the update guard\"))
 print(s.get())
 print(s.read(fn(x): x + s.get()))
 r := recover: s.read(bump)
 match r:
     ?_: print(\"no fault\")
-    !e: print(e.message().contains(\"already holds the read guard\"), s.get())
+    !e: print(e.error().contains(\"already holds the read guard\"), s.get())
 ";
     let entry = write_temp_chz("ticket246_rwshared_get_inside_write", src);
     let (out, _err, res, _code) = run_file_with(&entry, crate::native::HostConfig::default());
@@ -1310,7 +1310,7 @@ fn peek(v: int) -> int:
 res := recover: r.read(peek)
 match res:
     ?_: print(\"no fault\")
-    !e: print(e.message())
+    !e: print(e.error())
 print(r.read(fn(v: int) -> int: v))
 ";
     let entry = write_temp_chz("ticket016_rwshared_write_in_read", src);
@@ -1780,19 +1780,19 @@ fn ticket_193_await_update_guard_free_never_takes_the_guard() {
 #[test]
 fn a_user_err_records_its_origin_and_an_unraised_value_none() {
     // `!"boom"` at line 2 col 12, in the run's (temporary) entry file.
-    let src = "fn a() -> int!:\n    return !\"boom\"\nfn main():\n    match a():\n        ?v: print(v)\n        !e:\n            print(e.line())\n            print(e.col())\n            print(e.file() != None)\nmain()\n";
-    assert_eq!(run(src), "2\n12\ntrue\n");
+    let src = "fn a() -> int!:\n    return !\"boom\"\nfn main():\n    match a():\n        ?v: print(v)\n        !e:\n            match e.origin():\n                ?o: print(o.line, o.col, o.file.ends_with(\".chz\"))\n                None: print(\"no origin\")\nmain()\n";
+    assert_eq!(run(src), "2 12 true\n");
 
-    let src_struct = "struct MyErr:\n    code: int\n    fn message(self) -> str:\n        return \"code {self.code}\"\nfn b() -> int!:\n    return !MyErr(7)\nfn main():\n    match b():\n        ?v: print(v)\n        !e: print(e.line())\n    e: Error = MyErr(8)\n    print(e.line())\nmain()\n";
-    assert_eq!(run(src_struct), "6\nNone\n");
+    let src_struct = "struct MyErr:\n    code: int\n    fn error(self) -> str:\n        return \"code {self.code}\"\nfn b() -> int!:\n    return !MyErr(7)\nfn main():\n    match b():\n        ?v: print(v)\n        !e: print(e.origin() != None)\n    e: Error = MyErr(8)\n    print(e.origin())\nmain()\n";
+    assert_eq!(run(src_struct), "true\nNone\n");
 }
 
 /// W8-22: a fault caught by `recover:` carries the ORIGIN of the fault, not the `recover:` site.
 /// The uncaught form of this source faults at line 3 col 15 (`xs[9]`).
 #[test]
 fn caught_error_carries_the_fault_origin_span() {
-    let src = "fn boom() -> int!:\n    xs := [1]\n    return ?xs[9]\nfn main():\n    r := recover: boom()\n    match r:\n        ?v: print(v)\n        !e:\n            print(e.line())\n            print(e.col())\nmain()\n";
-    assert_eq!(run(src), "3\n13\n");
+    let src = "fn boom() -> int!:\n    xs := [1]\n    return ?xs[9]\nfn main():\n    r := recover: boom()\n    match r:\n        ?v: print(v)\n        !e:\n            match e.origin():\n                ?o: print(o.line, o.col)\n                None: print(\"no origin\")\nmain()\n";
+    assert_eq!(run(src), "3 13\n");
 }
 
 /// TICKET-126 (W13-24) — TICKET-118 added `SchedCore::cancelled_scope_awaiting_drain` to the idle

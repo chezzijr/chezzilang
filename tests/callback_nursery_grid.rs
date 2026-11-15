@@ -168,7 +168,7 @@ fn add4(y: int) -> int:
 fn must(r: int!) -> int:
     match r:
         ?v: return v
-        !e: panic(e.message())
+        !e: panic(e.error())
 ";
 
 /// One grid program and the value it must print.

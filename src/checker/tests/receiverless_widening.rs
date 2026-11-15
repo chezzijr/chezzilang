@@ -1030,7 +1030,7 @@ fn fn_type_param_invariance_pins_the_compatible_site() {
 #[test]
 fn fn_type_error_grant_does_not_smuggle_a_builtin_into_a_param() {
     rejects(
-        "struct MyErr:\n    code: int\n    fn message(self) -> str:\n        return \"e\"\nh: fn(Error) -> int = ord\n",
+        "struct MyErr:\n    code: int\n    fn error(self) -> str:\n        return \"e\"\nh: fn(Error) -> int = ord\n",
         "cannot assign fn(str) -> int to variable of type fn(Error) -> int",
     );
 }

@@ -160,6 +160,8 @@ pub fn compile_graph(graph: &ModuleGraph) -> Result<Program, CompileError> {
     c.program.range_key = crate::resolver::prelude_struct_key(graph, crate::resolver::RANGE_STRUCT);
     c.program.recv_error_key =
         crate::resolver::prelude_struct_key(graph, crate::resolver::RECV_ERROR_STRUCT);
+    c.program.location_key =
+        crate::resolver::prelude_struct_key(graph, crate::resolver::LOCATION_STRUCT);
     // Module 0 of a graph is the prelude.
     let prelude = graph.modules.first().map(|lm| &lm.ast.stmts[..]);
     c.program.print_defaults = call::prelude_print_defaults(prelude.unwrap_or_default())?;
@@ -453,6 +455,7 @@ impl Compiler {
             structs: HashMap::new(),
             range_key: crate::resolver::RANGE_STRUCT.to_string(),
             recv_error_key: crate::resolver::RECV_ERROR_STRUCT.to_string(),
+            location_key: crate::resolver::LOCATION_STRUCT.to_string(),
             print_defaults: [String::new(), String::new()],
             enum_methods: HashMap::new(),
             enum_home: HashMap::new(),

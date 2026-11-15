@@ -421,7 +421,7 @@ pub enum Intrinsic {
 
 impl Intrinsic {
     /// The method `protocol`'s intrinsic row promises: its hook's, or an unhooked protocol's.
-    /// `None` for `Error`, whose method on a `str` is the native `str.message`.
+    /// `None` for `Error`, whose method on a `str` is the native `str.error`.
     pub fn of_protocol(protocol: &str) -> Option<Intrinsic> {
         if let Some(row) = HOOKS.iter().find(|r| r.protocol == protocol) {
             return Some(Intrinsic::Hook(row.hook));
@@ -561,7 +561,9 @@ impl MethodTable {
         for id in 0..width {
             entries[module * width + id] = MethodEntry::Intrinsic(Intrinsic::ModuleMember);
         }
-        // Each struct: its fn fields, then its methods.
+        // Each struct: its fn fields, then its methods. Either may fill a std protocol default's
+        // slot (`Error.origin`); the checker's member rule (`Checker::check_default_members`) admits
+        // only a method with the default's signature there, so the overwrite answers as it is typed.
         for (tid, key) in program.struct_names.iter().enumerate() {
             let Some(def) = program.structs.get(&**key) else {
                 continue;

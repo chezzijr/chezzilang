@@ -62,7 +62,7 @@ fn ran[T](bad: List[str], name: str, r: T!):
         ?_:
             pass
         !e:
-            bad.push(name + ": " + e.message())
+            bad.push(name + ": " + e.error())
 
 fn isok[T](r: T!) -> bool:
     match r:

@@ -96,7 +96,7 @@ expected.
 
 ### D2. Errors are values: keep `Error`, hide `Err`; `!e` builds one
 
-- `Error` is the protocol every error type satisfies (`fn message(self) -> str`), like Go's `error`.
+- `Error` is the protocol every error type satisfies (`fn error(self) -> str`), like Go's `error`.
   `int!` means `int!Error`.
 - Prefix `!` builds an error value from the whole operand: `!IoErr("disk")`, `!wrap(e)`. The operand
   must satisfy `Error` (`!5`: `int does not satisfy Error`).
@@ -138,7 +138,7 @@ never produces a value; values come only from `??` and `match`.
 
 ```
 data := load(p) else e:
-    log(e.message())
+    log(e.error())
     return None
 for s in lines:
     n := to_int(s) else: continue          # T?: no e

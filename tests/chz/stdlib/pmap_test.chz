@@ -11,4 +11,4 @@ test fn pmap_limited_rejects_non_positive_limit():
     r := recover: pmap_limited([1, 2, 3], fn(x): x, 0)
     match r:
         ?_:  assert false, "expected a Err naming the bad limit"
-        !e: assert e.message().contains("limit"), e.message()
+        !e: assert e.error().contains("limit"), e.error()

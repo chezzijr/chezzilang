@@ -255,11 +255,11 @@ sink := Channel[int](0)
 fn must[T](r: T!) -> T:
     match r:
         ?v: return v
-        !e: panic(e.message())
+        !e: panic(e.error())
 fn show[T](r: T!) -> str:
     match r:
         ?_: return \"ok\"
-        !e: return \"err \" + e.message()
+        !e: return \"err \" + e.error()
 fn op(n: int) -> int:
 {OP}
     return 0
@@ -330,7 +330,7 @@ fn owner_src(kind: &str, ctx: &str) -> String {
             indent(&body, 12)
         ),
         "executor_job" => format!(
-            "fn owner_job() -> None:\n{}ex := Executor()\nt := ex.submit(owner_job)\nex.shutdown()\nmatch t.get():\n    ?_: pass\n    !e: panic(e.message())\n",
+            "fn owner_job() -> None:\n{}ex := Executor()\nt := ex.submit(owner_job)\nex.shutdown()\nmatch t.get():\n    ?_: pass\n    !e: panic(e.error())\n",
             indent(&body, 4)
         ),
         _ => unreachable!("owner kind {kind}"),

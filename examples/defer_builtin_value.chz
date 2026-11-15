@@ -21,6 +21,6 @@ fn main():
         p("boom")
     match r:
         ?v: print("no panic")
-        !e: print("recovered: {e.message()}")
+        !e: print("recovered: {e.error()}")
 
 main()

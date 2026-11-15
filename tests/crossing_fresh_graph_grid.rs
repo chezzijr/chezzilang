@@ -280,7 +280,7 @@ struct N:
 fn verdict(r: Channel[str], tag: str, res: None!):
     match res:
         ?_: r.send(tag + \" runs\")
-        !e: r.send(tag + \" other \" + e.message())
+        !e: r.send(tag + \" other \" + e.error())
 fn poke_l(r: Channel[str], tag: str, d: int, v: List[List[List[int]]]):
     res := recover:
         if d == 0:

@@ -3,5 +3,5 @@ fn main():
     r := recover: [1, 2][9]
     match r:
         ?v: print(v)
-        !e: print(e.message())
+        !e: print(e.error())
 main()

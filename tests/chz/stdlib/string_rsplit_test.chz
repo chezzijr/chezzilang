@@ -30,4 +30,4 @@ test fn empty_separator_faults():
     r := recover: string.rsplit("abc", "")
     match r:
         ?_: assert false
-        !e: assert e.message().contains("rsplit: sep must not be empty")
+        !e: assert e.error().contains("rsplit: sep must not be empty")

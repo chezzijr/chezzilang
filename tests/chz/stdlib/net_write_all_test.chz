@@ -7,7 +7,7 @@ import std.net
 fn count_text(r: int!) -> str:
     match r:
         ?n: return "Ok {n}"
-        !e: return e.message()
+        !e: return e.error()
 
 fn drain(peer: net.Socket) -> int:
     total := 0

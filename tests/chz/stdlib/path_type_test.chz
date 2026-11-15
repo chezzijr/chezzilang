@@ -69,4 +69,4 @@ test fn getcwd_returns_a_path():
             # On a normal (UTF-8) cwd the exact and the lossy conversion agree.
             assert p.decode() == ?p.str()
             assert fs.is_dir(p)
-        !e: assert false, "getcwd: " + e.message()
+        !e: assert false, "getcwd: " + e.error()

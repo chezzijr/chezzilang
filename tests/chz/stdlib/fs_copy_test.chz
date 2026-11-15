@@ -22,13 +22,13 @@ fn scratch(name: str) -> str:
 fn seed(p: str, text: str):
     match io.write_file(p, text):
         ?_: pass
-        !e: assert false, "setup: " + e.message()
+        !e: assert false, "setup: " + e.error()
 
 fn contents(p: str) -> str:
     match io.read_file(p):
         ?s: return s
         !e:
-            assert false, "read: " + e.message()
+            assert false, "read: " + e.error()
             return ""
 
 test fn copy_same_path_errs_and_preserves():
@@ -37,7 +37,7 @@ test fn copy_same_path_errs_and_preserves():
     seed(p, "important-data")
     match fs.copy(p, p):
         ?_: assert false, "copying a file onto itself must Err, not truncate it"
-        !e: assert e.message().contains("same file"), e.message()
+        !e: assert e.error().contains("same file"), e.error()
     assert contents(p) == "important-data", "the file must be byte-identical after a refused copy"
 
 test fn copy_through_symlink_errs_and_preserves():
@@ -49,10 +49,10 @@ test fn copy_through_symlink_errs_and_preserves():
     seed(src, "important-data")
     match pr.run_args("ln", ["-sf", src, link]):
         ?_: pass
-        !e: assert false, "setup ln: " + e.message()
+        !e: assert false, "setup ln: " + e.error()
     match fs.copy(link, src):
         ?_: assert false, "copying through a symlink to the same inode must Err"
-        !e: assert e.message().contains("same file"), e.message()
+        !e: assert e.error().contains("same file"), e.error()
     assert contents(src) == "important-data", "the file must be byte-identical after a refused copy"
 
 test fn copy_distinct_files_still_works():
@@ -63,7 +63,7 @@ test fn copy_distinct_files_still_works():
     seed(a, "payload-a")
     match fs.copy(a, b):
         ?_: pass
-        !e: assert false, "a normal copy must still work: " + e.message()
+        !e: assert false, "a normal copy must still work: " + e.error()
     assert contents(b) == "payload-a"
 
 test fn copy_onto_existing_different_dest_overwrites():
@@ -75,5 +75,5 @@ test fn copy_onto_existing_different_dest_overwrites():
     seed(b, "stale-b")
     match fs.copy(a, b):
         ?_: pass
-        !e: assert false, "overwriting a different dest must still work: " + e.message()
+        !e: assert false, "overwriting a different dest must still work: " + e.error()
     assert contents(b) == "payload-a"

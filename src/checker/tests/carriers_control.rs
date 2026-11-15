@@ -28,29 +28,29 @@ fn err_payload_typed_as_concrete_err() {
 #[test]
 fn custom_struct_error_ok() {
     ok(
-        "struct DbErr:\n    code: int\n    fn message(self) -> str:\n        return \"db\"\nfn q() -> int!DbErr:\n    return !DbErr(503)\n",
+        "struct DbErr:\n    code: int\n    fn error(self) -> str:\n        return \"db\"\nfn q() -> int!DbErr:\n    return !DbErr(503)\n",
     );
 }
 
 #[test]
 fn error_protocol_existential_accepts_str() {
-    // `Error` used as a value type; `str` conforms; only `message()` is available on it.
+    // `Error` used as a value type; `str` conforms; only `error()` is available on it.
     ok(
-        "fn q() -> int!Error:\n    return !\"bad\"\nfn main():\n    match q():\n        ?v: print(v)\n        !e: print(e.message())\nmain()\n",
+        "fn q() -> int!Error:\n    return !\"bad\"\nfn main():\n    match q():\n        ?v: print(v)\n        !e: print(e.error())\nmain()\n",
     );
 }
 
 #[test]
 fn bang_default_error_is_error_protocol() {
-    // `T!` defaults `E` to the `Error` protocol; the payload supports `.message()`.
+    // `T!` defaults `E` to the `Error` protocol; the payload supports `.error()`.
     ok(
-        "fn q() -> int!:\n    return !\"bad\"\nfn main():\n    match q():\n        ?v: print(v)\n        !e: print(e.message())\nmain()\n",
+        "fn q() -> int!:\n    return !\"bad\"\nfn main():\n    match q():\n        ?v: print(v)\n        !e: print(e.error())\nmain()\n",
     );
 }
 
 #[test]
 fn default_error_existential_rejects_str_methods() {
-    // `Error` existential exposes only `message()` — not `str`'s methods.
+    // `Error` existential exposes only `error()` — not `str`'s methods.
     rejects(
         "fn q() -> int!:\n    return !\"x\"\nfn main():\n    match q():\n        ?v: print(v)\n        !e: print(e.trim())\nmain()\n",
         "trim",
@@ -73,7 +73,7 @@ fn struct_error_without_message_rejected_as_error() {
 fn recover_yields_result_of_block_value() {
     // `recover:` evaluates to Result[T, Error]; matching Ok/Err is well-typed.
     ok(
-        "fn main():\n    r := recover: [1, 2][0]\n    match r:\n        ?v: print(v)\n        !e: print(e.message())\nmain()\n",
+        "fn main():\n    r := recover: [1, 2][0]\n    match r:\n        ?v: print(v)\n        !e: print(e.error())\nmain()\n",
     );
 }
 
@@ -103,7 +103,7 @@ fn recover_block_rejects_escaping_break() {
 fn recover_allows_inner_loop_break() {
     // A break that targets a loop *inside* the recover block is fine.
     ok(
-        "fn main():\n    r := recover:\n        for i in 0..3:\n            if i == 1: break\n    match r:\n        ?_: print(1)\n        !e: print(e.message())\nmain()\n",
+        "fn main():\n    r := recover:\n        for i in 0..3:\n            if i == 1: break\n    match r:\n        ?_: print(1)\n        !e: print(e.error())\nmain()\n",
     );
 }
 
@@ -111,7 +111,7 @@ fn recover_allows_inner_loop_break() {
 fn recover_question_mark_allowed_in_non_result_fn() {
     // `?` targets the recover boundary, so the enclosing fn need not return Result.
     ok(
-        "fn risky() -> int!:\n    return !\"x\"\nfn compute() -> str:\n    r := recover:\n        v := risky()?\n        v\n    match r:\n        ?v: return \"ok\"\n        !e: return e.message()\n",
+        "fn risky() -> int!:\n    return !\"x\"\nfn compute() -> str:\n    r := recover:\n        v := risky()?\n        v\n    match r:\n        ?v: return \"ok\"\n        !e: return e.error()\n",
     );
 }
 

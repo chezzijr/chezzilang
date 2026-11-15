@@ -531,7 +531,7 @@ fn full_path_head_shadowed_by_a_wait_recv_bind_reads_the_field() {
         ("pkg/deep.chz", FP_DEEP),
         (
             "main.chz",
-            "import pkg.deep\nstruct Inner:\n    x: int\nstruct Conf:\n    deep: Inner\nch: Channel[Conf] = Channel(1)\nch.send(Conf(Inner(9)))\nwait:\n    pkg := ch.recv():\n        match pkg:\n            ?pkg: print(pkg.deep.x)\n            !e: panic(e.message())\n",
+            "import pkg.deep\nstruct Inner:\n    x: int\nstruct Conf:\n    deep: Inner\nch: Channel[Conf] = Channel(1)\nch.send(Conf(Inner(9)))\nwait:\n    pkg := ch.recv():\n        match pkg:\n            ?pkg: print(pkg.deep.x)\n            !e: panic(e.error())\n",
         ),
     ]);
 }
@@ -1249,17 +1249,17 @@ fn ticket184_flow_grid() {
         ),
         (
             "T1",
-            "fn exit(c: int):\n    print(c)\nfn f():\n    r := recover:\n        exit(1)\n    match r:\n        ?v: print(v)\n        !e: print(e.message())\nf()\n",
+            "fn exit(c: int):\n    print(c)\nfn f():\n    r := recover:\n        exit(1)\n    match r:\n        ?v: print(v)\n        !e: print(e.error())\nf()\n",
             "returns no value",
         ),
         (
             "T2",
-            "fn f(c: Channel[int]):\n    r: ! = recover:\n        wait:\n            v := c.recv():\n                panic(\"x\")\n    match r:\n        ?_: print(1)\n        !e: print(e.message())\nf(Channel[int](1))\n",
+            "fn f(c: Channel[int]):\n    r: ! = recover:\n        wait:\n            v := c.recv():\n                panic(\"x\")\n    match r:\n        ?_: print(1)\n        !e: print(e.error())\nf(Channel[int](1))\n",
             "ok",
         ),
         (
             "T3",
-            "fn f():\n    r: int! = recover: panic(\"x\")\n    match r:\n        ?v: print(v)\n        !e: print(e.message())\nf()\n",
+            "fn f():\n    r: int! = recover: panic(\"x\")\n    match r:\n        ?v: print(v)\n        !e: print(e.error())\nf()\n",
             "ok",
         ),
         (

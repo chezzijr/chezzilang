@@ -10,7 +10,7 @@ fs.int_flag("count", 1, "how many times")
 fs.bool_flag("verbose", false, "chatty output")
 match fs.parse(os.args()):
     ?rest: ...                               # rest = the leftover positionals
-    !e:   print(e.message())
+    !e:   print(e.error())
 ```
 
 | Member | Behaviour |

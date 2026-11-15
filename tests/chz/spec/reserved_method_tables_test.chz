@@ -79,7 +79,7 @@ test fn str_split_empty_sep_faults():
     r := recover: "abc".split("")
     match r:
         ?_: assert false, "empty sep must fault"
-        !e: assert e.message().contains("sep must not be empty")
+        !e: assert e.error().contains("sep must not be empty")
     # positive controls: empty receiver stays [""], non-empty split unchanged.
     assert "a,b,c".split(",") == ["a", "b", "c"]
     assert "".split(",").len() == 1
@@ -90,11 +90,11 @@ test fn str_to_int_result():
         !_: assert false, "valid parse is Ok"
     match "x".to_int():
         ?_: assert false, "bad parse is Err"
-        !e: assert e.message().len() > 0, "the error carries a message"
+        !e: assert e.error().len() > 0, "the error carries a message"
 
 test fn str_message_is_error():
-    # `str` conforms to Error: message() returns the string itself.
-    assert "boom".message() == "boom"
+    # `str` conforms to Error: error() returns the string itself.
+    assert "boom".error() == "boom"
 
 # ---- bytes: decode / len ----
 

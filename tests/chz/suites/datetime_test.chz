@@ -89,7 +89,7 @@ test fn t_weekday():
     r := recover: datetime.weekday_name(7)
     match r:
         ?_: assert false, "expected a fault"
-        !e: assert e.message().contains("7"), "message must name the offending value"
+        !e: assert e.error().contains("7"), "message must name the offending value"
 
 test fn t_now():
     # smoke: deterministic bounds only, NOT an exact value (clock-dependent).
@@ -168,4 +168,4 @@ test fn t_days_in_month_domain():
         r := recover: datetime.days_in_month(2024, bad)
         match r:
             ?_: assert false, "expected a fault for month {bad}"
-            !e: assert e.message().contains("month out of range"), "wrong message: {e.message()}"
+            !e: assert e.error().contains("month out of range"), "wrong message: {e.error()}"

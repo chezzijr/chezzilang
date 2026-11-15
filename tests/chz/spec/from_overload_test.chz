@@ -65,7 +65,7 @@ fn pos_of_str(s: str) -> int!str:
 fn text(r: int!str) -> str:
     match r:
         ?v: return "ok {v}"
-        !e: return e.message()
+        !e: return e.error()
 
 fn seven() -> int:
     return 7

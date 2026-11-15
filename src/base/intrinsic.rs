@@ -139,7 +139,7 @@ pub const INTRINSIC_PROTO_METHODS: &[(&str, RecvKind)] = &[
     ("Hashable", RecvKind::Bool),
     // A tuple is Hashable exactly when every element type is (TICKET-161; CPython's rule).
     ("Hashable", RecvKind::Tuple),
-    // Error — `str`'s message is itself (Go model).
+    // Error — `str`'s `error()` is itself (Go model).
     (Unhooked::Error.protocol(), RecvKind::Str),
     // PathLike (W7-8) — the three byte-ish scalars a path can be spelled as. None of them HAS an
     // `as_path` method, so the grant is the only seam; `path.Path` conforms structurally instead.

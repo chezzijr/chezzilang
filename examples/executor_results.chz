@@ -24,6 +24,6 @@ fn main():
     for i in 0..rows.len():
         match handles[i].get():
             ?v:  print("{rows[i]} -> {v}")
-            !e: print("{rows[i]} -> fault: {e.message()}")
+            !e: print("{rows[i]} -> fault: {e.error()}")
 
 main()

@@ -240,7 +240,7 @@ test fn a_default_cycle_routed_through_an_ordinary_fn_faults_cleanly():
     r := recover: Cyc().n
     match r:
         ?v: assert false, "expected a fault, got {v}"
-        !e: assert e.message().contains("maximum call depth"), "got {e.message()}"
+        !e: assert e.error().contains("maximum call depth"), "got {e.error()}"
 
 # --- a `Self`-typed parameter keeps the INLINE clone ----------------------------------------------
 #

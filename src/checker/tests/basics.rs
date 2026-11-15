@@ -395,7 +395,7 @@ fn infer_ok_only_defaults_error_e() {
     // (Error vs DbErr) exactly like the annotated `-> int!` version. Today ok() leaks
     // Result[int, Unknown] so `?` launders into DbErr with no error.
     entry_rejects(
-        "struct DbErr:\n    code: int\n    fn message(self) -> str:\n        return \"db\"\nfn ok() -> int!:\n    return ?5\nfn caller() -> int!DbErr:\n    x := ok()?\n    return ?x\nfn main():\n    pass\n",
+        "struct DbErr:\n    code: int\n    fn error(self) -> str:\n        return \"db\"\nfn ok() -> int!:\n    return ?5\nfn caller() -> int!DbErr:\n    x := ok()?\n    return ?x\nfn main():\n    pass\n",
         "propagates error Error",
     );
 }
@@ -456,9 +456,9 @@ fn infer_ok_err_mixed_defaults_e_to_error() {
 #[test]
 fn infer_distinct_err_payloads_no_conflict() {
     // Two branches with DIFFERENT Err payload types no longer conflict on the E-slot (both finalize
-    // to `Error`); the Ok branch pins T=int. `e` binds as `Error` → `e.message()` is available.
+    // to `Error`); the Ok branch pins T=int. `e` binds as `Error` → `e.error()` is available.
     entry_ok(
-        "struct EA:\n    a: int\n    fn message(self) -> str:\n        return \"EA\"\nstruct EB:\n    b: int\n    fn message(self) -> str:\n        return \"EB\"\nfn f(k: int) -> int!:\n    if k == 0:\n        return !EA(1)\n    if k == 1:\n        return !EB(2)\n    return ?5\nfn main():\n    match f(2):\n        ?v: print(v)\n        !e: print(e.message())\n",
+        "struct EA:\n    a: int\n    fn error(self) -> str:\n        return \"EA\"\nstruct EB:\n    b: int\n    fn error(self) -> str:\n        return \"EB\"\nfn f(k: int) -> int!:\n    if k == 0:\n        return !EA(1)\n    if k == 1:\n        return !EB(2)\n    return ?5\nfn main():\n    match f(2):\n        ?v: print(v)\n        !e: print(e.error())\n",
     );
 }
 
@@ -466,44 +466,64 @@ fn infer_distinct_err_payloads_no_conflict() {
 fn infer_expr_non_error_payload_not_laundered() {
     // SOUNDNESS (adversarial-review): the if/match-EXPRESSION E-default must NOT force a concrete
     // NON-Error payload to `Error` — that path has no post-hoc assignability re-check, so laundering
-    // `MyErr` (no `message`) into the `Error` existential would make `e.message()` check-pass then
+    // `MyErr` (no `error`) into the `Error` existential would make `e.error()` check-pass then
     // fault at runtime. E is kept concrete → the method-call check rejects it at check time.
     entry_rejects(
-        "struct MyErr:\n    code: int\nfn foo(c: bool) -> int!MyErr:\n    if c:\n        return !MyErr(1)\n    return ?5\nfn main():\n    c := true\n    x := if c: foo(true) else: foo(false)\n    match x:\n        ?v: print(v)\n        !e: print(e.message())\n",
-        "no method 'message'",
+        "struct MyErr:\n    code: int\nfn foo(c: bool) -> int!MyErr:\n    if c:\n        return !MyErr(1)\n    return ?5\nfn main():\n    c := true\n    x := if c: foo(true) else: foo(false)\n    match x:\n        ?v: print(v)\n        !e: print(e.error())\n",
+        "no method 'error'",
     );
     // A bare non-Error scalar payload (`Err(42)`) is likewise preserved as `int`, not laundered.
     entry_rejects(
-        "fn main():\n    c := true\n    x := if c: !42 else: !43\n    match x:\n        ?v: print(v)\n        !e: print(e.message())\n",
+        "fn main():\n    c := true\n    x := if c: !42 else: !43\n    match x:\n        ?v: print(v)\n        !e: print(e.error())\n",
         "a `!` value needs its type",
     );
 }
 
-// TICKET-026 -- W8-22. THE NAME RECORDS THE BUG, NOT THE ASSERTION. A caught `Error` carries no
-// line/col/file today, so `e.line()` is rejected with `type Error has no method 'line'`. This test
-// asserts the FIXED behaviour, so it is RED until the three location accessors land. Do not rename
-// it: the ticket's `test_file` selects it by this exact string. Both helpers are called because
-// `ok()` keys types bare while `entry_ok()` keys them module-prefixed, so an `ok()`-only test can
-// pass while the CLI still rejects.
+// TICKET-026 -- W8-22. THE NAME RECORDS THE BUG, NOT THE ASSERTION. A caught `Error` once carried no
+// location, so this asserts the FIXED behaviour: `e.origin()` is a `Location?`. Do not rename it: the
+// ticket's `test_file` selects it by this exact string. Both helpers are called because `ok()` keys
+// types bare while `entry_ok()` keys them module-prefixed, so an `ok()`-only test can pass while the
+// CLI still rejects.
 #[test]
 fn caught_error_has_no_location_accessor() {
-    let src = "fn boom() -> int!:\n    xs := [1]\n    return ?xs[9]\nfn main():\n    r := recover: boom()\n    match r:\n        ?v: print(v)\n        !e: print(e.line())\n";
+    let src = "fn boom() -> int!:\n    xs := [1]\n    return ?xs[9]\nfn main():\n    r := recover: boom()\n    match r:\n        ?v: print(v)\n        !e: print(e.origin())\n";
     ok(src);
     entry_ok(src);
 
-    let src_col = "fn boom() -> int!:\n    xs := [1]\n    return ?xs[9]\nfn main():\n    r := recover: boom()\n    match r:\n        ?v: print(v)\n        !e: print(e.col())\n";
-    entry_ok(src_col);
-
-    let src_file = "fn boom() -> int!:\n    xs := [1]\n    return ?xs[9]\nfn main():\n    r := recover: boom()\n    match r:\n        ?v: print(v)\n        !e: print(e.file())\n";
-    entry_ok(src_file);
-
-    // `line()` returns `int?`: a declared `int?` binding must accept it.
-    let src_typed = "fn boom() -> int!:\n    xs := [1]\n    return ?xs[9]\nfn main():\n    r := recover: boom()\n    match r:\n        ?v: print(v)\n        !e:\n            x: int? = e.line()\n            print(x)\n";
+    // `origin()` returns `Location?`: a declared `Location?` binding accepts it, and its fields read.
+    let src_typed = "fn boom() -> int!:\n    xs := [1]\n    return ?xs[9]\nfn main():\n    r := recover: boom()\n    match r:\n        ?v: print(v)\n        !e:\n            x: Location? = e.origin()\n            match x:\n                ?o: print(o.line + o.col, o.file)\n                None: pass\n";
     entry_ok(src_typed);
 
-    // The accessors take 0 arguments; arity is still enforced.
-    let src_arity = "fn boom() -> int!:\n    xs := [1]\n    return ?xs[9]\nfn main():\n    r := recover: boom()\n    match r:\n        ?v: print(v)\n        !e: print(e.line(1))\n";
+    // The accessor takes 0 arguments; arity is still enforced.
+    let src_arity = "fn boom() -> int!:\n    xs := [1]\n    return ?xs[9]\nfn main():\n    r := recover: boom()\n    match r:\n        ?v: print(v)\n        !e: print(e.origin(1))\n";
     entry_rejects(src_arity, "expects 0 argument(s)");
+
+    // The three accessors it replaced are gone.
+    let src_line = "fn boom() -> int!:\n    return !\"x\"\nfn main():\n    match boom():\n        ?v: print(v)\n        !e: print(e.line())\n";
+    entry_rejects(src_line, "no method 'line'");
+}
+
+// The member rule (Rust: a trait's default method): a type that satisfies `Error` cannot hold a
+// member named `origin` the runtime would answer differently. A field of the name is a type error
+// (P4); a method of the name must have exactly the default's signature, and then it wins (P5).
+#[test]
+fn an_error_type_cannot_redeclare_origin() {
+    let field = "struct E:\n    origin: str\n    fn error(self) -> str:\n        return \"e\"\nfn main():\n    x: Error = E(\"a\")\n    print(x.error())\n";
+    entry_rejects(field, "Error.origin");
+    let method = "struct E:\n    fn error(self) -> str:\n        return \"e\"\n    fn origin(self) -> str:\n        return \"here\"\nfn main():\n    x: Error = E()\n    print(x.error())\n";
+    entry_rejects(method, "Error.origin");
+    // An enum is held to the same rule.
+    let en = "enum K:\n    A\n    fn error(self) -> str:\n        return \"k\"\n    fn origin(self) -> int:\n        return 1\nfn main():\n    print(K.A.error())\n";
+    entry_rejects(en, "Error.origin");
+    // The exact signature is allowed and wins.
+    entry_ok(
+        "struct E:\n    fn error(self) -> str:\n        return \"e\"\n    fn origin(self) -> Location?:\n        return ?Location(1, 2, \"f\")\nfn main():\n    x: Error = E()\n    print(x.origin())\n",
+    );
+    // A type that is not an `Error` has no rule: its `origin` is its own.
+    entry_ok("struct P:\n    origin: str\nfn main():\n    print(P(\"a\").origin)\n");
+    entry_ok(
+        "struct Q:\n    fn origin(self) -> str:\n        return \"q\"\nfn main():\n    print(Q().origin())\n",
+    );
 }
 
 #[test]
@@ -518,7 +538,7 @@ fn explicit_return_result_keeps_concrete_e() {
 
 // A `struct DbErr` satisfying the `Error` protocol, used by the if/match-expr E-default tests below.
 const DBERR: &str =
-    "struct DbErr:\n    msg: str\n    fn message(self) -> str:\n        return self.msg\n";
+    "struct DbErr:\n    msg: str\n    fn error(self) -> str:\n        return self.msg\n";
 
 #[test]
 fn if_expr_all_ok_defaults_result_e_to_error() {
@@ -603,7 +623,7 @@ fn closure_free_uninferable_errors() {
 fn closure_free_ok_defaults_error_e() {
     // CLOSURE: a free lambda writes its `T!E` type; `-> int!` has the error type `Error`.
     entry_ok(
-        "fn main():\n    f := fn() -> int!: ?5\n    x := f()\n    match x:\n        ?v: print(v)\n        !e: print(e.message())\n",
+        "fn main():\n    f := fn() -> int!: ?5\n    x := f()\n    match x:\n        ?v: print(v)\n        !e: print(e.error())\n",
     );
 }
 
@@ -2062,7 +2082,7 @@ fn try_result_in_option_fn_rejected() {
 fn try_option_in_result_fn_rejected() {
     let src = "fn find() -> int?:\n    return None\n\
                fn f() -> int!:\n    x := find()?\n    return ?x\n\
-               fn main():\n    match f():\n        ?v: print(v)\n        !e: print(e.message())\n\
+               fn main():\n    match f():\n        ?v: print(v)\n        !e: print(e.error())\n\
                main()\n";
     entry_rejects(src, "returns a `T!E` value, not a `T?` value");
 }

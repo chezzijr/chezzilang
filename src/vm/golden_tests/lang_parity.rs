@@ -185,7 +185,7 @@ fn json_raw_control_char_in_string_is_error_parity() {
 #[test]
 fn json_stringify_non_finite_faults_parity() {
     let out = golden_entry(
-        "import std.json\nfn tp(x: float) -> str:\n    doc := json.Json.Obj({\"v\": json.Json.Num(x)})\n    r := recover:\n        json.stringify(doc)\n    match r:\n        ?s: return \"OK \" + s\n        !e: return e.message()\nprint(tp(1.0 / 0.0))\nprint(tp(-1.0 / 0.0))\nprint(tp(0.0 / 0.0))\n",
+        "import std.json\nfn tp(x: float) -> str:\n    doc := json.Json.Obj({\"v\": json.Json.Num(x)})\n    r := recover:\n        json.stringify(doc)\n    match r:\n        ?s: return \"OK \" + s\n        !e: return e.error()\nprint(tp(1.0 / 0.0))\nprint(tp(-1.0 / 0.0))\nprint(tp(0.0 / 0.0))\n",
     );
     assert_eq!(
         out,
@@ -221,7 +221,7 @@ fn python_float_repr_str_parity() {
 #[test]
 fn json_stringify_finite_roundtrip_unchanged_parity() {
     let out = golden_entry(
-        "import std.json\ndoc := json.Json.Arr([json.Json.Num(3.0), json.Json.Num(1.5), json.Json.Num(1e300), json.Json.Num(0.0 - 2.5), json.Json.Str(\"hi\"), json.Json.Obj({\"k\": json.Json.Num(42.0)})])\ns := json.stringify(doc)\nprint(s)\nmatch json.parse(s):\n    ?v: print(\"roundtrip \" + json.stringify(v))\n    !e: print(\"ERR \" + e.message())\n",
+        "import std.json\ndoc := json.Json.Arr([json.Json.Num(3.0), json.Json.Num(1.5), json.Json.Num(1e300), json.Json.Num(0.0 - 2.5), json.Json.Str(\"hi\"), json.Json.Obj({\"k\": json.Json.Num(42.0)})])\ns := json.stringify(doc)\nprint(s)\nmatch json.parse(s):\n    ?v: print(\"roundtrip \" + json.stringify(v))\n    !e: print(\"ERR \" + e.error())\n",
     );
     // 1e300 is FINITE and far outside the i64 window: it must stringify normally (via `str(f)`),
     // NOT fault. `str(1e300)` renders in scientific notation (CPython repr parity, exponent >= 16):
@@ -737,7 +737,7 @@ fn float_ieee_div_mod() {
 #[test]
 fn int_div_by_zero_still_faults() {
     // INTEGER division by zero still faults — caught + printed identically.
-    let src = "fn run() -> int!:\n    r := recover:\n        1 / 0\n    match r:\n        ?v: return ?v\n        !e: print(e.message())\n    return ?0\nfn main():\n    _ := run()\nmain()";
+    let src = "fn run() -> int!:\n    r := recover:\n        1 / 0\n    match r:\n        ?v: return ?v\n        !e: print(e.error())\n    return ?0\nfn main():\n    _ := run()\nmain()";
     assert_eq!(golden_entry(src), "division by zero\n");
 }
 
@@ -856,7 +856,7 @@ fn math_abs_min_overflows() {
 #[test]
 fn math_abs_min_overflow_is_recoverable() {
     // The overflow is a normal recoverable fault: `recover:` turns it into an Err, not a crash.
-    let src = "import std.math\nfn main():\n    x := -9223372036854775807 - 1\n    r := recover:\n        math.abs(x)\n    match r:\n        ?v: print(v)\n        !e: print(e.message())\nmain()";
+    let src = "import std.math\nfn main():\n    x := -9223372036854775807 - 1\n    r := recover:\n        math.abs(x)\n    match r:\n        ?v: print(v)\n        !e: print(e.error())\nmain()";
     let out = golden_entry(src);
     assert!(out.contains("integer overflow in abs"), "{out}");
 }
@@ -967,7 +967,7 @@ fn main():
         0
     match x:
         ?_: print("no fault")
-        !e: print("caught: {e.message()}")
+        !e: print("caught: {e.error()}")
     print("still alive")
 main()
 "#;

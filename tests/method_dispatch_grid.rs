@@ -418,7 +418,7 @@ fn a_miss_faults_with_its_kind_text() {
 /// user struct and enum.
 #[test]
 fn every_granted_method_has_a_table_entry() {
-    use chezzi::base::builtin_method::{DECLARED_METHODS, NativeStatic};
+    use chezzi::base::builtin_method::{DECLARED_METHODS, ErrorMethod, NativeStatic};
     use chezzi::base::hooks::protocol_method;
     use chezzi::base::intrinsic::INTRINSIC_PROTO_METHODS;
     use chezzi::base::method_table::{KindRows, MethodEntry, MethodRow};
@@ -480,7 +480,7 @@ fn every_granted_method_has_a_table_entry() {
             fails.push(format!("({protocol}, {kind}).{m}: granted, no entry"));
         }
     }
-    for m in ["line", "col", "file"] {
+    for m in ErrorMethod::ALL.iter().map(|m| m.name()) {
         for row in [MethodRow::Int, MethodRow::Str, MethodRow::Tuple] {
             if t.fixed(row, id(m)) == MethodEntry::Miss {
                 fails.push(format!("{row:?}.{m}: a protocol default, no entry"));

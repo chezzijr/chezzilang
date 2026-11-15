@@ -86,7 +86,7 @@ test fn parse_int_base_agrees_with_to_int_on_underscores_and_whitespace():
 test fn parse_int_base_overflow_says_overflow_not_malformed():
     match math.parse_int_base("8000000000000000", 16):
         ?_: assert false, "8000000000000000 base 16 overflows i64"
-        !e: assert e.message().contains("overflows i64") and not e.message().contains("cannot parse"), e.message()
+        !e: assert e.error().contains("overflows i64") and not e.error().contains("cannot parse"), e.error()
 
 # M24-5 — a native module FUNCTION is an ordinary `defer` target and really runs. Its neighbour, a
 # native CONSTRUCTOR reached the same way (`concurrency.Shared(0)`, `time.timer(10)`), is refused by

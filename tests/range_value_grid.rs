@@ -493,7 +493,7 @@ fn program(form: Form, pos: Pos, uses: &[Use]) -> String {
     for u in uses {
         let l = u.label();
         p.push_str(&format!(
-            "    res_{l} := recover: u_{l}(r)\n    match res_{l}:\n        ?v:\n            print(\"{l}: {{v}}\")\n        !e:\n            print(\"{l}: FAULT {{e.message()}}\")\n"
+            "    res_{l} := recover: u_{l}(r)\n    match res_{l}:\n        ?v:\n            print(\"{l}: {{v}}\")\n        !e:\n            print(\"{l}: FAULT {{e.error()}}\")\n"
         ));
     }
     p.push_str("\nmain()\n");
@@ -653,7 +653,7 @@ fn a_literal_and_a_value_with_no_start_are_both_run_faults() {
 fn a_zero_step_faults_at_construction() {
     let f = write(
         "zero_step.chz",
-        "r := recover: Range(0, 3, 0)\nmatch r:\n    ?v:\n        print(\"built {v}\")\n    !e:\n        print(e.message())\n",
+        "r := recover: Range(0, 3, 0)\nmatch r:\n    ?v:\n        print(\"built {v}\")\n    !e:\n        print(e.error())\n",
     );
     let (ok, text) = chezzi(&["run"], &f, None);
     assert!(ok && text.contains("Range() step cannot be zero"), "{text}");

@@ -15,7 +15,7 @@ match fs.parse(["--name", "alice", "--count=3", "--verbose", "--", "--extra", "p
         print("verbose = {fs.get_bool("verbose")}")
         print("pos     = {" ".join(pos)}")
     !e:
-        print("parse failed: {e.message()}")
+        print("parse failed: {e.error()}")
 
 # get_* reads the LIVE value; usage() reads the registered default
 print("live name = {fs.get_str("name")}")   # still "alice" after the parse above
@@ -25,30 +25,30 @@ v1 := flag.new()
 v1.bool_flag("verbose", false, "v")
 match v1.parse(["--verbose=1"]):
     ?p: print("verbose=1 -> {v1.get_bool("verbose")}")
-    !e: print("err: {e.message()}")
+    !e: print("err: {e.error()}")
 v0 := flag.new()
 v0.bool_flag("verbose", true, "v")
 match v0.parse(["--verbose=F"]):
     ?p: print("verbose=F -> {v0.get_bool("verbose")}")
-    !e: print("err: {e.message()}")
+    !e: print("err: {e.error()}")
 
 # ----- error paths (a clean an error, never a fault) -----
 u := flag.new()
 match u.parse(["--nope"]):
     ?p: print("unexpected ok")
-    !e: print("err: {e.message()}")
+    !e: print("err: {e.error()}")
 
 m := flag.new()
 m.str_flag("name", "", "n")
 match m.parse(["--name"]):
     ?p: print("unexpected ok")
-    !e: print("err: {e.message()}")
+    !e: print("err: {e.error()}")
 
 b := flag.new()
 b.int_flag("count", 0, "c")
 match b.parse(["--count", "abc"]):
     ?p: print("unexpected ok")
-    !e: print("err: {e.message()}")
+    !e: print("err: {e.error()}")
 
 # ----- usage() -----
 print("--- usage ---")
@@ -60,4 +60,4 @@ h.str_flag("name", "world", "who to greet")
 print("--- help ---")
 match h.parse(["--help"]):
     ?p: print("unexpected ok")
-    !e: print(e.message())
+    !e: print(e.error())

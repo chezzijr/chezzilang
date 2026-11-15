@@ -43,7 +43,7 @@ fn a_job_fault_stays_in_its_task_and_ends_nothing() {
     // TICKET-289 (replaces TICKET-208 owner decision 3, where a fire-and-forget job's fault ended
     // the whole run) — a job's fault appears only in its Task. `shutdown()` raises nothing, the
     // `recover:` around it has nothing to catch, the siblings run, and `done` prints.
-    let src = "import Executor from std.concurrency\nfn boom():\n    x := [1]\n    print(x[9])\nfn run():\n    ex := Executor()\n    _ := ex.submit(fn(): print(\"A\"))\n    t := ex.submit(fn(): boom())\n    _ := ex.submit(fn(): print(\"C\"))\n    ex.shutdown()\n    match t.get():\n        ?_: print(\"no fault\")\n        !e: print(\"fault: {e.message()}\")\nfn main():\n    r := recover:\n        run()\n        0\n    match r:\n        ?_: print(\"nothing raised\")\n        !e: print(\"recovered: {e.message()}\")\n    print(\"done\")\nmain()\n";
+    let src = "import Executor from std.concurrency\nfn boom():\n    x := [1]\n    print(x[9])\nfn run():\n    ex := Executor()\n    _ := ex.submit(fn(): print(\"A\"))\n    t := ex.submit(fn(): boom())\n    _ := ex.submit(fn(): print(\"C\"))\n    ex.shutdown()\n    match t.get():\n        ?_: print(\"no fault\")\n        !e: print(\"fault: {e.error()}\")\nfn main():\n    r := recover:\n        run()\n        0\n    match r:\n        ?_: print(\"nothing raised\")\n        !e: print(\"recovered: {e.error()}\")\n    print(\"done\")\nmain()\n";
     let (out, res) = run_program(src);
     res.expect("a job's fault must not end the run");
     assert!(
@@ -85,13 +85,13 @@ fn main():
     r: None!Error = recover: ex.shutdown()
     match r:
         ?_: print("no fault")
-        !e: print("fault: {e.message()}")
+        !e: print("fault: {e.error()}")
     match ta.get():
         ?_: print("ta ok")
-        !e: print("ta: {e.message()}")
+        !e: print("ta: {e.error()}")
     match tb.get():
         ?_: print("tb ok")
-        !e: print("tb: {e.message()}")
+        !e: print("tb: {e.error()}")
 
 main()
 "#;
@@ -234,7 +234,7 @@ fn defer_break_inside_if_drains_inner_first() {
 #[test]
 fn defer_recover_runs_on_ok_path() {
     assert_defer_scope(
-        "fn log(s: str):\n    print(s)\nfn risky(ok: bool) -> int!:\n    if ok:\n        return ?1\n    return !\"boom\"\nfn main():\n    y := 0\n    r := recover:\n        defer log(\"release\")\n        y = risky(true)?\n    log(\"got\")\n    match r:\n        ?_: print(\"ok {y}\")\n        !e: print(\"err {e.message()}\")\nmain()\n",
+        "fn log(s: str):\n    print(s)\nfn risky(ok: bool) -> int!:\n    if ok:\n        return ?1\n    return !\"boom\"\nfn main():\n    y := 0\n    r := recover:\n        defer log(\"release\")\n        y = risky(true)?\n    log(\"got\")\n    match r:\n        ?_: print(\"ok {y}\")\n        !e: print(\"err {e.error()}\")\nmain()\n",
         "release\ngot\nok 1\n",
     );
 }
@@ -244,7 +244,7 @@ fn defer_recover_runs_on_ok_path() {
 #[test]
 fn defer_recover_runs_on_try_path() {
     assert_defer_scope(
-        "fn log(s: str):\n    print(s)\nfn risky(ok: bool) -> int!:\n    if ok:\n        return ?1\n    return !\"boom\"\nfn main():\n    r := recover:\n        defer log(\"release\")\n        x := risky(false)?\n        x\n    log(\"got\")\n    match r:\n        ?v: print(\"ok {v}\")\n        !e: print(\"err {e.message()}\")\nmain()\n",
+        "fn log(s: str):\n    print(s)\nfn risky(ok: bool) -> int!:\n    if ok:\n        return ?1\n    return !\"boom\"\nfn main():\n    r := recover:\n        defer log(\"release\")\n        x := risky(false)?\n        x\n    log(\"got\")\n    match r:\n        ?v: print(\"ok {v}\")\n        !e: print(\"err {e.error()}\")\nmain()\n",
         "release\ngot\nerr boom\n",
     );
 }
@@ -254,7 +254,7 @@ fn defer_recover_runs_on_try_path() {
 #[test]
 fn defer_recover_runs_on_fault_path() {
     assert_defer_scope(
-        "fn log(s: str):\n    print(s)\nfn main():\n    r := recover:\n        defer log(\"release\")\n        xs := [1]\n        y := xs[5]\n        y\n    log(\"got\")\n    match r:\n        ?v: print(\"ok {v}\")\n        !e: print(\"err {e.message()}\")\nmain()\n",
+        "fn log(s: str):\n    print(s)\nfn main():\n    r := recover:\n        defer log(\"release\")\n        xs := [1]\n        y := xs[5]\n        y\n    log(\"got\")\n    match r:\n        ?v: print(\"ok {v}\")\n        !e: print(\"err {e.error()}\")\nmain()\n",
         "release\ngot\nerr index 5 out of bounds (len 1)\n",
     );
 }
@@ -264,7 +264,7 @@ fn defer_recover_runs_on_fault_path() {
 #[test]
 fn defer_recover_fault_supersedes() {
     assert_defer_scope(
-        "fn boom():\n    xs := [1]\n    x := xs[9]\nfn main():\n    r := recover:\n        defer boom()\n        42\n    match r:\n        ?v: print(\"ok {v}\")\n        !e: print(\"err {e.message()}\")\nmain()\n",
+        "fn boom():\n    xs := [1]\n    x := xs[9]\nfn main():\n    r := recover:\n        defer boom()\n        42\n    match r:\n        ?v: print(\"ok {v}\")\n        !e: print(\"err {e.error()}\")\nmain()\n",
         "err index 9 out of bounds (len 1)\n",
     );
 }

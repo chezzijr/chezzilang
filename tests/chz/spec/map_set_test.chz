@@ -32,13 +32,13 @@ test fn missing_key_names_the_key():
     r1 := recover: sm["zz"]
     match r1:
         ?_: assert false, "expected a fault"
-        !e: assert e.message() == "key not found: 'zz'"
+        !e: assert e.error() == "key not found: 'zz'"
 
     im := {1: 10}
     r2 := recover: im[99]
     match r2:
         ?_: assert false, "expected a fault"
-        !e: assert e.message() == "key not found: 99"
+        !e: assert e.error() == "key not found: 99"
 
 # ---- methods: len / has / get / keys / values ----
 
@@ -151,7 +151,7 @@ struct Cyc:
 fn assert_depth_fault[T](r: T!Error, where_: str):
     match r:
         ?_: assert false, where_ + " must fault on a cyclic key"
-        !e: assert e.message().contains("maximum call depth"), where_ + ": " + e.message()
+        !e: assert e.error().contains("maximum call depth"), where_ + ": " + e.error()
 
 test fn cyclic_key_faults_everywhere():
     # two DISTINCT self-cyclic keys with the same hash (x=1) -> a candidate collision that

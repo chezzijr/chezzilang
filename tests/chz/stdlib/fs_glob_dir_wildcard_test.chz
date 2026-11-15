@@ -13,7 +13,7 @@ import std.time
 fn ok_nil(r: None!, what: str):
     match r:
         ?_: pass
-        !e: assert false, what + ": " + e.message()
+        !e: assert false, what + ": " + e.error()
 
 fn fixture(name: str) -> str:
     d := os.temp_dir().str() + "/chz_globdir_" + name + "_{os.getpid()}"
@@ -36,7 +36,7 @@ fn rel(d: str, pattern: str) -> List[str]:
         ?hits:
             for h in hits:
                 out.push(h.str().strip_prefix(d))
-        !e: assert false, pattern + " must not error: " + e.message()
+        !e: assert false, pattern + " must not error: " + e.error()
     return out
 
 test fn glob_matches_a_wildcard_in_a_directory_part():
@@ -63,7 +63,7 @@ test fn glob_checks_every_part_of_the_pattern():
     for p in ["nope_globdir/[/x.txt", "nope_globdir/[a/b]x", "[/*"]:
         match fs.glob(p):
             ?m: assert false, p + " must be a bad pattern, got {m}"
-            !e: assert "bad pattern" in e.message(), p + ": " + e.message()
+            !e: assert "bad pattern" in e.error(), p + ": " + e.error()
 
 # Each wildcard directory part is one level of recursion. Go 1.27 stops at 10000 levels with
 # `syntax error in pattern` (CVE-2022-30632): 9999 parts give `[]`, 10000 give the error. Before
@@ -71,11 +71,11 @@ test fn glob_checks_every_part_of_the_pattern():
 test fn glob_limits_wildcard_directory_depth_as_go():
     match fs.glob("nope_globdir/" + "*/".repeat(9999) + "x"):
         ?m: assert m == [], "{m}"
-        !e: assert false, "9999 parts must not error: " + e.message()
+        !e: assert false, "9999 parts must not error: " + e.error()
     for n in [10000, 1000000]:
         match fs.glob("nope_globdir/" + "*/".repeat(n) + "x"):
             ?m: assert false, "{n} parts must be a bad pattern, got {m}"
-            !e: assert "bad pattern" in e.message(), "{n} parts: the error must say bad pattern"
+            !e: assert "bad pattern" in e.error(), "{n} parts: the error must say bad pattern"
 
 # A long literal prefix before many wildcard parts must cost linear time. Each level used to rescan
 # the whole prefix for a wildcard: 400 KB of `q/` before 9998 `*/` took about 16 s (Go 1.27 is just

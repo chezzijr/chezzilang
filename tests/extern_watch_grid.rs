@@ -136,7 +136,7 @@ fn ctx_lines(ctx: &str) -> &'static str {
         "task" => "    parallel:\n        spawn runner(g, h, d)\nSIB",
         "body" => "    parallel:\nSIB        spawn pass_()\n        _ := work(g, h, d)\n",
         "job" => {
-            "    jx := Executor(1)\n    t := jx.submit(fn() -> int: work(g, h, d))\n    match t.get():\n        ?_: pass\n        !e: print(\"e {e.message()}\")\n"
+            "    jx := Executor(1)\n    t := jx.submit(fn() -> int: work(g, h, d))\n    match t.get():\n        ?_: pass\n        !e: print(\"e {e.error()}\")\n"
         }
         "cb" => "    parallel:\n        spawn runner_cb(g, h, d)\nSIB",
         other => panic!("no context {other}"),

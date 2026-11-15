@@ -10,7 +10,7 @@ print("b64 Man     = " + enc.base64_encode("Man"))
 print("b64 foobar  = " + enc.base64_encode("foobar"))
 match enc.base64_decode("Zm9vYmFy"):
     ?s: print("b64 decode  = " + s)
-    !e: print("b64 decode err: " + e.message())
+    !e: print("b64 decode err: " + e.error())
 match enc.base64_decode("not valid!!"):
     ?s: print("unexpected ok: " + s)
     !e: print("b64 bad     = err")
@@ -19,13 +19,13 @@ match enc.base64_decode("not valid!!"):
 print("b64url f?>  = " + enc.base64_encode_url("f?>"))
 match enc.base64_decode_url(enc.base64_encode_url("hello/world+more")):
     ?s: print("b64url rt   = " + s)
-    !e: print("b64url err: " + e.message())
+    !e: print("b64url err: " + e.error())
 
 # --- hex ---
 print("hex foo     = " + enc.hex_encode("foo"))
 match enc.hex_decode("68656c6c6f"):
     ?s: print("hex decode  = " + s)
-    !e: print("hex err: " + e.message())
+    !e: print("hex err: " + e.error())
 match enc.hex_decode("zz"):
     ?s: print("unexpected ok: " + s)
     !e: print("hex bad     = err")
@@ -35,7 +35,7 @@ print("url enc     = " + enc.url_encode("a b/c?d=e&f"))
 print("url unres   = " + enc.url_encode("keep~these-chars_.ok"))
 match enc.url_decode("a%20b%2Fc%3Fd"):
     ?s: print("url decode  = " + s)
-    !e: print("url err: " + e.message())
+    !e: print("url err: " + e.error())
 match enc.url_decode("%2G"):
     ?s: print("unexpected ok: " + s)
     !e: print("url bad     = err")

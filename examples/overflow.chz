@@ -7,7 +7,7 @@ import std.math
 fn show(label: str, r: int!):
     match r:
         ?v: print("{label}: ok {v}")
-        !e: print("{label}: {e.message()}")
+        !e: print("{label}: {e.error()}")
 
 fn main():
     big := 9223372036854775807          # i64::MAX

@@ -16,7 +16,7 @@ import Task from std.concurrency
 fn must[T](r: T!) -> T:
     match r:
         ?v: return v
-        !e: panic(e.message())
+        !e: panic(e.error())
 
 fn forty_two() -> int:
     return 42
@@ -42,7 +42,7 @@ fn show(t: Task[int]) -> str:
     r := recover: must(t.get())
     match r:
         ?v: return "{v}"
-        !e: return e.message()
+        !e: return e.error()
 
 fn child_show(t: Task[int], out: Channel[str]):
     out.send(show(t))
@@ -54,20 +54,20 @@ fn _child_get(t: Task[int], ch: Channel[str]):
     r := recover: must(t.get())
     match r:
         ?v: ch.send("{v}")
-        !e: ch.send(e.message())
+        !e: ch.send(e.error())
 
 fn child_mutate(t: Task[List[int]], out: Channel[str]):
     r := recover: _mutate_then_get(t)
     match r:
         ?s: out.send(s)
-        !e: out.send(e.message())
+        !e: out.send(e.error())
 
 fn _mutate_then_get(t: Task[List[int]]) -> str:
     a := must(t.get())
     r := recover: a.push(9)
     match r:
         ?_: return "push ok {must(t.get())}"
-        !e: return "{must(t.get())} {e.message()}"
+        !e: return "{must(t.get())} {e.error()}"
 
 test fn task_get_in_spawned_task_then_parent_get_sees_same_result():
     ex := concurrency.Executor()
@@ -81,7 +81,7 @@ test fn task_get_in_spawned_task_then_parent_get_sees_same_result():
     r := recover: must(t.get())
     match r:
         ?v: assert v == 42, "parent get() after child get()"
-        !e: assert false, e.message()
+        !e: assert false, e.error()
 
 test fn task_pending_parent_get_waits():
     ex := concurrency.Executor()

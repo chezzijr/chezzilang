@@ -180,7 +180,7 @@ wait:
         ),
         (
             "e := RecvError()
-print(e.message())
+print(e.error())
 ",
             true,
         ),
@@ -190,8 +190,8 @@ print(e.message())
         let program = compile_graph(&graph).unwrap_or_else(|e| panic!("{src:?}: {}", e.message));
         let has = program.structs[&program.recv_error_key]
             .methods
-            .contains_key("message");
-        assert_eq!(has, *used, "{src:?} compiled RecvError.message: {has}");
+            .contains_key("error");
+        assert_eq!(has, *used, "{src:?} compiled RecvError.error: {has}");
     }
 }
 

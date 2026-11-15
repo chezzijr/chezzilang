@@ -688,7 +688,7 @@ fn do_client(addr: str) -> str!:
 fn client(addr: str):
     match do_client(addr):
         ?line: print(line)
-        !e: print(\"ERR:\" + e.message())
+        !e: print(\"ERR:\" + e.error())
 
 fn server(listener: net.Listener) -> int!:
     conn := listener.accept()?
@@ -709,7 +709,7 @@ fn run() -> int!:
 fn main():
     match run():
         ?_: print(\"\")
-        !e: print(\"RUN-ERR:\" + e.message())
+        !e: print(\"RUN-ERR:\" + e.error())
 
 main()
 ";
@@ -767,7 +767,7 @@ fn do_server(listener: net.Listener) -> int!:
 fn server(listener: net.Listener):
     match do_server(listener):
         ?n: print(n)
-        !e: print(\"ERR:\" + e.message())
+        !e: print(\"ERR:\" + e.error())
 
 fn client(addr: str) -> int!:
     time.sleep_ms(50)
@@ -787,7 +787,7 @@ fn run() -> int!:
 fn main():
     match run():
         ?_: print(\"\")
-        !e: print(\"RUN-ERR:\" + e.message())
+        !e: print(\"RUN-ERR:\" + e.error())
 
 main()
 ";
@@ -1201,7 +1201,7 @@ fn bump(v: int) -> int:
         ("executor_job", |b| {
             format!(
                 "fn owner_job() -> None:\n{}ex := Executor()\nt := ex.submit(owner_job)\n\
-                 ex.shutdown()\nmatch t.get():\n    ?_: pass\n    !e: panic(e.message())\n",
+                 ex.shutdown()\nmatch t.get():\n    ?_: pass\n    !e: panic(e.error())\n",
                 indent(b, 4)
             )
         }),
@@ -1442,7 +1442,7 @@ t := ex.submit(owner_job)
 ex.shutdown()
 match t.get():
     ?_: pass
-    !e: panic(e.message())
+    !e: panic(e.error())
 ";
     let entry = write_temp_chz("t289_finish_drain_window", src);
     let cfg = crate::native::HostConfig::default();
@@ -1886,7 +1886,7 @@ import std.process
 fn checker(sink: Shared[int]):
     match process.cmd(\"true\"):
         ?out: sink.update(fn(x): x + 1)
-        !e: print(e.message())
+        !e: print(e.error())
 
 fn main():
     sink := Shared(0)

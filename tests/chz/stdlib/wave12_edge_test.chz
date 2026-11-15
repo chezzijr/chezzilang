@@ -40,7 +40,7 @@ test fn stringify_depth_cap_matches_parse():
     r := recover: json.stringify(j)
     match r:
         ?_: assert false, "stringify accepted a tree one level past parse's own MAX_NEST_DEPTH"
-        !e: assert e.message() == "json.stringify: exceeded max depth"
+        !e: assert e.error() == "json.stringify: exceeded max depth"
 
 # W12-20a: at exactly parse's own cutoff, stringify must accept AND the output must parse back.
 test fn stringify_at_the_depth_cap_parses_back():
@@ -52,7 +52,7 @@ test fn stringify_at_the_depth_cap_parses_back():
     t := json.stringify(j)
     match json.parse(t):
         ?_: assert true
-        !e: assert false, "stringify output must parse: " + e.message()
+        !e: assert false, "stringify output must parse: " + e.error()
 
 # W12-20b: csv.parse follows Go's encoding/csv record-separator set (CRLF or LF); a lone CR is
 # ordinary field data, not a record break.
@@ -76,7 +76,7 @@ test fn regex_dollar_brace_empty_name_stays_literal_like_go():
     r := regex.replace_all(r"(\d+)", "12 34", r"${}")
     match r:
         ?v: assert v == "${{}} ${{}}", v
-        !e: assert false, e.message()
+        !e: assert false, e.error()
 
 # W12-20d: the magnitude of a duration literal is parsed UNSIGNED before the sign is applied, so
 # i64::MIN milliseconds (whose magnitude alone overflows a signed i64) must parse, matching its own
@@ -85,7 +85,7 @@ test fn duration_parse_accepts_i64_min_millis():
     r := duration.parse("-9223372036854775808ms")
     match r:
         ?g: assert g.as_millis() == -9223372036854775808
-        !e: assert false, "i64::MIN ms must parse: " + e.message()
+        !e: assert false, "i64::MIN ms must parse: " + e.error()
 
 # W12-20d: the negative edge's neighbours — one past i64::MIN in either direction Errs, the fraction
 # path and a multi-group sum both reach i64::MIN, and the pre-existing overflow guard on the
@@ -99,10 +99,10 @@ test fn duration_parse_negative_edge_neighbours():
         !_: assert true
     match duration.parse("-9223372036854775.808s"):
         ?g: assert g.as_millis() == -9223372036854775807 - 1
-        !e: assert false, e.message()
+        !e: assert false, e.error()
     match duration.parse("-9223372036854775807ms1ms"):
         ?g: assert g.as_millis() == -9223372036854775807 - 1
-        !e: assert false, e.message()
+        !e: assert false, e.error()
     match duration.parse("-9223372036854775807ms2ms"):
         ?_: assert false, "a multi-group sum one past i64::MIN must Err"
         !_: assert true

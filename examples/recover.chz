@@ -14,19 +14,19 @@ fn main():
     a := recover: risky(1, xs)
     match a:
         ?v: print("ok: {v}")
-        !e: print("err: {e.message()}")
+        !e: print("err: {e.error()}")
 
     # Fault path: the out-of-bounds access is caught at the boundary.
     b := recover: risky(99, xs)
     match b:
         ?v: print("ok: {v}")
-        !e: print("recovered: {e.message()}")
+        !e: print("recovered: {e.error()}")
 
     # divide-by-zero, three steps in, is caught the same way.
     c := recover: 100 / (xs.len() - 3)
     match c:
         ?v: print("ok: {v}")
-        !e: print("recovered: {e.message()}")
+        !e: print("recovered: {e.error()}")
 
     # A `?` inside the block short-circuits to the boundary (try-block style): an explicit an error
     # lands in `d` just like a panic would — one boundary handles both kinds of failure.
@@ -36,5 +36,5 @@ fn main():
         d_v = n * 2
     match d:
         ?_: print("ok: {d_v}")
-        !e: print("recovered: {e.message()}")
+        !e: print("recovered: {e.error()}")
 main()

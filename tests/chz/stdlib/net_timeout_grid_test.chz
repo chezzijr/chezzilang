@@ -20,17 +20,17 @@ fn waits(form: str) -> bool:
 fn txt(r: str!) -> str:
     match r:
         ?s: return "ok {s}"
-        !e: return e.message()
+        !e: return e.error()
 
 fn btxt(r: bytes!) -> str:
     match r:
         ?b: return "ok {b.len()}"
-        !e: return e.message()
+        !e: return e.error()
 
 fn ntxt(r: int!) -> str:
     match r:
         ?n: return "ok {n}"
-        !e: return e.message()
+        !e: return e.error()
 
 fn read_with(c: net.Socket, form: str) -> str:
     if form == "omitted":
@@ -181,7 +181,7 @@ fn accept_case(form: str) -> str!:
                 ?s:
                     s.close()
                     out.send("ok")
-                !e: out.send(e.message())
+                !e: out.send(e.error())
     ln.close()
     return ?out.recv()?
 

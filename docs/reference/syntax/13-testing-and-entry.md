@@ -64,7 +64,7 @@ The repo's own Chezzi test suite is in `tests/chz/` (`spec/` for language behavi
 modules, `suites/` for lifecycle suites), separate from `examples/` (golden-output demos). `cargo test`
 runs it through `tests/chz_suite.rs`, and `tests/chezzi_threads_cli.rs` runs it again at
 `CHEZZI_THREADS=2`. You can test a fault's message in Chezzi: `r := recover: <expr>` then
-`match r: !e: assert e.message().contains(...)`. Only checker diagnostics and engine internals stay in Rust.
+`match r: !e: assert e.error().contains(...)`. Only checker diagnostics and engine internals stay in Rust.
 
 ## 9b. Program entry — there is no automatic `main`
 

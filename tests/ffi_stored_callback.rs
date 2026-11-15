@@ -395,7 +395,7 @@ for i in 0..2000000:
     match r:
         ?v: pass
         !e:
-            print("clean: {{e.message()}}")
+            print("clean: {{e.error()}}")
             break
 print("survived")
 "#,

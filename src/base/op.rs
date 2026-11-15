@@ -739,6 +739,8 @@ pub struct Program {
     /// The runtime key of the prelude's `RecvError` struct: what `Channel.recv` builds on a closed,
     /// drained channel.
     pub recv_error_key: String,
+    /// The runtime key of the prelude's `Location` struct: what `Error.origin` builds.
+    pub location_key: String,
     /// `print`'s `sep` and `end` defaults, read from the prelude's `native fn print` declaration (the
     /// one owner): what `Op::CallPrint` and a `print` fn value without those args join with.
     pub print_defaults: [String; 2],

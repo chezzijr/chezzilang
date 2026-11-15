@@ -189,7 +189,7 @@ fn sender(sk: int, ch: Channel[int], never: Channel[int], order: int, v1: int, s
         match r:
             ?_: sent.send(v)
             !e:
-                st.set(e.message())
+                st.set(e.error())
                 return
     st.set("ok")
 

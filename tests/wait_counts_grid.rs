@@ -106,7 +106,7 @@ fn ctx_lines(ctx: &str) -> &'static str {
         "task" => "    parallel:\n        spawn runner(c, s, g)\n",
         "task_cb" => "    parallel:\n        spawn runner_cb(c, s, g)\n",
         "job" => {
-            "    jx := Executor(1)\n    t := jx.submit(fn() -> int: op(c, s, g))\n    match t.get():\n        ?v: print(\"r {v}\")\n        !e: print(\"e {e.message()}\")\n"
+            "    jx := Executor(1)\n    t := jx.submit(fn() -> int: op(c, s, g))\n    match t.get():\n        ?v: print(\"r {v}\")\n        !e: print(\"e {e.error()}\")\n"
         }
         "main_cb" => {
             "    ys := [0].map(fn(i: int) -> int: op(c, s, g))\n    print(\"r {ys[0]}\")\n"

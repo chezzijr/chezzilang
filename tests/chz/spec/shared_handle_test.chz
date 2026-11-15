@@ -149,7 +149,7 @@ test fn task_get_is_one_object_in_the_owner_and_a_spawned_task():
         spawn write_task_result(t)
     match t.get():
         ?m: assert m.len() == 2
-        !e: assert false, e.message()
+        !e: assert false, e.error()
 
 fn add_b(m: Map[str, int]) -> int:
     m["b"] = 2

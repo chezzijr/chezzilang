@@ -18,7 +18,7 @@ test fn task_get_on_a_faulted_job_reports_the_job_error_not_deadlock():
     ex.shutdown()
     match t0.get():
         ?_: assert false, "get() on a faulted job must not return Ok"
-        !e: assert e.message().contains("job failed"), e.message()
+        !e: assert e.error().contains("job failed"), e.error()
     assert t0.done(), "done() must be true once the faulted job has finished"
 
 fn ok_job() -> int:
@@ -30,7 +30,7 @@ test fn raw_submit_get_on_a_faulted_job_does_not_report_deadlock():
     ex.shutdown()
     match c.get():
         ?_: assert false, "recv() on a faulted job's channel must not return Ok"
-        !e: assert e.message().contains("job failed"), e.message()
+        !e: assert e.error().contains("job failed"), e.error()
 
 test fn a_successful_task_is_unchanged_by_the_fault_path():
     ex := concurrency.Executor()
@@ -54,13 +54,13 @@ test fn a_faulted_tasks_error_is_memoized():
     match g1:
         ?_: assert false, "first get() on a faulted job must not return Ok"
         !e:
-            assert e.message().contains("job failed"), e.message()
-            assert not e.message().contains("closed"), e.message()
+            assert e.error().contains("job failed"), e.error()
+            assert not e.error().contains("closed"), e.error()
     match g2:
         ?_: assert false, "second get() on a faulted job must not return Ok"
         !e:
-            assert e.message().contains("job failed"), e.message()
-            assert not e.message().contains("closed"), e.message()
+            assert e.error().contains("job failed"), e.error()
+            assert not e.error().contains("closed"), e.error()
 
 # M3.2: the Task holds the job's own error, so it keeps the origin a local `recover: bad()` gives
 # (CPython: `future.exception()` is the job's exception, its traceback at `bad`'s raise; M3.2
@@ -72,8 +72,8 @@ test fn a_faulted_tasks_error_carries_the_jobs_origin():
     match t0.get():
         ?_: assert false, "get() on a faulted job must not return Ok"
         !e:
-            assert e.line() == ?13, "the line of the panic in `bad`"
-            assert e.col() == ?5, "the col of the panic in `bad`"
-            match e.file():
-                None: assert false, "expected the job's file"
-                ?p: assert p.ends_with("task_fault_test.chz"), "file: {p}"
+            match e.origin():
+                None: assert false, "expected the origin of the panic in `bad`"
+                ?o:
+                    assert o.line == 13 and o.col == 5, "the panic in `bad`: {o}"
+                    assert o.file.ends_with("task_fault_test.chz"), "file: {o.file}"

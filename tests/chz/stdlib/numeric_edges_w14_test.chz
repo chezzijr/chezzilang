@@ -21,7 +21,7 @@ test fn parse_int_base_accepts_underscore_after_prefix():
     r := math.parse_int_base("0x_ff", 0)
     match r:
         ?v: assert v == 255
-        !e: assert false, e.message()
+        !e: assert false, e.error()
 
 test fn with_ext_on_empty_name_is_an_error():
     r := recover: path.with_ext("", "txt")
@@ -33,7 +33,7 @@ test fn from_epoch_near_i64_min_does_not_overflow():
     r := recover: datetime.from_epoch(-9223372036854775807)
     match r:
         ?_: assert true
-        !e: assert false, e.message()
+        !e: assert false, e.error()
 
 # ---- rows added for the rest of W14-34 / W14-24 (each judged against a RUN CPython 3.14 / Go twin) ----
 struct H:
@@ -104,7 +104,7 @@ test fn with_ext_empty_name_faults_like_pathlib():
         r := recover: we(p)
         match r:
             ?v: assert false, "with_ext('{p}') returned {v}"
-            !e: assert e.message().starts_with("with_ext: path has an empty name"), e.message()
+            !e: assert e.error().starts_with("with_ext: path has an empty name"), e.error()
 
 test fn with_ext_trims_trailing_slashes_like_pathlib():
     assert we("a/") == "a.txt"
@@ -127,7 +127,7 @@ test fn days_from_civil_rejects_invalid_dates():
     r := recover: datetime.days_from_civil(2023, 13, 1)
     match r:
         ?v: assert false, "month 13 returned {v}"
-        !e: assert e.message() == "days_from_civil: month out of range: 13", e.message()
+        !e: assert e.error() == "days_from_civil: month out of range: 13", e.error()
     r0 := recover: datetime.days_from_civil(2023, 0, 1)
     match r0:
         ?v: assert false, "month 0 returned {v}"
@@ -135,7 +135,7 @@ test fn days_from_civil_rejects_invalid_dates():
     rd := recover: datetime.days_from_civil(2023, 2, 29)
     match rd:
         ?v: assert false, "Feb 29 2023 returned {v}"
-        !e: assert e.message() == "days_from_civil: day out of range: 29", e.message()
+        !e: assert e.error() == "days_from_civil: day out of range: 29", e.error()
     assert datetime.days_from_civil(2024, 2, 29) == 19782
 
 # A fn payload compares as `==` does, by identity (wave 24 F4): the stored fn swaps.

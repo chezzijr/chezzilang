@@ -67,7 +67,7 @@ fn main():
         d := done.recv():
             match d:
                 ?x: print("done {x}")
-                !e: print("done: {e.message()}")
+                !e: print("done: {e.error()}")
         n := nums.recv():
             x := n else: panic("nums closed")
             print("num {x}")

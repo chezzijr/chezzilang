@@ -7,7 +7,7 @@ import std.time
 fn fault_msg[T](r: T!Error) -> str:
     match r:
         ?_: return "NO FAULT"
-        !e: return e.message()
+        !e: return e.error()
     return ""
 
 fn poll_after_delay(rz: Channel[int], got: Shared[int]):

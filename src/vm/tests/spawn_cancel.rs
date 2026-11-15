@@ -1286,7 +1286,7 @@ fn executor_submit_runs_fifo_at_shutdown() {
 #[test]
 fn executor_submit_after_shutdown_settles_the_task_with_the_refusal() {
     // TICKET-289: the refused submit returns an already-settled Task; the run does not fault.
-    let src = "import Executor from std.concurrency\nfn main():\n    ex := Executor()\n    ex.shutdown()\n    t := ex.submit(fn(): print(1))\n    match t.get():\n        ?_: print(\"ran\")\n        !e: print(e.message())\nmain()\n";
+    let src = "import Executor from std.concurrency\nfn main():\n    ex := Executor()\n    ex.shutdown()\n    t := ex.submit(fn(): print(1))\n    match t.get():\n        ?_: print(\"ran\")\n        !e: print(e.error())\nmain()\n";
     let out = run_capture(src).expect("a refused submit must not fault the run");
     assert_eq!(
         out,

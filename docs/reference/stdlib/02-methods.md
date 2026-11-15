@@ -40,7 +40,7 @@ std protocol's requirement (`docs/reference/syntax/07-structs.md`, "A type's met
 | `to_int` | `() -> int!` | Parse (trims first, accepts PEP-515 underscores between digits): `?n`, or an error that names the cause: `!"to_int: cannot parse 'x' as int"`, `!"to_int: '99999999999999999999' is out of range for int"`. ASCII digits only: `"١٢"`/`"１２"` are errors (Go/Rust semantics; CPython's `int()` accepts Unicode decimal digits). Same for `to_float` and `math.parse_int_base`. |
 | `to_float` | `() -> float!` | Parse (trims first, accepts PEP-515 underscores between digits): `?f` or `!"to_float: cannot parse 'x' as float"`. |
 | `encode` | `() -> bytes` | UTF-8 encode (always succeeds). |
-| `message` | `() -> str` | Returns self, so a bare `str` satisfies the `Error` protocol. |
+| `error` | `() -> str` | Returns self, so a bare `str` satisfies the `Error` protocol. |
 
 The `ends_with`/`replace`/`repeat`/`reversed`/`pad_left`/`pad_right`/`index_of`/`count`/`strip_prefix`/
 `strip_suffix`/`split_lines` methods are receiver-method aliases of the same-named `std.string` free
@@ -106,7 +106,7 @@ fn bump(x: int) -> int:
     return x
 r := recover: w.sort_by_key(bump)
 match r:
-    !e: print(e.message())   # list modified during 'sort_by_key' -- a sort callback must not
+    !e: print(e.error())   # list modified during 'sort_by_key' -- a sort callback must not
                                   # mutate the list being sorted
     ?_: assert false
 ```

@@ -14,7 +14,7 @@ test fn owner_parked_recv_reports_the_child_fault():
             _ := ch.recv()
     match r:
         ?_: assert false, "expected the child fault, got Ok"
-        !e: assert e.message() == "task died", "got: {e.message()}"
+        !e: assert e.error() == "task died", "got: {e.error()}"
 
 test fn owner_parked_wait_reports_the_child_fault():
     ch := Channel[int]()
@@ -26,7 +26,7 @@ test fn owner_parked_wait_reports_the_child_fault():
                 v := ch.recv(): print(v)
     match r:
         ?_: assert false, "expected the child fault, got Ok"
-        !e: assert e.message() == "task died", "got: {e.message()}"
+        !e: assert e.error() == "task died", "got: {e.error()}"
 
 test fn owner_blocked_bounded_send_reports_the_child_fault():
     ch := Channel[int](1)
@@ -38,7 +38,7 @@ test fn owner_blocked_bounded_send_reports_the_child_fault():
             ch.send(2)
     match r:
         ?_: assert false, "expected the child fault, got Ok"
-        !e: assert e.message() == "task died", "got: {e.message()}"
+        !e: assert e.error() == "task died", "got: {e.error()}"
 
 # Receive inside a callback: the `else` form needs a statement, so the callback calls this.
 fn take(ch: Channel[int]) -> int:

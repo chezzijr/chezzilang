@@ -67,7 +67,7 @@ erased generic body, or through a protocol-typed value (the method set is owned 
   equally, and it agrees with container membership.
 
 The intrinsic grants and their methods are: `Comparable`→`compare`, `Eq`→`eq`, `Stringable`→`str`,
-`Hashable`→`hash`, `Error`→`message`, `Iterable`→`iter`, `Index`→`index`, `IndexSet`→`set_index` (it embeds `Index`),
+`Hashable`→`hash`, `Error`→`error`, `Iterable`→`iter`, `Index`→`index`, `IndexSet`→`set_index` (it embeds `Index`),
 `Slice`→`slice`, `Add`/`Sub`/`Mul`/`Div`/`Mod`→`add`/`sub`/`mul`/`div`/`mod`, `Neg`→`neg`,
 `BitAnd`/`BitOr`/`BitXor`/`Shl`/`Shr`→`bitand`/`bitor`/`bitxor`/`shl`/`shr`, `Contains`→`contains`.
 **An operator accepts a builtin type exactly when that type satisfies the operator's protocol:**
@@ -75,9 +75,8 @@ The intrinsic grants and their methods are: `Comparable`→`compare`, `Eq`→`eq
 `98 in b"abc"` asks `Contains`; every value satisfies `Stringable`. A type that DEFINES the method always
 gets its own (intrinsic dispatch is a resolution fallback, never a shadow).
 
-`line()`/`col()`/`file()` are callable through the `Error` existential but are **not** `Error`
-requirements; only `message()` is. (As requirements they would un-satisfy every struct error type that
-has only `message()`.)
+`origin()` is callable through the `Error` existential but is **not** an `Error` requirement; only
+`error()` is. (As a requirement it would un-satisfy every struct error type that has only `error()`.)
 
 **A NATIVE-TABLE witness for a USER protocol.** A built-in (`List`/`Map`/`Set`/`str`/`bytes`/
 `bytearray`) that satisfies a user-declared protocol does not use the intrinsic-grant table (a user

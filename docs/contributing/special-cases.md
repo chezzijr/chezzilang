@@ -259,7 +259,7 @@ line joining; every pattern form; numeric literal edges; all 143 code blocks of 
 |---|---|
 | a user type named like a builtin function is accepted and its constructor is dead | `struct print: x: int` checks clean; `print(1)` still prints. `enum chr: A` then `chr(65)` prints `A`. But `print := 3` shadows, `fn print` is rejected, `struct range` is rejected. Order at audit time: variable > builtin > user type |
 | divergence is decided by name | only `panic` is bottom-typed; `os.exit` and a user `fn die(msg: str): panic(msg)` are ordinary calls (TICKET-263, Go `os.Exit`), so a caller "can fall off the end" and the error says to write `panic(...)` after the call. No `never` type |
-| `Error.line()`, `.col()`, `.file()` | exist only on the bare `Error` existential |
+| `Error.origin()` | answered by the runtime for every type that satisfies `Error`; the checker bans any other member named `origin` on such a type (the member rule, `Checker::check_default_members`) |
 
 Builtins the language itself cannot express: `List()`/`Set()`/`Map()` (an internal union, not
 `Iterable[T]`); `Channel`, `Shared`, `RwShared`, `Atomic`, `Executor` (dedicated

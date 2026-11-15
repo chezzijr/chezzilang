@@ -16,39 +16,39 @@ copied := nested + "/copy.txt"
 # mkdir is recursive (mkdir -p): one call creates a/b/c and all parents.
 match fs.mkdir(nested):
     ?_: print("mkdir: {fs.is_dir(nested)}")
-    !e: print("mkdir err: " + e.message())
+    !e: print("mkdir err: " + e.error())
 
 # mkdir is idempotent on an existing dir (no error the second time).
 match fs.mkdir(nested):
     ?_: print("mkdir again: ok")
-    !e: print("mkdir again err: " + e.message())
+    !e: print("mkdir again err: " + e.error())
 
 # append creates the file if absent, then appends (never truncates).
 match fs.append(log, "hello"):
     ?_: print("append1: ok")
-    !e: print("append1 err: " + e.message())
+    !e: print("append1 err: " + e.error())
 match fs.append(log, " world"):
     ?_: print("append2: ok")
-    !e: print("append2 err: " + e.message())
+    !e: print("append2 err: " + e.error())
 
 # read back the appended contents (proves append accumulated).
 match io.read_file(log):
     ?s: print("contents: " + s)
-    !e: print("read err: " + e.message())
+    !e: print("read err: " + e.error())
 
 # rename moves the file.
 match fs.rename(log, moved):
     ?_: print("rename: gone={not fs.exists(log)} present={fs.exists(moved)}")
-    !e: print("rename err: " + e.message())
+    !e: print("rename err: " + e.error())
 
 # copy duplicates the file (source stays).
 match fs.copy(moved, copied):
     ?_: print("copy: present={fs.exists(copied)} src={fs.exists(moved)}")
-    !e: print("copy err: " + e.message())
+    !e: print("copy err: " + e.error())
 
 match io.read_file(copied):
     ?s: print("copy contents: " + s)
-    !e: print("read err: " + e.message())
+    !e: print("read err: " + e.error())
 
 # remove_file on a missing path is a catchable error (recoverable fault, not a crash).
 match fs.remove_file(nested + "/nope.txt"):
@@ -63,19 +63,19 @@ match fs.remove_dir(nested):
 # tear down: remove the files, then the (now-empty) dirs bottom-up.
 match fs.remove_file(moved):
     ?_: print("rm moved: ok")
-    !e: print("rm moved err: " + e.message())
+    !e: print("rm moved err: " + e.error())
 match fs.remove_file(copied):
     ?_: print("rm copy: ok")
-    !e: print("rm copy err: " + e.message())
+    !e: print("rm copy err: " + e.error())
 match fs.remove_dir(nested):
     ?_: print("rm c: ok")
-    !e: print("rm c err: " + e.message())
+    !e: print("rm c err: " + e.error())
 match fs.remove_dir(root + "/a/b"):
     ?_: print("rm b: ok")
-    !e: print("rm b err: " + e.message())
+    !e: print("rm b err: " + e.error())
 match fs.remove_dir(root + "/a"):
     ?_: print("rm a: ok")
-    !e: print("rm a err: " + e.message())
+    !e: print("rm a err: " + e.error())
 match fs.remove_dir(root):
     ?_: print("rm root: gone={not fs.exists(root)}")
-    !e: print("rm root err: " + e.message())
+    !e: print("rm root err: " + e.error())

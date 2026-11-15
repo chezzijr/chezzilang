@@ -182,7 +182,7 @@ struct Parser:
             match hex_val(c):
                 ?d: n = n * 16 + d
                 # `hex_val` is a free fn with no `self`, so the location wraps here instead.
-                !m: return !self.at_pos(m.message(), self.pos - 1)
+                !m: return !self.at_pos(m.error(), self.pos - 1)
         return ?n
 
     fn parse_number(self) -> Json!:

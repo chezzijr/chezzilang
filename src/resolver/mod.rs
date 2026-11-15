@@ -109,6 +109,8 @@ impl LoadedModule {
 pub const RANGE_STRUCT: &str = "Range";
 /// The prelude struct `Channel.recv` returns on a closed, drained channel; the VM builds it.
 pub const RECV_ERROR_STRUCT: &str = "RecvError";
+/// The prelude struct `Error.origin` answers with (`Some(Location(line, col, file))`); the VM builds it.
+pub const LOCATION_STRUCT: &str = "Location";
 
 /// One struct of `std.prelude` that every module sees with no `import` line.
 pub struct PreludeStruct {
@@ -121,8 +123,8 @@ pub struct PreludeStruct {
 /// The structs of `std.prelude` that every module sees with no `import` line: the one list the
 /// resolver's implicit import ([`prelude_struct_import`]) and the
 /// TICKET-255 method gate ([`PreludeUse`]) read. `RecvError` is built by `Channel.recv`, so a
-/// `recv` in the source (a call or a `wait:` recv arm) uses it.
-pub const PRELUDE_STRUCTS: [PreludeStruct; 2] = [
+/// `recv` in the source (a call or a `wait:` recv arm) uses it. `Location` is built by `origin()`.
+pub const PRELUDE_STRUCTS: [PreludeStruct; 3] = [
     PreludeStruct {
         name: RANGE_STRUCT,
         words: &[RANGE_STRUCT],
@@ -130,6 +132,10 @@ pub const PRELUDE_STRUCTS: [PreludeStruct; 2] = [
     PreludeStruct {
         name: RECV_ERROR_STRUCT,
         words: &[RECV_ERROR_STRUCT, "recv"],
+    },
+    PreludeStruct {
+        name: LOCATION_STRUCT,
+        words: &[LOCATION_STRUCT],
     },
 ];
 
@@ -508,7 +514,8 @@ pub fn graph_global_binds(graph: &ModuleGraph) -> Vec<Vec<(String, GlobalSource)
 }
 
 /// TICKET-253 — the import no one wrote that gives every module but the prelude the
-/// [`PRELUDE_STRUCTS`]: `import Range, RecvError from std.prelude`, with `prelude` the prelude's id.
+/// [`PRELUDE_STRUCTS`]: `import Range, RecvError, Location from std.prelude`, with `prelude` the
+/// prelude's id.
 pub fn prelude_struct_import(prelude: ModuleId) -> ResolvedImport {
     ResolvedImport {
         target: prelude,
@@ -1180,11 +1187,11 @@ impl Builder {
                 });
             }
         }
-        // TICKET-253: the [`PRELUDE_STRUCTS`] (`Range`, `RecvError`) are structs of `std.prelude` that
-        // every module sees with no `import` line. The one seam that makes it so: each module but the
-        // prelude itself resolves the import `import Range, RecvError from std.prelude`, so the checker,
-        // compiler and VM carry the types through the ordinary from-import path. `Span::NOWHERE` marks
-        // it as written by no one.
+        // TICKET-253: the [`PRELUDE_STRUCTS`] (`Range`, `RecvError`, `Location`) are structs of
+        // `std.prelude` that every module sees with no `import` line. The one seam that makes it so:
+        // each module but the prelude itself resolves the import `import Range, RecvError, Location
+        // from std.prelude`, so the checker, compiler and VM carry the types through the ordinary
+        // from-import path. `Span::NOWHERE` marks it as written by no one.
         if dotted != ["std".to_string(), "prelude".to_string()] {
             let prelude_path = ["std".to_string(), "prelude".to_string()];
             let file = module_file(&prelude_path, &self.project_root, &self.std_root);

@@ -1,23 +1,36 @@
 # tests/chz/spec/error_origin_grid_test.chz — every error records where `!x` first made it.
 #
-# `line()`/`col()`/`file()` are `native fn` defaults of `protocol Error`: a type that declares only
-# `message()` still satisfies `Error`, and a type that declares its own `line()` answers with it.
-# The first `!x` of a value stamps it (Python: the traceback starts at the `raise`); a later `!e` of
-# the same value, a `?` and a `recover:` boundary keep that stamp. A std `!x` or `panic` names none.
+# `origin()` is the one `native fn` default of `protocol Error`: a type that declares only `error()`
+# still satisfies `Error`, and its `origin()` is a `Location?` (Python `__traceback__`, Rust
+# `panic::Location`). A type that declares `fn origin(self) -> Location?` answers with it; its own
+# `line`/`col` fields stay its own. The first `!x` of a value stamps it (Python: the traceback starts at
+# the `raise`); a later `!e` of the same value, a `?` and a `recover:` boundary keep that stamp. A std
+# `!x` or `panic` names none.
 
 import std.cmp
 import std.json
 
 struct MyErr:
     code: int
-    fn message(self) -> str:
+    fn error(self) -> str:
         return "code {self.code}"
 
 struct Located:
-    fn message(self) -> str:
+    fn error(self) -> str:
         return "located"
-    fn line(self) -> int?:
-        return ?42
+    fn origin(self) -> Location?:
+        return ?Location(42, 5, "here.chz")
+
+# P4: an error struct keeps its own `line` field; `origin()` is where `!` raised it.
+struct LineErr:
+    line: int
+    col: int
+    fn error(self) -> str:
+        return "at {self.line}:{self.col}"
+
+fn line_of(e: Error) -> int?:
+    o := e.origin()?
+    return ?o.line
 
 fn make_str() -> int!:
     return !"boom"
@@ -34,92 +47,106 @@ fn through_q() -> int!:
     x := make_str()?
     return ?x
 
-test fn a_user_str_err_records_its_line_and_file():
+test fn a_user_str_err_records_its_line_col_and_file():
     match make_str():
         ?_: assert false, "expected Err"
         !e:
-            assert e.message() == "boom"
-            assert e.line() == ?23, "line: {e.line()}"
-            assert e.col() == ?12, "col: {e.col()}"
-            match e.file():
-                None: assert false, "expected the file"
-                ?p: assert p.ends_with("error_origin_grid_test.chz"), "file: {p}"
+            assert e.error() == "boom"
+            match e.origin():
+                None: assert false, "expected an origin"
+                ?o:
+                    assert o.line == 36, "line: {o.line}"
+                    assert o.col == 12, "col: {o.col}"
+                    assert o.file.ends_with("error_origin_grid_test.chz"), "file: {o.file}"
 
 test fn a_user_struct_err_records_its_line():
     match make_struct():
         ?_: assert false, "expected Err"
         !e:
-            assert e.message() == "code 7"
-            assert e.line() == ?26, "line: {e.line()}"
+            assert e.error() == "code 7"
+            assert line_of(e) == ?39, "line: {line_of(e)}"
+
+fn make_line_err() -> int!LineErr:
+    return !LineErr(3, 4)
+
+test fn an_own_line_field_is_the_field_and_origin_is_the_raise():
+    match make_line_err():
+        ?_: assert false, "expected Err"
+        !e:
+            assert e.line == 3
+            assert e.col == 4
+            assert line_of(e) == ?70, "origin: {line_of(e)}"
+            match e.origin():
+                None: assert false, "expected an origin"
+                ?o: assert o.col == 12, "col: {o.col}"
 
 test fn a_rewrap_keeps_the_first_line():
     match rewrap():
         ?_: assert false, "expected Err"
-        !e: assert e.line() == ?23, "line: {e.line()}"
+        !e: assert line_of(e) == ?36, "line: {line_of(e)}"
 
 test fn question_mark_keeps_the_first_line():
     match through_q():
         ?_: assert false, "expected Err"
-        !e: assert e.line() == ?23, "line: {e.line()}"
+        !e: assert line_of(e) == ?36, "line: {line_of(e)}"
 
 test fn a_recover_fault_names_the_faulting_line():
     xs := [1]
     r := recover: xs[9]
     match r:
         ?_: assert false, "expected a fault"
-        !e: assert e.line() == ?67, "line: {e.line()}"
+        !e: assert line_of(e) == ?95, "line: {line_of(e)}"
 
-test fn a_std_panic_names_no_line():
+test fn a_std_panic_names_no_origin():
     r := recover: cmp.clamp(5, 3, 1)
     match r:
         ?_: assert false, "inverted bounds must fault"
-        !e:
-            assert e.line() == None, "line: {e.line()}"
-            assert e.file() == None, "file: {e.file()}"
+        !e: assert e.origin() == None, "origin: {e.origin()}"
 
-test fn a_declared_line_wins():
+test fn a_declared_origin_wins():
     l := Located()
-    assert l.line() == ?42
+    match l.origin():
+        None: assert false, "expected the declared origin"
+        ?o: assert o.line == 42 and o.col == 5 and o.file == "here.chz"
     fn f() -> int!:
         return !Located()
     match f():
         ?_: assert false, "expected Err"
-        !e: assert e.line() == ?42, "line: {e.line()}"
+        !e: assert line_of(e) == ?42, "line: {line_of(e)}"
 
-test fn a_message_only_type_satisfies_error():
+test fn an_error_only_type_satisfies_error():
     e: Error = MyErr(1)
-    assert e.message() == "code 1"
-    assert e.line() == None, "never raised: {e.line()}"
+    assert e.error() == "code 1"
+    assert e.origin() == None, "never raised: {e.origin()}"
 
-test fn line_on_a_concrete_type_reads_the_default():
+test fn origin_on_a_concrete_type_reads_the_default():
     m := MyErr(3)
-    assert m.line() == None
-    assert m.col() == None
-    assert m.file() == None
+    assert m.origin() == None
+    assert LineErr(1, 2).origin() == None
 
 fn make_typed() -> int!MyErr:
     return !MyErr(9)
 
-test fn line_on_a_raised_concrete_type_reads_its_stamp():
+test fn origin_on_a_raised_concrete_type_reads_its_stamp():
     match make_typed():
         ?_: assert false, "expected Err"
         !e:
             assert e.code == 9
-            assert e.line() == ?101, "line: {e.line()}"
+            assert line_of(e) == ?128, "line: {line_of(e)}"
 
-# A std `!x` names no line (the std file rule), so the user's own `!e` of it is its origin.
+# A std `!x` names no origin (the std file rule), so the user's own `!e` of it is its origin.
 fn reraise_std() -> int!:
     match json.parse("x"):
         ?_: return ?0
         !e: return !e
 
-test fn a_std_err_names_no_line_until_the_user_raises_it():
+test fn a_std_err_names_no_origin_until_the_user_raises_it():
     match json.parse("x"):
         ?_: assert false, "expected Err"
-        !e: assert e.line() == None, "line: {e.line()}"
+        !e: assert e.origin() == None, "origin: {e.origin()}"
     match reraise_std():
         ?_: assert false, "expected Err"
-        !e: assert e.line() == ?114, "line: {e.line()}"
+        !e: assert line_of(e) == ?141, "line: {line_of(e)}"
 
 # Two `""` literals are two values: each `!""` names its own line, and a later `panic("")` its own.
 fn empty_a() -> int!:
@@ -131,11 +158,11 @@ fn empty_b() -> int!:
 test fn each_empty_str_err_names_its_own_line():
     match empty_a():
         ?_: assert false, "expected Err"
-        !e: assert e.line() == ?126, "a: {e.line()}"
+        !e: assert line_of(e) == ?153, "a: {line_of(e)}"
     match empty_b():
         ?_: assert false, "expected Err"
-        !e: assert e.line() == ?129, "b: {e.line()}"
+        !e: assert line_of(e) == ?156, "b: {line_of(e)}"
     r: int! = recover: panic("")
     match r:
         ?_: assert false, "expected a fault"
-        !e: assert e.line() == ?138, "panic: {e.line()}"
+        !e: assert line_of(e) == ?165, "panic: {line_of(e)}"

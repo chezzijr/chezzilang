@@ -32,11 +32,11 @@ test fn a_cancelled_tasks_get_returns_the_cancel_error():
     r := t.get()
     match r:
         ?_: assert false, "a cancelled task must not yield a value"
-        !e: assert e.message() == "task cancelled: cancel() stopped it before it finished"
+        !e: assert e.error() == "task cancelled: cancel() stopped it before it finished"
     again := t.get()
     match again:
         ?_: assert false, "get() must replay the cancel"
-        !e: assert e.message() == "task cancelled: cancel() stopped it before it finished"
+        !e: assert e.error() == "task cancelled: cancel() stopped it before it finished"
 
 test fn every_task_is_done_after_cancel_started_or_not():
     hold := Channel[int](1)
@@ -58,7 +58,7 @@ test fn cancel_settles_a_second_submitted_task():
     ex.shutdown()
     match ch.get():
         ?_: assert false, "a cancelled job must not send a value"
-        !e: assert e.message() == "task cancelled: cancel() stopped it before it finished"
+        !e: assert e.error() == "task cancelled: cancel() stopped it before it finished"
 
 test fn a_task_that_finished_carries_no_cancel_message():
     ex := concurrency.Executor()
@@ -67,7 +67,7 @@ test fn a_task_that_finished_carries_no_cancel_message():
     ex.cancel()
     match t.get():
         ?v: assert v == 5
-        !e: assert false, "a finished job must not report a cancel: " + e.message()
+        !e: assert false, "a finished job must not report a cancel: " + e.error()
 
 # TICKET-219 (C2) — under `Executor(1)` the first job runs and the rest are held, whatever the
 # timing. `ex.cancel()` drops the held jobs; each handle settles `!e` (CPython
@@ -86,16 +86,16 @@ test fn a_held_job_dropped_by_cancel_settles_err():
         assert t.done(), "done() must be true after cancel() and shutdown()"
         match t.get():
             ?_: assert false, "a dropped job must not yield a value"
-            !e: assert e.message() == msg
+            !e: assert e.error() == msg
     for _ in 0..2:
         match c.get():
             ?_: assert false, "a dropped job must not send a value"
-            !e: assert e.message() == msg
+            !e: assert e.error() == msg
 
 # TICKET-219 — `is_settled` reads a channel; any other value faults instead of answering.
 test fn is_settled_rejects_a_non_channel():
     r := recover: concurrency.is_settled(5)
     match r:
         ?_: assert false, "is_settled(5) must fault"
-        !e: assert e.message().contains("Channel"), e.message()
+        !e: assert e.error().contains("Channel"), e.error()
 

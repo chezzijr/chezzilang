@@ -30,7 +30,7 @@ import std.concurrency
 struct Lagged:
     missed: int
 
-    fn message(self) -> str:
+    fn error(self) -> str:
         return "receiver lagged by {self.missed} values"
 
 # The error `Receiver.recv` returns (tokio `broadcast::error::RecvError`): `Closed` once the broadcast
@@ -40,10 +40,10 @@ enum BroadcastError:
     Closed
     Lagged(Lagged)
 
-    fn message(self) -> str:
+    fn error(self) -> str:
         match self:
             BroadcastError.Closed: return "receiving on a closed channel"
-            BroadcastError.Lagged(l): return l.message()
+            BroadcastError.Lagged(l): return l.error()
         return ""
 
 # One value in a receiver's mailbox, with its send number.

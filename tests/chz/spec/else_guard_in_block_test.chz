@@ -44,7 +44,7 @@ test fn a_guard_that_panics_in_a_task_is_caught_by_an_outer_recover():
         ?_:
             log.push("ok")
         !e:
-            log.push("caught {e.message()}")
+            log.push("caught {e.error()}")
     assert log == ["v 3", "caught no w"], "got: {log}"
 
 test fn an_expression_guard_continues_a_loop_inside_a_task():

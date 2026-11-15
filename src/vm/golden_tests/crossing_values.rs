@@ -935,7 +935,7 @@ fn main():
         1
     match r:
         ?v: print(\"ok, len={ch.len()}\")
-        !e: print(\"err: {e.message()}\")
+        !e: print(\"err: {e.error()}\")
 main()";
     assert_golden_out(src, "ok, len=1\n");
 }
@@ -1523,7 +1523,7 @@ fn run() -> int!:
 fn main():
     match run():
         ?_: print(\"done\")
-        !e: print(\"net error: \" + e.message())
+        !e: print(\"net error: \" + e.error())
 
 main()
 "
@@ -1580,7 +1580,7 @@ fn run() -> int!:
 fn main():
     match run():
         ?_: print(\"done\")
-        !e: print(\"net error: \" + e.message())
+        !e: print(\"net error: \" + e.error())
 
 main()
 "

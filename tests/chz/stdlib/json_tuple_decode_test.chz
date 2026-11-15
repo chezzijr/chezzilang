@@ -12,7 +12,7 @@ struct P:
 test fn tuple_round_trips_through_encode():
     match json.decode[(int, str)](json.encode((1, "x"))):
         ?t: assert t == (1, "x"), "{t}"
-        !e: assert false, e.message()
+        !e: assert false, e.error()
 
 test fn struct_tuple_field_round_trips():
     p := P("n", (7, "y"))
@@ -20,26 +20,26 @@ test fn struct_tuple_field_round_trips():
         ?q:
             assert q.name == "n"
             assert q.pair == (7, "y"), "{q.pair}"
-        !e: assert false, e.message()
+        !e: assert false, e.error()
 
 test fn tuple_wrong_length_errs():
     for src in ["[1]", "[1, \"x\", 2]", "[]"]:
         match json.decode[(int, str)](src):
             ?t: assert false, src + " decoded as {t}"
-            !e: assert e.message().contains("expected an array of 2 elements"), e.message()
+            !e: assert e.error().contains("expected an array of 2 elements"), e.error()
 
 test fn tuple_element_mismatch_errs():
     match json.decode[(int, str)]("[\"a\", \"x\"]"):
         ?t: assert false, "decoded {t}"
-        !e: assert e.message().contains("expected int at $[0]"), e.message()
+        !e: assert e.error().contains("expected int at $[0]"), e.error()
 
 test fn tuple_non_array_errs():
     match json.decode[(int, str)](r'{"a": 1}'):
         ?t: assert false, "decoded {t}"
-        !e: assert e.message().contains("expected array at $"), e.message()
+        !e: assert e.error().contains("expected array at $"), e.error()
 
 test fn nested_tuple_in_list_round_trips():
     xs := [(1, "a"), (2, "b")]
     match json.decode[List[(int, str)]](json.encode(xs)):
         ?ys: assert ys == xs, "{ys}"
-        !e: assert false, e.message()
+        !e: assert false, e.error()

@@ -121,7 +121,7 @@ fn x1_executor_shutdown_in_fiber_releases_the_runner() {
 /// from a sibling. CPython and Go block and read; no Executor is involved.
 #[test]
 fn x2_socket_read_in_main_callback_blocks_and_reads() {
-    let src = "import std.net\nimport std.time\nfn show[T](r: T!) -> str:\n    match r:\n        ?_: return \"ok\"\n        !e: return \"err \" + e.message()\nfn main() -> int!:\n    ln := net.listen(\"127.0.0.1:0\")?\n    c := net.connect(ln.addr()?)?\n    peer := ln.accept()?\n    parallel:\n        spawn:\n            time.sleep_ms(50)\n            _ := c.write(\"hi\")\n        print([2].map(fn(n: int) -> str: show(peer.read(n))))\n    return ?0\n_ := main()\n";
+    let src = "import std.net\nimport std.time\nfn show[T](r: T!) -> str:\n    match r:\n        ?_: return \"ok\"\n        !e: return \"err \" + e.error()\nfn main() -> int!:\n    ln := net.listen(\"127.0.0.1:0\")?\n    c := net.connect(ln.addr()?)?\n    peer := ln.accept()?\n    parallel:\n        spawn:\n            time.sleep_ms(50)\n            _ := c.write(\"hi\")\n        print([2].map(fn(n: int) -> str: show(peer.read(n))))\n    return ?0\n_ := main()\n";
     assert_cell("x2", src, "['ok']\n");
 }
 
@@ -187,11 +187,11 @@ g := Shared[int](0)
 fn must[T](r: T!) -> T:
     match r:
         ?v: return v
-        !e: panic(e.message())
+        !e: panic(e.error())
 fn show[T](r: T!) -> str:
     match r:
         ?_: return \"ok\"
-        !e: return \"err \" + e.message()
+        !e: return \"err \" + e.error()
 fn op(n: int) -> int:
 {OP}
     return 0
@@ -424,7 +424,7 @@ fn ops() -> Vec<Op> {
         ),
         op(
             "task_get",
-            "    ex3 := Executor()\n    t := ex3.submit(recv7)\n    match t.get():\n        ?v: print(v)\n        !e: print(e.message())\n    ex3.shutdown()",
+            "    ex3 := Executor()\n    t := ex3.submit(recv7)\n    match t.get():\n        ?v: print(v)\n        !e: print(e.error())\n    ex3.shutdown()",
             send7,
             "",
             false,
@@ -432,7 +432,7 @@ fn ops() -> Vec<Op> {
         ),
         op(
             "http",
-            "    match request.get(url, 3000):\n        ?r: print(r.status)\n        !e: print(\"err \" + e.message())",
+            "    match request.get(url, 3000):\n        ?r: print(r.status)\n        !e: print(\"err \" + e.error())",
             HTTP_SIB,
             HTTP_PRELUDE,
             false,

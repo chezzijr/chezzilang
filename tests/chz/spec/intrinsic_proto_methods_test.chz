@@ -53,7 +53,7 @@ fn str_m[T: Stringable](a: T) -> str:
 fn msg_of[T](r: T!Error, where_: str) -> str:
     match r:
         ?_: assert false, where_ + " must fault"
-        !e: return e.message()
+        !e: return e.error()
     return ""
 
 # ---- int / float arithmetic methods == the operator forms ----
@@ -143,11 +143,11 @@ test fn min_mod_zero_and_min_div_neg_one_still_fault():
     rm := recover: MIN % "".len()
     match rm:
         ?_: assert false, "MIN % 0 must still fault"
-        !e: assert e.message() == "modulo by zero"
+        !e: assert e.error() == "modulo by zero"
     rd := recover: MIN / -1
     match rd:
         ?_: assert false, "MIN / -1 must still fault — the real overflow, unchanged"
-        !e: assert e.message() == "integer overflow in Div"
+        !e: assert e.error() == "integer overflow in Div"
 
 test fn ordinary_mod_sign_unaffected():
     # pinned against measured Go 1.26 / this project's documented policy (docs/reference/spec/'s integer

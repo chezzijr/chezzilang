@@ -38,12 +38,12 @@ import Executor from std.concurrency
 fn must[T](r: T!) -> T:
     match r:
         ?v: return v
-        !e: panic(e.message())
+        !e: panic(e.error())
 
 fn close_it(w: io.Writer):
     match w.close():
         ?_: pass
-        !e: panic(e.message())
+        !e: panic(e.error())
 
 fn churn(n: int) -> int:
     s := 0

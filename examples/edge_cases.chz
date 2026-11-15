@@ -10,7 +10,7 @@ fn probe(label: str, f: fn() -> int):
     r := recover: f()
     match r:
         ?v: print("{label}: ok {v}")
-        !e: print("{label}: {e.message()}")
+        !e: print("{label}: {e.error()}")
 
 # ---- arithmetic faults (all caught) --------------------------------------------------------------
 
@@ -216,7 +216,7 @@ fn defers():
         r_v = n
     match r:
         ?_: print("ok {r_v}")
-        !e: print("caught {e.message()}")
+        !e: print("caught {e.error()}")
 
 # ---- comprehensions ----------------------------------------------------------------------------
 

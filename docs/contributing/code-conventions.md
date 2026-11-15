@@ -69,7 +69,7 @@ The full text of every convention, moved out of `CLAUDE.md` (which every agent t
   subdirectory, each runs `chezzi test` as its own process, because `vm::pool` is one process-wide
   `OnceLock`), which together run the whole suite and assert every test passes;
   `tests/chezzi_threads_cli.rs` then runs each directory again at `CHEZZI_THREADS=2`. Prefer this: it dogfoods the language and shrinks the Rust test surface. **Fault-path IS
-  Chezzi-able** — `r := recover: <faulting expr>` then `assert r` is `!e` and check `e.message()`
+  Chezzi-able** — `r := recover: <faulting expr>` then `assert r` is `!e` and check `e.error()`
   (don't reach for Rust just because a test expects a panic). **Fall back to Rust `#[cfg(test)]` ONLY
   for what `assert` genuinely can't express:** compile-time checker diagnostics (`rejects`/`ok`),
   token/AST/bytecode/GC internals, gc-stress rooting (`run_capture_stress`), and concurrency

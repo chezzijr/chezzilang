@@ -1094,7 +1094,7 @@ fn deadlock_fault_is_not_recoverable_new_message() {
                \x20           print(v)\n\
                \x20   match r:\n\
                \x20       ?_: print(\"ok\")\n\
-               \x20       !e: print(\"caught: {e.message()}\")\n\
+               \x20       !e: print(\"caught: {e.error()}\")\n\
                main()\n";
     let msg = golden_entry_fault(src);
     assert!(msg.contains("deadlock"), "got: {msg}");
@@ -1213,7 +1213,7 @@ fn run() -> int!:
 fn main():
     match run():
         ?_: print("done")
-        !e: print("net error: " + e.message())
+        !e: print("net error: " + e.error())
 
 main()
 "#;

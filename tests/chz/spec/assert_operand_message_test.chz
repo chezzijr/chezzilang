@@ -3,7 +3,7 @@
 fn fault_msg[T](r: T!Error) -> str:
     match r:
         ?_: return "NO FAULT"
-        !e: return e.message()
+        !e: return e.error()
     return ""
 
 test fn comparison_assert_shows_operands():

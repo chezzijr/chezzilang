@@ -14,9 +14,10 @@ as `str`, `eq`, `hash`, `compare`, `add`), and they witness a user protocol too:
 (`Channel`, `Shared`, `Executor`, ...).
 
 **Runtime-answered defaults.** A std protocol may declare a `native fn` line: a method the runtime
-answers for every type that satisfies the protocol. It is not a requirement, and a type's own
-method of the name wins. `Error`'s `line()`, `col()` and `file()` are the only ones
-([`12-errors.md`](12-errors.md)). A user protocol cannot declare one (`native fn declarations are
+answers for every type that satisfies the protocol. It is not a requirement. A type that
+satisfies the protocol may declare a method of the name only with the default's signature (then
+its own wins); a field of the name, or a method of another signature, is a type error. `Error`'s
+`origin()` is the only one ([`12-errors.md`](12-errors.md)). A user protocol cannot declare one (`native fn declarations are
 only allowed in standard-library modules`), and no protocol method has a body.
 
 **Where the std protocols live.** Each std protocol is declared in a std module. A bound or a value

@@ -33,7 +33,7 @@ const BUSY: &str = "fn busy(n: int) -> int:
 const MUST: &str = "fn must[T](r: T!) -> T:
     match r:
         ?v: return v
-        !e: panic(e.message())
+        !e: panic(e.error())
 ";
 
 /// (mode, program body after the shared prelude, golden stdout)

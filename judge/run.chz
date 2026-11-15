@@ -117,7 +117,7 @@ fn judge_case(chezzi: str, timeout_s: int, sol: str, infile: str, expfile: str, 
             if r.code != 0:
                 return Verdict("FAULT", "exit {r.code}: {first_line(r.stderr)}")
         !e:
-            return Verdict("SPAWN", e.message())
+            return Verdict("SPAWN", e.error())
     if checker != "":
         match process.run("{checker} {infile} {gotfile} {expfile}"):
             ?c:
@@ -127,7 +127,7 @@ fn judge_case(chezzi: str, timeout_s: int, sol: str, infile: str, expfile: str, 
                     return Verdict("CHECK", first_line(c.stderr))
                 return Verdict("WRONG", first_line(c.stderr))
             !e:
-                return Verdict("SPAWN", e.message())
+                return Verdict("SPAWN", e.error())
     got := io.read_file(gotfile) ?? ""
     if " ".join(tokens(got)) == " ".join(tokens(expected)):
         return Verdict("PASS", "")

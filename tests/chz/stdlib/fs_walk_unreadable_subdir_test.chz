@@ -17,21 +17,21 @@ test fn walk_error_names_the_unreadable_subdir_not_the_root():
     r1 := fs.mkdir(d)
     match r1:
         ?_: pass
-        !e: assert false, "mkdir root: " + e.message()
+        !e: assert false, "mkdir root: " + e.error()
     r2 := fs.mkdir(sub)
     match r2:
         ?_: pass
-        !e: assert false, "mkdir sub: " + e.message()
+        !e: assert false, "mkdir sub: " + e.error()
     defer cleanup(d.encode(), sub.encode())
 
     r3 := fs.chmod(sub, 0)
     match r3:
         ?_: pass
-        !e: assert false, "chmod sub: " + e.message()
+        !e: assert false, "chmod sub: " + e.error()
 
     result := fs.walk(d)
     match result:
         ?_: assert false, "walk over an unreadable subdir must fault"
         !e:
             # THE BUG: the message named `d` (the readable root), not `sub` (the path that failed).
-            assert e.message().starts_with(sub), "expected error to name the unreadable subdir " + sub + ", got: " + e.message()
+            assert e.error().starts_with(sub), "expected error to name the unreadable subdir " + sub + ", got: " + e.error()

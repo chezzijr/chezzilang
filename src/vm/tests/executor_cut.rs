@@ -1302,7 +1302,7 @@ fn a_value_with_two_self_edges_renders_fast_on_every_path() {
         rx.recv_timeout(std::time::Duration::from_secs(10))
             .unwrap_or_else(|_| panic!("{what}: no render in 10 s"))
     }
-    const HDR: &str = "import Shared from std.concurrency\nstruct N:\n    id: int\n    kids: List[Any]\n    fn message(self) -> str:\n        return \"m\"\nstruct E:\n    v: Any\n    fn message(self) -> str:\n        return \"e\"\nfn mk_s() -> N:\n    n := N(1, [])\n    n.kids.push(n)\n    n.kids.push(n)\n    return n\nfn mk_l() -> List[Any]:\n    xs: List[Any] = []\n    xs.push(xs)\n    xs.push(xs)\n    return xs\nfn mk_m() -> Map[str, Any]:\n    m: Map[str, Any] = {}\n    m[\"a\"] = m\n    m[\"b\"] = m\n    return m\nfn fail(v: Any) -> int!E:\n    return !E(v)\n";
+    const HDR: &str = "import Shared from std.concurrency\nstruct N:\n    id: int\n    kids: List[Any]\n    fn error(self) -> str:\n        return \"m\"\nstruct E:\n    v: Any\n    fn error(self) -> str:\n        return \"e\"\nfn mk_s() -> N:\n    n := N(1, [])\n    n.kids.push(n)\n    n.kids.push(n)\n    return n\nfn mk_l() -> List[Any]:\n    xs: List[Any] = []\n    xs.push(xs)\n    xs.push(xs)\n    return xs\nfn mk_m() -> Map[str, Any]:\n    m: Map[str, Any] = {}\n    m[\"a\"] = m\n    m[\"b\"] = m\n    return m\nfn fail(v: Any) -> int!E:\n    return !E(v)\n";
     let cells = [
         ("mk_s()", "N(id=1, kids=[..., ...])", "<...>"),
         ("mk_l()", "[[...], [...]]", "<...>"),

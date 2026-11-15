@@ -1275,7 +1275,7 @@ fn bytes_native_seam_takes_bytes_only_bytearray_needs_an_explicit_convert() {
     );
     // …and `bytes(ba)` is the documented convert — it type-checks everywhere the seam takes bytes.
     entry_ok(
-        "import std.crypto\nimport std.encoding\nimport std.io\n\nfn main():\n    ba := bytearray.from_iter(b\"hi\")\n    print(crypto.sha256_bytes(bytes.from_iter(ba)))\n    print(encoding.base64_encode_bytes(bytes.from_iter(ba)))\n    match io.write_bytes(\"/dev/null\", bytes.from_iter(ba)):\n        ?_: pass\n        !e: print(e.message())\nmain()\n",
+        "import std.crypto\nimport std.encoding\nimport std.io\n\nfn main():\n    ba := bytearray.from_iter(b\"hi\")\n    print(crypto.sha256_bytes(bytes.from_iter(ba)))\n    print(encoding.base64_encode_bytes(bytes.from_iter(ba)))\n    match io.write_bytes(\"/dev/null\", bytes.from_iter(ba)):\n        ?_: pass\n        !e: print(e.error())\nmain()\n",
     );
     entry_ok(
         "import std.net\n\nfn go(sock: net.Socket) -> int!:\n    ba := bytearray.from_iter(b\"hi\")\n    n := sock.write_bytes(bytes.from_iter(ba))?\n    return ?n\n\nfn main():\n    pass\nmain()\n",
@@ -1397,19 +1397,19 @@ fn protocol_existential_crosses_tasks() {
 #[test]
 fn channel_send_sendable_error_literal_ok() {
     entry_ok(
-        "import std.concurrency\nprotocol Odd:\n    fn tag(self) -> int\nstruct Impl:\n    fn tag(self) -> int:\n        return 1\nstruct GErr:\n    w: Odd\n    fn message(self) -> str:\n        return \"x\"\nc := Channel[int!]()\nc.send(!GErr(Impl()))\n",
+        "import std.concurrency\nprotocol Odd:\n    fn tag(self) -> int\nstruct Impl:\n    fn tag(self) -> int:\n        return 1\nstruct GErr:\n    w: Odd\n    fn error(self) -> str:\n        return \"x\"\nc := Channel[int!]()\nc.send(!GErr(Impl()))\n",
     );
 }
 
 /// Task 2 (option a) — a `?` propagating `GErr{w: Odd}` inside a `recover:` block is now ACCEPTED:
-/// `GErr` satisfies `Error` (has `message`) AND is sendable (its `Odd` field is a sendable protocol),
+/// `GErr` satisfies `Error` (has `error`) AND is sendable (its `Odd` field is a sendable protocol),
 /// so the recover result `Result[_, Error]` accepts it. Was rejected with the "satisfies Error but
 /// isn't sendable" split message under the old rule, when a protocol field made the witness
 /// non-sendable.
 #[test]
 fn recover_try_sendable_error_ok() {
     entry_ok(
-        "protocol Odd:\n    fn tag(self) -> int\nstruct Impl:\n    fn tag(self) -> int:\n        return 1\nstruct GErr:\n    w: Odd\n    fn message(self) -> str:\n        return \"x\"\nfn bar(x: int) -> int!GErr:\n    if x == 0:\n        return ?1\n    return !GErr(Impl())\nfn main():\n    r := recover: bar(1)?\n    print(\"unreached\")\nmain()\n",
+        "protocol Odd:\n    fn tag(self) -> int\nstruct Impl:\n    fn tag(self) -> int:\n        return 1\nstruct GErr:\n    w: Odd\n    fn error(self) -> str:\n        return \"x\"\nfn bar(x: int) -> int!GErr:\n    if x == 0:\n        return ?1\n    return !GErr(Impl())\nfn main():\n    r := recover: bar(1)?\n    print(\"unreached\")\nmain()\n",
     );
 }
 
@@ -1420,7 +1420,7 @@ fn recover_try_sendable_error_ok() {
 #[test]
 fn explicit_bang_annotation_over_sendable_error_ok() {
     entry_ok(
-        "protocol Odd:\n    fn tag(self) -> int\nstruct Impl:\n    fn tag(self) -> int:\n        return 1\nstruct GErr:\n    w: Odd\n    fn message(self) -> str:\n        return \"x\"\nfn f(x: int) -> int!:\n    if x == 0:\n        return ?1\n    return !GErr(Impl())\nprint(\"x\")\n",
+        "protocol Odd:\n    fn tag(self) -> int\nstruct Impl:\n    fn tag(self) -> int:\n        return 1\nstruct GErr:\n    w: Odd\n    fn error(self) -> str:\n        return \"x\"\nfn f(x: int) -> int!:\n    if x == 0:\n        return ?1\n    return !GErr(Impl())\nprint(\"x\")\n",
     );
 }
 
@@ -1432,7 +1432,7 @@ fn explicit_bang_annotation_over_sendable_error_ok() {
 #[test]
 fn generic_fn_sendable_err_instantiation_ok_at_channel_send() {
     entry_ok(
-        "import std.concurrency\nprotocol Odd:\n    fn tag(self) -> int\nstruct Impl:\n    fn tag(self) -> int:\n        return 1\nstruct GErr:\n    w: Odd\n    fn message(self) -> str:\n        return \"x\"\nfn wrap[E: Error](e: E) -> int!E:\n    return !e\nc := Channel[int!]()\nc.send(wrap(GErr(Impl())))\nprint(\"x\")\n",
+        "import std.concurrency\nprotocol Odd:\n    fn tag(self) -> int\nstruct Impl:\n    fn tag(self) -> int:\n        return 1\nstruct GErr:\n    w: Odd\n    fn error(self) -> str:\n        return \"x\"\nfn wrap[E: Error](e: E) -> int!E:\n    return !e\nc := Channel[int!]()\nc.send(wrap(GErr(Impl())))\nprint(\"x\")\n",
     );
 }
 
@@ -1445,7 +1445,7 @@ fn generic_fn_sendable_err_instantiation_ok_at_channel_send() {
 #[test]
 fn three_branch_mixed_error_inference_ok() {
     entry_ok(
-        "protocol Odd:\n    fn tag(self) -> int\nstruct Impl:\n    fn tag(self) -> int:\n        return 1\nstruct GErr:\n    w: Odd\n    fn message(self) -> str:\n        return \"x\"\nstruct EA:\n    fn message(self) -> str:\n        return \"a\"\nstruct EB:\n    fn message(self) -> str:\n        return \"b\"\nfn f(x: int) -> int!:\n    if x == 0:\n        return ?1\n    elif x == 1:\n        return !EA()\n    elif x == 2:\n        return !GErr(Impl())\n    else:\n        return !EB()\nprint(\"x\")\n",
+        "protocol Odd:\n    fn tag(self) -> int\nstruct Impl:\n    fn tag(self) -> int:\n        return 1\nstruct GErr:\n    w: Odd\n    fn error(self) -> str:\n        return \"x\"\nstruct EA:\n    fn error(self) -> str:\n        return \"a\"\nstruct EB:\n    fn error(self) -> str:\n        return \"b\"\nfn f(x: int) -> int!:\n    if x == 0:\n        return ?1\n    elif x == 1:\n        return !EA()\n    elif x == 2:\n        return !GErr(Impl())\n    else:\n        return !EB()\nprint(\"x\")\n",
     );
 }
 

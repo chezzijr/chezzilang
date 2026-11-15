@@ -97,7 +97,7 @@ fn else_guard_grid() {
         // ---- the other leave statements.
         prints(
             "panic leaves",
-            "fn f(n: int) -> int:\n    v := r(n) else e:\n        panic(e)\n    return v\nprint(f(2))\nres := recover: f(0)\nmatch res:\n    ?v:\n        print(v)\n    !e:\n        print(e.message())",
+            "fn f(n: int) -> int:\n    v := r(n) else e:\n        panic(e)\n    return v\nprint(f(2))\nres := recover: f(0)\nmatch res:\n    ?v:\n        print(v)\n    !e:\n        print(e.error())",
             "2\nbad",
         ),
         prints(

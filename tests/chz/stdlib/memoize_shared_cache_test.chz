@@ -12,7 +12,7 @@ fn _child_memo(m: fn(int) -> int, ch: Channel[str]):
     r := recover: m(21)
     match r:
         ?v: ch.send("{v}")
-        !e: ch.send(e.message())
+        !e: ch.send(e.error())
 
 test fn memoize_wrapper_called_in_spawned_task_returns_value():
     m := memoize1(double)

@@ -10,11 +10,11 @@ fn arm_text(c: Channel[int], other: Channel[int]) -> str:
         r := c.recv():
             match r:
                 ?v: return "c {v}"
-                !e: return "c {e.message()}"
+                !e: return "c {e.error()}"
         r := other.recv():
             match r:
                 ?v: return "other {v}"
-                !e: return "other {e.message()}"
+                !e: return "other {e.error()}"
     return ""
 
 fn closed() -> Channel[int]:
@@ -50,7 +50,7 @@ test fn the_binding_is_the_recv_result_type():
                 ?v: assert false, "got {v}"
                 !e:
                     err: RecvError = e
-                    assert err.message() == "receiving on a closed channel"
+                    assert err.error() == "receiving on a closed channel"
 
 test fn a_closed_arm_before_a_ready_arm_wins():
     ready := Channel[int](1)
@@ -128,7 +128,7 @@ test fn a_parked_wait_wakes_when_another_task_closes_in_an_executor_job():
     ex.shutdown()
     match t.get():
         ?s: assert s == "c receiving on a closed channel", s
-        !e: assert false, e.message()
+        !e: assert false, e.error()
 
 test fn a_guard_switches_a_closed_arm_off():
     c := closed()

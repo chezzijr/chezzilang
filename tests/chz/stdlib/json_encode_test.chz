@@ -13,7 +13,7 @@ test fn encode_round_trips_through_decode():
     s := json.encode(p)
     match json.decode[Point](s):
         ?p2: assert p2.x == 1 and p2.y == 2
-        !e: assert false, "expected Ok: " + e.message()
+        !e: assert false, "expected Ok: " + e.error()
 
 # W13-19: `json.encode` charges a nesting level for `?...` even though `?v` emits no JSON
 # bracket, so a `T?`-linked chain hits the 2000 cap at half the depth a plain nested object
@@ -49,11 +49,11 @@ test fn encode_accepts_a_two_thousand_object_chain_and_rejects_one_more():
     ok := recover: json.encode(b_chain(1999))
     match ok:
         ?s: assert s.len() > 0
-        !e: assert false, "expected a 2000-object chain to encode: " + e.message()
+        !e: assert false, "expected a 2000-object chain to encode: " + e.error()
     too_deep := recover: json.encode(b_chain(2000))
     match too_deep:
         ?_: assert false, "expected a 2001-object chain to fault"
-        !e: assert e.message() == "json.encode: exceeded max depth"
+        !e: assert e.error() == "json.encode: exceeded max depth"
 
 # An empty container still occupies its own bracket level, even though it has no child to charge.
 # This is the W12-20a shape: an implementation that peels `?v` but keeps a per-value guard at the
@@ -71,9 +71,9 @@ test fn encode_charges_a_level_for_an_empty_container():
     ok := recover: json.encode(e)
     match ok:
         ?s: assert s.len() > 0
-        !err: assert false, "expected a 1999-object E chain to encode: " + err.message()
+        !err: assert false, "expected a 1999-object E chain to encode: " + err.error()
     deep := E(?e, {})
     too_deep := recover: json.encode(deep)
     match too_deep:
         ?_: assert false, "expected a 2000-object E chain (empty map at level 2001) to fault"
-        !err: assert err.message() == "json.encode: exceeded max depth"
+        !err: assert err.error() == "json.encode: exceeded max depth"

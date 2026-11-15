@@ -302,7 +302,7 @@ test fn a_faulting_task_still_propagates():
             spawn boom()
     match r:
         ?_: assert false, "expected a fault"
-        !e: assert e.message().contains("task blew up"), "got {e.message()}"
+        !e: assert e.error().contains("task blew up"), "got {e.error()}"
 
 # A `?`-style escape out of a nursery: the escape propagates and the scope tears down cleanly.
 # TICKET-169 (D4 layer C): `esc = 2` runs inside the spawned task, so it now faults instead of
@@ -319,7 +319,7 @@ test fn escape_out_of_a_nursery_tears_down():
     r := escape_out()
     match r:
         ?_: assert false, "expected the escape"
-        !e: assert e.message() == "bail"
+        !e: assert e.error() == "bail"
 
 # A nested nursery inside a task that then faults: teardown must not desync the per-nursery pin.
 fn nested_then_fault(out: Shared[int]):
@@ -334,7 +334,7 @@ test fn nested_nursery_inside_a_faulting_task():
             spawn nested_then_fault(out)
     match r:
         ?_: assert false, "expected a fault"
-        !e: assert e.message().contains("after nested"), "got {e.message()}"
+        !e: assert e.error().contains("after nested"), "got {e.error()}"
     assert out.get() == 42, "nested task saw {out.get()}"
 
 # A `defer` that reads a module global while running during teardown.

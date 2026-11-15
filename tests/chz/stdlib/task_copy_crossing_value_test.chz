@@ -28,7 +28,7 @@ import memoize1 from std.memoize
 fn must[T](r: T!) -> T:
     match r:
         ?v: return v
-        !e: panic(e.message())
+        !e: panic(e.error())
 
 fn mk() -> List[int]:
     return [1]
@@ -198,7 +198,7 @@ test fn owner_get_stays_one_object_after_a_crossing():
 fn send_outcome[T](r: T!Error, out: Channel[str]):
     match r:
         ?_: out.send("write ok")
-        !e: out.send(e.message())
+        !e: out.send(e.error())
 
 fn copy_write(t: Task[List[int]], m: fn(int) -> List[int], out: Channel[str]):
     rt := recover: must(t.get()).push(5)
@@ -366,10 +366,10 @@ test fn a_function_valued_channel_result_leaves_the_readers_globals_writable():
     rb := recover: b.xs.push(5)
     match rb:
         ?_: pass
-        !e: assert false, e.message()
+        !e: assert false, e.error()
     assert m(1).xs == [1, 5]
     rg := recover: owner_global.push(3)
     match rg:
         ?_: pass
-        !e: assert false, e.message()
+        !e: assert false, e.error()
     assert "{owner_global}" == "[1, 3]", "{owner_global}"

@@ -5,11 +5,11 @@ use super::*;
 
 // ---- user-callable panic(msg) builtin ----
 
-/// `panic(msg)` beneath `recover:` materializes as `Err(e)` whose `.message()` == msg on the VM
+/// `panic(msg)` beneath `recover:` materializes as `Err(e)` whose `.error()` == msg on the VM
 /// too — byte-identical against a literal golden.
 #[test]
 fn vm_panic_under_recover_yields_err_with_message() {
-    let src = "fn main():\n    r: int! = recover:\n        panic(\"boom\")\n    match r:\n        ?v: print(\"ok: {v}\")\n        !e: print(\"recovered: {e.message()}\")\nmain()\n";
+    let src = "fn main():\n    r: int! = recover:\n        panic(\"boom\")\n    match r:\n        ?v: print(\"ok: {v}\")\n        !e: print(\"recovered: {e.error()}\")\nmain()\n";
     assert_eq!(run(src), "recovered: boom\n");
 }
 
@@ -24,7 +24,7 @@ fn vm_panic_uncaught_returns_runtime_error() {
 /// `defer`s run during the VM panic unwind.
 #[test]
 fn vm_panic_runs_defers_during_unwind() {
-    let src = "fn log(m: str):\n    print(m)\nfn risky():\n    defer log(\"cleanup ran\")\n    panic(\"kaboom\")\nfn main():\n    r := recover:\n        risky()\n    match r:\n        ?v: print(\"ok\")\n        !e: print(\"recovered: {e.message()}\")\nmain()\n";
+    let src = "fn log(m: str):\n    print(m)\nfn risky():\n    defer log(\"cleanup ran\")\n    panic(\"kaboom\")\nfn main():\n    r := recover:\n        risky()\n    match r:\n        ?v: print(\"ok\")\n        !e: print(\"recovered: {e.error()}\")\nmain()\n";
     assert_eq!(run(src), "cleanup ran\nrecovered: kaboom\n");
 }
 
@@ -159,7 +159,7 @@ fn vm_wait_picks_first_ready_arm_in_source_order() {
 /// `<-closed`). The value on `b` stays queued.
 #[test]
 fn vm_wait_picks_closed_empty_arm_first_in_source_order() {
-    let src = "fn main():\n    a := Channel[int]()\n    b := Channel[int](1)\n    a.close()\n    b.send(9)\n    wait:\n        v := a.recv():\n            match v:\n                ?x: print(\"a {x}\")\n                !e: print(\"a {e.message()}\")\n        w := b.recv(): print(\"b {w}\")\n    print(b.len())\nmain()\n";
+    let src = "fn main():\n    a := Channel[int]()\n    b := Channel[int](1)\n    a.close()\n    b.send(9)\n    wait:\n        v := a.recv():\n            match v:\n                ?x: print(\"a {x}\")\n                !e: print(\"a {e.error()}\")\n        w := b.recv(): print(\"b {w}\")\n    print(b.len())\nmain()\n";
     assert_eq!(run(src), "a receiving on a closed channel\n1\n");
 }
 
@@ -214,7 +214,7 @@ fn vm_wait_every_arm_off_no_else_faults_in_every_context() {
 /// `!RecvError`), at the top level and in a nursery task; no fault.
 #[test]
 fn vm_wait_all_closed_multi_arm_takes_the_first_arm() {
-    let wait = "    wait:\n        v := a.recv():\n            match v:\n                ?x: print(\"a {x}\")\n                !e: print(\"a {e.message()}\")\n        w := b.recv(): print(\"b {w}\")\n";
+    let wait = "    wait:\n        v := a.recv():\n            match v:\n                ?x: print(\"a {x}\")\n                !e: print(\"a {e.error()}\")\n        w := b.recv(): print(\"b {w}\")\n";
     let top = format!(
         "fn w(a: Channel[int], b: Channel[int]):\n{wait}fn main():\n    a := Channel[int]()\n    b := Channel[int]()\n    a.close()\n    b.close()\n    w(a, b)\nmain()\n"
     );
@@ -472,7 +472,7 @@ fn vm_wait_single_arm_recv_park_unchanged_under_parallel() {
 /// `recv` answers it again (Rust `mpsc::Receiver::recv`; Go's `v, ok := <-ch` gives `ok` false).
 #[test]
 fn vm_channel_recv_on_closed_empty_gives_recv_error() {
-    let src = "fn main():\n    ch := Channel[int]()\n    ch.close()\n    match ch.recv():\n        ?v: print(\"got {v}\")\n        !e: print(e.message())\n    print(ch.recv())\nmain()\n";
+    let src = "fn main():\n    ch := Channel[int]()\n    ch.close()\n    match ch.recv():\n        ?v: print(\"got {v}\")\n        !e: print(e.error())\n    print(ch.recv())\nmain()\n";
     assert_eq!(run(src), "receiving on a closed channel\n!RecvError()\n");
 }
 
@@ -782,10 +782,10 @@ fn executor_faulting_job_does_not_hang_shutdown() {
                r: None!Error = recover: ex.shutdown()\n\
                match r:\n    \
                    ?_: print(\"no fault\")\n    \
-                   !e: print(\"caught: {e.message()}\")\n\
+                   !e: print(\"caught: {e.error()}\")\n\
                match t.get():\n    \
                    ?_: print(\"value\")\n    \
-                   !e: print(\"task: {e.message()}\")\n";
+                   !e: print(\"task: {e.error()}\")\n";
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         let _ = tx.send(run_capture(src));

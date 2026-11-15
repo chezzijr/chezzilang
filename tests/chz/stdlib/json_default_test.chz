@@ -13,7 +13,7 @@ test fn missing_key_takes_field_default():
         ?c:
             assert c.name == "x"
             assert c.retries == 3, "{c.retries}"
-        !e: assert false, e.message()
+        !e: assert false, e.error()
 
 K := 5
 KF := 2.5
@@ -61,7 +61,7 @@ fn dec(s: str) -> G:
     match json.decode[G](s):
         ?g: return g
         !e:
-            assert false, e.message()
+            assert false, e.error()
             return G()
 
 # key ABSENT -> the field's default: the value `G()` builds.
@@ -101,7 +101,7 @@ test fn null_keys_are_none_for_option_and_an_error_otherwise():
             ?g2: assert false, f + " null decoded to {g2}"
             !e:
                 msg := "decode: expected " + want + " at $." + f + ", found null"
-                assert e.message() == msg, e.message()
+                assert e.error() == msg, e.error()
 
 struct Ob:
     p: int?
@@ -110,16 +110,16 @@ struct Ob:
 test fn an_option_field_without_a_default_is_none_when_absent():
     match json.decode[Ob](r'{}'):
         ?o: assert o.p == None, "{o}"
-        !e: assert false, e.message()
+        !e: assert false, e.error()
 
 # A missing key with NO default is still an error, at the top level and inside a nested struct.
 test fn missing_key_without_default_is_still_an_error():
     match json.decode[Cfg](r'{}'):
         ?c: assert false, "{c}"
-        !e: assert e.message() == "decode: missing key 'name' at $", e.message()
+        !e: assert e.error() == "decode: missing key 'name' at $", e.error()
     match json.decode[G](r'{"n_struct":{}}'):
         ?g: assert false, "{g}"
-        !e: assert e.message() == "decode: missing key 'w' at $.n_struct", e.message()
+        !e: assert e.error() == "decode: missing key 'w' at $.n_struct", e.error()
 
 # Each decode evaluates the default afresh, as each `G()` does: two decodes never share a container.
 test fn each_decode_builds_a_fresh_default():
@@ -136,11 +136,11 @@ struct Lazy:
 test fn a_default_runs_only_when_its_key_is_absent():
     match json.decode[Lazy](r'{"z":1}'):
         ?l: assert l.z == 1, "{l}"
-        !e: assert false, e.message()
+        !e: assert false, e.error()
     r := recover: json.decode[Lazy](r'{}')
     match r:
         ?v: assert false, "the default did not run: {v}"
-        !e: assert "default evaluated" in e.message(), e.message()
+        !e: assert "default evaluated" in e.error(), e.error()
 
 # A struct declared in another module reads THAT module's globals, never the decoding module's `LK`.
 test fn a_default_resolves_in_the_declaring_module():
@@ -148,13 +148,13 @@ test fn a_default_resolves_in_the_declaring_module():
         ?c:
             assert c.k == 11 and c.j == 12 and c.lit == "lib", "{c}"
             assert "{c}" == "{lib.LibCfg()}", "{c}"
-        !e: assert false, e.message()
+        !e: assert false, e.error()
 
 # A list of structs fills each element's defaults.
 test fn list_elements_take_their_defaults():
     match json.decode[List[In]](r'[{"w":"a"},{"v":2,"w":"b"}]'):
         ?xs: assert xs[0].v == 7 and xs[1].v == 2, "{xs}"
-        !e: assert false, e.message()
+        !e: assert false, e.error()
 
 fn decode_in_task(out: Channel[int]):
     match json.decode[G](r'{}'):

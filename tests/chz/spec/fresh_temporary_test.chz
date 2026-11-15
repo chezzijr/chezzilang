@@ -158,5 +158,5 @@ test fn a_box_read_argument_is_the_boxes_value_not_a_fresh_one():
             spawn push_param(s.get())
     match r:
         ?_: pass
-        !e: assert false, e.message()
+        !e: assert false, e.error()
     assert s.get() == [1, 9]

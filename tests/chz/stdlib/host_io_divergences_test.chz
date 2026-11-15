@@ -10,7 +10,7 @@ test fn flag_int_accepts_go_prefixed_bases():
     fs.int_flag("n", 0, "count")
     match fs.parse(["-n", "0x10"]):
         ?_: pass
-        !e: assert false, "unexpected Err(" + e.message() + ")"
+        !e: assert false, "unexpected Err(" + e.error() + ")"
     assert fs.get_int("n") == 16, "{fs.get_int("n")}"
 
 test fn flag_int_leading_zero_is_octal():
@@ -18,13 +18,13 @@ test fn flag_int_leading_zero_is_octal():
     fs.int_flag("n", 0, "count")
     match fs.parse(["-n", "010"]):
         ?_: pass
-        !e: assert false, "unexpected Err(" + e.message() + ")"
+        !e: assert false, "unexpected Err(" + e.error() + ")"
     assert fs.get_int("n") == 8, "{fs.get_int("n")}"
 
 test fn base64_decode_ignores_newlines():
     match encoding.base64_decode("Zm9v\r\nYmFy\n"):
         ?s: assert s == "foobar", s
-        !e: assert false, "unexpected Err(" + e.message() + ")"
+        !e: assert false, "unexpected Err(" + e.error() + ")"
 
 # Parse one `-n <val>` against an int flag; `?n` or the `!e` message.
 fn parse_n(val: str) -> int!str:
@@ -32,7 +32,7 @@ fn parse_n(val: str) -> int!str:
     fs.int_flag("n", 0, "count")
     match fs.parse(["-n", val]):
         ?_: return ?fs.get_int("n")
-        !e: return !e.message()
+        !e: return !e.error()
 
 fn expect_n(val: str, want: int):
     match parse_n(val):
@@ -85,7 +85,7 @@ fn bad_syntax(args: List[str]) -> str:
     fs.str_flag("name", "", "n")
     match fs.parse(args):
         ?_: return "OK"
-        !e: return e.message()
+        !e: return e.error()
 
 test fn flag_bad_syntax_like_go():
     assert bad_syntax(["---name", "x"]).contains("bad flag syntax: ---name"), bad_syntax(["---name", "x"])

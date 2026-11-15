@@ -34,7 +34,7 @@ test fn a_caught_err_survives_the_escaped_nursery_wait():
             print(x)
     match r:
         ?_: assert false, "the `?` delivers its error"
-        !e: assert e.message() == "q boom"
+        !e: assert e.error() == "q boom"
 
 # A `?` success inside a `parallel:`: the unwrapped payload, no drain.
 test fn an_ok_unwraps_inside_a_parallel_body():
@@ -60,7 +60,7 @@ test fn a_caught_err_survives_the_escaped_body_defers():
             print(x)
     match r:
         ?_: assert false, "the `?` delivers its error"
-        !e: assert e.message() == "q boom"
+        !e: assert e.error() == "q boom"
 
 # A `?` error with a recover-block defer and no nursery: the recover-block defer drain.
 test fn a_caught_err_survives_the_recover_block_defers():
@@ -70,7 +70,7 @@ test fn a_caught_err_survives_the_recover_block_defers():
         print(x)
     match r:
         ?_: assert false, "the `?` delivers its error"
-        !e: assert e.message() == "q boom"
+        !e: assert e.error() == "q boom"
 
 # A `?` error with both defers and a nursery: every drain of the catch in one row.
 test fn a_caught_err_survives_every_drain_of_the_catch():
@@ -84,7 +84,7 @@ test fn a_caught_err_survives_every_drain_of_the_catch():
             print(x)
     match r:
         ?_: assert false, "the `?` delivers its error"
-        !e: assert e.message() == "q boom"
+        !e: assert e.error() == "q boom"
 
 fn propagate() -> int!str:
     defer churn()

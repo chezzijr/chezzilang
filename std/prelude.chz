@@ -190,8 +190,8 @@ native struct str:
     native fn upper(self) -> str
     native fn lower(self) -> str
     native fn trim(self) -> str
-    # `str` conforms to `Error`: `message()` returns the string itself.
-    native fn message(self) -> str
+    # `str` conforms to `Error`: `error()` returns the string itself.
+    native fn error(self) -> str
     native fn split(self, sep: str) -> List[str]
     native fn chars(self) -> List[str]
     native fn join(self, parts: List[str]) -> str
@@ -322,20 +322,26 @@ import Ok, Err from Result
 protocol Any:
     pass
 
-# `Error` -- what `!x` carries. `message()` is its one requirement. `line()`/`col()`/`file()` are
-# `native fn` defaults: the runtime answers them for every type that satisfies `Error`, with where the
-# value was first made an error (its first `!x`, or the fault a `recover:` caught), or `None` when it
-# never was or was made inside the stdlib. A type that declares its own `line()` answers with it.
+# `Error` -- what `!x` carries. `error()` is its one requirement. `origin()` is a `native fn` default:
+# the runtime answers it for every type that satisfies `Error`, with where the value was first made an
+# error (its first `!x`, or the fault a `recover:` caught), or `None` when it never was or was made
+# inside the stdlib. A type that satisfies `Error` may declare `fn origin(self) -> Location?` (then it
+# wins), but no other member named `origin` (the checker's member rule).
 protocol Error:
-    fn message(self) -> str
-    native fn line(self) -> int?
-    native fn col(self) -> int?
-    native fn file(self) -> str?
+    fn error(self) -> str
+    native fn origin(self) -> Location?
+
+# `Location` -- where an error was first made one (`Error.origin`; Rust `panic::Location`): the
+# 1-based line and column and the display path of the file. The VM builds it.
+struct Location:
+    line: int
+    col: int
+    file: str
 
 # `RecvError` — what `Channel.recv` returns once the channel is closed and drained (Rust std
 # `mpsc::RecvError`, same message). Like `Range`, every module sees it with no import.
 struct RecvError:
-    fn message(self) -> str:
+    fn error(self) -> str:
         return "receiving on a closed channel"
 
 # `Range` — a range of ints as a VALUE (TICKET-253). `a..b`, `a..=b`, `..b`, `a..` and `..` build one; so

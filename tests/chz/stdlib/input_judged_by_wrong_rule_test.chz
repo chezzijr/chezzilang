@@ -20,12 +20,12 @@ test fn duration_parse_bounds_by_value_not_digit_count():
     r := duration.parse("2562047788015ms")
     match r:
         ?_: assert true
-        !e: assert false, "expected Ok, got Err(" + e.message() + ")"
+        !e: assert false, "expected Ok, got Err(" + e.error() + ")"
     # 12 digits of hours is 3.6e17 ms, which FITS i64 ms; expect success, not an error.
     r2 := duration.parse("100000000000h")
     match r2:
         ?_: assert true
-        !e: assert false, "expected Ok, got Err(" + e.message() + ")"
+        !e: assert false, "expected Ok, got Err(" + e.error() + ")"
     # 13 digits of hours is 9223372036857600000 ms, which does NOT fit i64 ms; expect an error.
     r3 := duration.parse("2562047788016h")
     match r3:
@@ -49,18 +49,18 @@ test fn duration_round_trips_the_int_extremes():
         d := duration.millis(ms)
         match duration.parse(d.to_string()):
             ?g: assert g.as_millis() == ms, "roundtrip failed for {ms}"
-            !e: assert false, "roundtrip Err for {ms}: " + e.message()
+            !e: assert false, "roundtrip Err for {ms}: " + e.error()
 
 test fn flagset_parse_resets_positionals_per_call():
     fs := flag.new()
     r1 := fs.parse(["a"])
     match r1:
         ?pos: assert pos == ["a"]
-        !e: assert false, "unexpected Err(" + e.message() + ")"
+        !e: assert false, "unexpected Err(" + e.error() + ")"
     r2 := fs.parse(["b"])
     match r2:
         ?pos: assert pos == ["b"]
-        !e: assert false, "unexpected Err(" + e.message() + ")"
+        !e: assert false, "unexpected Err(" + e.error() + ")"
 
 test fn flagset_help_flag_reaches_usage():
     fs := flag.new()
@@ -68,37 +68,37 @@ test fn flagset_help_flag_reaches_usage():
     expected := "flag: help requested\n  --name (str) default=world: who to greet"
     for arg in ["--help", "-h"]:
         match fs.parse([arg]):
-            !e: assert e.message() == expected, "unexpected message: " + e.message()
+            !e: assert e.error() == expected, "unexpected message: " + e.error()
             ?pos: assert false, "expected Err(help requested), got Ok({pos})"
 
     owns_help := flag.new()
     owns_help.bool_flag("help", false, "my own help")
     match owns_help.parse(["--help"]):
         ?_: assert owns_help.get_bool("help") == true
-        !e: assert false, "user-registered help flag should win, got Err(" + e.message() + ")"
+        !e: assert false, "user-registered help flag should win, got Err(" + e.error() + ")"
 
 test fn datetime_parse_iso8601_accepts_cpython_forms():
     r1 := datetime.parse_iso8601("2024-01-01T12:34")
     match r1:
         ?_: assert true
-        !e: assert false, "minute-precision: " + e.message()
+        !e: assert false, "minute-precision: " + e.error()
     r2 := datetime.parse_iso8601("20240101T123456Z")
     match r2:
         ?_: assert true
-        !e: assert false, "basic/compact: " + e.message()
+        !e: assert false, "basic/compact: " + e.error()
     r3 := datetime.parse_iso8601("2024-01-01T12:34:56+0530")
     match r3:
         ?_: assert true
-        !e: assert false, "colonless offset: " + e.message()
+        !e: assert false, "colonless offset: " + e.error()
     match datetime.parse_iso8601("2024-01-01T12:34"):
         ?d: assert datetime.to_epoch(d) == 1704112440
-        !e: assert false, "minute-precision epoch: " + e.message()
+        !e: assert false, "minute-precision epoch: " + e.error()
     match datetime.parse_iso8601("20240101T123456Z"):
         ?d: assert datetime.to_epoch(d) == 1704112496
-        !e: assert false, "basic/compact epoch: " + e.message()
+        !e: assert false, "basic/compact epoch: " + e.error()
     match datetime.parse_iso8601("2024-01-01T12:34:56+0530"):
         ?d: assert datetime.to_epoch(d) == 1704092696
-        !e: assert false, "colonless offset epoch: " + e.message()
+        !e: assert false, "colonless offset epoch: " + e.error()
 
 fn cleanup_glob_dir(d: str):
     _ := fs.remove_file(d + "/a.c")
@@ -110,29 +110,29 @@ test fn fs_glob_does_not_silently_drop_character_classes():
     r1 := fs.mkdir(d)
     match r1:
         ?_: pass
-        !e: assert false, "mkdir: " + e.message()
+        !e: assert false, "mkdir: " + e.error()
     defer cleanup_glob_dir(d)
 
     r2 := fs.atomic_write(d + "/a.c", "")
     match r2:
         ?_: pass
-        !e: assert false, "write a.c: " + e.message()
+        !e: assert false, "write a.c: " + e.error()
     r3 := fs.atomic_write(d + "/b.h", "")
     match r3:
         ?_: pass
-        !e: assert false, "write b.h: " + e.message()
+        !e: assert false, "write b.h: " + e.error()
 
     r := fs.glob(d + "/*.[ch]")
     match r:
         ?matches: assert matches.len() == 2, "expected 2 matches for [ch] class, got {matches.len()}"
-        !e: assert false, "unexpected Err: " + e.message()
+        !e: assert false, "unexpected Err: " + e.error()
 
     rneg := fs.glob(d + "/*.[^c]")
     match rneg:
         ?matches: assert matches.len() == 1, "expected 1 match for [^c] class, got {matches.len()}"
-        !e: assert false, "unexpected Err: " + e.message()
+        !e: assert false, "unexpected Err: " + e.error()
 
     rbad := fs.glob(d + "/*.[ch")
     match rbad:
-        !e: assert e.message().contains("bad pattern"), "unexpected message: " + e.message()
+        !e: assert e.error().contains("bad pattern"), "unexpected message: " + e.error()
         ?matches: assert false, "expected Err for malformed pattern, got Ok({matches})"

@@ -124,7 +124,7 @@ test fn all_arms_off_without_else_faults():
             a.send(2) if false: pass
     match r:
         ?_: assert false, "expected a fault"
-        !e: assert e.message().contains("every arm is off"), e.message()
+        !e: assert e.error().contains("every arm is off"), e.error()
 
 test fn an_off_arm_is_not_a_closed_arm():
     # A closed, drained arm is ready and binds !RecvError; an off arm never runs.
@@ -147,8 +147,8 @@ test fn an_off_arm_is_not_a_closed_arm():
     match r2:
         ?_: assert false, "expected a fault"
         !e:
-            assert e.message().contains("every arm is off"), e.message()
-            assert not e.message().contains("closed"), e.message()
+            assert e.error().contains("every arm is off"), e.error()
+            assert not e.error().contains("closed"), e.error()
 
 test fn a_paused_worker_runs_queued_jobs_after_resume_in_order():
     jobs := Channel[int](0)

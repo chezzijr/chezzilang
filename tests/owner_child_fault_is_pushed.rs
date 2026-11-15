@@ -55,7 +55,7 @@ fn child_fault_cuts_owner_blocked_in_socket_read() {
         "fn must[T](r: T!) -> T:",
         "    match r:",
         "        ?v: return v",
-        "        !e: panic(e.message())",
+        "        !e: panic(e.error())",
         "ln := must(net.listen(\"127.0.0.1:0\"))",
         "c := must(net.connect(must(ln.addr())))",
         "peer := must(ln.accept())",

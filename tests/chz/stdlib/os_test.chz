@@ -25,7 +25,7 @@ test fn hostname_is_stable_across_calls():
 # fs/io/os surface (`fs.size`, etc. all prefix `"{path}: {e}"`) and both CPython and Go.
 test fn chdir_missing_path_names_the_path():
     match os.chdir("/nope/zz-TICKET-081"):
-        !e: assert e.message().contains("/nope/zz-TICKET-081"), e.message()
+        !e: assert e.error().contains("/nope/zz-TICKET-081"), e.error()
         ?_:  assert false, "expected Err for a nonexistent directory"
 
 # `chezzi test` hands a program the real process env, as `chezzi run` does. A login shell and

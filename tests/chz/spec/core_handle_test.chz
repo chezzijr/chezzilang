@@ -116,11 +116,11 @@ test fn a_sealed_task_holds_the_job_value():
     ex.shutdown()
     match t.get():
         ?m: m["b"] = 2
-        !e: assert false, e.message()
+        !e: assert false, e.error()
     assert m32_global.len() == 2
     match t.get():
         ?m: assert m.len() == 2
-        !e: assert false, e.message()
+        !e: assert false, e.error()
 
 # The print path snapshots a box and every box it holds before it renders, and a `Shared`
 # snapshot can wait in the GC door. An `Atomic` it finds holds a heap value that only the old

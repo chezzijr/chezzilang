@@ -178,7 +178,7 @@ reference docs.
 4. **Out of scope today:** k/m/g suffixes for `--max-heap`, and `chezzi run --max-heap` /
    `chezzi run --timeout`.
 5. **Fault-path tests in Chezzi.** `r := recover: <expr>` yields `!e`, and
-   `assert e.message().contains(...)` tests a fault without Rust. The Rust-only set for the
+   `assert e.error().contains(...)` tests a fault without Rust. The Rust-only set for the
    `tests/chz/` migration is: GC-stress rooting, checker `rejects`/`ok`, parser/lexer/bytecode
    internals, and concurrency timing. Fault-path tests are a future migration cluster.
 

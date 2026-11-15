@@ -16,4 +16,4 @@ test fn a_dropped_jobs_fault_is_caught_by_recover_around_shutdown():
     res := recover: ex.shutdown()
     match res:
         ?_: pass
-        !e: assert false, "shutdown() raised a job fault: {e.message()}"
+        !e: assert false, "shutdown() raised a job fault: {e.error()}"

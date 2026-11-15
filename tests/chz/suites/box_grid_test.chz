@@ -80,7 +80,7 @@ test fn display_box_contents_are_structural_no_user_str_hook():
 fn msg_of[T](r: T!Error, where_: str) -> str:
     match r:
         ?_: assert false, where_ + " must fault"
-        !e: return e.message()
+        !e: return e.error()
     return ""
 
 struct Acc:

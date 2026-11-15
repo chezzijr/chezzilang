@@ -327,7 +327,7 @@ wait:
     v := c1.recv():
         match v:
             ?x: print("c1 {x}")
-            !e: print("c1 {e.message()}")
+            !e: print("c1 {e.error()}")
     w := c2.recv():
         print("c2 {w}")
 "#;
@@ -1209,7 +1209,7 @@ _ := ex.submit(closer)
 done.recv()
 match t.get():
     ?_: print(\"no fault\")
-    !e: print(\"task fault: {e.message()}\")
+    !e: print(\"task fault: {e.error()}\")
 ",
     );
     res.expect("a job fault must not end the run");
@@ -1468,7 +1468,7 @@ t := ex.submit(blocker)
 _ := ex.submit(closer)
 match t.get():
     ?_: print(\"blocker ok\")
-    !e: print(\"task fault: {e.message()}\")
+    !e: print(\"task fault: {e.error()}\")
 ";
     let entry = write_temp_chz("w713c_send_sees_close", src);
     let (tx, rx) = std::sync::mpsc::channel();
@@ -2291,7 +2291,7 @@ inner.shutdown()
 print("main done")
 match t.get():
     ?_: print("accepted")
-    !e: print("task fault: {e.message()}")
+    !e: print("task fault: {e.error()}")
 "#;
     let entry = write_temp_chz("submit_after_creator_cancel", src);
     let (out, _err, res, _code) = run_file(&entry);

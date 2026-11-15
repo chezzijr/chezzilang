@@ -581,7 +581,7 @@ struct Tag:
     n: int
 struct MyErr[T]:
     v: T
-    fn message(self) -> str:
+    fn error(self) -> str:
         return \"boom\"
     fn eq(self, other: MyErr[T]) -> bool where T: Comparable:
         return true
@@ -1792,7 +1792,7 @@ fn comparable_types_equality_still_ok() {
     );
     // (2) the `Error` existential vs a conforming user error struct (not just the `str` special case).
     entry_ok(
-        "struct MyErr:\n    m: str\n    fn message(self) -> str:\n        return self.m\nfn boom() -> int!:\n    return !MyErr(\"x\")\nfn main():\n    match boom():\n        ?v: print(v)\n        !e: print(e == MyErr(\"x\"))\nmain()\n",
+        "struct MyErr:\n    m: str\n    fn error(self) -> str:\n        return self.m\nfn boom() -> int!:\n    return !MyErr(\"x\")\nfn main():\n    match boom():\n        ?v: print(v)\n        !e: print(e == MyErr(\"x\"))\nmain()\n",
     );
     // (3) `Any` is the TOP type — the documented escape hatch, and it must work with only ONE side
     // widened (the docs spell it `u: Any = a`).
@@ -1805,21 +1805,21 @@ fn comparable_types_equality_still_ok() {
     );
     // (5) a NESTED existential — the recursion `compatible` cannot do.
     entry_ok(
-        "struct MyErr:\n    m: str\n    fn message(self) -> str:\n        return self.m\nfn main():\n    o: Error? = ?MyErr(\"x\")\n    p: MyErr? = ?MyErr(\"x\")\n    print(o == p)\nmain()\n",
+        "struct MyErr:\n    m: str\n    fn error(self) -> str:\n        return self.m\nfn main():\n    o: Error? = ?MyErr(\"x\")\n    p: MyErr? = ?MyErr(\"x\")\n    print(o == p)\nmain()\n",
     );
     // ----- and the shapes `assignable` cannot see either (it answers the STORAGE question):
-    // (6) TWO existentials over ONE concrete. `Sq` has both `area` and `message`, so it is
+    // (6) TWO existentials over ONE concrete. `Sq` has both `area` and `error`, so it is
     // simultaneously a `Shape` and an `Error` — the pair is inhabited even though neither protocol
     // embeds the other, which is all `assignable`'s `(Protocol, Protocol)` path can see.
     entry_ok(
-        "protocol Shape:\n    fn area(self) -> int\nstruct Sq:\n    s: int\n    fn area(self) -> int:\n        return self.s\n    fn message(self) -> str:\n        return \"sq\"\nfn main():\n    sh: Shape = Sq(2)\n    e: Error = Sq(2)\n    print(sh == e)\n    print(e == sh)\nmain()\n",
+        "protocol Shape:\n    fn area(self) -> int\nstruct Sq:\n    s: int\n    fn area(self) -> int:\n        return self.s\n    fn error(self) -> str:\n        return \"sq\"\nfn main():\n    sh: Shape = Sq(2)\n    e: Error = Sq(2)\n    print(sh == e)\n    print(e == sh)\nmain()\n",
     );
     // (7) an existential nested inside a MUTABLE container / generic struct. Their type args are
     // compared INVARIANTLY for assignability (a `G[Sub]` aliased as `G[Super]` can be written
     // through) — a soundness rule for STORAGE. `==` never writes, so the same list/box/tuple really
     // can inhabit both types and the comparison must compile.
     entry_ok(
-        "struct MyErr:\n    m: str\n    fn message(self) -> str:\n        return self.m\nstruct Box[T]:\n    v: T\nfn boxes(a: Box[Error], b: Box[MyErr]) -> bool:\n    return a == b\nfn maps(a: Map[str, Error], b: Map[str, MyErr]) -> bool:\n    return a == b\nfn main():\n    o: List[Error] = [MyErr(\"x\")]\n    p: List[MyErr] = [MyErr(\"x\")]\n    print(o == p)\n    t: (Error, int) = (MyErr(\"x\"), 1)\n    u: (MyErr, int) = (MyErr(\"x\"), 1)\n    print(t == u)\nmain()\n",
+        "struct MyErr:\n    m: str\n    fn error(self) -> str:\n        return self.m\nstruct Box[T]:\n    v: T\nfn boxes(a: Box[Error], b: Box[MyErr]) -> bool:\n    return a == b\nfn maps(a: Map[str, Error], b: Map[str, MyErr]) -> bool:\n    return a == b\nfn main():\n    o: List[Error] = [MyErr(\"x\")]\n    p: List[MyErr] = [MyErr(\"x\")]\n    print(o == p)\n    t: (Error, int) = (MyErr(\"x\"), 1)\n    u: (MyErr, int) = (MyErr(\"x\"), 1)\n    print(t == u)\nmain()\n",
     );
     // (8) same as (4), one level down (`List[T]`): the co-inhabitance erasure is unaffected, the
     // walk still needs `T: Eq`.
@@ -1842,7 +1842,7 @@ fn comparable_types_equality_still_ok() {
         "import Atomic, RwShared, StructuralEq from std.concurrency\nfn chans[T](a: Channel[T], b: Channel[int]) -> bool:\n    return a == b\nfn atoms[T: StructuralEq](a: Atomic[T], b: Atomic[int]) -> bool:\n    return a == b\nfn rws[T](a: RwShared[T], b: RwShared[int]) -> bool:\n    return a == b\nfn main():\n    pass\nmain()\n",
     );
     entry_ok(
-        "import Shared from std.concurrency\nstruct MyErr:\n    m: str\n    fn message(self) -> str:\n        return self.m\nfn shr(a: Shared[Error], b: Shared[MyErr]) -> bool:\n    return a == b\nfn nested(a: List[Shared[Error]], b: List[Shared[MyErr]]) -> bool:\n    return a == b\nfn main():\n    pass\nmain()\n",
+        "import Shared from std.concurrency\nstruct MyErr:\n    m: str\n    fn error(self) -> str:\n        return self.m\nfn shr(a: Shared[Error], b: Shared[MyErr]) -> bool:\n    return a == b\nfn nested(a: List[Shared[Error]], b: List[Shared[MyErr]]) -> bool:\n    return a == b\nfn main():\n    pass\nmain()\n",
     );
     // (11) a PARAMETERIZED protocol existential vs a conforming concrete, with a free `T` in the
     // protocol's args — the erasure escape did not reach into `Protocol`'s own `pargs` either, so the
