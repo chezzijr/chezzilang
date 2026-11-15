@@ -546,12 +546,15 @@ pub struct Bound {
 }
 
 /// A protocol method signature — like an [`FnDecl`] but body-less. `Self` (as `Type::Named("Self")`)
-/// inside the params/ret refers to the conforming type.
+/// inside the params/ret refers to the conforming type. `native` marks a `native fn` line: a method
+/// the runtime answers for every type that satisfies the protocol, so it is not a requirement (a
+/// std protocol only; `Error`'s `line`/`col`/`file`).
 #[derive(Debug, Clone, PartialEq, borsh::BorshSerialize, borsh::BorshDeserialize)]
 pub struct MethodSig {
     pub name: String,
     pub params: Vec<Param>,
     pub ret: Option<Type>,
+    pub native: bool,
 }
 
 /// A function or closure parameter. `ty` is `None` for closure params, whose types are inferred.

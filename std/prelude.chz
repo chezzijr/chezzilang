@@ -322,8 +322,15 @@ import Ok, Err from Result
 protocol Any:
     pass
 
+# `Error` -- what `!x` carries. `message()` is its one requirement. `line()`/`col()`/`file()` are
+# `native fn` defaults: the runtime answers them for every type that satisfies `Error`, with where the
+# value was first made an error (its first `!x`, or the fault a `recover:` caught), or `None` when it
+# never was or was made inside the stdlib. A type that declares its own `line()` answers with it.
 protocol Error:
     fn message(self) -> str
+    native fn line(self) -> int?
+    native fn col(self) -> int?
+    native fn file(self) -> str?
 
 # `RecvError` — what `Channel.recv` returns once the channel is closed and drained (Rust std
 # `mpsc::RecvError`, same message). Like `Range`, every module sees it with no import.

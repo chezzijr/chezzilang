@@ -99,12 +99,28 @@ impl Compiler {
     }
 
     /// Build the carrier variant `enum_key.variant` around the stack top, for a wrap the CHECKER
-    /// decided (`FallOff::OkNil`, `Wrap`, `!e`, `RetCoerce`) — a verdict, never a name in source.
+    /// decided (`FallOff::OkNil`, `Wrap`, `RetCoerce`) — a verdict, never a name in source.
     pub(super) fn emit_carrier_wrap(
         &mut self,
         fc: &mut FnComp,
         enum_key: &str,
         variant: &str,
+        span: Span,
+    ) -> Result<(), CompileError> {
+        self.emit_carrier_variant(fc, enum_key, variant, false, span)
+    }
+
+    /// `!x`: the `Err` around the stack top, whose payload records `span` as its origin.
+    pub(super) fn emit_err_val(&mut self, fc: &mut FnComp, span: Span) -> Result<(), CompileError> {
+        self.emit_carrier_variant(fc, "Result", "Err", true, span)
+    }
+
+    fn emit_carrier_variant(
+        &mut self,
+        fc: &mut FnComp,
+        enum_key: &str,
+        variant: &str,
+        origin: bool,
         span: Span,
     ) -> Result<(), CompileError> {
         if self.variant_id_of_key(enum_key, variant) == crate::base::op::VID_NONE {
@@ -116,7 +132,7 @@ impl Compiler {
                 span,
             });
         }
-        self.emit_new_enum(fc, enum_key, variant, 1, span);
+        self.emit_enum_op(fc, enum_key, variant, 1, origin, span);
         Ok(())
     }
 

@@ -292,7 +292,9 @@
 # whole-body alternative so `pass`+member and `pass pass` are parse errors, matching the parser.
 <protoBody>    ::= <protoLines> | "PASS" "NEWLINE"
 <protoLines>   ::= <protoLine> | <protoLine> <protoLines>
-<protoLine>    ::= <fnSig> | <embedLine>
+# A `native fn` line (std protocols only, a checker rule) is a method the runtime answers for every
+# type that satisfies the protocol: not a requirement, and a type's own method of the name wins.
+<protoLine>    ::= <fnSig> | "NATIVE" <fnSig> | <embedLine>
 <embedLine>    ::= <boundList> "NEWLINE"
 <fnSig>        ::= "FN" <memberName> "LPAREN" "RPAREN" "NEWLINE"
                  | "FN" <memberName> "LPAREN" <params> "RPAREN" "NEWLINE"

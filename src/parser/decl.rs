@@ -167,8 +167,10 @@ impl Parser {
         Ok(Bound { name, args })
     }
 
-    /// A body-less method signature inside a `protocol` block: `fn name(params) -> ret` then NEWLINE.
+    /// A body-less method signature inside a `protocol` block: `[native] fn name(params) -> ret` then
+    /// NEWLINE. The checker rejects a `native` line outside the stdlib.
     fn parse_fn_sig(&mut self) -> PResult<MethodSig> {
+        let native = self.eat(&Token::Native);
         self.expect(&Token::Fn)?;
         let name = self.expect_member_name()?;
         self.expect(&Token::LParen)?;
@@ -179,7 +181,12 @@ impl Parser {
         } else {
             None
         };
-        Ok(MethodSig { name, params, ret })
+        Ok(MethodSig {
+            name,
+            params,
+            ret,
+            native,
+        })
     }
 
     pub(super) fn parse_protocol(&mut self) -> PResult<StmtKind> {
@@ -218,10 +225,10 @@ impl Parser {
         }
         // A protocol body line is EITHER an `fn` signature OR an embed line (M22). An embed line is
         // one-or-more protocol refs joined by `+` (`Add + Sub`, `Iterator[T]`) — order-free, may
-        // interleave with `fn` sigs. The two are unambiguous: an `fn` line starts with `FN`, an embed
-        // line with an IDENT (a protocol name).
+        // interleave with `fn` sigs. The two are unambiguous: an `fn` line starts with `FN` (or
+        // `NATIVE FN`, a runtime-answered default), an embed line with an IDENT (a protocol name).
         while !self.check(&Token::Dedent) && !self.check(&Token::Eof) {
-            if self.check(&Token::Fn) {
+            if self.check(&Token::Fn) || self.check(&Token::Native) {
                 methods.push(self.parse_fn_sig()?);
             } else {
                 embeds.push(self.parse_bound()?);

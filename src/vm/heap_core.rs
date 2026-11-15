@@ -131,8 +131,8 @@ pub struct HeapCore {
     over_cap: AtomicBool,
     /// `live_bytes()` as of the last `sweep()`: the cap-off byte goal (`Heap::bytes_gc_threshold`).
     last_live_bytes: AtomicUsize,
-    /// W8-22: the origin span of a caught error, keyed on the RAW SLOT INDEX of the `Err` payload's
-    /// `GcRef`. The key is a reused index (`alloc` reuses freed slots), so `sweep()`'s free branch
+    /// W8-22: the origin span of an error (its first `!x` or the `recover:` that caught it), keyed
+    /// on the RAW SLOT INDEX of the `Err` payload's `GcRef`. The key is a reused index (`alloc` reuses freed slots), so `sweep()`'s free branch
     /// is what makes this table sound: leaving an entry behind would hand a dead error's coordinates
     /// to whatever `alloc` reuses the slot for next.
     err_spans: Mutex<FxHashMap<u32, Span>>,
@@ -308,7 +308,7 @@ impl HeapCore {
     }
 
     pub(super) fn set_err_span(&self, r: GcRef, span: Span) {
-        lock(&self.err_spans).insert(r.0, span);
+        lock(&self.err_spans).entry(r.0).or_insert(span);
     }
 
     pub(super) fn err_span(&self, r: GcRef) -> Option<Span> {

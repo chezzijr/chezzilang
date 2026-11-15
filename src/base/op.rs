@@ -250,12 +250,13 @@ pub enum Op {
     // ----- calls -----
     /// Stack: `[callee, arg0, …]`; pops `argc + 1`, pushes the result.
     Call(usize),
-    /// `obj.method(args)` — stack `[recv, arg0, …]`. Resolves a struct method (binds `self`) or a
-    /// module member (plain call, no `self`). `ic`: per-call-site method inline-cache id (dense
+    /// `obj.method(args)` — stack `[recv, arg0, …]`. `method` is the name's id in
+    /// `Program::methods`; the receiver's row of that table says what runs (a method binds `self`,
+    /// a module member is a plain call). `ic`: per-call-site method inline-cache id (dense
     /// `0..Program::method_ic_sites`). Every compiler-emitted `CallMethod` gets a real `ic` (including
     /// the synthetic iterator-protocol `next`/`values` sites), and so does every `DeferMethod` site.
     CallMethod {
-        name: String,
+        method: crate::base::method_table::MethodId,
         argc: usize,
         ic: u32,
     },
@@ -265,7 +266,7 @@ pub enum Op {
     /// otherwise the builtin grant answers (`Vm::call_hook`).
     CallHook {
         hook: crate::base::hooks::Hook,
-        name: String,
+        method: crate::base::method_table::MethodId,
         argc: usize,
         ic: u32,
     },
@@ -313,7 +314,7 @@ pub enum Op {
     /// `defer recv.name(args)` — stack `[recv, arg0, …]`; pops `argc + 1` and records a deferred
     /// method call on the current frame. The third field is the site's own method-IC id (the
     /// `CallMethod` allocator), carried in the record so the drain dispatches through this site.
-    DeferMethod(std::sync::Arc<str>, usize, u32),
+    DeferMethod(crate::base::method_table::MethodId, usize, u32),
     /// Enter a lexical block that contains a `defer`: push a scope marker (the current count of
     /// pending defers) on the frame. Emitted by the compiler only for blocks that statically hold a
     /// `defer`, so defer-free code is unchanged.
@@ -364,11 +365,14 @@ pub enum Op {
     /// Construct an enum variant from the top `argc` stack values. `variant_id` (M19 lever #2) is the
     /// dense, compile-time id stamped onto the instance — the enum analogue of `NewStruct`'s `tid`;
     /// `variant` is kept only for the cold arity-mismatch error message. `VID_NONE` for an
-    /// unregistered variant (never constructible from source).
+    /// unregistered variant (never constructible from source). `origin` is set on the `Err` an
+    /// `!x` builds: the payload records the op's span as where it was first made an error
+    /// (`Vm::stamp_err_span`, first stamp wins).
     NewEnum {
         variant: String,
         variant_id: u32,
         argc: usize,
+        origin: bool,
     },
     /// Push the heap's one `Func` for `ProtoId` (`vm::Vm::fn_value`, TICKET-215), homed in
     /// the current frame's module on first build.
@@ -739,8 +743,8 @@ pub struct Program {
     /// one owner): what `Op::CallPrint` and a `print` fn value without those args join with.
     pub print_defaults: [String; 2],
     /// Enum methods, keyed by the enum's module-scoped runtime key → (method name → its proto). The
-    /// enum analogue of `StructDef::methods` (enums are type-erased — no `StructDef`/`tid`). Looked up
-    /// by `do_method_call` (via `variants_by_id[id].enum_name`) and the arith/compare overload paths.
+    /// enum analogue of `StructDef::methods` (enums are type-erased — no `StructDef`/`tid`). Read by
+    /// `MethodTable::build` (each enum's row) and the arith/compare overload paths.
     pub enum_methods: HashMap<String, HashMap<String, ProtoId>>,
     /// Enum runtime key → the index of the module that declared it, so an enum method resolves its
     /// top-level names against that module's globals (home-globals), mirroring `StructDef::module_idx`.
@@ -752,10 +756,9 @@ pub struct Program {
     /// Native-struct BODIED methods, keyed by the reserved handle's bare name (`"Reader"`) → (method
     /// name → its proto). The native-handle analogue of `enum_methods`: a `native struct` (a reserved
     /// opaque VM handle — no `StructDef`/`tid`) may carry a pure-Chezzi `fn` (e.g. `Reader.lines`)
-    /// alongside its Rust-backed `native fn` sigs. `do_method_call`'s handle arms look this up FIRST;
-    /// a miss falls through to the native (name-keyed) dispatch (`reader_method` etc.), so the bodyless
-    /// native methods are byte-identical. Reserved handle names are unique + import-gated → no user
-    /// collision. Empty when no native struct carries a bodied method.
+    /// alongside its Rust-backed `native fn` sigs. `MethodTable::build` puts each in its type's row
+    /// (`base/method_table.rs`), over the bodyless native of the name. Reserved handle names are
+    /// unique + import-gated → no user collision. Empty when no native struct carries a bodied method.
     pub native_methods: HashMap<String, HashMap<String, ProtoId>>,
     /// Native-struct bare name → the index of the module that declared it (home-globals for its bodied
     /// methods), mirroring `enum_home`.
@@ -793,6 +796,9 @@ pub struct Program {
     /// into `CallMethod` ops). The VM pre-sizes its per-`Vm` `method_ic` vector to this length. Holds
     /// proto ids + module indices, not `GcRef`s, so it carries no heap state (never snapshotted/swapped).
     pub method_ic_sites: u32,
+    /// The method names the call sites intern and what each (receiver row, method) runs: the one
+    /// table `Vm::do_method_call` reads (`base::method_table`).
+    pub methods: crate::base::method_table::MethodTable,
     /// TICKET-235 — the program-wide entry thunk (`<task entry>`, one parameter, body `Call(0)`)
     /// behind `Executor.submit(f)` when `f` pushes no frame by itself (a native fn value). `submit`
     /// is a runtime call, so no per-site thunk exists for it. See `Vm::task_entry`.

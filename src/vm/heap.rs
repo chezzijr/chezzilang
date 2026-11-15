@@ -1100,13 +1100,13 @@ impl Heap {
         out
     }
 
-    /// Stamp `r`'s origin span (W8-22), overwriting any prior entry for its slot.
+    /// Stamp `r`'s origin span (W8-22). The first stamp of a live slot wins: a later one is ignored.
     pub fn set_err_span(&mut self, r: GcRef, span: Span) {
         self.core.set_err_span(r, span);
     }
 
-    /// The origin span stamped on `r`, or `None` if it was never stamped (a user-constructed
-    /// `Err`, a struct error, or a slot swept since the stamp). Returns `Span` by value: `Span` is
+    /// The origin span stamped on `r`, or `None` if it was never stamped (a value no user `!x`
+    /// or `recover:` made an error, or a slot swept since the stamp). Returns `Span` by value: `Span` is
     /// `Copy`, so the core's `err_spans` lock is released here rather than held across a caller's
     /// subsequent `alloc`/`alloc_str`.
     pub fn err_span(&self, r: GcRef) -> Option<Span> {

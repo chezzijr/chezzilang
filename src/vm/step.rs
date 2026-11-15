@@ -20,7 +20,10 @@ impl Vm {
                 // literal lives in the immutable `Arc<Program>`). First push of this op allocs the
                 // heap `Obj::Str`; every later push reuses the cached, GC-rooted handle — no clone,
                 // no alloc. Sound because strings are immutable and there is no identity operator.
-                let key = s.as_ptr() as usize;
+                // The key is the literal's own `String` (one per site), not its data pointer: every
+                // empty `String` shares one dangling pointer, and a handle shared across sites would
+                // share its error origin (`Vm::stamp_err_span`) too.
+                let key = std::ptr::from_ref(s) as usize;
                 let h = match self.str_intern.get(&key) {
                     Some(&h) => h,
                     None => {
@@ -278,13 +281,15 @@ impl Vm {
                 }
             }
             Op::Call(argc) => self.do_call(*argc, span)?,
-            Op::CallMethod { name, argc, ic } => self.do_method_call(name, *argc, *ic, span)?,
+            Op::CallMethod { method, argc, ic } => {
+                self.do_method_call(*method, *argc, *ic, span)?
+            }
             Op::CallHook {
                 hook,
-                name,
+                method,
                 argc,
                 ic,
-            } => self.call_hook(*hook, name, *argc, *ic, span)?,
+            } => self.call_hook(*hook, *method, *argc, *ic, span)?,
             Op::CallStatic {
                 type_key,
                 method,
@@ -332,9 +337,7 @@ impl Vm {
             }
             Op::Return => self.do_return(false)?,
             Op::DeferCall(argc) => self.do_defer(None, *argc, span),
-            Op::DeferMethod(name, argc, ic) => {
-                self.do_defer(Some((name.clone(), *ic)), *argc, span)
-            }
+            Op::DeferMethod(method, argc, ic) => self.do_defer(Some((*method, *ic)), *argc, span),
             Op::EnterDeferScope => {
                 let frame = self.frames.last_mut().unwrap();
                 let marker = frame.deferred.len();
@@ -467,7 +470,8 @@ impl Vm {
                 variant,
                 variant_id,
                 argc,
-            } => self.new_enum(variant, *variant_id, *argc, span)?,
+                origin,
+            } => self.new_enum(variant, *variant_id, *argc, *origin, span)?,
             Op::MakeFunc(proto) => {
                 let home = self.frames.last().unwrap().home;
                 let proto = *proto;

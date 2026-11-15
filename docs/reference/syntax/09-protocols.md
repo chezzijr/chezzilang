@@ -13,6 +13,12 @@ as `str`, `eq`, `hash`, `compare`, `add`), and they witness a user protocol too:
 `protocol Show: fn str(self) -> str` is satisfied by `5`, a struct, a tuple and a handle
 (`Channel`, `Shared`, `Executor`, ...).
 
+**Runtime-answered defaults.** A std protocol may declare a `native fn` line: a method the runtime
+answers for every type that satisfies the protocol. It is not a requirement, and a type's own
+method of the name wins. `Error`'s `line()`, `col()` and `file()` are the only ones
+([`12-errors.md`](12-errors.md)). A user protocol cannot declare one (`native fn declarations are
+only allowed in standard-library modules`), and no protocol method has a body.
+
 **Where the std protocols live.** Each std protocol is declared in a std module. A bound or a value
 type names it after an import (`import Add from std.ops`). Without the import the name is
 `unknown name 'Add'`. An operator, a hook or a `for` loop needs no import: `a + b` and

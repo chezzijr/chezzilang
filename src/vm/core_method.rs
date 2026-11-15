@@ -5,51 +5,56 @@ use super::call::py_blank;
 use super::*;
 use crate::ast::BinaryOp;
 use crate::base::builtin_method::{
-    BytearrayMethod, BytesMethod, FloatMethod, IntMethod, ListMethod, MapMethod, SetMethod,
-    StrMethod,
+    BytearrayMethod, BytesMethod, ErrorMethod, FloatMethod, IntMethod, ListMethod, MapMethod,
+    SetMethod, StrMethod,
 };
-use crate::base::hooks::{Hook, Unhooked};
+use crate::base::hooks::Hook;
+use crate::base::method_table::{Intrinsic, NativeArm};
 
 impl Vm {
+    /// The answer of the intrinsic method `which` (a `MethodEntry::Intrinsic` of the method
+    /// table, or the hook an `Op::CallHook` names) on `recv`, or `None` when it declines: a
+    /// wrong argument count, or operands it cannot answer. The caller then faults with the
+    /// receiver kind's miss text. The kind's own cursor and module entries are the dispatch loop's
+    /// (`Vm::do_method_call`) and decline here.
     pub(super) fn intrinsic_proto_method(
         &mut self,
         recv: Value,
-        method: &str,
+        which: Intrinsic,
         args: &[Value],
         span: Span,
     ) -> Result<Option<Value>, RuntimeError> {
-        // W8-22 — `line()`/`col()`/`file()` through the `Error` existential, for every receiver:
-        // the fault's origin span, stamped on a `str` handle at one of the three `recover:`
-        // boundaries. `None` for a receiver that was never stamped (a user-constructed
-        // `Err("...")`, or any non-`str` error, which never carries a stamped span). This hook is
-        // miss-only and runs from the struct arm, the enum arm and the catch-all, so a user error
-        // type that DEFINES its own `line()` still gets that method instead of this answer.
-        // `file()` resolves the span's file to a display path, the text `lexer::render_span` prints
-        // for an uncaught fault; `None` when the span's file has no coordinate (`file` 0).
-        if args.is_empty() && matches!(method, "line" | "col" | "file") {
-            let sp = recv.as_obj().and_then(|r| self.heap.err_span(r));
-            let answer = match (method, sp) {
-                ("line", Some(sp)) => Some(Value::int(sp.line as i64)),
-                ("col", Some(sp)) => Some(Value::int(sp.col as i64)),
-                ("file", Some(sp)) => self
-                    .program
-                    .file_path(sp.file)
-                    .map(|p| crate::lexer::display_path(p).to_string_lossy().into_owned())
-                    .map(|p| self.alloc_str(p)),
-                _ => None,
-            };
-            return Ok(Some(match answer {
-                Some(v) => self.alloc_enum("Option", "Some", &[v]),
-                None => self.alloc_enum("Option", "None", &[]),
-            }));
-        }
-        // The `Unhooked` protocols have no operator hook. `Error`'s method on a `str` is the native
-        // `str.message`, so only `PathLike`'s reaches this miss arm.
-        if args.is_empty() && method == Unhooked::PathLike.method() {
-            return self.intrinsic_as_path(recv);
-        }
-        let Some(hook) = Hook::of_method(method) else {
-            return Ok(None);
+        let hook = match which {
+            Intrinsic::Hook(hook) => hook,
+            // `Error`'s `native fn` defaults (`std/prelude.chz`): where the value was first made an
+            // error, stamped on its handle by its first `!x` or by the `recover:` boundary that
+            // caught it ([`Vm::stamp_err_span`]). `None` for a receiver never stamped. `file()`
+            // resolves the span's file to a display path, the text `lexer::render_span` prints for
+            // an uncaught fault; `None` when the span's file has no coordinate (`file` 0).
+            Intrinsic::Error(m) if args.is_empty() => {
+                let sp = recv.as_obj().and_then(|r| self.heap.err_span(r));
+                let answer = sp.and_then(|sp| match m {
+                    ErrorMethod::Line => Some(Value::int(sp.line as i64)),
+                    ErrorMethod::Col => Some(Value::int(sp.col as i64)),
+                    ErrorMethod::File => self
+                        .program
+                        .file_path(sp.file)
+                        .map(|p| crate::lexer::display_path(p).to_string_lossy().into_owned())
+                        .map(|p| self.alloc_str(p)),
+                });
+                return Ok(Some(match answer {
+                    Some(v) => self.alloc_enum("Option", "Some", &[v]),
+                    None => self.alloc_enum("Option", "None", &[]),
+                }));
+            }
+            Intrinsic::AsPath if args.is_empty() => return self.intrinsic_as_path(recv),
+            Intrinsic::Error(_)
+            | Intrinsic::AsPath
+            | Intrinsic::CollectionIter
+            | Intrinsic::SelfIter
+            | Intrinsic::CursorNext
+            | Intrinsic::GenNext
+            | Intrinsic::ModuleMember => return Ok(None),
         };
         // `Add`/`Sub`/`Mul`/`Div`/`Mod` → the binary-arith primitive.
         let bin = match hook {
@@ -288,92 +293,69 @@ impl Vm {
         Ok(Some(Value::obj(r)))
     }
 
-    /// The miss arm of `core_method`, `bytes_method` and `bytearray_method`: a name no dispatcher
-    /// owns is tried as an intrinsic protocol method the checker grants this built-in (W6-3), and
-    /// only then is a `has no method` fault. Reached from a miss alone, so a real method's fault
-    /// keeps its own message.
-    fn container_method_miss(
-        &mut self,
-        h: GcRef,
-        type_name: &str,
-        method: &str,
-        args: &[Value],
-        span: Span,
-    ) -> Result<Value, RuntimeError> {
-        match self.intrinsic_proto_method(Value::obj(h), method, args, span)? {
-            Some(v) => Ok(v),
-            None => Err(self.err(format!("type {type_name} has no method '{method}'"), span)),
-        }
-    }
-
-    /// A method on a scalar receiver (an inline or boxed int, a float, a bool, `None`): the
-    /// `native struct int` / `float` decls, then the intrinsic protocol methods.
-    pub(super) fn scalar_method(
+    /// An `int` method (`native struct int`) on an inline or boxed int.
+    pub(super) fn int_method(
         &mut self,
         recv: Value,
-        method: &str,
+        which: IntMethod,
         args: &[Value],
         span: Span,
     ) -> Result<Value, RuntimeError> {
-        if let Some(n) = self.int_val(recv)
-            && let Some(which) = IntMethod::from_name(method)
-        {
-            return match which {
-                IntMethod::ToFloat => {
-                    self.arity_err("to_float", args, 0, span)?;
-                    Ok(self.box_float(n as f64))
-                }
-                // `to_be_bytes(len, signed = false)`: the checker admits one or two arguments.
-                // `to_be_bytes(len, signed)`: the call site fills `signed = false` from the decl.
-                IntMethod::ToBeBytes | IntMethod::ToLeBytes => {
-                    let name = which.name();
-                    self.arity_err(name, args, 2, span)?;
-                    let len = self.int_val(args[0]).unwrap_or_default();
-                    let Some(signed) = args[1].as_bool() else {
-                        return Err(self.err(format!("{name}() expects a bool signed"), span));
-                    };
-                    let big = matches!(which, IntMethod::ToBeBytes);
-                    Ok(match int_to_bytes(name, n, len, signed, big) {
-                        Ok(b) => {
-                            let bv = Value::obj(self.heap.alloc(Obj::Bytes(b.into_boxed_slice())));
-                            self.alloc_enum("Result", "Ok", &[bv])
-                        }
-                        Err(text) => {
-                            let msg = self.alloc_str(text);
-                            self.alloc_enum("Result", "Err", &[msg])
-                        }
-                    })
-                }
-            };
-        }
-        if recv.is_float()
-            && let Some(which) = FloatMethod::from_name(method)
-        {
-            return match which {
-                // Truncates toward zero; NaN, the infinities and a value outside i64 give `None`.
-                FloatMethod::ToInt => {
-                    self.arity_err("to_int", args, 0, span)?;
-                    let f = self.float_of(recv).trunc();
-                    if f.is_finite() && f >= i64::MIN as f64 && f < 9_223_372_036_854_775_808.0 {
-                        let nv = self.make_int(f as i64);
-                        Ok(self.alloc_enum("Option", "Some", &[nv]))
-                    } else {
-                        Ok(self.alloc_enum("Option", "None", &[]))
+        let n = self.int_val(recv).expect("the int row holds ints");
+        match which {
+            IntMethod::ToFloat => {
+                self.arity_err("to_float", args, 0, span)?;
+                Ok(self.box_float(n as f64))
+            }
+            // `to_be_bytes(len, signed = false)`: the checker admits one or two arguments.
+            // `to_be_bytes(len, signed)`: the call site fills `signed = false` from the decl.
+            IntMethod::ToBeBytes | IntMethod::ToLeBytes => {
+                let name = which.name();
+                self.arity_err(name, args, 2, span)?;
+                let len = self.int_val(args[0]).unwrap_or_default();
+                let Some(signed) = args[1].as_bool() else {
+                    return Err(self.err(format!("{name}() expects a bool signed"), span));
+                };
+                let big = matches!(which, IntMethod::ToBeBytes);
+                Ok(match int_to_bytes(name, n, len, signed, big) {
+                    Ok(b) => {
+                        let bv = Value::obj(self.heap.alloc(Obj::Bytes(b.into_boxed_slice())));
+                        self.alloc_enum("Result", "Ok", &[bv])
                     }
-                }
-            };
-        }
-        match self.intrinsic_proto_method(recv, method, args, span)? {
-            Some(v) => Ok(v),
-            None => Err(self.err(
-                format!("type {} has no method '{method}'", self.type_name(recv)),
-                span,
-            )),
+                    Err(text) => {
+                        let msg = self.alloc_str(text);
+                        self.alloc_enum("Result", "Err", &[msg])
+                    }
+                })
+            }
         }
     }
 
-    /// A str / list / map / set method by name (the GC tests' entry; the dispatch loop parses the
-    /// name itself and calls [`Vm::core_method_as`]).
+    /// A `float` method (`native struct float`).
+    pub(super) fn float_method(
+        &mut self,
+        recv: Value,
+        which: FloatMethod,
+        args: &[Value],
+        span: Span,
+    ) -> Result<Value, RuntimeError> {
+        match which {
+            // Truncates toward zero; NaN, the infinities and a value outside i64 give `None`.
+            FloatMethod::ToInt => {
+                self.arity_err("to_int", args, 0, span)?;
+                let f = self.float_of(recv).trunc();
+                if f.is_finite() && f >= i64::MIN as f64 && f < 9_223_372_036_854_775_808.0 {
+                    let nv = self.make_int(f as i64);
+                    Ok(self.alloc_enum("Option", "Some", &[nv]))
+                } else {
+                    Ok(self.alloc_enum("Option", "None", &[]))
+                }
+            }
+        }
+    }
+
+    /// A str / list / map / set method by name (the GC tests' entry; the dispatch loop reads the
+    /// method off the method table and calls [`Vm::core_method_as`]).
     #[cfg(test)]
     pub(super) fn core_method(
         &mut self,
@@ -382,20 +364,26 @@ impl Vm {
         args: &[Value],
         span: Span,
     ) -> Result<Value, RuntimeError> {
-        let list = ListMethod::from_name(method);
-        self.core_method_as(h, method, list, args, span)
+        let arm = match self.heap.get(h) {
+            Obj::Str(_) => StrMethod::from_name(method).map(NativeArm::Str),
+            Obj::List(_) => ListMethod::from_name(method).map(NativeArm::List),
+            Obj::Map(_) => MapMethod::from_name(method).map(NativeArm::Map),
+            Obj::Set(_) => SetMethod::from_name(method).map(NativeArm::Set),
+            _ => None,
+        };
+        self.core_method_as(h, arm.expect("a str/list/map/set method"), args, span)
     }
 
-    /// A str / list / map / set method, `list` being `method` parsed as a list method (`None` when
-    /// it names none): the dispatch loop parses a list method's name once.
+    /// A str / list / map / set method: `arm` is the receiver's `NativeArm` (`Str`, `List`, `Map`
+    /// or `Set`), read off the method table.
     pub(super) fn core_method_as(
         &mut self,
         h: GcRef,
-        method: &str,
-        list: Option<ListMethod>,
+        arm: NativeArm,
         args: &[Value],
         span: Span,
     ) -> Result<Value, RuntimeError> {
+        let method = arm.name();
         // A str argument's owned text, with a uniform type error.
         let str_arg = |vm: &Vm, i: usize| -> Result<String, RuntimeError> {
             match args[i].as_obj().map(|ah| vm.heap.get(ah)) {
@@ -415,8 +403,8 @@ impl Vm {
                 // nothing, so they answer under the `&Obj` borrow instead of paying the clone
                 // below. Anything that allocates, re-enters the VM, or needs `&mut self` must
                 // stay under the clone (TICKET-072).
-                let Some(which) = StrMethod::from_name(method) else {
-                    return self.container_method_miss(h, "str", method, args, span);
+                let NativeArm::Str(which) = arm else {
+                    unreachable!("the str row holds str methods")
                 };
                 match which {
                     StrMethod::Len => {
@@ -789,8 +777,8 @@ impl Vm {
                 }
             }
             Obj::List(items) => {
-                let Some(which) = list else {
-                    return self.container_method_miss(h, "list", method, args, span);
+                let NativeArm::List(which) = arm else {
+                    unreachable!("the list row holds list methods")
                 };
                 match which {
                     ListMethod::Len => {
@@ -1184,8 +1172,8 @@ impl Vm {
                 }
             }
             Obj::Map(m) => {
-                let Some(which) = MapMethod::from_name(method) else {
-                    return self.container_method_miss(h, "map", method, args, span);
+                let NativeArm::Map(which) = arm else {
+                    unreachable!("the map row holds map methods")
                 };
                 match which {
                     MapMethod::Len => {
@@ -1338,8 +1326,8 @@ impl Vm {
                 }
             }
             Obj::Set(s) => {
-                let Some(which) = SetMethod::from_name(method) else {
-                    return self.container_method_miss(h, "set", method, args, span);
+                let NativeArm::Set(which) = arm else {
+                    unreachable!("the set row holds set methods")
                 };
                 match which {
                     SetMethod::Len => {
@@ -1489,13 +1477,10 @@ impl Vm {
     pub(super) fn bytearray_method(
         &mut self,
         h: GcRef,
-        method: &str,
+        which: BytearrayMethod,
         args: &[Value],
         span: Span,
     ) -> Result<Value, RuntimeError> {
-        let Some(which) = BytearrayMethod::from_name(method) else {
-            return self.container_method_miss(h, "bytearray", method, args, span);
-        };
         match which {
             BytearrayMethod::Len => {
                 self.arity_err("len", args, 0, span)?;
@@ -1599,13 +1584,10 @@ impl Vm {
     pub(super) fn bytes_method(
         &mut self,
         h: GcRef,
-        method: &str,
+        which: BytesMethod,
         args: &[Value],
         span: Span,
     ) -> Result<Value, RuntimeError> {
-        let Some(which) = BytesMethod::from_name(method) else {
-            return self.container_method_miss(h, "bytes", method, args, span);
-        };
         match which {
             BytesMethod::Decode => {
                 self.arity_err("decode", args, 0, span)?;

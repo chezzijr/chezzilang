@@ -109,6 +109,9 @@ workspace crates, the blocking-point table (`block::wait_steps`) and the boundar
    `Atomic.cas` follows `==`. The native handles `==` compares by core (`Executor`, `Socket`,
    `Listener`, `Writer`, `Reader`, `ptr`) are `Eq` and `Stringable` (`RecvKind::Handle`), so
    `List.contains`/`index_of`/`dedup`/`unique` carry `where T: Eq` on their decls.
+   Error origin landed (2026-11-15, owner decision): every error records where `!x` first made it
+   (first stamp wins, none in a std file); `line()`/`col()`/`file()` are `native fn` defaults of
+   `protocol Error`, so `MyErr(1).line()` type-checks and a declared `line()` wins.
 1. **TICKET-266, a `never` return type.** `exit` and `panic` declare `-> never`, and a call of that
    type leaves its block (Rust `-> !`). It deletes the `panic("unreachable")` lines after `os.exit`.
    Escalated; branch `ticket/266` kept.

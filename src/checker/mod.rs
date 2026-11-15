@@ -654,12 +654,22 @@ struct ProtocolInfo {
     /// Shared: a copy of the table (each checker's seed of the std protocols, an import) copies
     /// no signature.
     methods: std::sync::Arc<Vec<(String, FnSig)>>,
+    /// The `native fn` lines of a std protocol (`Error`'s `line`/`col`/`file`): methods the runtime
+    /// answers for every type that satisfies it. NOT requirements, so `methods` stays the
+    /// satisfaction set; a type's own method of the name wins ([`Checker::intrinsic_method`]).
+    defaults: std::sync::Arc<Vec<(String, FnSig)>>,
     /// Embedded (super-)protocols (M22): `protocol Vector: Add + Sub` carries `[Add, Sub]`. A type
     /// satisfies this protocol iff it satisfies every embed (transitively) AND has every OWN method
     /// in `methods`. Empty for an ordinary protocol. Reuses [`Bound`] — an embed ref is identical to
     /// a type-param bound (name + optional `[args]`). The builtin `Arithmetic` bundle is built with
     /// this same field (`embeds: [Add, Sub, Mul, Div]`, no own methods) — uniform machinery.
     embeds: Vec<TyBound>,
+}
+
+/// A protocol declaration's resolved methods, split ([`Checker::protocol_method_sigs`]).
+struct ProtocolSigs {
+    required: Vec<(String, FnSig)>,
+    defaults: Vec<(String, FnSig)>,
 }
 
 /// A user enum variant: which enum it belongs to and its payload field types.

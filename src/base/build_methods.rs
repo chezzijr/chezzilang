@@ -1,7 +1,9 @@
 //! Build script of chezzi-base: reads every `native struct` / `native enum` with methods in `std/**/*.chz`
 //! with the real parser and writes `$OUT_DIR/builtin_methods.rs` — one `<Type>Method` enum per type
-//! (its instance methods), the `NativeStatic` enum (every static method, one variant per type and
-//! method) and the `DECLARED_METHODS` table. `std/*.chz` is the one owner of a builtin type's method set.
+//! (its instance methods), one `<Protocol>Method` enum per std protocol with `native fn` lines (what
+//! the VM answers for every receiver that satisfies it), the `NativeStatic` enum (every static
+//! method, one variant per type and method) and the `DECLARED_METHODS` table. `std/*.chz` is the one
+//! owner of a builtin type's method set.
 
 use chezzi_syntax::ast::{ExprKind, FnDecl, NativeDecl, Param, StmtKind, Type, UnaryOp};
 use chezzi_syntax::{lexer, parser};
@@ -203,6 +205,53 @@ fn module_name(std_dir: &Path, path: &Path) -> String {
     format!("std.{}", parts.join("."))
 }
 
+/// One `<Owner>Method` enum: a variant per name, with `ALL`, `from_name` and `name`. `what` says what
+/// `owner` is (`type`, `protocol`) in the doc line.
+fn method_enum(out: &mut String, owner: &str, names: &[String], what: &str) {
+    let en = enum_name(owner);
+    let mut variants: Vec<(String, &String)> = Vec::new();
+    for n in names {
+        let v = variant_name(n);
+        assert!(
+            !variants.iter().any(|(o, _)| *o == v),
+            "{what} `{owner}`: two methods map to variant `{v}`"
+        );
+        variants.push((v, n));
+    }
+    let _ = writeln!(
+        out,
+        "/// The methods of {what} `{owner}`, one variant per bodyless `native fn` declared in `std/`."
+    );
+    let _ = writeln!(out, "#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]");
+    let _ = writeln!(out, "pub enum {en} {{");
+    for (v, _) in &variants {
+        let _ = writeln!(out, "    {v},");
+    }
+    let _ = writeln!(out, "}}");
+    let _ = writeln!(out, "impl {en} {{");
+    let _ = writeln!(out, "    pub const ALL: &'static [Self] = &[");
+    for (v, _) in &variants {
+        let _ = writeln!(out, "        Self::{v},");
+    }
+    let _ = writeln!(out, "    ];");
+    let _ = writeln!(out, "    pub fn from_name(name: &str) -> Option<Self> {{");
+    let _ = writeln!(out, "        match name {{");
+    for (v, n) in &variants {
+        let _ = writeln!(out, "            {n:?} => Some(Self::{v}),");
+    }
+    let _ = writeln!(out, "            _ => None,");
+    let _ = writeln!(out, "        }}");
+    let _ = writeln!(out, "    }}");
+    let _ = writeln!(out, "    pub fn name(self) -> &'static str {{");
+    let _ = writeln!(out, "        match self {{");
+    for (v, n) in &variants {
+        let _ = writeln!(out, "            Self::{v} => {n:?},");
+    }
+    let _ = writeln!(out, "        }}");
+    let _ = writeln!(out, "    }}");
+    let _ = writeln!(out, "}}");
+}
+
 fn main() {
     let manifest = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
     let std_dir = manifest.join("../../std");
@@ -212,6 +261,8 @@ fn main() {
     let mut rows: Vec<Row> = Vec::new();
     // (owner, native, its parameter names, its `DeclDefaults`) for each native decl with a default.
     let mut defaults: Vec<(String, String, Vec<String>, String)> = Vec::new();
+    // (protocol, its `native fn` names) for each std protocol with one.
+    let mut protocol_natives: Vec<(String, Vec<String>)> = Vec::new();
     for path in &files {
         let src =
             std::fs::read_to_string(path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
@@ -222,6 +273,16 @@ fn main() {
         for stmt in &module.stmts {
             if let StmtKind::Native(decl) = &stmt.kind {
                 defaults.extend(defaults_row(path, &module_name(&std_dir, path), decl));
+            }
+            if let StmtKind::Protocol { name, methods, .. } = &stmt.kind {
+                let natives: Vec<String> = methods
+                    .iter()
+                    .filter(|m| m.native)
+                    .map(|m| m.name.clone())
+                    .collect();
+                if !natives.is_empty() {
+                    protocol_natives.push((name.clone(), natives));
+                }
             }
             if let StmtKind::NativeStruct { name, methods, .. }
             | StmtKind::NativeEnum { name, methods, .. } = &stmt.kind
@@ -278,54 +339,15 @@ fn main() {
     }
     let mut out = String::new();
     for r in &rows {
-        let en = enum_name(&r.ty);
         // A bodied method compiles to bytecode, so only the bodyless names have a VM arm.
-        if r.instance.is_empty() {
-            continue;
+        if !r.instance.is_empty() {
+            method_enum(&mut out, &r.ty, &r.instance, "type");
         }
-        let mut variants: Vec<(String, &String)> = Vec::new();
-        for n in &r.instance {
-            let v = variant_name(n);
-            assert!(
-                !variants.iter().any(|(o, _)| *o == v),
-                "type `{}`: two methods map to variant `{v}`",
-                r.ty
-            );
-            variants.push((v, n));
-        }
-        let _ = writeln!(
-            out,
-            "/// The methods of `{}`, one variant per bodyless `native fn` declared in `std/`.",
-            r.ty
-        );
-        let _ = writeln!(out, "#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]");
-        let _ = writeln!(out, "pub enum {en} {{");
-        for (v, _) in &variants {
-            let _ = writeln!(out, "    {v},");
-        }
-        let _ = writeln!(out, "}}");
-        let _ = writeln!(out, "impl {en} {{");
-        let _ = writeln!(out, "    pub const ALL: &'static [Self] = &[");
-        for (v, _) in &variants {
-            let _ = writeln!(out, "        Self::{v},");
-        }
-        let _ = writeln!(out, "    ];");
-        let _ = writeln!(out, "    pub fn from_name(name: &str) -> Option<Self> {{");
-        let _ = writeln!(out, "        match name {{");
-        for (v, n) in &variants {
-            let _ = writeln!(out, "            {n:?} => Some(Self::{v}),");
-        }
-        let _ = writeln!(out, "            _ => None,");
-        let _ = writeln!(out, "        }}");
-        let _ = writeln!(out, "    }}");
-        let _ = writeln!(out, "    pub fn name(self) -> &'static str {{");
-        let _ = writeln!(out, "        match self {{");
-        for (v, n) in &variants {
-            let _ = writeln!(out, "            Self::{v} => {n:?},");
-        }
-        let _ = writeln!(out, "        }}");
-        let _ = writeln!(out, "    }}");
-        let _ = writeln!(out, "}}");
+    }
+    // A std protocol's `native fn` lines: the methods the VM answers for every receiver that
+    // satisfies it (`ErrorMethod`).
+    for (name, natives) in &protocol_natives {
+        method_enum(&mut out, name, natives, "protocol");
     }
     // The static methods: one variant per (type, method), `List.from_iter` -> `ListFromIter`.
     let mut statics: Vec<(String, &String, &String, usize)> = Vec::new();

@@ -68,12 +68,26 @@ impl Compiler {
         argc: usize,
         span: Span,
     ) {
+        self.emit_enum_op(fc, enum_key, variant, argc, false, span);
+    }
+
+    /// [`Self::emit_new_enum`] with the op's `origin` flag (set only by `!x`).
+    pub(super) fn emit_enum_op(
+        &self,
+        fc: &mut FnComp,
+        enum_key: &str,
+        variant: &str,
+        argc: usize,
+        origin: bool,
+        span: Span,
+    ) {
         let variant_id = self.variant_id_of_key(enum_key, variant);
         fc.emit(
             Op::NewEnum {
                 variant: variant.to_string(),
                 variant_id,
                 argc,
+                origin,
             },
             span,
         );

@@ -257,7 +257,7 @@ main()
 /// `tests/chz/spec/intrinsic_proto_methods_test.chz`.
 #[test]
 fn intrinsic_grants_all_have_vm_arms() {
-    use crate::checker::proto::{INTRINSIC_PROTO_METHODS, INTRINSIC_UNPAIRED, RecvKind};
+    use crate::base::intrinsic::{INTRINSIC_PROTO_METHODS, INTRINSIC_UNPAIRED, RecvKind};
     /// One receiver per kind `Checker::intrinsic_recv_kind` can classify a grant as — the value to
     /// probe with, plus the literals/types the parameterized bounds need. `"-"` = the kind has no
     /// grant needing that column. `struct` needs ONE struct satisfying all three struct-granted
@@ -1775,18 +1775,16 @@ fn ticket_193_await_update_guard_free_never_takes_the_guard() {
     assert_eq!(await_update_guard_free(&t, waiter, budget), Ok(true));
 }
 
-/// W8-22: an error with no recorded span answers `None`, never a guess. A user-constructed
-/// `Err("boom")` was never stamped by `recover:`, and a struct error's only requirement is
-/// `message()` — neither carries an origin.
+/// An error records where `!x` first made it (owner 2026-11-15, reversing W8-22's "a user `!` has
+/// no origin"); a value never made an error answers `None`, never a guess.
 #[test]
-fn caught_error_location_is_nil_without_a_recorded_span() {
-    // A user-constructed `Err(...)` returned as a plain value (no fault, so no `recover:`
-    // boundary ever runs) was never stamped.
-    let src = "fn a() -> int!:\n    return !\"boom\"\nfn main():\n    match a():\n        ?v: print(v)\n        !e:\n            print(e.line())\n            print(e.col())\n            print(e.file())\nmain()\n";
-    assert_eq!(run(src), "None\nNone\nNone\n");
+fn a_user_err_records_its_origin_and_an_unraised_value_none() {
+    // `!"boom"` at line 2 col 12, in the run's (temporary) entry file.
+    let src = "fn a() -> int!:\n    return !\"boom\"\nfn main():\n    match a():\n        ?v: print(v)\n        !e:\n            print(e.line())\n            print(e.col())\n            print(e.file() != None)\nmain()\n";
+    assert_eq!(run(src), "2\n12\ntrue\n");
 
-    let src_struct = "struct MyErr:\n    code: int\n    fn message(self) -> str:\n        return \"code {self.code}\"\nfn b() -> int!:\n    return !MyErr(7)\nfn main():\n    match b():\n        ?v: print(v)\n        !e: print(e.line())\nmain()\n";
-    assert_eq!(run(src_struct), "None\n");
+    let src_struct = "struct MyErr:\n    code: int\n    fn message(self) -> str:\n        return \"code {self.code}\"\nfn b() -> int!:\n    return !MyErr(7)\nfn main():\n    match b():\n        ?v: print(v)\n        !e: print(e.line())\n    e: Error = MyErr(8)\n    print(e.line())\nmain()\n";
+    assert_eq!(run(src_struct), "6\nNone\n");
 }
 
 /// W8-22: a fault caught by `recover:` carries the ORIGIN of the fault, not the `recover:` site.

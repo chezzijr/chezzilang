@@ -1,8 +1,8 @@
 # tests/chz/spec/error_location_test.chz — a caught Error's origin span (W8-22, TICKET-026).
 #
-# A fault caught by `recover:` carries where it happened (`line()`/`col()`/`file()`); a
-# user-constructed `!...` reached as a plain value never does. `message()` stays byte-identical
-# in both cases.
+# A fault caught by `recover:` carries where it happened (`line()`/`col()`/`file()`), and so does a
+# user `!...`: where it was first made an error, kept through `?`. `message()` stays byte-identical
+# in both cases. The full grid is `error_origin_grid_test.chz`.
 
 test fn a_runtime_fault_carries_its_origin():
     xs := [1]
@@ -13,7 +13,7 @@ test fn a_runtime_fault_carries_its_origin():
             assert e.message() == "index 9 out of bounds (len 1)"
             assert e.line() != None
 
-test fn a_user_err_through_question_mark_carries_no_origin():
+test fn a_user_err_through_question_mark_carries_its_origin():
     fn inner() -> int!:
         return !"boom"
     fn outer() -> int!:
@@ -23,8 +23,10 @@ test fn a_user_err_through_question_mark_carries_no_origin():
         ?_: assert false, "expected Err"
         !e:
             assert e.message() == "boom"
-            assert e.line() == None
-            assert e.file() == None
+            assert e.line() == ?18
+            match e.file():
+                None: assert false, "expected a recorded file"
+                ?p: assert p.ends_with("error_location_test.chz")
 
 test fn a_fault_inside_a_helper_names_this_file():
     fn helper():
@@ -44,11 +46,11 @@ struct MyErr:
     fn message(self) -> str:
         return "code {self.code}"
 
-test fn a_struct_error_with_only_message_carries_no_origin():
+test fn a_struct_error_with_only_message_carries_its_origin():
     fn boom() -> int!:
         return !MyErr(7)
     match boom():
         ?_: assert false, "expected Err"
         !e:
             assert e.message() == "code 7"
-            assert e.line() == None
+            assert e.line() == ?51

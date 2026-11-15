@@ -71,7 +71,9 @@ fn main() {
                                 protocol_names.insert(name.clone()),
                                 "std/{rel}: protocol `{name}` is declared in two std files"
                             );
-                            for m in methods {
+                            // A `native fn` line is a runtime-answered default, not a method
+                            // the protocol requires.
+                            for m in methods.iter().filter(|m| !m.native) {
                                 let _ = writeln!(protocol_methods, "    ({name:?}, {:?}),", m.name);
                             }
                             protocols.push((i as u32, stmt.clone()));
@@ -128,7 +130,7 @@ fn main() {
          pub const STD_ASTS: &[Option<&[u8]>] = &[\n{asts}];\n\n\
          /// The encoded `protocol` statements of all [`STD_FILES`], each with its file's index.\n\
          pub const STD_PROTOCOLS: &[u8] = include_bytes!({:?});\n\n\
-         /// One row per method a std `protocol` declares itself, `(protocol, method)`, in decl order:\n\
+         /// One row per method a std `protocol` requires itself, `(protocol, method)`, in decl order:\n\
          /// the owner of every protocol method name (`Hook::method` reads it).\n\
          pub const PROTOCOL_METHODS: &[(&str, &str)] = &[\n{protocol_methods}];\n\n\
          /// One row per `native struct` that declares fields, `(struct, field names in decl order)`:\n\

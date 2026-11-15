@@ -89,8 +89,11 @@ impl Vm {
         self.print_from(argc, custom, i + 1, line, sep, end, true, span)
     }
 
-    /// Stamps a caught fault's origin onto its message string, unless the fault was raised inside
-    /// the stdlib itself (a coordinate the user cannot act on).
+    /// THE stamp of where a value was first made an error: an `!x` (its payload) or a caught
+    /// fault's message string at a `recover:` boundary. The first stamp wins, so a later `!e` of
+    /// the same value keeps where it was made. A span inside the stdlib is not stamped (a
+    /// coordinate the user cannot act on), so the user's own `!e` of a std error is its origin.
+    /// An inline value (int, float, bool, `None`) carries no stamp; none satisfies `Error`.
     pub(super) fn stamp_err_span(&mut self, msg: Value, sp: Span) {
         if let Some(mh) = msg.as_obj()
             && !self.program.file_is_std(sp.file)

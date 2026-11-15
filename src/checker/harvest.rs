@@ -637,7 +637,8 @@ impl Checker {
         self.type_params = saved;
         Some(ProtocolInfo {
             type_params: type_params.iter().map(|tp| tp.name.clone()).collect(),
-            methods: std::sync::Arc::new(sigs),
+            methods: std::sync::Arc::new(sigs.required),
+            defaults: std::sync::Arc::new(sigs.defaults),
             embeds,
         })
     }
@@ -680,6 +681,7 @@ impl Checker {
                 let info = ProtocolInfo {
                     type_params: type_params.iter().map(|tp| tp.name.clone()).collect(),
                     methods: std::sync::Arc::default(),
+                    defaults: std::sync::Arc::default(),
                     embeds: Vec::new(),
                 };
                 self.protocols.insert(d.name.clone(), info);

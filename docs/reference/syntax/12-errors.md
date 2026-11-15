@@ -81,6 +81,9 @@ structured error, define a struct with `message` and name it in `T!E`:
 ```chezzi
 protocol Error:                 # built-in; shown for reference
     fn message(self) -> str
+    native fn line(self) -> int?  # runtime-answered defaults, not requirements
+    native fn col(self) -> int?
+    native fn file(self) -> str?
 
 struct DbErr:
     code: int
@@ -93,9 +96,9 @@ fn query() -> Row!DbErr:        # Row!DbErr
 match query():
     ?row: use(row)
     !e:  print(e.message())   # message() is declared by DbErr itself
-# `line()` / `col()` / `file()` are the bare `Error` existential's origin accessors (see `recover:`
-# below) — they are NOT available on a user error type like `DbErr`, which carries only what it
-# declares. Spell the sink `Row!` (i.e. `Row!Error`) to get them.
+         print(e.line())      # the line of `return !DbErr(503)` (see below)
+# `line()` / `col()` / `file()` are `Error`'s `native fn` defaults: every type that satisfies `Error`
+# has them, `DbErr` and `Error` alike, unless the type declares its own method of the name.
 ```
 
 **`?` must match the enclosing function's return kind.** A `T!E`-`?` needs a `T!E`-returning fn (its
@@ -255,11 +258,18 @@ match r:
     !e: print("recovered: {e.message()}")   # → recovered: boom
 ```
 
-**A fault caught by `recover:` carries its origin:** `e.line() -> int?`, `e.col() -> int?`,
-`e.file() -> str?`, the coordinate an uncaught fault prints (`runtime error (file:line:col): message`).
+**An error carries its origin:** `e.line() -> int?`, `e.col() -> int?`, `e.file() -> str?`. For a
+fault caught by `recover:` it is the coordinate an uncaught fault prints
+(`runtime error (file:line:col): message`). For a value it is where `!x` first made it an error
+(Python's rule: the traceback starts at the `raise`). They are `native fn` lines of
+`protocol Error` (`std/prelude.chz`): not requirements, so a type with only `message()` still
+satisfies `Error`, and a type that declares its own `line()` answers with it.
 
-- A `!"..."` value made by user code, and an error in flight through `?`, have `None` for all three.
-  Only `recover:` (and a `defer`-fault boundary) stamps the origin.
+- The first stamp wins: a `?`, a later `!e` of the same value and a `recover:` keep it. A value
+  made once and raised from two places names the first.
+- A value never made an error (`MyErr(1)` held as an `Error`), and an `int`/`float`/`bool` payload,
+  have `None` for all three.
+- A `!x` inside the stdlib names no origin (`None`), so your own `!e` of a std error is its origin.
 - `panic(e.message())` re-raises at `e`'s origin, not at the `panic` line.
 - A fault raised inside a stdlib function (for example `submit` on a shut-down `Executor`) is located
   at your call into the stdlib (Rust's `#[track_caller]`), caught or uncaught; the trace keeps its

@@ -631,11 +631,13 @@ impl Vm {
     /// Construct an enum from `Op::NewEnum`. M19 lever #2 — the dense `variant_id` is baked into the op
     /// at compile time (no runtime hash lookup); it is stamped onto the instance instead of the two
     /// per-instance type/variant `Box<str>`s. `variant` is used only for the arity-mismatch message.
+    /// `origin` (an `!x`) stamps the payload with `span`, its first error origin.
     pub(super) fn new_enum(
         &mut self,
         variant: &str,
         variant_id: u32,
         argc: usize,
+        origin: bool,
         span: Span,
     ) -> Result<(), RuntimeError> {
         if let Some(def) = self.program.variants_by_id.get(variant_id as usize)
@@ -650,6 +652,9 @@ impl Vm {
             ));
         }
         let at = self.stack.len() - argc;
+        if origin && let Some(&payload) = self.stack.get(at) {
+            self.stamp_err_span(payload, span);
+        }
         let payload = RVec::from_slice(&self.stack[at..]);
         self.stack.truncate(at);
         let h = self.heap.alloc(Obj::Enum {

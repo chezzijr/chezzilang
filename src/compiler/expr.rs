@@ -102,9 +102,10 @@ impl Compiler {
                         fc.emit(Op::AsBool, inner.span);
                         fc.emit(Op::Not, expr.span);
                     }
-                    // `!e` is `Err(e)`; `?x` compiles its operand, and the checker's wrap
-                    // record on this node (applied by `compile_expr`) builds the carrier.
-                    UnaryOp::ErrVal => self.emit_carrier_wrap(fc, "Result", "Err", expr.span)?,
+                    // `!e` is `Err(e)` that records this span as `e`'s origin; `?x` compiles its
+                    // operand, and the checker's wrap record on this node (applied by
+                    // `compile_expr`) builds the carrier.
+                    UnaryOp::ErrVal => self.emit_err_val(fc, expr.span)?,
                     UnaryOp::Wrap => {}
                 }
             }
@@ -561,6 +562,7 @@ impl Compiler {
                 variant: "Ok".to_string(),
                 variant_id: crate::base::op::VID_OK,
                 argc: 1,
+                origin: false,
             },
             span,
         );
@@ -747,7 +749,8 @@ impl Compiler {
                 self.compile_expr(fc, obj)?;
                 self.emit_sum_seed(fc, &seed, call.span);
                 let ic = self.next_method_ic();
-                fc.emit(Op::DeferMethod(name.as_str().into(), 1, ic), call.span);
+                let method = self.method_id(name);
+                fc.emit(Op::DeferMethod(method, 1, ic), call.span);
                 return Ok(());
             }
             self.compile_expr(fc, obj)?;
@@ -755,10 +758,8 @@ impl Compiler {
             // M24-5: the hidden witness arguments ride LAST, exactly as on the eager `Op::CallMethod`.
             let w = self.emit_member_witness_args(fc, callee, name, *name_span, call.span)?;
             let ic = self.next_method_ic();
-            fc.emit(
-                Op::DeferMethod(name.as_str().into(), argc + w, ic),
-                call.span,
-            );
+            let method = self.method_id(name);
+            fc.emit(Op::DeferMethod(method, argc + w, ic), call.span);
             return Ok(());
         }
         // A deferred value call: its arguments -- default fills included -- are evaluated here, at

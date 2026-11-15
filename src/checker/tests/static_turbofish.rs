@@ -1125,6 +1125,19 @@ fn native_decl_in_user_file_rejected() {
     );
 }
 
+/// A `native fn` line in a `protocol` (a runtime-answered default, `Error.line`) is std-only too.
+#[test]
+fn native_fn_in_user_protocol_rejected() {
+    rejects(
+        "protocol P:\n    native fn f(self)\n",
+        "native fn declarations are only allowed in standard-library modules",
+    );
+    entry_rejects(
+        "protocol P:\n    fn g(self) -> int\n    native fn f(self) -> int\n",
+        "native fn declarations are only allowed in standard-library modules",
+    );
+}
+
 /// Phase 4a — a `native struct` decl is likewise PRELUDE/STD-ONLY: in a user (non-stdlib) module it is
 /// a clear checker error (a user can't declare a native type whose layout the runtime doesn't know).
 #[test]
@@ -1691,8 +1704,9 @@ fn container_method_sigs_byte_match() {
 /// (b) the hover (`builtin_type_doc`) lists every declared name that does not start with `_`;
 /// (c) the types whose hover carries a `methods:` line, found by asking `builtin_type_doc` about every
 ///     type name the CHECKER knows, equal the declared types, so a declared type with no hover arm and
-///     a hover methods line with no decl both go red. The VM side is its dispatchers' exhaustive
-///     `match` on the generated enums, which fails the build.
+///     a hover methods line with no decl both go red. The VM side: the method table puts every
+///     variant in its type's row (`every_granted_method_has_a_table_entry`,
+///     `tests/method_dispatch_grid.rs`), and the dispatchers match the variants exhaustively.
 #[test]
 fn builtin_method_grid_declared_checked_and_hovered() {
     use crate::base::builtin_method::DECLARED_METHODS;

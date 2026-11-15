@@ -30,6 +30,9 @@ fn std_decls() -> HashMap<String, Decl> {
         let module_name = format!("std.{}", rel.trim_end_matches(".chz").replace('/', "."));
         for stmt in &module.stmts {
             if let StmtKind::Protocol { name, methods, .. } = &stmt.kind {
+                // A `native fn` line is a runtime-answered default, not a method the protocol
+                // requires (`Error.line`).
+                let methods: Vec<_> = methods.iter().filter(|m| !m.native).collect();
                 out.insert(
                     name.clone(),
                     Decl {

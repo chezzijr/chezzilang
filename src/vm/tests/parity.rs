@@ -542,7 +542,8 @@ fn enum_variant_id_stamped_at_construction() {
         .variant_id;
     let mut vm = Vm::new(Arc::new(program));
     let span = Span::RUNTIME;
-    vm.new_enum("Green", green_id, 0, span).expect("new_enum");
+    vm.new_enum("Green", green_id, 0, false, span)
+        .expect("new_enum");
     let Some(h) = vm.pop().as_obj() else {
         panic!("expected enum obj")
     };
