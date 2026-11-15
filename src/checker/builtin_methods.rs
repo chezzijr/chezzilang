@@ -22,7 +22,7 @@ pub(super) fn mutates_receiver(recv: &Ty, method: &str) -> bool {
 // method table (re-seeded by `seed_stdlib_structs`) and looked up via `native_handle_method` with NO type
 // args (the scalars are non-generic — the identity path returns the stored sig verbatim). The
 // `int()`/`str()`/`bytes()`/`bytearray()` CTORS stay the `native ctor` decls, and runtime dispatch stays
-// Rust-inline (`vm/core_method.rs` `scalar_method` / `core_method` / `bytes_method`). The `bytearray.extend` special-case (its arg may
+// Rust-inline (`vm/core_method.rs` `int_method` / `core_method_as` / `bytes_method`, through the method table). The `bytearray.extend` special-case (its arg may
 // be any of bytes|bytearray|List[int], not a flat `FnSig`) stays an explicit branch in `infer_method_call`
 // BEFORE the table lookup.
 

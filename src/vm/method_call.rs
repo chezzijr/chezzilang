@@ -1,9 +1,10 @@
 //! VM: arity checks, native-bodied methods, operator hooks, `do_method_call`, static calls.
 //! Split out of `src/vm/call.rs`. `super::*` is the parent module.
 
+use super::shared_methods::RwCall;
 use super::*;
-use crate::base::builtin_method::ListMethod;
 use crate::base::hooks::Hook;
+use crate::base::method_table::{Intrinsic, MethodEntry, MethodId, MethodRow, NativeArm};
 
 impl Vm {
     /// Arity check for a call that enters a compiled PROTO, accepting `min_arity..=arity`.
@@ -54,47 +55,6 @@ impl Vm {
             ));
         }
         Ok(())
-    }
-
-    /// Try to dispatch a BODIED Chezzi method on a native handle (`native struct` bare name `key`, e.g.
-    /// `"Reader"`). Returns `Ok(true)` if `method` resolved to a compiled proto and was dispatched (a
-    /// result/generator pushed, or a frame flattened into `run_until`); `Ok(false)` if the native
-    /// struct carries no such bodied method — the caller then falls through to the native name-keyed
-    /// dispatch (`reader_method` etc.), leaving those byte-identical. Mirrors the enum-method arm
-    /// (`Obj::Enum` in this file): type-erased (no `StructDef`/`tid`), home-globals from `native_home`,
-    /// generator-aware (a `yield`-bearing method allocates rather than running).
-    fn try_native_bodied_method(
-        &mut self,
-        key: &str,
-        method: &str,
-        recv: Value,
-        args: &[Value],
-        argc: usize,
-        span: Span,
-    ) -> Result<bool, RuntimeError> {
-        let prog = Arc::clone(&self.program);
-        let Some(proto) = prog
-            .native_methods
-            .get(key)
-            .and_then(|ms| ms.get(method).copied())
-        else {
-            return Ok(false);
-        };
-        self.check_proto_arity(proto, argc + 1, span)?;
-        let home = self.module_obj(prog.native_home[key]);
-        if self.program.protos[proto].is_generator {
-            let mut gen_args = Vec::with_capacity(argc + 1);
-            gen_args.push(recv);
-            gen_args.extend_from_slice(args);
-            let g = self.alloc_generator(proto, home, None, gen_args);
-            self.push(g);
-            return Ok(true);
-        }
-        let base = self.stack.len();
-        self.stack.push(recv);
-        self.stack.extend_from_slice(args);
-        self.push_frame_in_place(proto, home, None, base, span)?;
-        Ok(true)
     }
 
     /// TICKET-250 — does the declared type of `v` have `hook`? The checker decided it
@@ -307,7 +267,7 @@ impl Vm {
     pub(super) fn call_hook(
         &mut self,
         hook: Hook,
-        name: &str,
+        method: MethodId,
         argc: usize,
         ic: u32,
         span: Span,
@@ -317,12 +277,12 @@ impl Vm {
             .as_obj()
             .is_some_and(|h| matches!(self.heap.get(h), Obj::Struct { .. } | Obj::Enum { .. }));
         if !declared || self.hook_of(recv, hook) {
-            return self.do_method_call(name, argc, ic, span);
+            return self.do_method_call(method, argc, ic, span);
         }
         let at = self.stack.len() - argc;
         let args: Vec<Value> = self.stack.split_off(at);
         self.pop();
-        if let Some(v) = self.intrinsic_proto_method(recv, name, &args, span)? {
+        if let Some(v) = self.intrinsic_proto_method(recv, Intrinsic::Hook(hook), &args, span)? {
             self.push(v);
             return Ok(());
         }
@@ -330,6 +290,7 @@ impl Vm {
             self.push(recv);
             return Ok(());
         }
+        let name = self.program.methods.name(method);
         Err(self.err(
             format!("type {} has no method '{name}'", self.type_name(recv)),
             span,
@@ -339,10 +300,11 @@ impl Vm {
     /// `recv.method(args)` from a running dispatch loop: a `CallMethod` op, or a `defer` record
     /// (`Deferred::Method`; the synchronous drain `Vm::run_loaded` runs the pushed frame in its own
     /// `run_until`). A user body is installed as a frame for that loop to run. `ic` is the site's
-    /// method inline-cache id, always a real one.
+    /// method inline-cache id, always a real one. The struct IC answers first; every other call
+    /// reads the receiver's entry of the method table (`Program::methods`) and runs it.
     pub(super) fn do_method_call(
         &mut self,
-        method: &str,
+        method: MethodId,
         argc: usize,
         ic: u32,
         span: Span,
@@ -354,35 +316,26 @@ impl Vm {
         let at = self.stack.len() - argc;
         let args: Vec<Value> = self.stack.split_off(at);
         let recv = self.pop();
-        let Some(h) = recv.as_obj() else {
-            // An inline scalar (int/float/bool/nil) receiver: its decl's methods, then the
-            // intrinsic protocol methods the checker grants int/float/bool.
-            let v = self.scalar_method(recv, method, &args, span)?;
-            self.push(v);
-            return Ok(());
-        };
         // M19 Phase 6 / N-way poly — method-call inline-cache fast path (struct methods only). Scan
-        // the site's ways for a way whose cached `tid` matches the receiver layout: a hit collapses the
-        // `program.structs` clone + name-keyed `def.methods` probe to a short int-compare scan AND
-        // flattens the call: `[recv, args…]` go on the stack and the method frame is installed in place,
-        // so the running `run_until` executes the body and its `Return` pushes the result — no re-entrant
-        // `run_proto`. A megamorphic-but-bounded site (≤4 distinct receiver types) hits a way for each,
-        // so it never thrashes the monomorphic refill. Only the dispatch loop reaches here;
-        // the arity guard re-runs per hit (cheap) so a hit can never enter a frame with the wrong slot
-        // count, and the tid re-compare on every probe bars a wrong body. A `sticky` site (overflowed
-        // past 4 types) skips the probe and falls straight through to the slow path.
+        // the site's ways for a way whose cached `tid` matches the receiver layout: a hit skips the
+        // table read AND flattens the call: `[recv, args…]` go on the stack and the method frame is
+        // installed in place, so the running `run_until` executes the body and its `Return` pushes
+        // the result — no re-entrant `run_proto`. A megamorphic-but-bounded site (≤4 distinct
+        // receiver types) hits a way for each, so it never thrashes the monomorphic refill. The
+        // arity guard re-runs per hit (cheap) so a hit can never enter a frame with the wrong slot
+        // count, and the tid re-compare on every probe bars a wrong body. A `sticky` site
+        // (overflowed past 4 types) skips the probe and reads the table.
         let site = self.method_ic[ic as usize];
         if !site.sticky
+            && let Some(h) = recv.as_obj()
             && let Obj::Struct { tid, .. } = self.heap.get(h)
         {
             let recv_tid = *tid;
-            let mut hit: Option<MethodIcCell> = None;
-            for way in &site.ways {
-                if way.tid != TID_NONE && way.tid == recv_tid {
-                    hit = Some(*way);
-                    break;
-                }
-            }
+            let hit = site
+                .ways
+                .iter()
+                .find(|way| way.tid != TID_NONE && way.tid == recv_tid)
+                .copied();
             if let Some(cell) = hit {
                 let proto = cell.proto;
                 self.check_proto_arity(proto, argc + 1, span)?;
@@ -403,45 +356,306 @@ impl Vm {
                 return self.push_frame_in_place(proto, home, None, base, span);
             }
         }
-        // TICKET-257, wave 24 F4: a channel, a cursor and every reserved handle (`handle_kind`) are
-        // `Eq` by identity and `Stringable` (their `Eq`/`Stringable` grant rows): `x.eq(y)` is
-        // `x == y`. No handle declares an `eq` or `str` of its own, and its native dispatcher below
-        // would claim the name.
-        let obj = self.heap.get(h);
-        if ((method == Hook::Eq.method() && args.len() == 1)
-            || (method == Hook::Str.method() && args.is_empty()))
-            && (obj.handle_kind().is_some()
-                || matches!(obj, Obj::Channel(_) | Obj::Iter { .. } | Obj::Generator(_)))
-            && let Some(v) = self.intrinsic_proto_method(recv, method, &args, span)?
-        {
-            self.push(v);
+        match self.method_entry(recv, method) {
+            MethodEntry::Proto { proto, home } => {
+                self.enter_method(proto as ProtoId, home, recv, args, ic, span)
+            }
+            // A fn-typed field: `recv.f(args)` where `f` holds a function value (the checker
+            // verified `f: fn(...) -> ...`), invoked as a value (no `self` bound).
+            MethodEntry::Field(i) => {
+                let fval = if let Obj::Struct { fields, .. } = self.heap.get(recv.as_gcref()) {
+                    fields.get(i as usize)
+                } else {
+                    None
+                };
+                let Some(fval) = fval else {
+                    return Err(self.method_miss(recv, method, &args, span));
+                };
+                let v = self.invoke_value(fval, args, span)?;
+                if self.paused() {
+                    return Ok(()); // B1/D3: the function-field call parked on `recv` or yielded.
+                }
+                self.push(v);
+                Ok(())
+            }
+            MethodEntry::Native(arm) => self.native_method(arm, recv, args, span),
+            MethodEntry::Intrinsic(which) => self.intrinsic_method(which, recv, method, args, span),
+            MethodEntry::Miss => Err(self.method_miss(recv, method, &args, span)),
+        }
+    }
+
+    /// The method-table entry of `method` on `recv`'s row: a fixed row for every kind but a
+    /// struct (its `tid`'s row) and an enum (its variant's enum's row).
+    fn method_entry(&self, recv: Value, method: MethodId) -> MethodEntry {
+        let table = &self.program.methods;
+        let row = match recv.view() {
+            ValueView::Int(_) => MethodRow::Int,
+            ValueView::Bool(_) => MethodRow::Bool,
+            ValueView::Nil => MethodRow::Nil,
+            ValueView::Obj(_) if recv.is_float() => MethodRow::Float,
+            ValueView::Obj(h) => match self.heap.get(h) {
+                Obj::Struct { tid, .. } => return table.of_struct(*tid, method),
+                Obj::Enum { variant_id, .. } => return table.of_enum(*variant_id, method),
+                Obj::Str(_) => MethodRow::Str,
+                Obj::Bytes(_) => MethodRow::Bytes,
+                Obj::ByteArray(_) => MethodRow::ByteArray,
+                Obj::BigInt(_) => MethodRow::Int,
+                Obj::FloatBox(_) => MethodRow::Float,
+                Obj::Iter { .. } => MethodRow::Cursor,
+                Obj::List(_) => MethodRow::List,
+                Obj::Tuple(_) => MethodRow::Tuple,
+                Obj::Map(_) => MethodRow::Map,
+                Obj::Set(_) => MethodRow::Set,
+                Obj::Cell(_) => MethodRow::Cell,
+                Obj::Func { .. }
+                | Obj::Closure { .. }
+                | Obj::Native { .. }
+                | Obj::Builtin(_)
+                | Obj::Cffi(_) => MethodRow::Func,
+                Obj::Module(_) => MethodRow::Module,
+                Obj::Ptr(_) => MethodRow::Ptr,
+                Obj::Channel(_) => MethodRow::Channel,
+                Obj::Shared(_) => MethodRow::Shared,
+                Obj::RwShared(_) => MethodRow::RwShared,
+                Obj::Atomic(_) => MethodRow::Atomic,
+                Obj::AtomicInt(_) => MethodRow::AtomicInt,
+                Obj::Executor(_) => MethodRow::Executor,
+                Obj::Socket(_) => MethodRow::Socket,
+                Obj::Listener(_) => MethodRow::Listener,
+                Obj::Writer(_) => MethodRow::Writer,
+                Obj::Reader(_) => MethodRow::Reader,
+                Obj::Generator(_) => MethodRow::Generator,
+            },
+        };
+        table.fixed(row, method)
+    }
+
+    /// Run a compiled method body on `recv`: a generator method allocates rather than running (else
+    /// its `Op::Yield` would poison the host run); any other body is installed as a frame in place
+    /// for the running `run_until`. A struct receiver fills the site's IC first.
+    fn enter_method(
+        &mut self,
+        proto: ProtoId,
+        home_idx: u32,
+        recv: Value,
+        args: Vec<Value>,
+        ic: u32,
+        span: Span,
+    ) -> Result<(), RuntimeError> {
+        self.check_proto_arity(proto, args.len() + 1, span)?;
+        let home = self.module_obj(home_idx as usize);
+        if self.program.protos[proto].is_generator {
+            let mut gen_args = Vec::with_capacity(args.len() + 1);
+            gen_args.push(recv);
+            gen_args.extend(args);
+            let g = self.alloc_generator(proto, home, None, gen_args);
+            self.push(g);
             return Ok(());
         }
-        // Concurrency C4: `Channel` / `Shared` methods mutate the heap object in place (and `update`
-        // re-enters the VM), so dispatch them directly off the handle, like the core-type methods.
-        if matches!(self.heap.get(h), Obj::Channel(_)) && method != Hook::Iter.method() {
-            self.sched_seed_point();
-            let result = self.channel_method(h, method, &args, span)?;
-            if self.suspend.is_some() || self.send_suspend.is_some() {
-                // B1: `recv` parked this fiber (re-rooted the receiver itself); or a bounded `send`
-                // parked it on a full channel (re-rooted receiver + value). Either way, no result push.
+        // Fill the next free way so the next call at this site hits the fast path (a registered
+        // layout `tid` only). When all ways are occupied AND this `tid` is new, latch `sticky` so
+        // the site stops probing the (full) ways — a megamorphic site never thrashes.
+        if let Some(h) = recv.as_obj()
+            && let Obj::Struct { tid, .. } = self.heap.get(h)
+            && *tid != TID_NONE
+        {
+            let cell = MethodIcCell {
+                tid: *tid,
+                proto,
+                module_idx: home_idx,
+            };
+            let site = &mut self.method_ic[ic as usize];
+            if !site.sticky {
+                if let Some(free) = site.ways.iter_mut().find(|w| w.tid == TID_NONE) {
+                    *free = cell;
+                } else {
+                    site.sticky = true;
+                }
+            }
+        }
+        let base = self.stack.len();
+        self.stack.push(recv);
+        self.stack.extend(args);
+        self.push_frame_in_place(proto, home, None, base, span)
+    }
+
+    /// Run the bodyless std method `arm` on `recv` and push its result, unless the method parked
+    /// the fiber or ran a frame whose return pushes it. Each kind's tail is here: a channel's park,
+    /// a box closure's frame, an Executor's join, a socket's poller park, a Writer's broken pipe.
+    fn native_method(
+        &mut self,
+        arm: NativeArm,
+        recv: Value,
+        args: Vec<Value>,
+        span: Span,
+    ) -> Result<(), RuntimeError> {
+        let result = match arm {
+            NativeArm::Int(m) => self.int_method(recv, m, &args, span)?,
+            NativeArm::Float(m) => self.float_method(recv, m, &args, span)?,
+            NativeArm::Str(_) | NativeArm::Map(_) | NativeArm::Set(_) => {
+                self.core_method_as(recv.as_gcref(), arm, &args, span)?
+            }
+            // A list HOF runs its loop here: each callback is a frame, so a wait in it parks. So
+            // does a sort or a min / max whose comparator may be user code.
+            NativeArm::List(m) => {
+                let h = recv.as_gcref();
+                if let Some(kind) = HofKind::of(m) {
+                    return self.list_hof(h, kind, args, true, span);
+                }
+                if let Some(c) = CmpMethod::of(m)
+                    && self.list_compare_method(h, c, &args, true, span)?
+                {
+                    return Ok(());
+                }
+                self.core_method_as(h, arm, &args, span)?
+            }
+            NativeArm::Bytes(m) => self.bytes_method(recv.as_gcref(), m, &args, span)?,
+            NativeArm::ByteArray(m) => self.bytearray_method(recv.as_gcref(), m, &args, span)?,
+            // Concurrency C4: `Channel` / `Shared` methods mutate the heap object in place (and
+            // `update` re-enters the VM), so they run directly off the handle.
+            NativeArm::Channel(m) => {
+                self.sched_seed_point();
+                let result = self.channel_method(recv.as_gcref(), m, &args, span)?;
+                if self.suspend.is_some() || self.send_suspend.is_some() {
+                    // B1: `recv` parked this fiber (re-rooted the receiver itself); or a bounded
+                    // `send` parked it on a full channel (re-rooted receiver + value). No push.
+                    return Ok(());
+                }
+                result
+            }
+            // A box closure on the dispatch loop is a frame: its return pushes the result.
+            NativeArm::Shared(m) => {
+                self.sched_seed_point();
+                match self.shared_method(recv.as_gcref(), m, &args, span)? {
+                    Some(v) => v,
+                    None => return Ok(()),
+                }
+            }
+            NativeArm::RwShared(m) => {
+                self.sched_seed_point();
+                match self.rwshared_method(recv.as_gcref(), RwCall::Method(m), &args, span)? {
+                    Some(v) => v,
+                    None => return Ok(()),
+                }
+            }
+            NativeArm::RwSharedPrim(p) => {
+                self.sched_seed_point();
+                match self.rwshared_method(recv.as_gcref(), RwCall::Prim(p), &args, span)? {
+                    Some(v) => v,
+                    None => return Ok(()),
+                }
+            }
+            NativeArm::Atomic(m) => {
+                self.sched_seed_point();
+                self.atomic_method(recv.as_gcref(), m, &args, span)?
+            }
+            NativeArm::AtomicInt(m) => {
+                self.sched_seed_point();
+                self.atomic_int_method(recv.as_gcref(), m, &args, span)?
+            }
+            NativeArm::Executor(m) => {
+                self.sched_seed_point();
+                let r = self.executor_method(recv.as_gcref(), m, &args, span)?;
+                if self.exec_join_suspend.is_some() {
+                    return Ok(()); // a parked `shutdown` re-pushed its receiver and rewound.
+                }
+                r
+            }
+            // D6: `Socket` / `Listener` ops operate on the fd in the `Arc`'d core and may park the
+            // fiber on the netpoller (a would-block `read`/`write`/`accept`); gate the result-push
+            // on `poll_park` (as the channel `recv` park gate, but routed to the poller).
+            NativeArm::Socket(m) => {
+                self.sched_seed_point();
+                let r = self.socket_method(recv.as_gcref(), m, &args, span)?;
+                if self.poll_park.is_some() {
+                    return Ok(()); // D6: the op `WouldBlock`ed and re-rooted the receiver itself.
+                }
+                r
+            }
+            NativeArm::Listener(m) => {
+                self.sched_seed_point();
+                let r = self.listener_method(recv.as_gcref(), m, &args, span)?;
+                if self.poll_park.is_some() {
+                    return Ok(());
+                }
+                r
+            }
+            // R2 / N1: a `stdout()`-backed `write` routes through `emit_out`, a NO-OP once the
+            // streamed reader has died. `writer_method` then returns `Ok`, so — exactly like
+            // `print` and `invoke_native` — the deterministic broken-pipe halt must be raised HERE
+            // at the call site, or a `loop: w.write(...)` into a dead pipe spins forever, growing
+            // the unbounded stream queue without bound (6f8bb5c). `stream_halt` is inert off the
+            // streaming CLI path.
+            //
+            // W7-5d — gated on THIS call having emitted to stdout, for the reason spelled out at
+            // `invoke_native`: unguarded, a dead stdout also faulted a write to a FILE-backed or
+            // `stderr()`-backed `Writer`, which never touched the broken pipe.
+            NativeArm::Writer(m) => {
+                self.sched_seed_point();
+                let writes_before = self.stdout_writes;
+                let r = self.writer_method(recv.as_gcref(), m, &args, span)?;
+                if self.stdout_writes != writes_before
+                    && let Some(halt) = self.stream_halt(span)
+                {
+                    return Err(halt);
+                }
+                r
+            }
+            // R2b: `Reader` ops are synchronous blocking file reads — no netpoller/`poll_park`, and
+            // NO `stream_halt` check (a Reader never emits to stdout/stderr).
+            NativeArm::Reader(m) => {
+                self.sched_seed_point();
+                self.reader_method(recv.as_gcref(), m, &args, span)?
+            }
+        };
+        self.push(result);
+        Ok(())
+    }
+
+    /// Run the intrinsic method `which` on `recv`: a kind's own cursor and module entries here,
+    /// the protocol methods through [`Vm::intrinsic_proto_method`]. One that declines (a wrong
+    /// argument count) faults with the kind's miss text.
+    fn intrinsic_method(
+        &mut self,
+        which: Intrinsic,
+        recv: Value,
+        method: MethodId,
+        args: Vec<Value>,
+        span: Span,
+    ) -> Result<(), RuntimeError> {
+        match which {
+            // `.iter()` on a built-in collection → a FRESH cursor over a snapshot of what
+            // `for x in X` yields: the [`builtin_items`](Self::builtin_items) row, or a channel's
+            // drained values.
+            Intrinsic::CollectionIter if args.is_empty() => {
+                let h = recv.as_gcref();
+                // Both readers may alloc (str per-char); root the receiver across the call.
+                self.push(recv);
+                let items: Option<RVec<Value>> = if matches!(self.heap.get(h), Obj::Channel(_)) {
+                    Some(self.drain_iterable(recv, span)?.into())
+                } else {
+                    self.builtin_items(h)
+                };
+                self.pop(); // unroot receiver
+                if let Some(items) = items {
+                    let cursor = self.heap.alloc(Obj::Iter {
+                        items,
+                        pos: RCell::new(0),
+                    });
+                    self.push(Value::obj(cursor));
+                    return Ok(());
+                }
+            }
+            // A cursor IS Iterable and a generator IS an Iterator: `iter()` is itself.
+            Intrinsic::SelfIter if args.is_empty() => {
+                self.push(recv);
                 return Ok(());
             }
-            self.push(result);
-            return Ok(());
-        }
-        // A cursor (`Obj::Iter`, the `Iterable` `.iter()` result) exposes `.next()` (advance the
-        // snapshot, idempotent `None` past the end) and `.iter()` (returns self — every Iterator IS
-        // Iterable, idempotently). Intrinsic, like the generator arm just below.
-        if matches!(self.heap.get(h), Obj::Iter { .. }) {
-            if !args.is_empty() {
-                return Err(self.err(format!("a cursor's '{method}' takes no arguments"), span));
-            }
-            if method == Hook::Iter.method() {
-                self.push(recv); // idempotent: iter() on a cursor returns self
-            } else if method == Hook::Next.method() {
+            // A cursor's `next()` advances its snapshot (idempotent `None` past the end).
+            Intrinsic::CursorNext if args.is_empty() => {
+                let h = recv.as_gcref();
                 let Obj::Iter { items, pos } = self.heap.write(h).get(h) else {
-                    unreachable!()
+                    unreachable!("the cursor row holds cursors")
                 };
                 // M3.0a — one read answers the bound and the element: two threads can step
                 // one shared cursor (a racy step can repeat or skip an item, as in Go).
@@ -455,366 +669,90 @@ impl Vm {
                     None => self.alloc_enum("Option", "None", &[]),
                 };
                 self.push(result);
-            } else {
-                return Err(self.err(
-                    format!("a cursor has no method '{method}' (only `next()`/`iter()`)"),
-                    span,
-                ));
-            }
-            return Ok(());
-        }
-        // Experimental generators — `.next()` is intrinsic (resumes the coroutine), so a generator
-        // result drives `for x in g():` through the same lazy `next()` step as a struct iterator.
-        // `.iter()` on a generator returns self (a generator IS an Iterator, hence Iterable).
-        if matches!(self.heap.get(h), Obj::Generator(_)) {
-            if method == Hook::Iter.method() && args.is_empty() {
-                self.push(recv); // idempotent: a generator's iter() is itself
                 return Ok(());
             }
-            if method != Hook::Next.method() || !args.is_empty() {
-                return Err(self.err(
-                    format!("a generator has no method '{method}' (only `next()`)"),
-                    span,
-                ));
+            // Experimental generators — `.next()` resumes the coroutine. The body runs as a frame
+            // on this stack, so a wait in it parks.
+            Intrinsic::GenNext if args.is_empty() => {
+                return self.gen_resume(recv.as_gcref(), GenThen::Push, span);
             }
-            // The body runs as a frame on this stack, so a wait in it parks.
-            return self.gen_resume(h, GenThen::Push, span);
-        }
-        // UNIFIED NATIVE-HANDLE DISPATCH for every reserved handle (concurrency + io/net):
-        // `Obj::handle_kind` maps the receiver to its kind; a `None` goes straight on to the hot
-        // collection arms below. For a handle, a BODIED Chezzi method compiled to bytecode (generic
-        // like `Executor.submit`, or plain like `Reader.lines`) dispatches FIRST; a miss (`Ok(false)`)
-        // falls through to the native op body below, including each tail (Socket/Listener
-        // `poll_park`, Writer `stream_halt`). EXCLUDES List/Map/Set — they harvest no bodied methods
-        // and their hot `core_method` arm is on the M19 hot path.
-        let handle_key = self.heap.get(h).handle_kind();
-        if let Some(key) = handle_key {
-            if self.try_native_bodied_method(key.name(), method, recv, &args, argc, span)? {
-                return Ok(());
-            }
-            // Native op body per handle — identical to the retired per-arm dispatch, tails included.
-            self.sched_seed_point();
-            let result = match key {
-                // A box closure on the dispatch loop is a frame: its return pushes the result.
-                HandleKind::Shared | HandleKind::RwShared => {
-                    let r = if key == HandleKind::Shared {
-                        self.shared_method(h, method, &args, span)?
-                    } else {
-                        self.rwshared_method(h, method, &args, span)?
-                    };
-                    match r {
-                        Some(v) => v,
-                        None => return Ok(()),
-                    }
-                }
-                HandleKind::Atomic => self.atomic_method(h, method, &args, span)?,
-                HandleKind::AtomicInt => self.atomic_int_method(h, method, &args, span)?,
-                HandleKind::Executor => {
-                    let r = self.executor_method(h, method, &args, span)?;
-                    if self.exec_join_suspend.is_some() {
-                        return Ok(()); // a parked `shutdown` re-pushed its receiver and rewound.
-                    }
-                    r
-                }
-                // D6: `Socket` / `Listener` ops operate on the fd in the `Arc`'d core and may park the
-                // fiber on the netpoller (a would-block `read`/`write`/`accept`); gate the result-push
-                // on `poll_park` (mirrors the channel `recv` park gate, but routed to the poller).
-                HandleKind::Socket => {
-                    let r = self.socket_method(h, method, &args, span)?;
-                    if self.poll_park.is_some() {
-                        return Ok(()); // D6: the op `WouldBlock`ed and re-rooted the receiver itself.
-                    }
-                    r
-                }
-                HandleKind::Listener => {
-                    let r = self.listener_method(h, method, &args, span)?;
-                    if self.poll_park.is_some() {
-                        return Ok(());
-                    }
-                    r
-                }
-                // R2 / N1: a `stdout()`-backed `write` routes through `emit_out`, a NO-OP once the
-                // streamed reader has died. `writer_method` then returns `Ok`, so — exactly like
-                // `print` (line ~186) and `invoke_native` (line ~339) — the deterministic broken-pipe
-                // halt must be raised HERE at the call site, or a `loop: w.write(...)` into a dead
-                // pipe spins forever, growing the unbounded stream queue without bound (6f8bb5c).
-                // `stream_halt` is inert off the streaming CLI path.
-                //
-                // W7-5d — gated on THIS call having emitted to stdout, for the reason spelled out at
-                // `invoke_native`: unguarded, a dead stdout also faulted a write to a FILE-backed or
-                // `stderr()`-backed `Writer`, which never touched the broken pipe.
-                HandleKind::Writer => {
-                    let writes_before = self.stdout_writes;
-                    let r = self.writer_method(h, method, &args, span)?;
-                    if self.stdout_writes != writes_before
-                        && let Some(halt) = self.stream_halt(span)
-                    {
-                        return Err(halt);
-                    }
-                    r
-                }
-                // R2b: `Reader` ops are synchronous blocking file reads — no netpoller/`poll_park`, and
-                // NO `stream_halt` check (a Reader never emits to stdout/stderr).
-                HandleKind::Reader => self.reader_method(h, method, &args, span)?,
-            };
-            self.push(result);
-            return Ok(());
-        }
-        // `.iter()` on a built-in collection → a FRESH cursor over a snapshot of what `for x in X`
-        // yields: the [`builtin_items`](Self::builtin_items) row, or a channel's drained values. A
-        // cursor and a generator returned above (their `iter()` is self); any other receiver
-        // (a struct, an enum) falls through to its own `iter` method.
-        if method == Hook::Iter.method() && args.is_empty() {
-            // Both readers may alloc (str per-char); root the receiver across the call.
-            self.push(recv);
-            let items: Option<RVec<Value>> = if matches!(self.heap.get(h), Obj::Channel(_)) {
-                Some(self.drain_iterable(recv, span)?.into())
-            } else {
-                self.builtin_items(h)
-            };
-            self.pop(); // unroot receiver
-            if let Some(items) = items {
-                let cursor = self.heap.alloc(Obj::Iter {
-                    items,
-                    pos: RCell::new(0),
-                });
-                self.push(Value::obj(cursor));
-                return Ok(());
-            }
-        }
-        // Built-in container methods, dispatched off the handle BEFORE the clone-match below so
-        // `list.push`/`bytearray.push` mutate the heap object in place (the match clones the Obj):
-        //   `str`/`list`/`map`/`set` → `core_method` (M6),
-        //   `bytes`                  → `bytes_method` (immutable: only `decode() -> str`),
-        //   `bytearray`              → `bytearray_method` (`len`/`push`/`pop`/`extend`/`decode`;
-        //                              separate from `core_method`, same in-place `write` discipline).
-        //   a boxed int              → `scalar_method`, as its inline twin above.
-        enum Container {
-            Core,
-            Bytes,
-            ByteArray,
-            Scalar,
-        }
-        let container = match self.heap.get(h) {
-            Obj::Str(_) | Obj::List(_) | Obj::Map(_) | Obj::Set(_) => Some(Container::Core),
-            Obj::Bytes(_) => Some(Container::Bytes),
-            Obj::ByteArray(_) => Some(Container::ByteArray),
-            Obj::BigInt(_) => Some(Container::Scalar),
-            Obj::FloatBox(_)
-            | Obj::Iter { .. }
-            | Obj::Tuple(_)
-            | Obj::Struct { .. }
-            | Obj::Enum { .. }
-            | Obj::Cell(_)
-            | Obj::Func { .. }
-            | Obj::Closure { .. }
-            | Obj::Module(_)
-            | Obj::Native { .. }
-            | Obj::Builtin(_)
-            | Obj::Cffi(_)
-            | Obj::Ptr(_)
-            | Obj::Channel(_)
-            | Obj::Shared(_)
-            | Obj::RwShared(_)
-            | Obj::Atomic(_)
-            | Obj::AtomicInt(_)
-            | Obj::Executor(_)
-            | Obj::Socket(_)
-            | Obj::Listener(_)
-            | Obj::Writer(_)
-            | Obj::Reader(_)
-            | Obj::Generator(_) => None,
-        };
-        if let Some(container) = container {
-            // A list HOF runs its loop here: each callback is a frame, so a wait in it parks.
-            // A list method's name is parsed once, here; `core_method_as` reads the parse.
-            let list = if let Obj::List(_) = self.heap.get(h) {
-                ListMethod::from_name(method)
-            } else {
-                None
-            };
-            if let Some(m) = list {
-                if let Some(kind) = HofKind::of(m) {
-                    return self.list_hof(h, kind, args, true, span);
-                }
-                // So does a sort or a min / max whose comparator may be user code.
-                if let Some(c) = CmpMethod::of(m)
-                    && self.list_compare_method(h, c, &args, true, span)?
-                {
-                    return Ok(());
-                }
-            }
-            let dispatched = match container {
-                Container::Core => self.core_method_as(h, method, list, &args, span),
-                Container::Bytes => self.bytes_method(h, method, &args, span),
-                Container::ByteArray => self.bytearray_method(h, method, &args, span),
-                Container::Scalar => self.scalar_method(recv, method, &args, span),
-            };
-            // A name miss inside a dispatcher falls to the intrinsic protocol methods through
-            // `container_method_miss`; any other error is the dispatcher's own and stays as it is.
-            let result = dispatched?;
-            self.push(result);
-            return Ok(());
-        }
-        // `module.fn(args)` — plain call on the looked-up member, no `self`. Read in place: every
-        // task of the run shares the module (M3.1), so a clone would copy its slots per call.
-        if matches!(self.heap.get(h), Obj::Module(_)) {
-            let idx = self.slot_index(h, method).ok_or_else(|| {
-                self.err(
-                    format!("module '{}' has no member '{method}'", self.module_name(h)),
-                    span,
-                )
-            })?;
-            let member = self.read_slot(h, idx, span)?;
-            // A member can be a bodied Chezzi fn (`std.fs`'s `PathLike` wrappers): `do_call`
+            // `module.fn(args)` — plain call on the looked-up member, no `self`. Read in place:
+            // every task of the run shares the module (M3.1), so a clone would copy its slots per
+            // call. A member can be a bodied Chezzi fn (`std.fs`'s `PathLike` wrappers): `do_call`
             // installs it as a frame for the running loop.
-            self.stack.push(member);
-            self.stack.extend(args);
-            return self.do_call(argc, span);
-        }
-        match self.heap.get(h).clone() {
-            Obj::Module(_) => unreachable!("a module receiver returned above"),
-            Obj::Struct { tid, fields, .. } => {
-                // Resolve the type IDENTITY KEY from the instance's dense `tid` (O(1) index) — the
-                // instance no longer carries a per-instance `name`. Warm method-dispatch path.
-                let name = self.struct_name_of_tid(tid);
-                // Fix A — resolve `(proto, module_idx)` WITHOUT cloning the whole StructDef (its
-                // `fields` Vec + `methods` HashMap). On a megamorphic / sticky-generic site this slow
-                // path runs per call, so the per-miss StructDef clone dwarfed the dispatch itself. We
-                // bump the cheap `Arc<Program>` refcount (read-only, never alias-mutated) so the
-                // immutable `structs` borrow is released before the later `&mut self` calls.
-                let prog = Arc::clone(&self.program);
-                let def = prog
-                    .structs
-                    .get(name)
-                    .ok_or_else(|| self.err(format!("unknown struct type '{name}'"), span))?;
-                let resolved = def.methods.get(method).copied();
-                let def_module_idx = def.module_idx;
-                if let Some(proto) = resolved {
-                    let home = self.module_obj(def_module_idx);
-                    self.check_proto_arity(proto, argc + 1, span)?;
-                    // A generator method allocates rather than running (else its `Op::Yield` would
-                    // poison the host run); never IC-cached (it returns, not push-frame).
-                    if self.program.protos[proto].is_generator {
-                        let mut gen_args = Vec::with_capacity(argc + 1);
-                        gen_args.push(recv);
-                        gen_args.extend(args);
-                        let g = self.alloc_generator(proto, home, None, gen_args);
-                        self.push(g);
-                        return Ok(());
-                    }
-                    // Fill the next free way so the next call at this site hits the fast path above
-                    // (a registered layout `tid` only). When all ways are occupied AND this `tid` is
-                    // new, latch `sticky` so the site stops probing the (full) ways and goes straight
-                    // here — a megamorphic site never thrashes.
-                    if tid != TID_NONE {
-                        let site = &mut self.method_ic[ic as usize];
-                        if !site.sticky {
-                            let cell = MethodIcCell {
-                                tid,
-                                proto,
-                                module_idx: def_module_idx as u32,
-                            };
-                            if let Some(free) = site.ways.iter_mut().find(|w| w.tid == TID_NONE) {
-                                *free = cell;
-                            } else {
-                                // All ways occupied and `tid` is distinct from every one of them (else
-                                // the fast path would have hit) — the site is megamorphic; go sticky.
-                                site.sticky = true;
-                            }
-                        }
-                    }
-                    // Install the frame in place; the running `run_until` executes it.
-                    let base = self.stack.len();
-                    self.stack.push(recv);
-                    self.stack.extend(args);
-                    return self.push_frame_in_place(proto, home, None, base, span);
-                }
-                // No method named `method`: fall back to a function-typed *field* — `recv.f(args)`
-                // where `f` holds a function value (the checker verified `f: fn(...) -> ...`).
-                // Invoked as a value (no `self` bound — it's not a method). Positional layout:
-                // resolve the field name->index from the StructDef, then index the flat `fields`.
-                let fidx = self
-                    .program
-                    .structs
-                    .get(name)
-                    .and_then(|d| d.fields.iter().position(|f| f == method));
-                if let Some(fval) = fidx.and_then(|i| fields.get(i)) {
-                    let v = self.invoke_value(fval, args, span)?;
-                    if self.paused() {
-                        return Ok(()); // B1/D3: the function-field call parked on `recv` or yielded.
-                    }
+            Intrinsic::ModuleMember => {
+                let h = recv.as_gcref();
+                let name = self.program.methods.name(method);
+                let Some(idx) = self.slot_index(h, name) else {
+                    return Err(self.method_miss(recv, method, &args, span));
+                };
+                let member = self.read_slot(h, idx, span)?;
+                let argc = args.len();
+                self.stack.push(member);
+                self.stack.extend(args);
+                return self.do_call(argc, span);
+            }
+            Intrinsic::Hook(_) | Intrinsic::AsPath | Intrinsic::Error(_) => {
+                if let Some(v) = self.intrinsic_proto_method(recv, which, &args, span)? {
                     self.push(v);
                     return Ok(());
                 }
-                // ROOT REDESIGN — render the BARE display name (not the identity key) in the error.
-                // Resolved BEFORE the W6-3 fallback below so the `name` borrow of `self` ends here.
+            }
+            Intrinsic::CollectionIter
+            | Intrinsic::SelfIter
+            | Intrinsic::CursorNext
+            | Intrinsic::GenNext => {}
+        }
+        Err(self.method_miss(recv, method, &args, span))
+    }
+
+    /// The fault of a method `recv`'s kind does not have, in the kind's own words.
+    fn method_miss(
+        &self,
+        recv: Value,
+        method: MethodId,
+        args: &[Value],
+        span: Span,
+    ) -> RuntimeError {
+        let m = self.program.methods.name(method);
+        let Some(h) = recv.as_obj() else {
+            return self.err(
+                format!("type {} has no method '{m}'", self.type_name(recv)),
+                span,
+            );
+        };
+        let text = match self.heap.get(h) {
+            Obj::Str(_) => format!("type str has no method '{m}'"),
+            Obj::List(_) => format!("type list has no method '{m}'"),
+            Obj::Map(_) => format!("type map has no method '{m}'"),
+            Obj::Set(_) => format!("type set has no method '{m}'"),
+            Obj::Bytes(_) => format!("type bytes has no method '{m}'"),
+            Obj::ByteArray(_) => format!("type bytearray has no method '{m}'"),
+            // ROOT REDESIGN — the BARE display name (not the identity key).
+            Obj::Struct { tid, .. } => {
+                let name = self.struct_name_of_tid(*tid);
                 let display = self
                     .program
                     .structs
                     .get(name)
                     .map(|d| d.display_name.clone())
                     .unwrap_or_else(|| crate::base::words::bare_display(name));
-                // W6-3 — the `Eq`, `Stringable`, `Iterable` and `Iterator` struct rows are intrinsic
-                // (`proto.rs`), so a call in an erased `[T: Eq]` body answers through them.
-                if let Some(v) = self.intrinsic_proto_method(recv, method, &args, span)? {
-                    self.push(v);
-                    return Ok(());
-                }
-                Err(self.err(format!("struct '{display}' has no method '{method}'"), span))
+                format!("struct '{display}' has no method '{m}'")
             }
-            // Enum method dispatch (name-resolved, like structs). Enums are type-erased — no `tid`,
-            // so the method IC is skipped (follow-up lever); we resolve `enum_methods[key][method]`
-            // off the variant's `enum_name` and dispatch with the same `self`-binding path structs use.
             Obj::Enum { variant_id, .. } => {
-                let prog = Arc::clone(&self.program);
-                let enum_key = self.enum_names(variant_id).0.to_string();
-                let resolved = prog
-                    .enum_methods
-                    .get(&enum_key)
-                    .and_then(|ms| ms.get(method).copied());
-                if let Some(proto) = resolved {
-                    // An enum method's home module is the enum's declaring module (recorded in
-                    // `enum_home`), so its body resolves top-level names against the right globals.
-                    let home = self.module_obj(self.enum_home_module(&enum_key));
-                    self.check_proto_arity(proto, argc + 1, span)?;
-                    if self.program.protos[proto].is_generator {
-                        let mut gen_args = Vec::with_capacity(argc + 1);
-                        gen_args.push(recv);
-                        gen_args.extend(args);
-                        let g = self.alloc_generator(proto, home, None, gen_args);
-                        self.push(g);
-                        return Ok(());
-                    }
-                    let base = self.stack.len();
-                    self.stack.push(recv);
-                    self.stack.extend(args);
-                    return self.push_frame_in_place(proto, home, None, base, span);
-                }
-                // D1 (W6-3's rule, applied to the one dispatch arm that lacked it) — the checker
-                // grants `Eq` intrinsically to an `enum`, and `Option`/`Result` ARE `Obj::Enum` at
-                // runtime, so an erased `[T: Eq]` body's `a.eq(b)` must answer here. Miss-only, so
-                // an enum that DEFINES the method already dispatched above. Without this the grant
-                // is check-OK-then-`has no method 'eq'`, the class this whole milestone closes.
-                if let Some(v) = self.intrinsic_proto_method(recv, method, &args, span)? {
-                    self.push(v);
-                    return Ok(());
-                }
-                let who = Self::enum_subject(variant_id, &enum_key, |n| format!("type {n}"));
-                Err(self.err(format!("{who} has no method '{method}'"), span))
+                let key = self.enum_names(*variant_id).0;
+                let who = Self::enum_subject(*variant_id, key, |n| format!("type {n}"));
+                format!("{who} has no method '{m}'")
             }
-            // Any other heap value answers the intrinsic protocol methods (a boxed int returned
-            // through `scalar_method` above).
-            Obj::Str(_)
-            | Obj::Bytes(_)
-            | Obj::ByteArray(_)
-            | Obj::BigInt(_)
+            Obj::Module(_) => format!("module '{}' has no member '{m}'", self.module_name(h)),
+            Obj::Iter { .. } if !args.is_empty() => {
+                format!("a cursor's '{m}' takes no arguments")
+            }
+            Obj::Iter { .. } => format!("a cursor has no method '{m}' (only `next()`/`iter()`)"),
+            Obj::Generator(_) => format!("a generator has no method '{m}' (only `next()`)"),
+            Obj::BigInt(_)
             | Obj::FloatBox(_)
-            | Obj::Iter { .. }
-            | Obj::List(_)
             | Obj::Tuple(_)
-            | Obj::Map(_)
-            | Obj::Set(_)
             | Obj::Cell(_)
             | Obj::Func { .. }
             | Obj::Closure { .. }
@@ -831,18 +769,9 @@ impl Vm {
             | Obj::Socket(_)
             | Obj::Listener(_)
             | Obj::Writer(_)
-            | Obj::Reader(_)
-            | Obj::Generator(_) => {
-                if let Some(v) = self.intrinsic_proto_method(recv, method, &args, span)? {
-                    self.push(v);
-                    return Ok(());
-                }
-                Err(self.err(
-                    format!("type {} has no method '{method}'", self.type_name(recv)),
-                    span,
-                ))
-            }
-        }
+            | Obj::Reader(_) => format!("type {} has no method '{m}'", self.type_name(recv)),
+        };
+        self.err(text, span)
     }
 
     /// The proto of method `method` on the struct, the enum or the builtin `type_key`, and the

@@ -166,6 +166,8 @@ pub fn compile_graph(graph: &ModuleGraph) -> Result<Program, CompileError> {
     c.program.rebuild_struct_names(&c.field_widths);
     c.build_hooks();
     c.build_provider_table()?;
+    let names = std::mem::take(&mut c.method_names);
+    c.program.methods = crate::base::method_table::MethodTable::build(&c.program, names);
     Ok(c.program)
 }
 
@@ -271,6 +273,8 @@ struct Compiler {
     /// (like `field_ic_next`). Each `CallMethod` op gets a unique slot into the VM's `method_ic`
     /// vector. Recorded into `Program::method_ic_sites`.
     method_ic_next: u32,
+    /// The method names the call sites spell, one id each (`Program::methods` is built from them).
+    method_names: crate::base::method_table::MethodNames,
     /// ROOT REDESIGN — module-scoped types: `(declaring module_idx, bare type name) → IDENTITY KEY`.
     /// The key is ALWAYS `<module-key>::<Name>` (no winner/loser, no bare keys) so every user
     /// struct/enum/variant/alias is unique by construction. Built once by
@@ -465,6 +469,7 @@ impl Compiler {
             modules: Vec::new(),
             field_ic_sites: 0,
             method_ic_sites: 0,
+            methods: Default::default(),
             task_entry: 0,
             cffi_defs: Vec::new(),
             tests: Vec::new(),
@@ -526,6 +531,7 @@ impl Compiler {
             global_let_lines: Vec::new(),
             field_ic_next: 0,
             method_ic_next: 0,
+            method_names: crate::base::method_table::MethodNames::with_std(),
             type_keys: HashMap::new(),
             imported_modules: HashMap::new(),
             current_module_idx: 0,
@@ -573,6 +579,11 @@ impl Compiler {
     /// M19 Phase 6 — allocate an inline-cache site id for a `CallMethod` op. Every method/module-member
     /// call gets a fresh dense id (the VM fills it only for struct-method dispatch; module/core-type
     /// calls leave it empty, costing one unused `method_ic` slot — negligible).
+    /// The id of the method name `name` (`Op::CallMethod`'s operand).
+    fn method_id(&mut self, name: &str) -> crate::base::method_table::MethodId {
+        self.method_names.intern(name)
+    }
+
     fn next_method_ic(&mut self) -> u32 {
         let id = self.method_ic_next;
         self.method_ic_next += 1;

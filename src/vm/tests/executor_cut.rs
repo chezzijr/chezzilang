@@ -677,7 +677,7 @@ fn the_settle_internals_reject_a_non_channel() {
     let e = vm
         .executor_method(
             h,
-            "_submit_settled",
+            crate::base::builtin_method::ExecutorMethod::StdSubmitSettled,
             &[Value::nil(), Value::int(5)],
             Span::RUNTIME,
         )

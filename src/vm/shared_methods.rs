@@ -7,6 +7,23 @@ use crate::base::builtin_method::{
     AtomicIntMethod, AtomicMethod, ExecutorMethod, RwSharedMethod, RwSharedPrim, SharedMethod,
 };
 
+/// A `RwShared[T]` method: one its decl declares, or a `_` container primitive
+/// (`std.concurrency.collection` calls them), as the method table names it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) enum RwCall {
+    Method(RwSharedMethod),
+    Prim(RwSharedPrim),
+}
+
+impl RwCall {
+    fn name(self) -> &'static str {
+        match self {
+            RwCall::Method(m) => m.name(),
+            RwCall::Prim(p) => p.name(),
+        }
+    }
+}
+
 /// A box method that runs a closure on the box's value under its guard: the `RetAction::Box`
 /// frame's job when the closure returns.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -44,13 +61,11 @@ impl Vm {
     pub(super) fn shared_method(
         &mut self,
         h: GcRef,
-        method: &str,
+        which: SharedMethod,
         args: &[Value],
         span: Span,
     ) -> Result<Option<Value>, RuntimeError> {
-        let Some(which) = SharedMethod::from_name(method) else {
-            return Err(self.err(format!("type Shared has no method '{method}'"), span));
-        };
+        let method = which.name();
         let call = match which {
             SharedMethod::Update => BoxCall::Update,
             SharedMethod::Read => BoxCall::Read,
@@ -281,14 +296,12 @@ impl Vm {
     pub(super) fn rwshared_method(
         &mut self,
         h: GcRef,
-        method: &str,
+        call: RwCall,
         args: &[Value],
         span: Span,
     ) -> Result<Option<Value>, RuntimeError> {
-        if let Some(which @ (RwSharedMethod::Read | RwSharedMethod::Write)) =
-            RwSharedMethod::from_name(method)
-        {
-            self.arity_err(method, args, 1, span)?;
+        if let RwCall::Method(which @ (RwSharedMethod::Read | RwSharedMethod::Write)) = call {
+            self.arity_err(call.name(), args, 1, span)?;
             let call = if which == RwSharedMethod::Read {
                 BoxCall::RwRead
             } else {
@@ -298,9 +311,7 @@ impl Vm {
             return self.rewind_if_parked(h, args, r);
         }
         let r = self
-            .with_method_rooted(h, args, |vm| {
-                vm.rwshared_method_rooted(h, method, args, span)
-            })
+            .with_method_rooted(h, args, |vm| vm.rwshared_method_rooted(h, call, args, span))
             .map(Some);
         self.rewind_if_parked(h, args, r)
     }
@@ -357,10 +368,11 @@ impl Vm {
     fn rwshared_method_rooted(
         &mut self,
         h: GcRef,
-        method: &str,
+        call: RwCall,
         args: &[Value],
         span: Span,
     ) -> Result<Value, RuntimeError> {
+        let method = call.name();
         let core = self.rwshared_core(h);
         let want_elem = |vm: &Vm, st: Value, want: &'static str| {
             if vm.elem_kind(st) == want {
@@ -369,26 +381,26 @@ impl Vm {
                 Err(vm.err(format!("RwShared.{method} requires a {want} element"), span))
             }
         };
-        if let Some(which) = RwSharedMethod::from_name(method) {
-            return match which {
-                RwSharedMethod::Get => {
-                    self.arity_err("get", args, 0, span)?;
-                    self.rwshared_read(&core, span, |_, cur| Ok(cur))
-                }
-                RwSharedMethod::Read | RwSharedMethod::Write => {
-                    unreachable!("`rwshared_method` runs `{method}` as a frame")
-                }
-                RwSharedMethod::Set => {
-                    self.arity_err("set", args, 1, span)?;
-                    self.rwshared_mutate(&core, span, |_, _| {
-                        core.v.set(args[0]);
-                        Ok(Value::nil())
-                    })
-                }
-            };
-        }
-        let Some(prim) = RwSharedPrim::from_name(method) else {
-            return Err(self.err(format!("type RwShared has no method '{method}'"), span));
+        let prim = match call {
+            RwCall::Prim(prim) => prim,
+            RwCall::Method(which) => {
+                return match which {
+                    RwSharedMethod::Get => {
+                        self.arity_err("get", args, 0, span)?;
+                        self.rwshared_read(&core, span, |_, cur| Ok(cur))
+                    }
+                    RwSharedMethod::Read | RwSharedMethod::Write => {
+                        unreachable!("`rwshared_method` runs `{method}` as a frame")
+                    }
+                    RwSharedMethod::Set => {
+                        self.arity_err("set", args, 1, span)?;
+                        self.rwshared_mutate(&core, span, |_, _| {
+                            core.v.set(args[0]);
+                            Ok(Value::nil())
+                        })
+                    }
+                };
+            }
         };
         match prim {
             RwSharedPrim::SetKey => {
@@ -563,13 +575,11 @@ impl Vm {
     pub(super) fn atomic_method(
         &mut self,
         h: GcRef,
-        method: &str,
+        which: AtomicMethod,
         args: &[Value],
         span: Span,
     ) -> Result<Value, RuntimeError> {
-        let Some(which) = AtomicMethod::from_name(method) else {
-            return Err(self.err(format!("type Atomic has no method '{method}'"), span));
-        };
+        let method = which.name();
         match which {
             AtomicMethod::Load => {
                 self.arity_err("load", args, 0, span)?;
@@ -658,14 +668,12 @@ impl Vm {
     pub(super) fn atomic_int_method(
         &mut self,
         h: GcRef,
-        method: &str,
+        which: AtomicIntMethod,
         args: &[Value],
         span: Span,
     ) -> Result<Value, RuntimeError> {
         use std::sync::atomic::Ordering::SeqCst;
-        let Some(which) = AtomicIntMethod::from_name(method) else {
-            return Err(self.err(format!("type AtomicInt has no method '{method}'"), span));
-        };
+        let method = which.name();
         match which {
             AtomicIntMethod::Load => {
                 self.arity_err("load", args, 0, span)?;
@@ -726,13 +734,10 @@ impl Vm {
     pub(super) fn executor_method(
         &mut self,
         h: GcRef,
-        method: &str,
+        which: ExecutorMethod,
         args: &[Value],
         span: Span,
     ) -> Result<Value, RuntimeError> {
-        let Some(which) = ExecutorMethod::from_name(method) else {
-            return Err(self.err(format!("type Executor has no method '{method}'"), span));
-        };
         match which {
             // TICKET-219 — a std internal: `Executor.submit` starts its job with the fresh cap-1
             // channel of its Task, which the job transition seals with the job's cancel value or

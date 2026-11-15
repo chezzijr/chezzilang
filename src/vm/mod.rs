@@ -792,10 +792,10 @@ enum Deferred {
         args: Vec<Value>,
         span: Span,
     },
-    /// `defer recv.name(args)` — dispatch the named method on the receiver.
+    /// `defer recv.name(args)` — dispatch the method on the receiver.
     Method {
         recv: Value,
-        name: Arc<str>,
+        method: crate::base::method_table::MethodId,
         /// The `defer` site's own method-IC id.
         ic: u32,
         args: Vec<Value>,

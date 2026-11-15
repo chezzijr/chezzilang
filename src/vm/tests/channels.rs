@@ -29,10 +29,22 @@ fn parallel_recv_blocks_until_send_wakes_it() {
     // Queue first, then hand the receiving `Vm` to another thread: the value is already in the
     // shared core, so the cross-thread `recv` pops it deterministically (no interleaving race).
     sender
-        .channel_method(sh, "send", &[Value::int(42)], sp)
+        .channel_method(
+            sh,
+            crate::base::builtin_method::ChannelMethod::Send,
+            &[Value::int(42)],
+            sp,
+        )
         .unwrap();
     let handle = std::thread::spawn(move || {
-        let got = worker.channel_method(wh, "recv", &[], sp).unwrap();
+        let got = worker
+            .channel_method(
+                wh,
+                crate::base::builtin_method::ChannelMethod::Recv,
+                &[],
+                sp,
+            )
+            .unwrap();
         (worker, got)
     });
     let (worker, got) = handle.join().unwrap();

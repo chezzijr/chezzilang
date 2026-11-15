@@ -265,7 +265,7 @@ impl Compiler {
             let ic = self.next_method_ic();
             fc.emit(
                 Op::CallMethod {
-                    name: crate::resolver::JSON_DECODE_PARSE.to_string(),
+                    method: self.method_id(crate::resolver::JSON_DECODE_PARSE),
                     argc: 1,
                     ic,
                 },
@@ -375,7 +375,7 @@ impl Compiler {
                 let ic = self.next_method_ic();
                 fc.emit(
                     Op::CallMethod {
-                        name: name.clone(),
+                        method: self.method_id(name),
                         argc: argc + w,
                         ic,
                     },
@@ -394,7 +394,7 @@ impl Compiler {
                 let ic = self.next_method_ic();
                 fc.emit(
                     Op::CallMethod {
-                        name: name.clone(),
+                        method: self.method_id(name),
                         argc: 1,
                         ic,
                     },
@@ -446,18 +446,21 @@ impl Compiler {
             let op = match self.hook_calls.get(&hook_key) {
                 Some(&hook) => Op::CallHook {
                     hook,
-                    name: name.clone(),
+                    method: self.method_id(name),
                     argc: argc + w,
                     ic,
                 },
                 // An `into` overload: the checker's pick for this call, by the witness key.
-                None => Op::CallMethod {
-                    name: self
+                None => {
+                    let picked = self
                         .overload_pick(*name_span)
-                        .unwrap_or_else(|| name.clone()),
-                    argc: argc + w,
-                    ic,
-                },
+                        .unwrap_or_else(|| name.clone());
+                    Op::CallMethod {
+                        method: self.method_id(&picked),
+                        argc: argc + w,
+                        ic,
+                    }
+                }
             };
             fc.emit(op, span);
             return Ok(());
@@ -592,7 +595,7 @@ impl Compiler {
         let ic = self.next_method_ic();
         vf.emit(
             Op::CallMethod {
-                name: method.to_string(),
+                method: self.method_id(method),
                 argc: arity.saturating_sub(1),
                 ic,
             },

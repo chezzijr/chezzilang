@@ -235,20 +235,22 @@ in its own worktree and target dir. Budget: +3% per bench.
 2000 tasks that each wait in a `defer` at `--threads=2` (`tests/defer_park_scale.rs`): 5 OS threads
 and 0.47 s, `demotes=0`; before, 2005 threads and 38.3 s.
 
-### Method calls without the `NO_IC` fallback (2026-11-08)
+### Method calls through one method table (2026-11-15)
 
-The dead `ic != NO_IC` re-entrant arms of `Vm::do_method_call` are deleted. Release,
-`perf stat -e instructions:u`, median of 5 interleaved single runs, base `bad25748` built in its own
-worktree and target dir.
+Plan `2026-11-15-error-origin-vm-method-ids`: a method call carries a `MethodId`, and one dense
+(receiver row, method id) table (`src/base/method_table.rs`) replaces the 13 name-keyed deciders of
+`Vm::do_method_call`; the struct IC still answers first. Also in the change: an executed `!x` stamps
+its payload's origin. Release, `perf stat -e instructions:u`, median of 5 interleaved single runs,
+base `91acae84` built in its own worktree and target dir. Budget: +1% per bench.
 
 | bench | change vs base |
 |---|---|
-| `benches/chz/struct.chz` | −0.00% |
-| `benches/chz/poly_method.chz` | +0.01% |
-| `benches/chz/enum.chz` | −0.11% |
-| `benches/chz/hof.chz` | +0.00% |
-| `benches/chz/hook_dispatch.chz` | +0.07% |
-| `benches/chz/defer.chz` | +0.22% |
+| `benches/chz/poly_method.chz` | −1.58% |
+| `benches/chz/struct.chz` | +0.31% |
+| `benches/chz/enum.chz` | −0.00% |
+| `benches/chz/hof.chz` | +0.75% |
+| `benches/chz/hook_dispatch.chz` | −1.26% |
+| `benches/chz/defer.chz` | −2.50% |
 
 ### Guard waits and Executor joins park (2026-11-08)
 

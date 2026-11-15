@@ -6,7 +6,9 @@
 pub mod builtin;
 pub mod builtin_method;
 pub mod hooks;
+pub mod intrinsic;
 pub mod json_desc;
+pub mod method_table;
 pub mod module_id;
 pub mod op;
 pub mod provider_name;

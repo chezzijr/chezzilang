@@ -1960,17 +1960,35 @@ fn executor_core_shut_is_shared_across_handles() {
     let h1 = vm.heap.alloc(Obj::Executor(Arc::clone(&core)));
     let h2 = vm.heap.alloc(Obj::Executor(core));
     let sp = Span::RUNTIME;
-    vm.executor_method(h1, "shutdown", &[], sp).unwrap();
+    vm.executor_method(
+        h1,
+        crate::base::builtin_method::ExecutorMethod::Shutdown,
+        &[],
+        sp,
+    )
+    .unwrap();
     let ch = Arc::new(ChannelCore::default());
     let chv = vm.heap.alloc(Obj::Channel(Arc::clone(&ch)));
-    vm.executor_method(h2, "_submit_settled", &[Value::nil(), Value::obj(chv)], sp)
-        .expect("a refused submit returns Ok with its Task settled");
+    vm.executor_method(
+        h2,
+        crate::base::builtin_method::ExecutorMethod::StdSubmitSettled,
+        &[Value::nil(), Value::obj(chv)],
+        sp,
+    )
+    .expect("a refused submit returns Ok with its Task settled");
     assert!(
         ch.q.lock().unwrap().is_sealed(),
         "the refusal must seal the Task's channel"
     );
     // M3.2: the refusal is sealed as text, and the receive builds it into the `Err` value.
-    let got = vm.channel_method(chv, "recv", &[], sp).unwrap();
+    let got = vm
+        .channel_method(
+            chv,
+            crate::base::builtin_method::ChannelMethod::Recv,
+            &[],
+            sp,
+        )
+        .unwrap();
     let sealed = vm.display(got);
     assert!(
         sealed.contains("submit on a shut-down Executor (it no longer accepts work)"),

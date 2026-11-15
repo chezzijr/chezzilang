@@ -298,7 +298,7 @@ Gates stop new disagreement. The unifying rules above repair what exists.
 | Change | Removes |
 |---|---|
 | builtin types declare their protocols in `std/*.chz` like user types, and every operator asks the one conformance decider | most of the 888 builtin-type arms; every operator-against-bound disagreement |
-| one method table per type; the run time dispatches from the table, not from name strings | the 226 name tests in `src/vm` |
+| one method table per type; the run time dispatches from the table, not from name strings | the 226 name tests in `src/vm`. The method-call half landed 2026-11-15: a call carries a method id and `Vm::do_method_call` reads one entry of `Program::methods` (`base/method_table.rs`), so its 13 name-keyed deciders are gone |
 | no wildcard arm on a language enum (G1) | the "new construct silently absorbed" class |
 | a builtin type's constructor only makes an empty value; `T.from_iter(xs)` / `T.zeroed(n)` are static `native fn` decls of its prelude `native struct` (2026-11-03) | the checker's and the VM's per-type constructor-with-argument arms, the hand list of prelude type names in `hoist.rs` / `graph_pass.rs`, and `infer_conv_arg` |
 | a scalar's constructor gives its zero value (`int()` is `0`); a conversion is a `native fn` method of the source type's prelude `native struct` (`n.to_float()`, `f.to_int()`), and display is `"{x}"` (2026-11-03) | the cast arms with an argument (`builtin_int`/`float`/`bool`/`str` in the VM), the cast domain list `reject_non_scalar_cast`, and the scalar receivers' separate "no method" arm |

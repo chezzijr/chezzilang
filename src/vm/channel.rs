@@ -47,13 +47,10 @@ impl Vm {
     pub(super) fn channel_method(
         &mut self,
         h: GcRef,
-        method: &str,
+        which: ChannelMethod,
         args: &[Value],
         span: Span,
     ) -> Result<Value, RuntimeError> {
-        let Some(which) = ChannelMethod::from_name(method) else {
-            return Err(self.err(format!("type Channel has no method '{method}'"), span));
-        };
         match which {
             ChannelMethod::Send => {
                 self.arity_err("send", args, 1, span)?;

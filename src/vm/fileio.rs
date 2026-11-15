@@ -165,13 +165,11 @@ impl Vm {
     pub(super) fn writer_method(
         &mut self,
         h: GcRef,
-        method: &str,
+        which: WriterMethod,
         args: &[Value],
         span: Span,
     ) -> Result<Value, RuntimeError> {
-        let Some(which) = WriterMethod::from_name(method) else {
-            return Err(self.err(format!("type Writer has no method '{method}'"), span));
-        };
+        let method = which.name();
         match which {
             WriterMethod::Write | WriterMethod::WriteBytes => {
                 self.arity_err(method, args, 1, span)?;
@@ -419,13 +417,10 @@ impl Vm {
     pub(super) fn reader_method(
         &mut self,
         h: GcRef,
-        method: &str,
+        which: ReaderMethod,
         args: &[Value],
         span: Span,
     ) -> Result<Value, RuntimeError> {
-        let Some(which) = ReaderMethod::from_name(method) else {
-            return Err(self.err(format!("type Reader has no method '{method}'"), span));
-        };
         match which {
             ReaderMethod::ReadLine => {
                 self.arity_err("read_line", args, 0, span)?;

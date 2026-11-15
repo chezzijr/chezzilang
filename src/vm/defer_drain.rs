@@ -280,14 +280,14 @@ impl Vm {
                 self.do_call(argc, span)
             }
             Deferred::Method {
-                name,
+                method,
                 ic,
                 args,
                 span,
                 ..
             } => {
-                let (name, ic, argc, span) = (Arc::clone(name), *ic, args.len(), *span);
-                self.do_method_call(&name, argc, ic, span)
+                let (method, ic, argc, span) = (*method, *ic, args.len(), *span);
+                self.do_method_call(method, argc, ic, span)
             }
         }
     }

@@ -2137,6 +2137,8 @@ C := BIG.iter()"
     type Op = fn(&mut Vm, &[GcRef], i64) -> Result<(), RuntimeError>;
     fn method(w: &mut Vm, h: GcRef, m: &str, args: &[Value]) -> Result<Value, RuntimeError> {
         if matches!(w.heap.get(h), Obj::ByteArray(_)) {
+            let m = crate::base::builtin_method::BytearrayMethod::from_name(m)
+                .expect("a bytearray method");
             w.bytearray_method(h, m, args, Span::RUNTIME)
         } else {
             w.core_method(h, m, args, Span::RUNTIME)
@@ -2182,7 +2184,13 @@ C := BIG.iter()"
     fn step(w: &mut Vm, c: GcRef) -> Result<(), RuntimeError> {
         w.push(Value::obj(c));
         // An `Obj::Iter` receiver never reads its site; 0 is a real one (the prelude has calls).
-        w.do_method_call("next", 0, 0, Span::RUNTIME)?;
+        let next = w
+            .program
+            .methods
+            .names()
+            .get("next")
+            .expect("an id for next");
+        w.do_method_call(next, 0, 0, Span::RUNTIME)?;
         w.pop();
         Ok(())
     }
@@ -2444,7 +2452,13 @@ C := BIG.iter()"
     fn step(w: &mut Vm, c: GcRef) -> Result<(), RuntimeError> {
         w.push(Value::obj(c));
         // An `Obj::Iter` receiver never reads its site; 0 is a real one (the prelude has calls).
-        w.do_method_call("next", 0, 0, Span::RUNTIME)?;
+        let next = w
+            .program
+            .methods
+            .names()
+            .get("next")
+            .expect("an id for next");
+        w.do_method_call(next, 0, 0, Span::RUNTIME)?;
         w.pop();
         Ok(())
     }

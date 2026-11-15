@@ -872,14 +872,19 @@ impl Vm {
     /// `defer f(args)` / `defer recv.m(args)` — pop the callee/receiver + `argc` args off the stack
     /// and record a deferred call on the current frame (drained LIFO at frame exit). The values were
     /// evaluated now (Go semantics); the call runs at exit.
-    pub(super) fn do_defer(&mut self, method: Option<(Arc<str>, u32)>, argc: usize, span: Span) {
+    pub(super) fn do_defer(
+        &mut self,
+        method: Option<(crate::base::method_table::MethodId, u32)>,
+        argc: usize,
+        span: Span,
+    ) {
         let at = self.stack.len() - argc;
         let args: Vec<Value> = self.stack.split_off(at);
         let head = self.pop();
         let d = match method {
-            Some((name, ic)) => Deferred::Method {
+            Some((method, ic)) => Deferred::Method {
                 recv: head,
-                name,
+                method,
                 ic,
                 args,
                 span,

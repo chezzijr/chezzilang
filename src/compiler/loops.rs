@@ -245,7 +245,7 @@ impl Compiler {
             let ic = self.next_method_ic();
             fc.emit(
                 Op::CallMethod {
-                    name: crate::base::hooks::Hook::Next.method().to_string(),
+                    method: self.method_id(crate::base::hooks::Hook::Next.method()),
                     argc: 0,
                     ic,
                 },

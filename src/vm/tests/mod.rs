@@ -86,6 +86,7 @@ pub(crate) fn empty_program() -> Program {
         modules: vec![],
         field_ic_sites: 0,
         method_ic_sites: 0,
+        methods: Default::default(),
         task_entry: 0,
         cffi_defs: vec![],
         tests: vec![],

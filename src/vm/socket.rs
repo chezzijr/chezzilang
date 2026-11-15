@@ -873,13 +873,10 @@ impl Vm {
     pub(super) fn socket_method(
         &mut self,
         h: GcRef,
-        method: &str,
+        which: SocketMethod,
         args: &[Value],
         span: Span,
     ) -> Result<Value, RuntimeError> {
-        let Some(which) = SocketMethod::from_name(method) else {
-            return Err(self.err(format!("type Socket has no method '{method}'"), span));
-        };
         match which {
             SocketMethod::Read => {
                 let r = self.socket_read(h, args, span);
@@ -1013,13 +1010,10 @@ impl Vm {
     pub(super) fn listener_method(
         &mut self,
         h: GcRef,
-        method: &str,
+        which: ListenerMethod,
         args: &[Value],
         span: Span,
     ) -> Result<Value, RuntimeError> {
-        let Some(which) = ListenerMethod::from_name(method) else {
-            return Err(self.err(format!("type Listener has no method '{method}'"), span));
-        };
         match which {
             ListenerMethod::Accept => {
                 let r = self.listener_accept(h, args, span);

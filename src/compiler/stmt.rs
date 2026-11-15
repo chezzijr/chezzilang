@@ -606,7 +606,7 @@ impl Compiler {
                 let ic = self.next_method_ic();
                 child.emit(
                     Op::CallMethod {
-                        name: name.to_string(),
+                        method: self.method_id(name),
                         argc: k,
                         ic,
                     },

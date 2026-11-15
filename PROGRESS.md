@@ -111,7 +111,11 @@ workspace crates, the blocking-point table (`block::wait_steps`) and the boundar
    `List.contains`/`index_of`/`dedup`/`unique` carry `where T: Eq` on their decls.
    Error origin landed (2026-11-15, owner decision): every error records where `!x` first made it
    (first stamp wins, none in a std file); `line()`/`col()`/`file()` are `native fn` defaults of
-   `protocol Error`, so `MyErr(1).line()` type-checks and a declared `line()` wins.
+   `protocol Error`, so `MyErr(1).line()` type-checks and a declared `line()` wins. Method ids and
+   one VM method table landed (2026-11-15, same plan, Task 2): a method call carries an interned
+   `MethodId` and `Vm::do_method_call` reads one dense entry of `Program::methods`
+   (`base/method_table.rs`), built from the std decls, the intrinsic rows (moved to
+   `base/intrinsic.rs`) and the program's types; the VM's 13 name-keyed deciders are gone.
 1. **TICKET-266, a `never` return type.** `exit` and `panic` declare `-> never`, and a call of that
    type leaves its block (Rust `-> !`). It deletes the `panic("unreachable")` lines after `os.exit`.
    Escalated; branch `ticket/266` kept.
