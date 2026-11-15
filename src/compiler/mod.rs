@@ -576,14 +576,14 @@ impl Compiler {
             .unwrap_or_else(|| name.to_string())
     }
 
-    /// M19 Phase 6 — allocate an inline-cache site id for a `CallMethod` op. Every method/module-member
-    /// call gets a fresh dense id (the VM fills it only for struct-method dispatch; module/core-type
-    /// calls leave it empty, costing one unused `method_ic` slot — negligible).
     /// The id of the method name `name` (`Op::CallMethod`'s operand).
     fn method_id(&mut self, name: &str) -> crate::base::method_table::MethodId {
         self.method_names.intern(name)
     }
 
+    /// M19 Phase 6 — allocate an inline-cache site id for a `CallMethod` op. Every method/module-member
+    /// call gets a fresh dense id (the VM fills it only for struct-method dispatch; module/core-type
+    /// calls leave it empty, costing one unused `method_ic` slot — negligible).
     fn next_method_ic(&mut self) -> u32 {
         let id = self.method_ic_next;
         self.method_ic_next += 1;

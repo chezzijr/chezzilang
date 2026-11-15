@@ -270,7 +270,9 @@ satisfies `Error`, and a type that declares its own `line()` answers with it.
 - A value never made an error (`MyErr(1)` held as an `Error`), and an `int`/`float`/`bool` payload,
   have `None` for all three.
 - A `!x` inside the stdlib names no origin (`None`), so your own `!e` of a std error is its origin.
-- `panic(e.message())` re-raises at `e`'s origin, not at the `panic` line.
+- `panic(e.message())` re-raises at `e`'s origin, not at the `panic` line, when `e` is a `str`
+  error or a fault caught by `recover:`. A struct error's `message()` builds a new `str`, so that
+  `panic` names its own line (`e.line()` still gives the struct's origin).
 - A fault raised inside a stdlib function (for example `submit` on a shut-down `Executor`) is located
   at your call into the stdlib (Rust's `#[track_caller]`), caught or uncaught; the trace keeps its
   frames. A stdlib `panic(...)` stays unstamped (`None`).
