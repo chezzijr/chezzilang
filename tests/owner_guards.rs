@@ -499,3 +499,94 @@ fn a_native_argument_takes_its_default_from_its_decl() {
         assert_eq!(!hand_defaults(shape).is_empty(), fires, "{shape}");
     }
 }
+
+/// The identifiers of `code`, in order (a word of `[A-Za-z0-9_]`).
+fn idents(code: &str) -> impl Iterator<Item = &str> {
+    code.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+        .filter(|w| !w.is_empty())
+}
+
+/// The deadlock verdict is decided once, as Go's `checkdead` decides it: `MnSched::on_deadlock` in
+/// `vm/deadlock.rs` is its one definition, and no error carries a deadlock flag of its own (a
+/// deadlock is `RunHalt::Deadlock`, read through `run_halt()`), so no `is_deadlock` field or read
+/// is left anywhere in `src`, tests included.
+#[test]
+fn the_deadlock_verdict_has_one_definition() {
+    let src = Path::new("src");
+    let mut defs = Vec::new();
+    let mut flags = Vec::new();
+    for path in rust_files(src) {
+        let rel = path.strip_prefix(src).unwrap();
+        let text = fs::read_to_string(&path).unwrap();
+        let code = production_code(&text, false);
+        for (n, line) in code.lines().enumerate() {
+            if !is_test_file(rel) && line.contains("fn on_deadlock(") {
+                defs.push(format!("src/{}:{}", rel.display(), n + 1));
+            }
+            if idents(line).any(|w| w == "is_deadlock") {
+                flags.push(format!("src/{}:{}", rel.display(), n + 1));
+            }
+        }
+    }
+    assert!(
+        defs.len() == 1 && defs[0].starts_with("src/vm/deadlock.rs:"),
+        "`fn on_deadlock` must be defined once, in src/vm/deadlock.rs; found:\n{}",
+        defs.join("\n")
+    );
+    assert!(
+        flags.is_empty(),
+        "a deadlock is `RunHalt::Deadlock`, never an `is_deadlock` flag:\n{}",
+        flags.join("\n")
+    );
+}
+
+/// The run's awake count (`quiesce::Awake`) changes only at a task's start, park, wake and end:
+/// its word (`awake` and `alive`) is written only by `task_started`, `task_ended`, `asleep` and
+/// `woken`. The fields are private, so only `vm/quiesce.rs` can reach them; inside it, a write to
+/// the word from any other fn, or a reach into `awake.0` from outside `impl Awake`, fails here.
+#[test]
+fn the_awake_count_has_four_writers() {
+    const WRITERS: &[&str] = &["task_started", "task_ended", "asleep", "woken"];
+    const WRITES: &[&str] = &["fetch_", "store(", "swap(", "compare_exchange"];
+    let code = production_code(&fs::read_to_string("src/vm/quiesce.rs").unwrap(), false);
+    let decl = code
+        .lines()
+        .find(|l| l.contains("struct Awake("))
+        .expect("quiesce.rs declares `struct Awake(..)`");
+    let fields = &decl[decl.find("struct Awake(").unwrap()..];
+    assert!(
+        !fields.contains("pub"),
+        "Awake's fields must stay private: {decl}"
+    );
+    let mut bad = Vec::new();
+    let mut in_impl = false;
+    let mut func = "";
+    for (n, line) in code.lines().enumerate() {
+        if line.starts_with("impl Awake {") {
+            in_impl = true;
+            continue;
+        }
+        if in_impl && line.starts_with('}') {
+            in_impl = false;
+            continue;
+        }
+        if in_impl {
+            if let Some(at) = line.find("fn ") {
+                let name = &line[at + 3..];
+                func = &name[..name.find('(').unwrap_or(name.len())];
+            }
+            let writes_word = line.contains("self.0.") && WRITES.iter().any(|w| line.contains(w));
+            if writes_word && !WRITERS.contains(&func) {
+                bad.push(format!("src/vm/quiesce.rs:{} in fn `{func}`", n + 1));
+            }
+        } else if line.contains("awake.0") {
+            bad.push(format!("src/vm/quiesce.rs:{} outside `impl Awake`", n + 1));
+        }
+    }
+    assert!(
+        bad.is_empty(),
+        "the awake count is written only by `Awake::{{{}}}`:\n{}",
+        WRITERS.join(", "),
+        bad.join("\n")
+    );
+}

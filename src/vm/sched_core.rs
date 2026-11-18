@@ -3,228 +3,64 @@
 
 use super::*;
 
-/// May the verdict cut a stuck cleanup as its family's cancel (`aborting`: its scope is an
-/// aborting family's)? Never a guard holder: its cut is fatal and the report lists it
-/// (TICKET-298).
-fn cut_as_family(aborting: bool, holds_guard: bool) -> bool {
-    aborting && !holds_guard
-}
-
 impl SchedCore {
-    /// Fault every still-parked fiber (across ALL scopes) with the deadlock error, cut every
-    /// blocked-in-place waiter (`verdict_cut`) and latch `terminate` unless a demoted fiber is still
-    /// registered (called under the lock). An aborting family is cut first, alone
-    /// ([`SchedCore::cut_aborting_families`]). Returns whether `terminate` latched. Correct because the
-    /// global predicate firing means nothing can progress anywhere. A `Wait` token sits in N buckets
-    /// but is ONE fiber — claim-once (the wake CAS) dedups it so the flat slot is faulted and the fiber's SCOPE's `done` bumped exactly once.
-    /// Each parked fiber's OWN buffered stdout/stderr (moved into `f.ctx.out`/`stderr` by `swap_task`
-    /// when it parked) is carried into its `Deadlocked` slot, so `reduce_task_slots` flushes EVERY
-    /// parked buffer at its task-order slot — matching what a strictly sequential run would have
-    /// printed live before the deadlock returned. A distinct `Deadlocked` outcome (not `Fault`) is what lets
-    /// the reduce flush ALL parked buffers here without disturbing the real-fault multi-fault path.
-    pub(super) fn flag_deadlock(&mut self, err: &RuntimeError) -> bool {
-        if self.cut_aborting_families() {
-            return false;
-        }
-        let buckets: Vec<Vec<ParkedEntry>> = self.parked.drain().map(|(_, v)| v).collect();
-        let mut own_joins = Vec::new();
-        for v in buckets {
-            for entry in v {
-                let fiber = match entry {
-                    ParkedEntry::Recv(f) => Some(f),
-                    ParkedEntry::Send(f) | ParkedEntry::Guard(f) => Some(f),
-                    // A join with slack is of this sched's own Executor ([`Vm::join_executor`]):
-                    // judged below, once the jobs it waits for are ended.
-                    ParkedEntry::ExecJoin(f, _, slack) if slack > 0 => {
-                        own_joins.push((f, slack));
-                        None
-                    }
-                    ParkedEntry::ExecJoin(f, ..) => Some(f),
-                    ParkedEntry::Wait(wp) => {
-                        if wp
-                            .claimed
-                            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-                            .is_err()
-                        {
-                            None
-                        } else {
-                            Some(
-                                wp.fiber
-                                    .lock()
-                                    .unwrap_or_else(|e| e.into_inner())
-                                    .take()
-                                    .expect("WaitPark fiber claimed twice"),
-                            )
-                        }
-                    }
-                };
-                if let Some(f) = fiber {
-                    self.verdict_victim(f, err);
-                }
-            }
-        }
-        // TICKET-103 — `terminate` stops every worker before its next global pop, so a join-parked
-        // owner requeued here would never run: record it `Deadlocked` instead (or cut it, in a
-        // `defer`, and keep the workers).
-        for (origin, f) in std::mem::take(&mut self.join_parked) {
-            self.scopes[origin].joins_blocked -= 1;
-            self.scopes[f.scope_id].owners_blocked -= 1;
-            self.verdict_victim(f, err);
-        }
-        // A fiber joining this sched's own Executor whose join the verdict just ended resumes (its
-        // `shutdown` returns), as an in-place joiner sees its join over before the cut. The
-        // verdict's caller adds it to `runnable` ([`MnSched::take_cut_requeued`]).
-        for (mut f, slack) in own_joins {
-            if self.join_over(slack) {
-                f.state = FiberState::Ready;
-                self.global.push_back(f);
-                self.cut_requeued += 1;
-            } else {
-                self.verdict_victim(f, err);
-            }
-        }
-        self.parked_n = 0;
-        // TICKET-296: a demoted fiber reads the cut, unwinds and can requeue itself, so the workers
-        // stay until it settles, as they do for a fiber cut in a `defer`. Returns whether
-        // `terminate` latched.
-        self.verdict_cut = true;
-        self.terminate = !self.any_fiber_waiter() && self.cut_requeued == 0;
-        self.terminate
-    }
-
-    /// THE verdict's treatment of a parked fiber it meets: one in a `defer` (it does not honour a
-    /// cancel, [`Fiber::honours_cancel`]) has its wait cut ([`SchedCore::cut_parked`]), as the
-    /// demoted cleanup it replaces is cut in place; any other is recorded `Deadlocked`.
-    /// A fiber of an aborting scope is cut as that scope's cancel, wherever the verdict meets it.
-    fn verdict_victim(&mut self, f: Fiber, err: &RuntimeError) {
-        if f.honours_cancel() {
-            self.record_deadlocked(f, err);
-        } else if cut_as_family(self.aborting(f.scope_id), f.holds_guard()) {
-            self.cut_parked(f, VerdictCut::Family);
-        } else {
-            self.cut_parked(f, VerdictCut::Sched);
-        }
-    }
-
-    /// Is scope `sid` an aborting family's: incomplete, with its cancel (or an ancestor's)
-    /// tripped? A stuck cleanup there is cut as the cancel ([`SchedCore::cut_aborting_families`]).
-    fn aborting(&self, sid: usize) -> bool {
-        let s = &self.scopes[sid];
-        s.done < s.total && self.scope_cancel_tripped(sid)
-    }
-
-    /// Requeue parked fiber `f` with its wait cut (`how`): never recorded, never listed. The
-    /// verdict's caller adds it to `runnable` ([`MnSched::take_cut_requeued`]).
-    fn cut_parked(&mut self, mut f: Fiber, how: VerdictCut) {
-        f.defer_cut = Some(how);
-        f.state = FiberState::Ready;
-        self.global.push_back(f);
-        self.cut_requeued += 1;
-    }
-
-    /// The verdict's cut of an aborting family: a fiber of a cancelled scope (its owner's own
-    /// fault, or a child's fault, tripped the scope's cancel, before or after the owner reached its
-    /// join) waits in a `defer` that nothing can finish, and the owner waits for that family alone.
-    /// The verdict cuts those waits as the scope's cancel and nothing else, and latches nothing:
-    /// the cause wins (DEC-147), the owner unwinds, and a later wait is judged again. A demoted
-    /// fiber reads its cut in place ([`Vm::in_place_cut`]); a fiber parked in a `defer` (it does
-    /// not honour the cancel, [`Fiber::honours_cancel`]) is requeued with its wait cut
-    /// ([`SchedCore::cut_parked`]). Returns whether such a wait exists; without one
-    /// the verdict is sched-wide.
-    fn cut_aborting_families(&mut self) -> bool {
-        let cancelled: Vec<usize> = self
-            .scopes
-            .iter()
-            .map(|(i, _)| i)
-            .filter(|&i| self.aborting(i))
-            .collect();
-        let mut any = false;
-        for w in self.waiters.values_mut() {
-            if w.fiber
-                && cut_as_family(
-                    w.scope.is_some_and(|s| cancelled.contains(&s)),
-                    w.holds_guard,
-                )
-            {
-                w.cut = true;
-                any = true;
-            }
-        }
-        let stuck = |f: &Fiber| {
-            !f.honours_cancel() && cut_as_family(cancelled.contains(&f.scope_id), f.holds_guard())
-        };
-        let buckets: Vec<(usize, Vec<ParkedEntry>)> = self.parked.drain().collect();
-        let mut cut = Vec::new();
-        for (key, v) in buckets {
-            let mut keep = Vec::new();
+    /// The run's deadlock verdict on this sched, step 1 ([`MnSched::on_deadlock`]): every parked
+    /// and join-parked fiber leaves its wait, each counted awake again. Every sched of the run
+    /// takes its fibers out before any is ended ([`SchedCore::end_asleep`]), so the end of one
+    /// (a job a fiber joins) wakes no fiber the verdict ends.
+    pub(super) fn take_asleep(&mut self) -> Vec<Fiber> {
+        let mut out = Vec::new();
+        for (_, v) in self.parked.drain() {
             for entry in v {
                 match entry {
                     ParkedEntry::Recv(f)
                     | ParkedEntry::Send(f)
                     | ParkedEntry::Guard(f)
-                    | ParkedEntry::ExecJoin(f, ..)
-                        if stuck(&f) =>
-                    {
-                        cut.push(f)
-                    }
+                    | ParkedEntry::ExecJoin(f, ..) => out.push(f),
+                    // One fiber in N buckets: the claim takes it once.
                     ParkedEntry::Wait(wp) => {
-                        // `None`: a claimed token's stale copy, dropped as `drain_parked` drops it.
-                        let take = wp
-                            .fiber
-                            .lock()
-                            .unwrap_or_else(|e| e.into_inner())
-                            .as_ref()
-                            .map(stuck);
-                        if take == Some(false) {
-                            keep.push(ParkedEntry::Wait(wp));
-                        } else if take == Some(true)
-                            && wp
-                                .claimed
-                                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-                                .is_ok()
+                        if wp
+                            .claimed
+                            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                            .is_ok()
+                            && let Some(f) =
+                                wp.fiber.lock().unwrap_or_else(|e| e.into_inner()).take()
                         {
-                            cut.push(
-                                wp.fiber
-                                    .lock()
-                                    .unwrap_or_else(|e| e.into_inner())
-                                    .take()
-                                    .expect("WaitPark fiber claimed twice"),
-                            );
+                            out.push(f);
                         }
                     }
-                    other @ (ParkedEntry::Recv(_)
-                    | ParkedEntry::Send(_)
-                    | ParkedEntry::Guard(_)
-                    | ParkedEntry::ExecJoin(..)) => keep.push(other),
                 }
             }
-            if !keep.is_empty() {
-                self.parked.insert(key, keep);
-            }
         }
-        self.parked_n -= cut.len();
-        for f in cut {
-            any = true;
-            self.cut_parked(f, VerdictCut::Family);
+        for (_, f) in std::mem::take(&mut self.join_parked) {
+            out.push(f);
         }
-        any
+        self.parked_n = 0;
+        self.awake.woken(out.len());
+        out
     }
 
-    /// TICKET-296: the sched is torn down, or the sched-wide verdict cut every blocked-in-place
-    /// waiter. Read through [`Vm::in_place_cut`].
+    /// Step 2 of the run's verdict on this sched: each fiber [`SchedCore::take_asleep`] took ends
+    /// `Deadlocked` with `err`, listed at its wait, its guards cut, no `defer` run
+    /// ([`SchedCore::record_deadlocked`]). Latches `terminate` unless a demoted fiber is still
+    /// registered.
+    pub(super) fn end_asleep(&mut self, fibers: Vec<Fiber>, err: &RuntimeError, verdict: u64) {
+        for f in fibers {
+            self.record_deadlocked(f, err, verdict);
+        }
+        self.verdict_cut = true;
+        self.terminate = !self.any_fiber_waiter();
+    }
+
+    /// TICKET-296: the sched is torn down, or the run's verdict ended its tasks
+    /// ([`SchedCore::end_asleep`]). Read through [`Vm::in_place_cut`].
     pub(super) fn cut_in_place(&self) -> bool {
         self.terminate || self.verdict_cut
     }
 
-    /// Did the verdict cut the waiter `tok` as the stuck cleanup of a cancelled scope
-    /// ([`SchedCore::cut_aborting_families`])? Read through [`Vm::in_place_cut`].
-    pub(super) fn waiter_cut(&self, tok: Option<u64>) -> bool {
-        tok.is_some_and(|t| self.waiters.get(&t).is_some_and(|w| w.cut))
-    }
-
-    /// Store one claimed parked fiber's `Deadlocked` outcome and bump its scope's `done`. Shared by
-    /// `flag_deadlock` and `flag_deadlock_leaves`.
-    fn record_deadlocked(&mut self, f: Fiber, err: &RuntimeError) {
+    /// Store one claimed parked fiber's `Deadlocked` outcome and bump its scope's `done`
+    /// ([`SchedCore::end_asleep`]).
+    fn record_deadlocked(&mut self, f: Fiber, err: &RuntimeError, verdict: u64) {
         // Carry the parked fiber's OWN buffered stdout/stderr into its Deadlocked slot (not an empty
         // buffer). `swap_task` moved this fiber's live prints into `f.ctx.out` when it parked; the
         // downstream `reduce_task_slots` flushes EVERY Deadlocked slot's buffer at its task-order slot
@@ -256,10 +92,17 @@ impl SchedCore {
             (None, Some(e)) => e.clone(),
             (None, None) => err.clone(),
         };
+        // A task stuck in a `defer` of its `--max-heap` abort stays over memory.
+        let scope_err = if ctx.drains.iter().any(super::Drain::over_memory) {
+            scope_err.over_memory()
+        } else {
+            scope_err
+        };
         self.slots[ti] = Some(TaskOutcome::Deadlocked {
             err: scope_err,
             out: ctx.out,
             stderr: ctx.stderr,
+            verdict,
         });
         self.task_done(sid);
         self.job_event(
@@ -310,7 +153,10 @@ impl SchedCore {
                     step.start.push(fiber);
                     return step;
                 }
+                // A held job is alive but asleep: only a job's end releases it. The submitter is
+                // awake, so this never reads as every task asleep.
                 self.exec_held.push_back(fiber);
+                self.awake.asleep();
             }
             JobEvent::Ended {
                 task_index,
@@ -327,8 +173,9 @@ impl SchedCore {
                 task_index,
                 scope_id,
             } => {
-                // `flag_deadlock` latches `terminate` (or leaves a demoted fiber to settle), so a
-                // released job would never run and its `None` slot would hang the join; the parked job's `Deadlocked` is the report.
+                // `end_asleep` latches `terminate` (or leaves a demoted fiber to settle), so a
+                // released job would never run and its `None` slot would hang the join; the parked
+                // job's `Deadlocked` is the report.
                 if self.is_job_scope(scope_id) {
                     self.exec_active -= 1;
                     self.settle_job(task_index, JobSeal::Nothing, &mut step);
@@ -360,6 +207,7 @@ impl SchedCore {
                 break;
             };
             self.exec_active += 1;
+            self.awake.woken(1);
             step.start.push(f);
         }
         step
@@ -372,6 +220,7 @@ impl SchedCore {
 
     fn drop_held(&mut self, settle: bool, step: &mut JobStep) {
         for f in std::mem::take(&mut self.exec_held) {
+            self.awake.woken(1); // a held job wakes to end
             self.drop_job(f, settle, step);
         }
     }
@@ -407,6 +256,7 @@ impl SchedCore {
         };
         if let Some(pos) = self.exec_held.iter().position(|f| f.task_index == idx) {
             if let Some(f) = self.exec_held.remove(pos) {
+                self.awake.woken(1); // a held job wakes to end
                 self.drop_job(f, halt.settles(), step);
             }
             return;
@@ -434,10 +284,6 @@ impl SchedCore {
         if sealed {
             step.sealed.push(s.ch);
         }
-        // TICKET-236 — LAST: the seal above is this leaver's final channel effect, and the caller
-        // still holds the lock that ends the job. Moved above the seal, a judge could open its
-        // bracket after the bump, read the unsealed handle, then read the finished sched.
-        self.note_left();
     }
 
     /// TICKET-103 — every scope sharing `scope_id`'s cancel token: a nursery's origin scope plus its
@@ -472,178 +318,6 @@ impl SchedCore {
     pub(super) fn owner_scope_done(&self, scope_id: usize) -> bool {
         !self.scopes[scope_id].body_open && self.family_done(scope_id)
     }
-
-    /// TICKET-103 — some owner blocked at a same-sched join is joining a family whose every scope is
-    /// complete. That owner resumes on its next pass (see `MnSched::quiesced_core`).
-    pub(super) fn any_joined_family_done(&self) -> bool {
-        self.scopes
-            .iter()
-            .any(|(i, s)| s.joins_blocked > 0 && self.family_done(i))
-    }
-
-    /// TICKET-103 (W12-4) — the deadlock flag, faulting only the parked fibers of JOINED LEAF
-    /// families. Returns `true` when it fell back to the sched-wide [`SchedCore::flag_deadlock`]
-    /// (which latches `terminate` unless a demoted fiber is left), `false` when it faulted leaves
-    /// only and the sched keeps running.
-    ///
-    /// A join-blocked owner feeds by CHANNEL, not by family, so a parked fiber outside the family it
-    /// joins may be its next receiver once its `recover:` returns (`cousin_fed`). A *joined* family
-    /// (one with `joins_blocked > 0`) is a *leaf* when none of its scopes holds a join-blocked owner
-    /// (`owners_blocked`). A joined leaf's fibers have no feeder left: its owner waits on them, and
-    /// no member waits on a join. With no parked fiber in ANY joined leaf, the sched keeps today's
-    /// sched-wide flag.
-    ///
-    /// TICKET-125 (W13-5) — with two OR MORE parked leaves, faulting all of them at once can be
-    /// wrong: one leaf's owner may feed a COUSIN leaf once its `recover:` returns
-    /// (`leaf_cousin`/`d2a`), so faulting the cousin too drops a live receiver. So it faults the
-    /// single lowest-index parked leaf alone, and ONLY when `unproven_ok` licenses it (TICKET-129 —
-    /// [`MnSched::may_fault_unproven`] is that license: a private sched judging its own leaf in
-    /// isolation cannot tell "genuinely stuck" from "a cousin on another sched is about to feed
-    /// me", so a fault waits for that peer to either move or itself go quiet, matching Go's
-    /// all-goroutines-parked rule instead of a per-subgroup guess). The next verdict judges the next
-    /// leaf.
-    ///
-    /// M3.2 fix 1 — there is no holder-count proof any more: a channel slot can be shared by two
-    /// tasks (a module global, a value received by handle), and one slot holds one `Arc`, so no
-    /// count of `Arc` holders shows that no other task holds the channel.
-    ///
-    /// Returns `None` when `unproven_ok` is `false` — the caller must decline (wait, never spin)
-    /// rather than fault. Otherwise returns `Some(true)` when it fell back to the sched-wide
-    /// [`SchedCore::flag_deadlock`] and that latched `terminate`, `Some(false)` when it faulted
-    /// leaves only and the sched keeps running.
-    pub(super) fn flag_deadlock_leaves(
-        &mut self,
-        err: &RuntimeError,
-        unproven_ok: bool,
-    ) -> Option<bool> {
-        if !unproven_ok {
-            return None;
-        }
-        let candidates = self.leaf_candidates();
-        if candidates.is_empty() {
-            return Some(self.flag_deadlock(err));
-        }
-        let target: std::collections::HashSet<usize> = candidates[0].iter().copied().collect();
-        let buckets: Vec<(usize, Vec<ParkedEntry>)> = self.parked.drain().collect();
-        let mut flagged = 0usize;
-        for (key, v) in buckets {
-            let mut keep: Vec<ParkedEntry> = Vec::new();
-            for entry in v {
-                let fiber = match entry {
-                    ParkedEntry::Recv(f)
-                    | ParkedEntry::Send(f)
-                    | ParkedEntry::Guard(f)
-                    | ParkedEntry::ExecJoin(f, ..)
-                        if target.contains(&f.scope_id) =>
-                    {
-                        Some(f)
-                    }
-                    ParkedEntry::Wait(wp) => {
-                        if wp.claimed.load(Ordering::Acquire) {
-                            continue; // a stale copy of a claimed token: drop it
-                        }
-                        match Self::peek_wait_scope(&wp) {
-                            None => continue, // already taken: drop the stale copy
-                            Some(s) if !target.contains(&s) => {
-                                keep.push(ParkedEntry::Wait(wp));
-                                continue;
-                            }
-                            Some(_) => {
-                                if wp
-                                    .claimed
-                                    .compare_exchange(
-                                        false,
-                                        true,
-                                        Ordering::AcqRel,
-                                        Ordering::Acquire,
-                                    )
-                                    .is_err()
-                                {
-                                    continue;
-                                }
-                                wp.fiber.lock().unwrap_or_else(|e| e.into_inner()).take()
-                            }
-                        }
-                    }
-                    other @ (ParkedEntry::Recv(_)
-                    | ParkedEntry::Send(_)
-                    | ParkedEntry::Guard(_)
-                    | ParkedEntry::ExecJoin(..)) => {
-                        keep.push(other); // outside every joined leaf: stays parked
-                        continue;
-                    }
-                };
-                if let Some(f) = fiber {
-                    self.verdict_victim(f, err);
-                    flagged += 1;
-                }
-            }
-            if !keep.is_empty() {
-                self.parked.insert(key, keep);
-            }
-        }
-        self.parked_n -= flagged;
-        Some(false)
-    }
-
-    /// Peek a `Wait` fiber's scope under its mutex without claiming, as `cancel_drain` does. Shared by
-    /// [`SchedCore::leaf_candidates`] and the flagging loop in [`SchedCore::flag_deadlock_leaves`].
-    fn peek_wait_scope(wp: &Arc<WaitPark>) -> Option<usize> {
-        wp.fiber
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .as_ref()
-            .map(|f| f.scope_id)
-    }
-
-    /// TICKET-129 (W13-5 residual) — the distinct joined-leaf families with at least one parked
-    /// member, ordered by each family's lowest scope index ([`SchedCore::flag_deadlock_leaves`]).
-    fn leaf_candidates(&self) -> Vec<Vec<usize>> {
-        // Distinct joined-leaf families, keyed (and so de-duplicated + ordered) by each family's
-        // lowest scope index.
-        let mut families: std::collections::BTreeMap<usize, Vec<usize>> =
-            std::collections::BTreeMap::new();
-        for (i, si) in self.scopes.iter() {
-            if si.joins_blocked == 0 {
-                continue;
-            }
-            let fam = self.scope_family(i);
-            if fam.iter().any(|&j| self.scopes[j].owners_blocked > 0) {
-                continue; // interior: a member's owner may feed it once its own join returns
-            }
-            // TICKET-125 (W13-4) — a member fiber that owns a still-incomplete NESTED nursery is
-            // also interior: faulting that member drops it without unwinding its child scope, which
-            // orphans the child and hangs the run. `owners_blocked` alone misses this: it only
-            // counts JOIN-parked owners, not one parked on a channel inside the child's own body.
-            if self.scopes.iter().any(|(k, s)| {
-                !fam.contains(&k)
-                    && s.done < s.total
-                    && s.parent_scope.is_some_and(|p| fam.contains(&p))
-            }) {
-                continue;
-            }
-            let lowest = *fam.iter().min().expect("scope_family never returns empty");
-            families.entry(lowest).or_insert(fam);
-        }
-        let parked_scopes: std::collections::HashSet<usize> = self
-            .parked
-            .values()
-            .flatten()
-            .filter_map(|e| match e {
-                ParkedEntry::Recv(f)
-                | ParkedEntry::Send(f)
-                | ParkedEntry::Guard(f)
-                | ParkedEntry::ExecJoin(f, ..) => Some(f.scope_id),
-                ParkedEntry::Wait(wp) => (!wp.claimed.load(Ordering::Acquire))
-                    .then(|| Self::peek_wait_scope(wp))
-                    .flatten(),
-            })
-            .collect();
-        families
-            .into_values()
-            .filter(|fam| fam.iter().any(|s| parked_scopes.contains(s)))
-            .collect()
-    }
 }
 
 /// B3.3-threads — turn a caught panic payload (from `catch_unwind` around a worker task) into a
@@ -661,9 +335,7 @@ pub(super) fn panic_to_fault(payload: Box<dyn std::any::Any + Send>, span: Span)
         is_assert: false,
         is_over_memory: false,
         is_timed_out: false,
-        is_deadlock: false,
         is_panic: false,
-        blocked: None,
     }
 }
 
@@ -769,8 +441,8 @@ impl ReadyWorker {
             fault_park: None,
             park_site: None,
             park_deadline: None,
+            timer_wait: None,
             job_cancel: None,
-            defer_cut: None,
             cut: None,
             cancel_unwind_faulted: false,
         }

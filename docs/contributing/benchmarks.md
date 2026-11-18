@@ -235,6 +235,85 @@ in its own worktree and target dir. Budget: +3% per bench.
 2000 tasks that each wait in a `defer` at `--threads=2` (`tests/defer_park_scale.rs`): 5 OS threads
 and 0.47 s, `demotes=0`; before, 2005 threads and 38.3 s.
 
+### One global deadlock check (2026-11-18)
+
+Plan `2026-11-17-checkdead`: a run-wide awake count (one atomic add per start, park, wake and end)
+replaces the per-scope, per-sched and family deadlock judges; main runs as fiber 1 and an
+Executor's jobs run on the root sched's workers. `benches/sched/ab_pair.py`, release, n=5
+interleaved, wall ms median (spread = max - min) and max RSS; T `default` is the default worker
+count. Base `7f2e03b3` built in its own target dir. Gate (`ab_pair.py`): `ok` when the branch median is at most
+the base median plus the base spread; budget +3% per bench.
+
+After Task 1 (the count added, the old judges still deciding), loadavg 3.6:
+
+| bench | T | base ms (spread) / RSS MiB | branch ms (spread) / RSS MiB | ratio | gate |
+|---|---|---|---|---|---|
+| `benches/sched/body_and_spawn.chz` | 4 | 3145 (77) / 15 | 3026 (55) / 15 | 0.96x | ok |
+| `benches/sched/burn8_nursery.chz` | 4 | 1857 (30) / 15 | 1782 (21) / 15 | 0.96x | ok |
+| `benches/sched/churn2.chz` | 4 | 2320 (142) / 23 | 2291 (205) / 23 | 0.99x | ok |
+| `benches/sched/churn8.chz` | 4 | 3124 (181) / 23 | 3284 (121) / 24 | 1.05x | ok |
+| `benches/sched/deep_nurseries.chz` | 4 | 2688 (1271) / 15 | 2758 (808) / 15 | 1.03x | ok |
+| `benches/sched/executor_and_parallel.chz` | 4 | 1922 (143) / 15 | 1852 (63) / 15 | 0.96x | ok |
+| `benches/sched/extern_abs.chz` | 4 | 87 (30) / 15 | 92 (27) / 15 | 1.07x | ok |
+| `benches/sched/fan_open.chz` | 4 | 487 (21) / 15 | 511 (30) / 15 | 1.05x | SLOW |
+| `benches/sched/guard_contend.chz` | 4 | 133 (19) / 15 | 127 (4) / 15 | 0.95x | ok |
+| `benches/sched/rendezvous_pingpong.chz` | 4 | 3424 (1620) / 15 | 4794 (2805) / 15 | 1.40x | ok |
+| `benches/sched/send_one_channel.chz` | 4 | 1261 (449) / 15 | 1214 (66) / 15 | 0.96x | ok |
+| `benches/sched/spawn_fresh_graph.chz` | 4 | 205 (44) / 15 | 214 (37) / 15 | 1.04x | ok |
+| `benches/sched/spawn_native_call.chz` | 4 | 805 (106) / 26 | 819 (85) / 25 | 1.02x | ok |
+| `benches/sched/storm.chz` | 4 | 44 (11) / 15 | 48 (6) / 15 | 1.10x | ok |
+| `benches/sched/trips.chz` | 4 | 57 (7) / 15 | 58 (11) / 15 | 1.02x | ok |
+| `benches/sched/two_executors.chz` | 4 | 1954 (97) / 15 | 1875 (53) / 15 | 0.96x | ok |
+
+`fan_open.chz` re-sampled n=10: 491 (26) vs 504 (15) ms, 1.03x, ok. `rendezvous_pingpong.chz` n=10:
+1.07x, ok (noisy).
+
+After the switch (Task 3e, the judges deleted). **Measured under load, loadavg ~12**, so the
+spreads are wide; re-run on a quiet box before using a row as a baseline:
+
+| bench | T | base ms (spread) / RSS MiB | branch ms (spread) / RSS MiB | ratio | gate |
+|---|---|---|---|---|---|
+| `benches/sched/body_and_spawn.chz` | 4 | 3212 (90) / 15 | 3166 (48) / 15 | 0.99x | ok |
+| `benches/sched/burn8_nursery.chz` | 4 | 1869 (14) / 15 | 1863 (11) / 15 | 1.00x | ok |
+| `benches/sched/churn2.chz` | 4 | 2408 (126) / 23 | 1049 (319) / 15 | 0.44x | ok |
+| `benches/sched/churn8.chz` | 4 | 3246 (151) / 24 | 1277 (153) / 15 | 0.39x | ok |
+| `benches/sched/deep_nurseries.chz` | 4 | 2418 (519) / 15 | 599 (125) / 15 | 0.25x | ok |
+| `benches/sched/executor_and_parallel.chz` | 4 | 1938 (104) / 15 | 1814 (9) / 15 | 0.94x | ok |
+| `benches/sched/extern_abs.chz` | 4 | 99 (24) / 15 | 95 (12) / 15 | 0.96x | ok |
+| `benches/sched/fan_open.chz` | 4 | 491 (41) / 15 | 511 (8) / 15 | 1.04x | ok |
+| `benches/sched/guard_contend.chz` | 4 | 133 (22) / 15 | 116 (10) / 15 | 0.87x | ok |
+| `benches/sched/rendezvous_pingpong.chz` | 4 | 3821 (1857) / 15 | 1834 (574) / 15 | 0.48x | ok |
+| `benches/sched/send_one_channel.chz` | 4 | 1223 (330) / 15 | 1110 (242) / 15 | 0.91x | ok |
+| `benches/sched/spawn_fresh_graph.chz` | 4 | 215 (29) / 15 | 220 (25) / 15 | 1.02x | ok |
+| `benches/sched/spawn_native_call.chz` | 4 | 795 (106) / 25 | 856 (108) / 23 | 1.08x | ok |
+| `benches/sched/storm.chz` | 4 | 49 (7) / 15 | 47 (6) / 15 | 0.96x | ok |
+| `benches/sched/trips.chz` | 4 | 63 (10) / 15 | 72 (7) / 15 | 1.13x | ok |
+| `benches/sched/two_executors.chz` | 4 | 1959 (97) / 15 | 1815 (47) / 15 | 0.93x | ok |
+| `benches/chz/closure.chz` | default | 2483 (43) / 15 | 2479 (37) / 15 | 1.00x | ok |
+| `benches/chz/defer.chz` | default | 701 (49) / 15 | 684 (27) / 15 | 0.98x | ok |
+| `benches/chz/empty.chz` | default | 7 (2) / 15 | 8 (3) / 15 | 1.13x | ok |
+| `benches/chz/enum.chz` | default | 3952 (194) / 15 | 3962 (19) / 15 | 1.00x | ok |
+| `benches/chz/fib.chz` | default | 529 (27) / 15 | 507 (43) / 15 | 0.96x | ok |
+| `benches/chz/hof.chz` | default | 707 (4) / 15 | 696 (48) / 15 | 0.98x | ok |
+| `benches/chz/hof_nursery.chz` | default | 711 (25) / 15 | 720 (75) / 15 | 1.01x | ok |
+| `benches/chz/hook_dispatch.chz` | default | 311 (33) / 15 | 279 (95) / 15 | 0.90x | ok |
+| `benches/chz/list.chz` | default | 816 (4) / 42 | 753 (36) / 42 | 0.92x | ok |
+| `benches/chz/loop.chz` | default | 1778 (39) / 15 | 1724 (54) / 15 | 0.97x | ok |
+| `benches/chz/many_list.chz` | default | 751 (27) / 195 | 657 (49) / 196 | 0.88x | ok |
+| `benches/chz/many_map.chz` | default | 499 (37) / 96 | 493 (37) / 95 | 0.99x | ok |
+| `benches/chz/many_struct.chz` | default | 811 (45) / 115 | 783 (49) / 117 | 0.97x | ok |
+| `benches/chz/map.chz` | default | 284 (52) / 26 | 264 (35) / 26 | 0.93x | ok |
+| `benches/chz/map_str.chz` | default | 423 (35) / 15 | 410 (29) / 15 | 0.97x | ok |
+| `benches/chz/poly_method.chz` | default | 2729 (68) / 15 | 2672 (108) / 15 | 0.98x | ok |
+| `benches/chz/primes.chz` | default | 1181 (29) / 15 | 1180 (44) / 15 | 1.00x | ok |
+| `benches/chz/print_loop.chz` | default | 550 (44) / 34 | 585 (33) / 30 | 1.06x | ok |
+| `benches/chz/str.chz` | default | 271 (33) / 60 | 261 (25) / 59 | 0.96x | ok |
+| `benches/chz/struct.chz` | default | 918 (35) / 15 | 802 (18) / 15 | 0.87x | ok |
+| `benches/chz/unique.chz` | default | 166 (8) / 44 | 164 (36) / 45 | 0.99x | ok |
+
+No row is `SLOW`. The large drops (`churn2`, `churn8`, `deep_nurseries`, `rendezvous_pingpong`)
+were not sampled on a quiet box, so no cause is claimed for them here.
+
 ### Method calls through one method table (2026-11-15)
 
 Plan `2026-11-15-error-origin-vm-method-ids`: a method call carries a `MethodId`, and one dense

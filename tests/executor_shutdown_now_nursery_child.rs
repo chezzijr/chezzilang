@@ -166,20 +166,30 @@ fn a_job_nursery_deadlock_with_no_shutdown_still_faults() {
              stderr: {stderr}",
             out.status
         );
+        // One global check (plan 2026-11-17): the run is awake through main's sleep, so the
+        // verdict lands at `shutdown()`, with every task listed in pre-order: main at its
+        // Executor join, the job at its `parallel:` join, the job's child at its `recv()`. Go
+        // twin: fatal, all goroutines asleep.
         assert!(
-            stderr.contains("deadlock: 1 task is blocked and cannot proceed")
-                && stderr.contains("task 1: recv() on an empty channel at "),
+            out.status.code() == Some(1)
+                && stdout == "awake\n"
+                && stderr.contains("deadlock: every task is blocked\n")
+                && stderr.contains("task 1: waiting for an Executor join at ")
+                && stderr.contains("h2c_noshut.chz:13:5\n")
+                && stderr.contains("task 2: waiting for a nursery join at ")
+                && stderr.contains("h2c_noshut.chz:5:5\n")
+                && stderr.contains("task 3: recv() on an empty channel at ")
+                && stderr.contains("h2c_noshut.chz:7:13\n"),
             "expected a deadlock fault, got stdout: {stdout:?} stderr: {stderr:?}"
         );
     });
 }
 
-/// W13-8 — `cancel()` must end a nursery child whose `defer` blocks forever, cutting the
-/// cleanup short at rc=0 rather than hanging. This is the EXISTING nursery precedent (`nrc.chz`,
-/// `## Digest`), not a new choice this ticket makes: a trigger that re-drains a re-parking fiber
-/// (the cleanup's own `stuck.recv()`) fails the hang deadline instead. Go's twin of this shape
-/// reports `fatal error: all goroutines are asleep - deadlock!` — a deliberate, pre-existing
-/// divergence this test pins today's outcome for, not endorses.
+/// W13-8 — `cancel()` ends a nursery child at its `recv`, and the child's `defer` then blocks
+/// forever (a `defer` is never itself cancelled). Main waits at `shutdown()`, the job at its
+/// `parallel:` join, the cleanup at its `recv()`: every task is asleep, so the one global check
+/// ends the run (plan 2026-11-17), never a hang. Go twin: `fatal error: all goroutines are asleep
+/// - deadlock!`. Before the plan the stuck cleanup was cut at rc=0.
 #[test]
 fn cancel_ends_a_nursery_child_whose_defer_blocks_forever() {
     let program = "import Executor from std.concurrency\n\
@@ -205,7 +215,21 @@ fn cancel_ends_a_nursery_child_whose_defer_blocks_forever() {
             print(\"done\")\n\
         main()\n";
     assert_at_every_worker_count("dfr2.chz", program, 5, |out| {
-        assert_clean_run(out, "awake 1\ncleanup start\ndone\n");
+        let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+        let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+        assert!(
+            out.status.code() == Some(1)
+                && stdout == "awake 1\ncleanup start\n"
+                && stderr.contains("dfr2.chz:20:5): deadlock: every task is blocked\n")
+                && stderr.contains("task 1: waiting for an Executor join at ")
+                && stderr.contains("dfr2.chz:20:5\n")
+                && stderr.contains("task 2: waiting for a nursery join at ")
+                && stderr.contains("dfr2.chz:9:5\n")
+                && stderr.contains("task 3: recv() on an empty channel at ")
+                && stderr.contains("dfr2.chz:7:5\n"),
+            "expected the deadlock listing, got rc={:?} stdout: {stdout:?} stderr: {stderr:?}",
+            out.status.code()
+        );
     });
 }
 

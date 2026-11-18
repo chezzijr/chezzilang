@@ -1056,7 +1056,15 @@ fn parallel_all_blocked_deadlock_faults() {
     let src = "fn waiter(c: Channel[int]):\n    c.recv()\nfn main():\n    a := Channel[int]()\n    b := Channel[int]()\n    parallel:\n        spawn waiter(a)\n        spawn waiter(b)\nmain()\n";
     let (_o, _e, res, _c) = run_parallel_watchdog(src);
     let err = res.expect_err("an all-blocked --parallel nursery must fault, not hang");
-    assert!(err.message.contains("deadlock"), "got: {}", err.message);
+    // Go twin: fatal, all asleep; main at its join, both waiters in spawn order.
+    super::tests::assert_deadlock(
+        &err,
+        &[
+            ("waiting for a nursery join", 6),
+            ("recv() on an empty channel", 2),
+            ("recv() on an empty channel", 2),
+        ],
+    );
 }
 
 /// gaps.md W13-3 — a genuine nested deadlock (main body AND a nested owner body both
@@ -1067,7 +1075,16 @@ fn parallel_nested_deadlock_at_channel_parked_owner_faults() {
     let src = "fn main():\n    never := Channel[int](0)\n    parallel:\n        spawn:\n            parallel:\n                spawn:\n                    never.recv()\n                never.recv()\n        never.recv()\n    print(\"unreachable\")\nmain()\n";
     let (_o, _e, res, _c) = run_parallel_watchdog(src);
     let err = res.expect_err("a genuine nested deadlock must fault, not hang");
-    assert!(err.message.contains("deadlock"), "got: {}", err.message);
+    // Go twin: fatal, all asleep. Pre-order: main in its body, the child in its body, the
+    // grandchild.
+    super::tests::assert_deadlock(
+        &err,
+        &[
+            ("recv() on an empty channel", 9),
+            ("recv() on an empty channel", 8),
+            ("recv() on an empty channel", 7),
+        ],
+    );
 }
 
 /// A blocking `for v in ch:` (recv) with no producer and no runnable sibling deadlocks with an
@@ -1078,7 +1095,7 @@ fn deadlock_fault_message_is_engine_agnostic() {
     let msg = golden_entry_fault(
         "fn main():\n    ch := Channel[int]()\n    for v in ch:\n        print(v)\nmain()\n",
     );
-    assert!(msg.contains("deadlock"), "got: {msg}");
+    assert!(msg.contains(super::tests::DEADLOCK_HEADER), "got: {msg}");
     assert!(!msg.contains("sequential executor"), "got: {msg}");
 }
 
@@ -1097,7 +1114,7 @@ fn deadlock_fault_is_not_recoverable_new_message() {
                \x20       !e: print(\"caught: {e.error()}\")\n\
                main()\n";
     let msg = golden_entry_fault(src);
-    assert!(msg.contains("deadlock"), "got: {msg}");
+    assert!(msg.contains(super::tests::DEADLOCK_HEADER), "got: {msg}");
     assert!(!msg.contains("sequential executor"), "got: {msg}");
 }
 

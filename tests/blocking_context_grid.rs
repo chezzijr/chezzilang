@@ -171,7 +171,9 @@ struct Cell {
     expect: Expect,
 }
 
-const DEADLOCK: &str = "deadlock";
+/// The one deadlock header (plan 2026-11-17). Every `nothing` cell is the only work of its run, so
+/// every task is asleep (Go twin: fatal, all goroutines asleep).
+const DEADLOCK: &str = "deadlock: every task is blocked\n";
 
 const PROGRAM: &str = "import std.concurrency\nimport Iterator from std.iter\nimport Executor, Shared from std.concurrency
 import std.time
@@ -446,7 +448,8 @@ fn ops() -> Vec<Op> {
 fn expect(op: &Op, ctx: &Ctx, sat: Sat, out: &'static str) -> Expect {
     // TICKET-185: a full send (or a `wait:` send arm) in a Demote context blocks on its offer, as
     // Go blocks — the old v1 `Refuse` cell is gone, so it takes the generic rule below.
-    // A nested nursery's own verdict judges its children: Go faults, and so does every context.
+    // A stuck nested nursery leaves every task of the run asleep: Go faults, and so does every
+    // context.
     if op.name == "nested" && sat == Sat::Nothing {
         return Expect::Fault(DEADLOCK);
     }

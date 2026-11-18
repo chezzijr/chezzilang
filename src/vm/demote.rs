@@ -61,21 +61,12 @@ impl Vm {
             | crate::vm::core::Settled::Sent(_) => None,
         };
         let latch = self.halt_latch();
-        // 1. Account running → a registered waiter AND register the channel (#1 fix), under core lock A, then
-        //    notify so an idle puller sitting in an untimed `take_runnable` `cv.wait` re-evaluates the
-        //    deadlock predicate now that this fiber left `running` (without this notify a genuine
-        //    all-blocked quiesce would never be detected — a hang). The registration lets
-        //    `is_deadlocked` peek this fiber's queue so a value a sibling races in isn't misread as a
-        //    deadlock (the #1 false-positive against an innocent parked sibling).
+        // 1. Account running → a registered waiter AND register the channel (#1 fix), under core lock A.
+        //    A task waiting in place stays counted awake (`quiesce::Awake`), so the run's deadlock
+        //    verdict never fires while it waits.
         let mut reg = match self.wait_begin(
             WaitSpec::Recv,
-            Some(
-                Blocked::on(quiesce::PartyWait::Recv(
-                    Arc::clone(&core),
-                    Some(Arc::clone(&p)),
-                ))
-                .named(Wait::Recv, span),
-            ),
+            Some(Blocked::named(Wait::Recv, span)),
             "recv",
             span,
         ) {
@@ -141,21 +132,12 @@ impl Vm {
                     } else if closed {
                         reg.release(&sched, &mut c);
                         Ok(RecvStep::ClosedEmpty)
-                    } else if self.in_place_cut(&c, reg.tok()) {
+                    } else if self.in_place_cut(&c) {
                         // Terminate without a delivered value (genuine deadlock / nursery torn down).
                         reg.release(&sched, &mut c);
                         Err(self.cut_fault(&sched, span))
                     } else {
-                        // Path C self-sufficient deadlock detection: evaluate the predicate HERE rather
-                        // than depending on a separate idle puller being alive to fire it. A verdict
-                        // ends the wait on a later pass through `run_exit_err` or `terminate`, which
-                        // releases `reg`. Either way this pass waits one tick: a pass that waits
-                        // nowhere keeps the run permit that the party judge may need (T=1).
-                        let dead = sched.is_deadlocked(&c);
                         drop(c);
-                        if dead {
-                            sched.fault_own_deadlock();
-                        }
                         // --- wait on the channel's OWN condvar (q-only; core lock A released) ---
                         // M3.2 — `h` is pinned: the receiver may be a popped temporary, and the
                         // collector reads a value a sender puts in the slot through it.
@@ -215,10 +197,7 @@ impl Vm {
         let _gated = self.gated_register(&[core]);
         let mut reg = self.wait_begin(
             WaitSpec::Send,
-            Some(
-                Blocked::on(quiesce::PartyWait::Send(Arc::clone(p)))
-                    .named(Wait::send(core.cap), span),
-            ),
+            Some(Blocked::named(Wait::send(core.cap), span)),
             "send",
             span,
         )?;
@@ -241,15 +220,9 @@ impl Vm {
                     reg.release(&sched, &mut c);
                     break Err(e);
                 }
-                if self.in_place_cut(&c, reg.tok()) {
+                if self.in_place_cut(&c) {
                     reg.release(&sched, &mut c);
                     break Err(self.cut_fault(&sched, span));
-                }
-                if sched.is_deadlocked(&c) {
-                    // A verdict ends the wait on a later pass through `run_exit_err` or
-                    // `terminate`. This pass still waits its tick (see the recv loop).
-                    drop(c);
-                    sched.fault_own_deadlock();
                 }
             }
             // M3.2 — `h` is pinned: the collector reads this send's offer through it.
@@ -268,8 +241,8 @@ impl Vm {
     /// A host-stack loop frame sits between the worker loop and the `wait`, so the fiber CANNOT
     /// snapshot-park (`park_wait`); it demotes — blocks this worker in place until an arm MAY be
     /// ready, then returns so `op_wait_poll` settles and re-polls in source order. The N-arm analogue
-    /// of [`Vm::demote_recv_block`]: account `running → a registered waiter`, register EVERY arm (so
-    /// `is_deadlocked` peeks them all and a value racing onto any arm vetoes a false fire), then loop.
+    /// of [`Vm::demote_recv_block`]: account `running → a registered waiter`, register EVERY arm,
+    /// then loop.
     ///
     /// TICKET-185 — the `wait:`'s offers (send arms) and slots (rendezvous recv arms) are published
     /// under `p` before this is called, so a send arm blocks here like a recv arm (Go blocks it
@@ -312,8 +285,7 @@ impl Vm {
             deadline: timer.is_some(),
             has_send,
         };
-        let on = Blocked::on(quiesce::PartyWait::Wait(arms.clone(), Some(Arc::clone(p))))
-            .named(Wait::select(has_send), span);
+        let on = Blocked::named(Wait::select(has_send), span);
         let mut reg = self.wait_begin(spec, Some(on), "wait", span)?;
         let recv_ready = |core: &Arc<ChannelCore>, g: &crate::vm::core::ChanState| {
             g.closed || g.recv_ready_for(Some(p)) || core.done_latch.load(Ordering::Relaxed)
@@ -344,18 +316,10 @@ impl Vm {
                     drop(c);
                     break Err(e);
                 }
-                if self.in_place_cut(&c, reg.tok()) {
+                if self.in_place_cut(&c) {
                     reg.release(&sched, &mut c);
                     drop(c);
                     break Err(self.cut_fault(&sched, span));
-                }
-                // A pending timer guarantees future progress (its deadline send), so it vetoes the
-                // self-detected deadlock just like an `inflight` job does on the snapshot-park path.
-                if sched.is_deadlocked(&c) {
-                    // A verdict ends the wait on a later pass through `run_exit_err` or
-                    // `terminate`. This pass still waits its tick (see the recv loop).
-                    drop(c);
-                    sched.fault_own_deadlock();
                 }
             }
             // No single condvar to wait on (N arms, N condvars) → bounded backoff poll. Sleep on the
@@ -389,10 +353,9 @@ impl Vm {
     /// (the callback's `for`-loop state lives on the un-snapshottable Rust host stack), so without this
     /// the sleep runs INLINE and pins the worker for `ms`. Instead DEMOTE like a recv-in-callback: spin a
     /// replacement worker + sleep in place + resume, freeing the worker for `ms` (Go's `handoffp`).
-    /// Accounted as `inflight` (NOT a registered waiter): a sleeper returns unconditionally, so it must VETO
-    /// the deadlock predicate (like an offloaded blocking native — `is_deadlocked` already treats
-    /// `inflight>0` as "external progress guaranteed"). A demoted waiter fiber is the opposite (it
-    /// returns only via a sibling `send`). Returns `Ok(Nil)` (`sleep_ms` yields nothing). Residual: the
+    /// Accounted as `inflight` (NOT a registered waiter): a sleeper returns unconditionally, like an
+    /// offloaded blocking native, and it stays counted awake, so no deadlock verdict fires while it
+    /// sleeps. A demoted waiter fiber is the opposite (it returns only via a sibling `send`). Returns `Ok(Nil)` (`sleep_ms` yields nothing). Residual: the
     /// `thread::sleep` is uninterruptible, so a cancel during the sleep is observed only after it returns
     /// (no worse than the inline pin it replaces — the worker is now freed).
     pub(super) fn demote_block_until(
@@ -496,10 +459,10 @@ impl Vm {
     /// socket is a runnable party, so `all goroutines are asleep` does not fire (measured — `main` in
     /// `ln.Accept()` plus a goroutine on an empty `chan int`: prints `listening`, hangs, rc=124).
     ///
-    /// On an M:N worker it is accounted `inflight` (NOT a registered waiter): a socket op is woken by external OS readiness, so
-    /// it must VETO the deadlock predicate — exactly the netpoller-park accounting (a lone in-callback
-    /// `accept` with no client correctly never self-terminates, Go-identical), hence **no** `is_deadlocked`
-    /// self-fire here. The flip side: this op exits the wait ONLY via fd readiness, `cancel`, or another
+    /// On an M:N worker it is accounted `inflight` (NOT a registered waiter): a socket op is woken by
+    /// external OS readiness, so it stays counted awake and the deadlock verdict cannot fire —
+    /// exactly the netpoller-park accounting (a lone in-callback `accept` with no client correctly
+    /// never self-terminates, Go-identical). The flip side: this op exits the wait ONLY via fd readiness, `cancel`, or another
     /// worker setting `terminate` — so a nursery where *every* remaining fiber is an in-callback socket
     /// demote on an fd that never becomes ready, with no faulting sibling, hangs silently (no `deadlock`
     /// fault). That is the same Go-identical "all goroutines waiting on a never-ready socket" case the
@@ -551,7 +514,7 @@ impl Vm {
             // never *self*-fires the predicate (it vetoes it), so a genuine quiesce is surfaced by another
             // worker setting `terminate`, observed here within the backoff.
             if let Some(s) = &sched
-                && self.in_place_cut(&s.lock(), reg.tok())
+                && self.in_place_cut(&s.lock())
             {
                 break Err(self.cut_at(&s.deadlock_err, Wait::Socket.phrase(), span));
             }

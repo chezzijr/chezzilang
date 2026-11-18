@@ -62,14 +62,18 @@ the box waits.
 **Re-entry and faults.**
 
 - `get` / `read` / `set` / `update` of a `Shared` from inside that box's own `update` or `read`
-  closure are a fatal `deadlock` with `already holds the update guard`: exit status 1, and no
-  `recover:` catches it (Go: `Lock` inside `Lock` is `fatal error: all goroutines are asleep -
-  deadlock!`). A `print` of the box takes no guard (Go's `fmt` takes no lock): it shows the box's
-  value as it is.
-- A fault inside the closure is raised in the caller, `recover:` catches it (except a re-entry or a
-  lock cycle, which is fatal), the box keeps serving and the state is what the closure left.
-- A holder cut by a deadlock releases its guard cut: a cut box refuses every later acquire for the
-  rest of the run (Go: a `Mutex` nobody unlocks blocks every later `Lock`).
+  closure blocks on the guard its own task holds, as Go's `Lock` inside `Lock` does. So does a lock
+  cycle (two tasks that take two boxes in opposite order). There is no fault of its own: once every
+  task is blocked, the run's one deadlock check ends it with `deadlock: every task is blocked`, each
+  task listed as `waiting for the Shared guard` at its inner call; exit status 1, and no `recover:`
+  catches it (Go: `fatal error: all goroutines are asleep - deadlock!`). If another task still runs,
+  the run hangs, as in Go. A `print` of the box takes no guard (Go's `fmt` takes no lock): it shows
+  the box's value as it is.
+- A fault inside the closure is raised in the caller, `recover:` catches it, the box keeps serving
+  and the state is what the closure left.
+- In `chezzi test`, a guard held by a task of a test that deadlocked is released cut when that test's
+  tasks are dropped: a cut box refuses every later acquire for the rest of the run (Go: a `Mutex`
+  nobody unlocks blocks every later `Lock`).
 - A slow closure blocks every user of the box and holds its worker (the Elixir `Agent` warning
   applies: keep it short). A child of a `parallel:` inside the closure that reads or writes the
   **same** box can never be served (the closure holds the box until the nursery joins), so the run
@@ -80,7 +84,7 @@ the box waits.
   faults, an owner that waits inside the closure is cut there, and a `recover:` inside the closure
   does not catch the child's fault. A `parallel:` opened inside the closure joins the scheduler of the
   task's enclosing `parallel:`, so a nursery deadlock there is reported the same way
-  (`deadlock: N tasks are blocked and none can proceed`, then each task, exit 1).
+  (`deadlock: every task is blocked`, then each task, exit 1).
 - A reader of a `RwShared` whose writer is blocked for good is listed as `waiting for the RwShared
   guard` at its own `read` / `get`, as a `Shared` user is.
 
@@ -93,7 +97,7 @@ same one-value box behind a read-write guard.
 |---|---|---|
 | lock | one user at a time | many readers or one writer |
 | `update` / `write` | closure runs on the live value, in place | the same, exclusive |
-| `read(f)` | `f` runs on the live value under the guard; readers queue | `f` runs on the live value under the read guard; readers run in parallel; a `write` inside it is a fatal deadlock |
+| `read(f)` | `f` runs on the live value under the guard; readers queue | `f` runs on the live value under the read guard; readers run in parallel; a `write` inside it blocks for good (a deadlock) |
 | `get()` | the live value, by handle | the live value, by handle |
 | pick it when | you mostly write, or read a small part of a big value (`read`) | reads dominate and readers must not queue |
 
@@ -265,22 +269,17 @@ writer preference: a writer counts as waiting from its first failed acquire to i
 reader slips in at the handoff). A write release admits every reader that waited during the write,
 ahead of the writers that wait too (Go `sync.RWMutex.Unlock`), so back-to-back writers cannot
 starve a reader. A nested `read` by a reader is granted while no writer waits; with
-a writer waiting for the outer read it is a certain cycle (Go deadlocks) and faults with the lock
-cycle text. A `print` takes no guard. The fast path is one atomic operation on the box's lock word;
-the wait-for graph is read only on a contended acquire, so a cycle that passes through a read guard
-(readers are anonymous in the lock word) is left to the run's deadlock verdict.
+a writer waiting for the outer read it blocks behind that writer, as Go's recursive `RLock` does. A
+`print` takes no guard. The fast path is one atomic operation on the box's lock word.
 
-> **Reentrancy deadlock (same class as `Shared.update`):** a closure passed to `write` (or `set`) that
-> re-acquires the **same** `RwShared`'s update guard — `write` or `set` inside `write` — is a
-> length-1 wait-for cycle and is a fatal `deadlock` (`"already holds the update guard"`), instead of
-> hanging or silently losing the inner write. A cross-box wait-for cycle (two boxes each written from
-> inside the other's closure) is fatal the same way; two tasks that merely contend for different
-> boxes are not a cycle and complete normally. `get` / `read` of the box from inside its **own
-> `write`** closure is fatal the same way. M3.3 (Q2): `write` or `set` nested in the same task's
-> **`read`** waits for that read, a certain deadlock (Go `RLock(); Lock()`), so it is a fatal
-> deadlock with `already holds the read guard on this RwShared box`. `get` / `read` nested in `read`
-> are legal while no writer waits; past a waiting writer they are a fatal `a lock cycle` deadlock.
-> The re-entry text names the box kind (`Shared` or `RwShared`).
+> **Re-locks block (same class as `Shared.update`):** a closure passed to `write` (or `set`) that
+> re-acquires the **same** `RwShared`'s guard (`write`, `set`, `get` or `read` inside `write`)
+> blocks on its own task's guard, as Go's `Lock` in `Lock` does. So do `write` or `set` nested in the
+> same task's **`read`** (Go `RLock(); Lock()`), `get` / `read` nested in `read` past a waiting
+> writer, and a cross-box cycle (two boxes each written from inside the other's closure). None of
+> them is a fault of its own: once every task is blocked, the run's one deadlock check lists each
+> blocked task as `waiting for the RwShared guard` (or `the Shared guard`) at its inner call. Two
+> tasks that merely contend for different boxes are not a cycle and complete normally.
 
 > **A guard wait in a task parks, as a goroutine's `sync.Mutex` wait does.** A contended
 > `set`/`update`/`write` in a spawned task or an Executor job retries for a few microseconds, then

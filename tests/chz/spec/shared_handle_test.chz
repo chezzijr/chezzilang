@@ -5,7 +5,8 @@
 # `blocking_update 7`, `holder_waits_on_channel 30`, `memoize_one_object 2`,
 # `task_get_one_object 2`, `broadcast_shares 2 2`. `reenter/main.go` (Lock in Lock) and
 # `readwrite/main.go` (Lock in RLock) end `fatal error: all goroutines are asleep - deadlock!`:
-# the same certain deadlock is a fault here, with the re-entry text. Fix round 1: `rv33/gopref`
+# the same certain deadlock blocks here and ends the run in the one deadlock report (`deadlock:
+# every task is blocked`, plan 2026-11-17). Fix round 1: `rv33/gopref`
 # (a reader that arrives after a waiting writer) prints `r 10`; `nestedread/main.go` (a nested RLock
 # past a waiting writer) ends `fatal error: all goroutines are asleep - deadlock!`. Fix round 2:
 # `rr33/gostarve` (3 back-to-back writers x 300, one reader) prints `reader saw 20..22 of 900`
@@ -104,9 +105,10 @@ test fn a_guard_waiter_behind_a_holder_that_waits_on_a_channel_is_no_deadlock():
                     ch.send(3)
     assert s.get() == 30
 
-# A same-box re-entry, a write inside a read and a nested read past a waiting writer are fatal
-# deadlocks since TICKET-298: `recover:` cannot catch them, so `tests/cut_release_grid.rs`
-# (`a_recovered_reentry_or_lock_cycle_is_fatal`) holds them.
+# A same-box re-entry, a write inside a read and a nested read past a waiting writer block (plan
+# 2026-11-17: no re-entry check), so the run ends in the one fatal deadlock report: `recover:`
+# cannot catch it, so `tests/cut_release_grid.rs` (`a_recovered_reentry_or_lock_cycle_is_fatal`)
+# holds them.
 
 fn read_inside(r: RwShared[int], x: int) -> int:
     return x + r.read(fn(y): y)

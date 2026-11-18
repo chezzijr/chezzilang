@@ -57,6 +57,9 @@ fn a_settled_wake_requeues_only_committed_parties() {
         b.push(ParkedEntry::Send(f3));
         c.parked_n += 4;
         c.running -= 4;
+        for _ in 0..4 {
+            c.awake.asleep(); // as each real park does
+        }
     }
     sched.recv_wake(key, &core);
     assert_eq!(sched.lock().parked_n, 2);
@@ -249,32 +252,8 @@ fn mnsched_inject_grows_total_and_slots() {
     );
 }
 
-/// Per-connection spawn: injecting a runnable fiber into a sched where every existing fiber is
-/// parked must VETO the deadlock predicate — `total += 1` is paired with `runnable += 1` under
-/// one lock, so the new fiber is immediately accounted and `is_deadlocked` sees `runnable > 0`.
-#[test]
-fn mnsched_inject_does_not_false_deadlock() {
-    let sched = mk_sched(1);
-    sched.seed(vec![mk_fiber(0)]);
-    let f0 = take_run(&sched); // running 1, runnable 0
-    let core = empty_core();
-    sched.park(core_key(&core), Arc::clone(&core), f0); // parked 1, running 0, runnable 0 → deadlock
-    {
-        let c = sched.lock();
-        assert!(
-            sched.is_deadlocked(&c),
-            "all parked, nothing runnable/inflight = deadlock"
-        );
-    }
-    sched.inject(mk_pending_fiber(1), 0); // runnable 1
-    {
-        let c = sched.lock();
-        assert!(
-            !sched.is_deadlocked(&c),
-            "an injected runnable fiber vetoes the deadlock fire"
-        );
-    }
-}
+// An injected fiber is counted awake at its start (`task_started`), not by a per-sched predicate
+// (plan 2026-11-17). Covered by `tests/awake_count_grid.rs` cell `nursery::task` (live).
 
 // ----- Cross-nursery flat scheduler (M:N): JoinScope / scope-scoped owner stop -----
 
@@ -286,7 +265,7 @@ fn mn_register_scope_appends_and_offsets_slots() {
     let s1 = sched.register_scope(3, Arc::new(AtomicBool::new(false)), Vec::new());
     assert_eq!(s1, 1, "second scope id");
     let c = sched.lock();
-    assert_eq!(c.scopes.count(), 2);
+    assert_eq!(c.scopes.ids().len(), 2);
     assert_eq!(c.scopes[0].base_index, 0);
     assert_eq!(
         c.scopes[1].base_index, 2,
@@ -628,35 +607,8 @@ fn mn_wait_park_close_wake_claims_and_sweeps() {
     assert_eq!(take_run(&sched).task_index, 0);
 }
 
-/// §6d M:N wait-park: a lone wait-parked fiber on N empty keys with nothing running/runnable/
-/// inflight IS a deadlock — `park_wait` must increment `parked_n` so `is_deadlocked` fires (the
-/// accounting choice: one fiber, +1 regardless of key count).
-#[test]
-fn mn_wait_park_lone_fiber_is_deadlock() {
-    let sched = mk_sched(1);
-    sched.seed(vec![mk_fiber(0)]);
-    use crate::vm::core::{Pending, PendingOp};
-    let mut f0 = take_run(&sched);
-    let c1 = empty_core();
-    let c2 = empty_core();
-    // TICKET-236: the verdict asks a parked fiber through its `PendingOp`, as production sets it.
-    f0.pending = Some(PendingOp::new(
-        Pending::new(),
-        vec![(Arc::clone(&c1), 0, false), (Arc::clone(&c2), 1, false)],
-    ));
-    sched.park_wait(
-        vec![
-            (0, core_key(&c1), Arc::clone(&c1), false),
-            (1, core_key(&c2), Arc::clone(&c2), false),
-        ],
-        f0,
-    );
-    let c = sched.lock();
-    assert!(
-        sched.is_deadlocked(&c),
-        "a lone wait-parked fiber with no sender is a deadlock"
-    );
-}
+// A lone wait-parked fiber is a deadlock through the global awake count, not a per-sched
+// predicate (plan 2026-11-17). Covered by `tests/awake_count_grid.rs` cell `wait::task` (nothing).
 
 /// W7-2 — the `close()`-vs-`wait:`-park lost wakeup. `op_wait_poll` takes a closed+EMPTY recv arm
 /// (D2: it is READY and binds `!RecvError`). `park_wait`'s gap re-check must classify arms the SAME
@@ -698,8 +650,6 @@ fn mn_park_wait_all_recv_arms_closed_requeues_instead_of_parking() {
 /// `park_wait`'s gap re-check requeues the fiber instead of parking it, and nothing reads as
 /// deadlocked. Before D2 the re-poll SKIPPED a closed arm, so reading it as ready live-locked
 /// (requeue→re-poll→re-park, parity-perf-0); now the re-poll ends the wait, so it cannot loop.
-/// The deadlock fence for a wait whose arms are all open, empty and unfeedable in this same
-/// `park_wait` context is [`mn_wait_park_lone_fiber_is_deadlock`].
 #[test]
 fn mn_park_wait_one_closed_one_live_requeues_to_take_the_closed_arm() {
     let sched = mk_sched(1);
@@ -731,10 +681,6 @@ fn mn_park_wait_one_closed_one_live_requeues_to_take_the_closed_arm() {
             "a closed arm is ready — the fiber must NOT park"
         );
         assert_eq!(c.global.len(), 1, "it is requeued Ready to re-poll");
-        assert!(
-            !sched.is_deadlocked(&c),
-            "a requeued fiber about to take its closed arm is not a deadlock"
-        );
     }
     assert_eq!(
         take_run(&sched).task_index,
@@ -742,27 +688,8 @@ fn mn_park_wait_one_closed_one_live_requeues_to_take_the_closed_arm() {
         "the fiber re-runs WaitPoll, which takes the closed arm"
     );
 }
-
-/// TICKET-236 — a parked fiber is asked about its channel, as a demoted waiter and a blocked
-/// party are. A close that landed after the park (its wake has not run yet) makes the fiber
-/// resumable, so the sched is not deadlocked.
-#[test]
-fn a_parked_recv_whose_channel_closed_is_not_judged_stuck() {
-    let sched = mk_sched(1);
-    sched.seed(vec![mk_fiber(0)]);
-    let f0 = take_run(&sched);
-    let c1 = empty_core();
-    sched.park(core_key(&c1), Arc::clone(&c1), f0);
-    assert!(
-        sched.is_deadlocked(&sched.lock()),
-        "a lone parked fiber on an open, empty channel is a deadlock"
-    );
-    c1.q.lock().unwrap().closed = true;
-    assert!(
-        !sched.is_deadlocked(&sched.lock()),
-        "the channel closed: the parked fiber can resume"
-    );
-}
+// A parked recv whose channel closed is woken by the close, not judged by a predicate (plan
+// 2026-11-17). Covered by `tests/awake_count_grid.rs` cell `recv::task`.
 
 /// W7-2 end-to-end (RACY — loop it): a `close()` racing a sibling's `wait:` park must never produce
 /// a spurious `deadlock:` fault. Pre-fix the scheduler lost the wakeup whenever the `close` landed
@@ -915,210 +842,11 @@ fn offload_native_panic_still_completes_and_faults() {
     );
 }
 
-/// D5: an in-flight blocking offload must SUPPRESS the deadlock fire. The predicate is
-/// `running==0 && runnable==0 && parked_n>0 && done<total` — but a fiber off in the blocking pool
-/// (counted by `inflight`) is neither running, runnable, nor parked, and *will* come back runnable,
-/// so `inflight>0` must veto the deadlock declaration (else a program that parks everyone while one
-/// fiber blocks in `read_file` would falsely fault `deadlock`).
-#[test]
-fn deadlock_predicate_suppressed_by_inflight_offload() {
-    let sched = mk_sched(2);
-    let c = sched.lock();
-    // running==0, runnable==0, one parked, none done: a real deadlock with no in-flight work.
-    let mut c = c;
-    c.parked_n = 1;
-    assert!(
-        sched.is_deadlocked(&c),
-        "all-parked + nothing in flight = deadlock"
-    );
-    sched.inflight.fetch_add(1, Ordering::Relaxed);
-    assert!(
-        !sched.is_deadlocked(&c),
-        "an in-flight blocking offload vetoes the deadlock fire"
-    );
-}
-
-/// D5 owe #3 Path C (#1) — the deadlock false-positive fix. A demoted (blocked-in-callback) fiber
-/// polls its OWN channel queue; a value a sibling already queued there is invisible to the
-/// counter-only predicate (a `send` `push_back`s + notifies the channel condvar — it does NOT bump
-/// `runnable`). Registering the demoted channel lets `is_deadlocked` peek it: a non-empty queue
-/// means that fiber WILL pop + make progress (possibly waking a parked sibling), so an apparent
-/// all-blocked quiesce is NOT a deadlock — don't fault an innocent parked sibling.
-#[test]
-fn deadlock_predicate_vetoed_by_queued_value_on_demoted_channel() {
-    let sched = mk_sched(2);
-    let core = empty_core();
-    let mut c = sched.lock();
-    // The #1 race: one demoted fiber (a registered waiter) + one parked sibling, nothing running /
-    // runnable / inflight — the counter-only predicate fires (the false positive).
-    c.parked_n = 1;
-    let tok = c.register_waiter(recv_waiter(&core, vec![]));
-    // A sibling already queued a value on the demoted fiber's channel: it will pop + progress.
-    core.q.lock().unwrap().push(Value::int(7));
-    assert!(
-        !sched.is_deadlocked(&c),
-        "a queued value on a demoted channel must veto the deadlock fire (#1 false-positive)"
-    );
-    // Drain it: now the demoted fiber truly has nothing queued → a real all-blocked deadlock.
-    core.q.lock().unwrap().pop();
-    assert!(
-        sched.is_deadlocked(&c),
-        "an empty demoted channel with all fibers blocked IS a genuine deadlock"
-    );
-    // Un-register restores the pre-demote predicate (no stale registry entry vetoing forever).
-    c.unregister_waiter(tok);
-    assert!(
-        sched.is_deadlocked(&c),
-        "after un-register the predicate is unchanged (still all-blocked)"
-    );
-}
-
-/// W15-6 (TICKET-176) — a demoted recv settles `ClosedEmpty` on a closed channel, so a closed
-/// channel under it is progress, not a deadlock.
-#[test]
-fn a_closed_channel_under_a_demoted_recv_vetoes_the_deadlock_verdict() {
-    let sched = mk_sched(2);
-    let core = empty_core();
-    let mut c = sched.lock();
-    c.parked_n = 1;
-    let tok = c.register_waiter(recv_waiter(&core, vec![]));
-    assert!(
-        sched.is_deadlocked(&c),
-        "an open empty demoted channel is a genuine deadlock"
-    );
-    core.q.lock().unwrap().closed = true;
-    assert!(
-        !sched.is_deadlocked(&c),
-        "a closed channel under a demoted recv settles it (ClosedEmpty): no deadlock"
-    );
-    c.unregister_waiter(tok);
-    assert!(
-        sched.is_deadlocked(&c),
-        "after the demoted recv leaves, the closed channel vetoes nothing"
-    );
-}
-
-/// W15-6 (TICKET-176) — a demoted recv or `wait:` settles on a tripped `done_latch`.
-#[test]
-fn a_tripped_latch_under_a_demoted_recv_vetoes_the_deadlock_verdict() {
-    let sched = mk_sched(2);
-    let core = empty_core();
-    let mut c = sched.lock();
-    c.parked_n = 1;
-    c.register_waiter(recv_waiter(&core, vec![]));
-    core.done_latch.store(true, Ordering::Relaxed);
-    assert!(
-        !sched.is_deadlocked(&c),
-        "a tripped latch under a demoted recv settles it: no deadlock"
-    );
-}
-
-/// W15-6 (TICKET-176) — a demoted `wait:` takes a closed arm (D2: closed is ready), so every arm
-/// closed is progress.
-#[test]
-fn a_demoted_wait_with_every_arm_closed_vetoes_the_deadlock_verdict() {
-    let sched = mk_sched(2);
-    let (a, b) = (empty_core(), empty_core());
-    let mut c = sched.lock();
-    c.parked_n = 1;
-    c.register_waiter(Waiter {
-        wait: Arc::new(quiesce::PartyWait::Wait(
-            vec![(Arc::clone(&a), false), (Arc::clone(&b), false)],
-            None,
-        )),
-        cancel: vec![],
-        fiber: true,
-        scope: None,
-        cut: false,
-        holds_guard: false,
-    });
-    a.q.lock().unwrap().closed = true;
-    b.q.lock().unwrap().closed = true;
-    assert!(
-        !sched.is_deadlocked(&c),
-        "every arm of a demoted wait closed settles it (a closed arm is taken): no deadlock"
-    );
-}
-
-/// W15-6 (TICKET-176), D2 — a demoted `wait:` takes a closed arm, so ONE closed arm of two is
-/// progress: it vetoes the deadlock verdict. Goes red if the closed veto asks `all` arms instead
-/// of `any`. Its deadlock fence, in the same demoted-waiter context: while both arms are still
-/// OPEN, empty and unfeedable, the verdict IS deadlock — a closed arm must not make an open one
-/// look satisfiable.
-#[test]
-fn a_demoted_wait_with_one_arm_closed_vetoes_the_deadlock_verdict() {
-    let sched = mk_sched(2);
-    let (a, b) = (empty_core(), empty_core());
-    let mut c = sched.lock();
-    c.parked_n = 1;
-    c.register_waiter(Waiter {
-        wait: Arc::new(quiesce::PartyWait::Wait(
-            vec![(Arc::clone(&a), false), (Arc::clone(&b), false)],
-            None,
-        )),
-        cancel: vec![],
-        fiber: true,
-        scope: None,
-        cut: false,
-        holds_guard: false,
-    });
-    assert!(
-        sched.is_deadlocked(&c),
-        "a demoted wait whose arms are all open and empty is a genuine deadlock"
-    );
-    a.q.lock().unwrap().closed = true;
-    assert!(
-        !sched.is_deadlocked(&c),
-        "one closed arm of a demoted wait is ready (it is taken): no deadlock"
-    );
-}
-
-/// D5 owe #3 Path C (#1) — the registry is REFCOUNTED so 2+ fibers demoted on the SAME channel each
-/// register/unregister independently (one `unregister` must not drop the channel while a second
-/// demoted fiber still waits on it). Drives refcount 0→1→2→1→0 and asserts the veto survives the
-/// single `unregister` (the entry is still present at refcount 1) and only the empty/fully-removed
-/// state declares deadlock. Catches a refcount-direction regression (remove-at-1 / wrong increment)
-/// that the single-fiber test cannot — exactly the "stale entry permanently vetoes a real deadlock"
-/// vs "premature removal re-opens the false-positive" failure modes.
-#[test]
-fn demoted_channel_registry_is_refcounted_for_two_fibers_on_one_channel() {
-    let sched = mk_sched(3);
-    let core = empty_core();
-    let mut c = sched.lock();
-    // Two fibers demoted on the SAME channel + one parked sibling; nothing else running.
-    c.parked_n = 1;
-    let t1 = c.register_waiter(recv_waiter(&core, vec![]));
-    let t2 = c.register_waiter(recv_waiter(&core, vec![]));
-    // A value queued on the shared channel → at least one demoted fiber pops + progresses.
-    core.q.lock().unwrap().push(Value::int(7));
-    assert!(
-        !sched.is_deadlocked(&c),
-        "queued value on the shared demoted channel vetoes deadlock"
-    );
-    // One fiber pops + un-registers (refcount 2→1); the OTHER is still demoted on this channel, so
-    // its waiter must remain. Queue now empty → but the waiter's presence alone does NOT veto; the
-    // peek is queue-driven, so an empty registered channel is a genuine all-blocked deadlock.
-    core.q.lock().unwrap().pop();
-    c.unregister_waiter(t1); // one of two waiters leaves; the other stays registered
-    assert!(
-        sched.is_deadlocked(&c),
-        "refcount 1 + empty queue = genuine deadlock (the surviving demoted fiber has nothing)"
-    );
-    // A fresh value for the surviving fiber re-vetoes via the retained entry (proves it wasn't
-    // dropped at the first unregister).
-    core.q.lock().unwrap().push(Value::int(9));
-    assert!(
-        !sched.is_deadlocked(&c),
-        "the surviving waiter still peeks the queue (unregistering one waiter kept the other)"
-    );
-    core.q.lock().unwrap().pop();
-    c.unregister_waiter(t2); // the last waiter leaves
-    assert!(c.waiters.is_empty(), "both waiters are gone");
-    assert!(
-        sched.is_deadlocked(&c),
-        "all demoted fibers gone, still all-blocked = deadlock"
-    );
-}
+// The deadlock predicate's vetoes (an in-flight offload, a queued value, a closed channel, a
+// tripped latch or a closed arm under a demoted waiter, the waiter registry's refcount) are gone
+// with the per-sched judge (plan 2026-11-17: one global awake count). Covered by
+// `tests/awake_count_grid.rs` cells `timer::task`, `sleep::task` (an in-flight wait is awake) and
+// `recv::callback`, `wait::callback` (a demoted wait, live and nothing).
 
 fn t185_core(cap: Option<usize>) -> Arc<crate::vm::core::ChannelCore> {
     Arc::new(crate::vm::core::ChannelCore {
@@ -1326,7 +1054,7 @@ fn chan_state_readiness_ignores_the_callers_own_entries() {
 
 /// D6: `poll_park_offload` hands a fiber whose socket op `WouldBlock`ed to the netpoller —
 /// running→inflight — so a socket-parked fiber is accounted as in-flight (it WILL be woken by the
-/// OS) and vetoes a false deadlock, exactly like a blocking-pool offload. Uses a real loopback fd
+/// OS), exactly like a blocking-pool offload. Uses a real loopback fd
 /// (never written) so the fiber genuinely stays parked; `deregister` cleans up (delete-before-drop).
 #[test]
 fn poll_park_offload_moves_running_to_inflight() {
@@ -1364,15 +1092,6 @@ fn poll_park_offload_moves_running_to_inflight() {
         1,
         "running → inflight on poll-park"
     );
-
-    // The in-flight socket op vetoes a deadlock even with the sibling still queued drained off.
-    let mut c = sched.lock();
-    c.parked_n = 1;
-    assert!(
-        !sched.is_deadlocked(&c),
-        "a socket op in flight on the poller vetoes a false deadlock"
-    );
-    drop(c);
 
     // Clean up: deregister disarms the fd + re-injects (inflight→runnable), before `server` drops.
     assert!(
@@ -1440,10 +1159,10 @@ fn offload_runs_native_and_requeues_fiber_with_result() {
 }
 
 /// D5 owe #2: a `timer_ms` offload parks the fiber on the *timer* thread (not the blocking pool):
-/// running→inflight at submit (so it vetoes the deadlock predicate while sleeping), then the timer
+/// running→inflight at submit, then the timer
 /// fires at the deadline and `complete_offload`s the fiber back (inflight→runnable) carrying
 /// `Ok(Nil)` — the native is never run on this path (a sleep computes nothing). Guards the timer
-/// branch + that the sleeping fiber can't fault a false deadlock.
+/// branch.
 #[test]
 fn timer_offload_parks_then_requeues_fiber_with_nil() {
     let sched = Arc::new(mk_sched(2));
@@ -1466,20 +1185,12 @@ fn timer_offload_parks_then_requeues_fiber_with_nil() {
     };
     sched.offload(f0, req);
 
-    // While the timer holds it the fiber is `inflight` — neither running, runnable, nor parked —
-    // and must veto a deadlock fire (it WILL come back).
+    // While the timer holds it the fiber is `inflight` — neither running, runnable, nor parked.
     assert_eq!(
         sched.inflight.load(Ordering::Relaxed),
         1,
         "timer offload moved the fiber to inflight"
     );
-    {
-        let c = sched.lock();
-        assert!(
-            !sched.is_deadlocked(&c),
-            "a timer-parked (inflight) fiber must not fault a false deadlock"
-        );
-    }
 
     // The timer fires at the deadline and requeues the fiber.
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);

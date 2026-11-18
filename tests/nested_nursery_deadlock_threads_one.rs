@@ -63,8 +63,14 @@ fn nested_nursery_deadlock_faults_at_one_worker_like_every_other_count() {
         !status.success(),
         "expected a nonzero exit for an undetected deadlock, got {status} (stderr: {stderr})"
     );
+    // One global check (plan 2026-11-17): main waits at the module's implicit join and `f` at its
+    // own, so every task is asleep; the inner task is listed third, after main and `f` (pre-order;
+    // Go twin: fatal, all asleep). The sites of the two implicit joins are not pinned here.
     assert!(
-        stderr.contains("dd6.chz:4:15): deadlock: 1 task is blocked")
+        status.code() == Some(1)
+            && stderr.contains("deadlock: every task is blocked\n")
+            && stderr.contains("task 3: recv() on an empty channel at ")
+            && stderr.contains("dd6.chz:4:15\n")
             && stderr.contains("(called at /")
             && stderr.contains("dd6.chz:3:5)"),
         "expected a `deadlock: …` fault listing the INNER nursery's task (its recv at dd6.chz:4:15, \
@@ -133,7 +139,7 @@ fn recovered_nested_nursery_deadlock_is_fatal_at_one_worker() {
         let _ = e.read_to_string(&mut stderr);
     }
     assert!(
-        !status.success() && stderr.contains("deadlock"),
+        status.code() == Some(1) && stderr.contains("deadlock: every task is blocked\n"),
         "expected a fatal `deadlock` (`recover:` is transparent to it), got {status} (stdout: {stdout}, stderr: {stderr})"
     );
     assert!(

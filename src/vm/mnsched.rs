@@ -18,87 +18,6 @@ impl SchedCore {
         self.scopes.values().any(|s| s.body_open)
     }
 
-    /// §2c1 — the DEADLOCK predicate's half of [`Self::any_body_open`]: any scope whose eager body can
-    /// still `inject`. A body that is itself BLOCKED in place cannot reach another `spawn`, so it is
-    /// not live work and must not veto the verdict (see [`JoinScope::body_blocked`]). Terminate keeps
-    /// asking `any_body_open`, which ignores this flag.
-    pub(super) fn any_body_injecting(&self) -> bool {
-        self.scopes.values().any(|s| s.body_open && !s.body_blocked)
-    }
-
-    /// Cross-nursery flat scheduler — true when EVERY still-incomplete scope is one merely awaiting the
-    /// inline builder's own `JoinNursery` (early-enlisted). The builder, having finished all nested
-    /// service (else a non-`awaiting_builder` scope would still be incomplete), WILL return to the body
-    /// and can `send`/`close`/`spawn` to feed these parked siblings — so this quiesce is NOT a deadlock.
-    /// A single-scope sched never holds an enlisted scope, so the fast path is always `false` (zero cost
-    /// on the common path). (Cross-nursery flat scheduler — charges #1/#2.)
-    pub(super) fn all_incomplete_awaiting_builder(&self) -> bool {
-        if self.scopes.count() == 1 {
-            return false;
-        }
-        let mut any_incomplete = false;
-        for s in self.scopes.values() {
-            if s.done < s.total {
-                any_incomplete = true;
-                if !s.awaiting_builder {
-                    return false;
-                }
-            }
-        }
-        any_incomplete
-    }
-
-    /// N4 — some still-incomplete scope has its `cancel` tripped, i.e. is MID-TEARDOWN: a fault/exit/
-    /// abort has cancelled it and its parked fibers are about to be requeued by `cancel_drain` so they
-    /// can unwind their `defer`s. Vetoes the deadlock predicate (see [`MnSched::is_deadlocked`]).
-    ///
-    /// A cancel trip and its `cancel_drain` are TWO SEPARATE core-lock acquisitions apart at every seam
-    /// that trips one — there are exactly THREE (the only scope-cancel stores in the VM):
-    /// `MnSched::finish_with` (a fiber's fault/exit, `run_one_fiber`'s panic-fault fallback included)
-    /// followed by `mn_worker_loop`'s `cancel_drain`;
-    /// `abort_enlisted_scope`; and `abort_eager_nursery` (sched.rs). (The two demote self-detect loops
-    /// only READ a cancel — they trip none.) An idle worker's `take_runnable` landing in such a gap sees
-    /// the pre-drain quiesce (`running == 0 && runnable == 0 && parked_n > 0`) and, without this veto,
-    /// calls the teardown a DEADLOCK — `flag_deadlock` then DROPS the still-parked siblings without
-    /// `unwind_deferred`, silently skipping their `defer`s.
-    ///
-    /// The two abort seams also clear a PRE-EXISTING veto of their own (`awaiting_builder` /
-    /// `any_body_open`); both trip the scope cancel FIRST (`MnSched::trip_scope_cancel`, a store under
-    /// the core lock) so the veto handoff is GAPLESS — one veto is armed before the other is dropped.
-    /// The store must stay under the core lock: it is what publishes the flag to any worker that later
-    /// takes that lock to evaluate the predicate (a bare `Relaxed` store outside it has no
-    /// synchronizes-with edge). On the fault path the edge is `finish`'s own lock release (the predicate
-    /// needs `running == 0`, which only holds after it).
-    ///
-    /// BOUNDED TO THAT WINDOW (this is the whole liveness argument): the veto asks for an UNDRAINED
-    /// PARKED fiber of the cancelled scope, not merely `done < total`. "Some incomplete cancelled scope"
-    /// was too wide and could never lift: a `defer` is not itself cancellable (`halt_requested`'s
-    /// `in_defer` term), so a cleanup body that blocks FOREVER (`ch.recv()` nobody will ever
-    /// answer) demotes or parks and sits there — a parked one is no drain's fiber
-    /// ([`Fiber::honours_cancel`]) — the scope is then incomplete *because of* that fiber, the veto
-    /// held forever and the M:N engine hung SILENTLY (serial reports it). The harm the veto exists to
-    /// prevent is only possible while parked fibers are still owed their `cancel_drain`; once drained
-    /// they are in `global` (`runnable > 0`), so the predicate is false on its own terms and the veto is
-    /// no longer needed. A cancelled scope cannot RE-accumulate drainable parked fibers after its
-    /// drain (a fiber parked in a `defer` is none: it ignores the cancel and the verdict cuts it,
-    /// `SchedCore::cut_aborting_families`): every park path re-checks this scope's cancel OR an ancestor's (`park`/`park_send`/`park_wait` re-read
-    /// `c.scope_cancel_tripped(fiber.scope_id)` under the core lock and requeue `Ready` instead of
-    /// parking; `poll_park_offload` hands the netpoller's `register` the same `ScopeCancel`, which
-    /// rejects the park under the registry lock `drain_family` sweeps under) — pinned by
-    /// `mnsched_park_requeues_when_cancel_tripped` and `poll_park_rejects_cancelled_inner_scope`. The
-    /// NETPOLLER half counts too (TICKET-200): a poll-parked fiber is deliberately NOT in `parked` and
-    /// `poll_park_offload` accounts it running→`inflight`, so `is_deadlocked` (which requires
-    /// `inflight == 0`) never judges it — but nothing wakes it either, so the drain scan must still
-    /// find it. `scope_has_undrained_park` reads the poller registry for it, under the registry lock
-    /// taken while this core lock A is held; the registry is a leaf (nothing under it takes a core
-    /// lock or calls `complete_offload`), so the order A → registry cannot invert.
-    /// A cancelled scope whose last unsettled fiber is DEMOTED-blocked forever inside its own cleanup is
-    /// therefore a REAL deadlock, and `demote_recv_block`'s self-detect reports it instead of hanging
-    /// (`mnsched_cancelled_scope_whose_only_fiber_is_demoted_is_deadlock`).
-    pub(super) fn any_cancelled_scope_awaiting_drain(&self, me: &MnSched) -> bool {
-        self.cancelled_scope_awaiting_drain(me).is_some()
-    }
-
     /// TICKET-118 (W13-8) — is scope `sid`'s cancel flag itself set, or any ancestor's (an
     /// `Executor`'s `cancel` trips a flag a job's nursery scope carries in
     /// `JoinScope::ancestors`, installed by `Vm::run_one_fiber` as this fiber's `cancel_outer`)?
@@ -117,9 +36,8 @@ impl SchedCore {
     }
 
     /// TICKET-118 (W13-8) — the first scope (if any) whose own flag or an ancestor's is tripped
-    /// and still owing a `cancel_drain` to some parked fiber. `MnSched::take_runnable`
-    /// drains it before judging a deadlock; every other caller reads the own-flag-only
-    /// `any_cancelled_scope_awaiting_drain` above.
+    /// and still owing a `cancel_drain` to some parked fiber. Its one caller is
+    /// [`SchedCore::drain_scan_due`], on `MnSched::take_runnable`'s idle path.
     ///
     /// TICKET-289 — a COMPLETE scope counts too. Its owner is a parked fiber of another scope (a job
     /// in a full `send`, behind a nursery whose only child just faulted), and that child's `finish`
@@ -163,7 +81,7 @@ impl SchedCore {
     /// fiber lock without claiming; a poll-parked fiber by `poller::any_parked`, TICKET-200) — so no
     /// new state to keep in sync (a counter would have to be set/cleared at every trip + drain seam;
     /// a missed clear re-creates the hang). The registry read takes the registry lock under this core
-    /// lock A; the registry is a leaf (see `any_cancelled_scope_awaiting_drain`).
+    /// lock A; the registry is a leaf.
     fn scope_has_undrained_park(&self, me: &MnSched, sid: usize) -> bool {
         if poller::any_parked(me, &self.scope_family(sid)) {
             return true;
@@ -188,27 +106,9 @@ impl SchedCore {
         self.scopes.values().any(|s| s.done < s.total)
     }
 
-    /// TICKET-125 (exec_join, DEC-112 bullet 3) — every counted fiber on this sched is an owner
-    /// blocked at a nested join: it can feed nobody (DEC-099) and has no parked fiber of its own
-    /// (`parked_n == 0`), so a caller demanding a visible parked victim before counting this sched
-    /// live must not — that demand is exactly what hung `exec_join`/`b4a`/`e10`/`e11` at T>=2.
-    pub(super) fn only_blocked_owners(&self) -> bool {
-        self.running > 0 && self.running == self.blocked_owners && self.parked_n == 0
-    }
-
-    /// TICKET-236 — a waker left the counts a verdict reads: move the run's epoch
-    /// ([`quiesce::QuiesceState::note_left`]). Called after the leaver's last channel effect and
-    /// inside the lock hold that publishes the leave, so a judge that saw the waker gone also
-    /// sees the moved epoch and declines. The methods below are the only ways out of those
-    /// counts; a transfer between two counts inside one lock hold needs no bump.
-    pub(super) fn note_left(&self) {
-        self.left.fetch_add(1, Ordering::SeqCst);
-    }
-
     /// TICKET-236 — THE way off `running` (a park, a yield, a finish, a demote, an offload).
     pub(super) fn leave_running(&mut self) {
         self.running -= 1;
-        self.note_left();
     }
 
     /// TICKET-236 — THE way a task of scope `sid` becomes done. A fiber parked in an `Executor`
@@ -216,7 +116,6 @@ impl SchedCore {
     /// so [`MnSched::wake_cross`]).
     pub(super) fn task_done(&mut self, sid: usize) {
         self.scopes[sid].done += 1;
-        self.note_left();
         if !self.exec_joiners.is_empty() {
             let undone = self.undone_tasks();
             self.exec_joiners.retain(|(s, slack, key)| {
@@ -229,55 +128,23 @@ impl SchedCore {
                 false
             });
         }
+        if self.root && sid == 0 {
+            // `main`'s end as fiber 1 (scope 0 holds it alone): the driving thread takes main's
+            // count back ([`Vm::run_root`]).
+            self.awake.task_started(1);
+        }
+        // After the joiners' wakes: a wake counts before the waker's own end.
+        self.awake.task_ended();
     }
 
     /// TICKET-236 — THE way a scope leaves the table ([`MnSched::retire_scope`]).
     pub(super) fn scope_retired(&mut self, sid: usize) {
-        self.note_left();
         self.scopes.remove(sid);
-    }
-
-    /// TICKET-236 — THE way an owner blocks at a nested join (DEC-095); `cross_sched` when the
-    /// joined sched is not this one.
-    pub(super) fn owner_blocked(&mut self, cross_sched: bool) {
-        self.blocked_owners += 1;
-        if cross_sched {
-            self.cross_sched_blocked_owners += 1;
-        }
-        self.note_left();
     }
 
     /// TICKET-236 — THE way scope `sid`'s eager body stops injecting for good.
     fn body_closed(&mut self, sid: usize) {
         self.scopes[sid].body_open = false;
-        self.note_left();
-    }
-
-    /// TICKET-236 — THE writer of scope `sid`'s `body_blocked`, and of its `awaiting_builder`
-    /// when `awaiting` is set ([`MnSched::set_body_wait`]). Moves the epoch on block AND on
-    /// unblock, so "every write of these two flags moves the epoch" holds with no condition.
-    ///
-    /// §2c1 — a body parked in a NESTED nursery's join is not merely unable to inject: it WILL
-    /// resume the moment that inner scope completes, and may then `send`/`close` to a sibling.
-    /// That is exactly what `awaiting_builder` already means, so say it rather than invent a
-    /// second flag — `all_incomplete_awaiting_builder` then vetoes when the inner scope is DONE
-    /// (the builder is about to resume and feed) and does NOT veto while the inner scope is
-    /// itself incomplete-and-stuck (a genuine nested deadlock, which must fault). A body blocked
-    /// on a CHANNEL leaves it false: that body resumes only if somebody feeds it, so it is not a
-    /// promise of progress.
-    fn body_wait(&mut self, sid: usize, blocked: bool, awaiting: bool) {
-        self.scopes[sid].body_blocked = blocked;
-        if awaiting {
-            self.scopes[sid].awaiting_builder = blocked;
-        }
-        self.note_left();
-    }
-
-    /// TICKET-236 — THE way scope `sid` stops awaiting its builder: the builder reached the
-    /// scope's join.
-    pub(super) fn builder_joined(&mut self, sid: usize) {
-        self.scopes[sid].awaiting_builder = false;
-        self.note_left();
     }
 
     /// TICKET-181 — register a blocked waiter; returns its token for [`Self::unregister_waiter`].
@@ -292,44 +159,6 @@ impl SchedCore {
     /// TICKET-181 — drop the waiter `tok` names. Caller holds core lock A.
     pub(super) fn unregister_waiter(&mut self, tok: u64) {
         self.waiters.remove(&tok);
-    }
-
-    /// TICKET-181, TICKET-236 — the ONE veto of every blocked thing: could any registered waiter
-    /// or any parked fiber ([`ParkedEntry::satisfiable`]) already resume? Runs under A and takes only Q and the guard registry G (a leaf), the order `send_wake` uses.
-    /// `me` is the sched this core belongs to. A `Join` waiter is answered here, never through
-    /// [`quiesce::PartyWait::satisfiable`], which would lock a sched core under this one: a join of
-    /// `me` reads `self`, and a join of another sched uses `try_lock` (a busy core answers `true`,
-    /// which only declines the verdict).
-    pub(super) fn any_blocked_satisfiable(&self, me: &MnSched) -> bool {
-        self.waiters.values().any(|w| match &*w.wait {
-            quiesce::PartyWait::Join(s, slack) => {
-                w.cancel.iter().any(|f| f.load(Ordering::Relaxed))
-                    || self.join_of_over(me, s, *slack)
-            }
-            quiesce::PartyWait::Recv(..)
-            | quiesce::PartyWait::Send(_)
-            | quiesce::PartyWait::Wait(..)
-            | quiesce::PartyWait::Nursery(_)
-            | quiesce::PartyWait::Guard(..) => w.satisfiable(),
-        }) || self
-            .parked
-            .values()
-            .flatten()
-            .any(|e| e.satisfiable(self, me))
-    }
-
-    /// Is a join of `s` owed `slack` over, asked under the core lock of `me` (this core)? A join
-    /// of `me` reads `self`; a join of another sched uses `try_lock` (a busy core answers `true`,
-    /// which only declines the verdict).
-    pub(super) fn join_of_over(&self, me: &MnSched, s: &MnSched, slack: usize) -> bool {
-        if std::ptr::eq(s, me) {
-            return self.join_over(slack);
-        }
-        match s.core.try_lock() {
-            Ok(c) => c.join_over(slack),
-            Err(std::sync::TryLockError::Poisoned(e)) => e.into_inner().join_over(slack),
-            Err(std::sync::TryLockError::WouldBlock) => true,
-        }
     }
 
     /// TICKET-236 — THE Join predicate: a join of this sched is over when it owes nothing but
@@ -380,24 +209,21 @@ impl MnSched {
         deadlock_err: RuntimeError,
         mem_cap: usize,
     ) -> Self {
-        // gaps.md W7-58 — its own state by default: no parties, so the judge below never fires.
-        // TICKET-236 — a sched that belongs to a run takes the run's state through
-        // [`MnSched::join_run`], which also re-pairs the core's epoch handle.
+        // Its own state by default; a sched that belongs to a run takes the run's state through
+        // [`MnSched::join_run`].
         let quiesce: Arc<quiesce::QuiesceState> = Default::default();
         MnSched {
             core: Mutex::new(SchedCore {
-                left: quiesce.epoch(),
                 listing: Arc::clone(&quiesce.listing),
+                awake: Arc::clone(&quiesce.awake),
+                root: false,
                 global: std::collections::VecDeque::new(),
                 parked: std::collections::HashMap::new(),
                 slots: (0..total).map(|_| None).collect(),
                 running: 0,
-                blocked_owners: 0,
-                cross_sched_blocked_owners: 0,
                 pool_joiner: None,
                 drain_scan_gen: 0,
                 parked_n: 0,
-                cut_requeued: 0,
                 join_parked: Vec::new(),
                 exec_joiners: Vec::new(),
                 scopes: ScopeTable::with_root(JoinScope {
@@ -406,15 +232,11 @@ impl MnSched {
                     done: 0,
                     bytes: 0,
                     body_open: false,
-                    body_blocked: false,
-                    awaiting_builder: false,
                     cancel: Arc::clone(&cancel),
                     // The creator wires the enclosing scopes' flags in (`Vm::scope_ancestors`)
                     // when this sched is built INSIDE an already-running task.
                     ancestors: Vec::new(),
                     deadlock_err: None,
-                    owners_blocked: 0,
-                    joins_blocked: 0,
                     parent_scope: None,
                 }),
                 terminate: false,
@@ -446,7 +268,6 @@ impl MnSched {
             // registry. An empty one is today's behaviour (no peers to wake or veto against).
             sched_registry: Default::default(),
             // TICKET-112 — false by default; `activate_eager_nursery` sets it for a nested sched.
-            body_is_fiber: false,
             detached: None,
             // gaps.md W7-56 — empty by default; both `MnSched` construction sites assign the run's
             // registry. An empty one is today's behaviour (no veto).
@@ -455,6 +276,7 @@ impl MnSched {
             idle_cv: Condvar::new(),
             idle_sleepers: AtomicUsize::new(0),
             spinning: AtomicUsize::new(0),
+            visitors: AtomicUsize::new(0),
             helpers_live: Mutex::new(0),
             helpers_gone: Condvar::new(),
             #[cfg(test)]
@@ -464,20 +286,18 @@ impl MnSched {
         }
     }
 
-    /// TICKET-236 — make this sched part of the run whose state is `q`: it judges through `q`
-    /// and its core moves `q`'s epoch. The ONE place that pairs the two; never assign
-    /// `MnSched::quiesce` directly, or the core keeps moving an epoch no judge of the run reads.
+    /// TICKET-236 — make this sched part of the run whose state is `q`: its core counts into
+    /// `q`'s awake count and lists into `q`'s listing. The ONE place that pairs them; never assign
+    /// `MnSched::quiesce` directly.
     pub(super) fn join_run(&mut self, q: &Arc<quiesce::QuiesceState>) {
         self.quiesce = Arc::clone(q);
         let c = self.core.get_mut().unwrap_or_else(|e| e.into_inner());
-        c.left = q.epoch();
         c.listing = Arc::clone(&q.listing);
+        c.awake = Arc::clone(&q.awake);
     }
 
-    /// TICKET-236 — THE way off `inflight`. Moves the epoch FIRST: `inflight` is read under no
-    /// lock, so a bump after the subtraction could land after a judge's closing read.
+    /// TICKET-236 — THE way off `inflight`.
     pub(super) fn leave_inflight(&self) {
-        self.quiesce.note_left();
         self.inflight.fetch_sub(1, Ordering::Relaxed);
     }
 
@@ -575,13 +395,9 @@ impl MnSched {
             done: 0,
             bytes: 0,
             body_open: false,
-            body_blocked: false,
-            awaiting_builder: false,
             cancel,
             ancestors,
             deadlock_err: None,
-            owners_blocked: 0,
-            joins_blocked: 0,
             parent_scope: None,
         });
         // Cross-nursery flat scheduler — a late `spawn:` into a non-outermost nursery registers a fresh
@@ -598,11 +414,8 @@ impl MnSched {
 
     /// Register a fresh trailing scope AND seed its fibers **atomically under one core lock**. Unlike
     /// `register_scope` followed by a separate `seed` (two locks with a wide gap — `prepare_worker` runs
-    /// in between), this guarantees there is never an instant where the scope is visible (`done < total`,
-    /// `awaiting_builder == false`) with `runnable == 0`. That window is a false-quiesce a SENTINEL helper
-    /// could read via `is_deadlocked` and fault an innocent parked outer sibling — reachable on the
-    /// late-spawn-into-middle path where the inline builder driving the registration is NOT counted in
-    /// `running`. Mirrors [`MnSched::inject`]'s grow+runnable atomicity contract. `workers` are already
+    /// in between), this guarantees there is never an instant where the scope is visible (`done < total`)
+    /// with its fibers not yet queued and counted awake (`QuiesceState::awake`). Mirrors [`MnSched::inject`]'s grow+runnable atomicity contract. `workers` are already
     /// prepared (no fallible/heap work happens inside the lock); each fiber's flat `task_index` is
     /// `base_index + i`, assigned here under the lock.
     pub(super) fn register_scope_seeded(
@@ -621,13 +434,9 @@ impl MnSched {
             done: 0,
             bytes: 0,
             body_open: false,
-            body_blocked: false,
-            awaiting_builder: false,
             cancel,
             ancestors,
             deadlock_err: None,
-            owners_blocked: 0,
-            joins_blocked: 0,
             parent_scope: None,
         });
         // A freshly-registered scope has unfinished work — un-latch any stale global `terminate` (see
@@ -637,6 +446,7 @@ impl MnSched {
         // Seed in the SAME lock: bump `runnable` and queue every fiber before the lock is dropped, so the
         // scope and its runnable fibers become visible together (no `runnable == 0` gap).
         self.runnable.fetch_add(total, Ordering::Relaxed);
+        c.awake.task_started(total);
         for (i, w) in workers.into_iter().enumerate() {
             c.global.push_back(w.into_fiber(base_index + i, scope_id));
         }
@@ -669,15 +479,18 @@ impl MnSched {
         slot.set_listed(true);
     }
 
-    /// TICKET-205 — the spawner of a gated worker lists the child's slot, and queues it for the
-    /// permit when a fiber is already runnable.
+    /// TICKET-205 — the spawner of a gated worker lists the child's slot and queues it for the
+    /// permit when a fiber is already runnable. A child born with nothing runnable is any idle
+    /// worker: it lists itself when the gate is tight, else it sleeps untimed (a listed sleeper
+    /// polls, so every idle worker of a run born listed polled while one task ran).
     pub(super) fn idle_register_child(&self, slot: &Arc<width::Slot>) {
+        if self.runnable.load(Ordering::Relaxed) == 0 {
+            return;
+        }
         let mut g = self.gated_idle.lock().unwrap_or_else(|e| e.into_inner());
         g.push(Arc::clone(slot));
         slot.set_listed(true);
-        if self.runnable.load(Ordering::Relaxed) > 0 {
-            width::reserve(slot);
-        }
+        width::reserve(slot);
     }
 
     /// TICKET-205 — drop a slot whose thread the OS refused, with any ticket reserved for it.
@@ -689,11 +502,60 @@ impl MnSched {
         width::cancel(slot);
     }
 
-    pub(super) fn notify_waiters(&self) {
-        // TICKET-230 — the waker queues gated idle workers only when no permit is free beyond the
-        // queued tickets ([`width::full`]): with a free permit the woken worker takes it itself,
-        // and a reserved ticket would make it wait behind a thread the OS has not run yet
-        // (head-of-line wait). The `gated_idle` walk is skipped with it.
+    /// The wake for ONE fiber made runnable (a `spawn`, [`MnSched::inject_or_extend`]): the
+    /// gated idle workers queue for the permit as in [`Self::notify_waiters`], the `cv` waiters
+    /// re-check, and one idle sleeper is recruited (Go's `newproc` → `wakep`). A broadcast here
+    /// woke every idle runner of the run ([`Vm::run_root`] starts `worker_count() - 1`) per
+    /// spawn, and the herd took the core lock and the CPUs from the fibers just spawned.
+    pub(super) fn notify_new_work(&self) {
+        self.reserve_gated_idle();
+        self.cv.notify_all();
+        self.recruit();
+        // A new fiber recruits a host worker even while one visits ([`Self::recruit_host`]):
+        // the visitor keeps running the spawner, not the fiber it spawned.
+        if self.visitors.load(Ordering::Relaxed) > 0 {
+            self.wake_host(false);
+        }
+    }
+
+    /// An Executor's sched has no thread of its own while the run has a host
+    /// ([`quiesce::QuiesceState::host`]): a wake of it with a fiber runnable wakes the host's idle
+    /// workers, one per runnable fiber (`all`) or one. The host's core lock is taken first: an
+    /// idle host worker reads this sched's `runnable` under it
+    /// ([`quiesce::QuiesceState::runnable_guest`]), so it has read the new count or is already
+    /// waiting when the notify lands.
+    pub(super) fn wake_host(&self, all: bool) {
+        if self.detached.is_none() || self.runnable.load(Ordering::Relaxed) == 0 {
+            return;
+        }
+        let Some(host) = self.quiesce.host() else {
+            return;
+        };
+        drop(host.lock());
+        host.cv.notify_all();
+        if all {
+            let n = self.runnable.load(Ordering::Relaxed);
+            for _ in 0..n.min(host.idle_sleepers.load(Ordering::Relaxed)) {
+                host.idle_cv.notify_one();
+            }
+        } else {
+            host.recruit();
+        }
+    }
+
+    /// [`Self::wake_host`] for one handed-off fiber (Go's `wakep`): no host worker is recruited
+    /// while one visits this sched, as [`Self::recruit`] skips while a worker spins.
+    fn recruit_host(&self) {
+        if self.visitors.load(Ordering::Relaxed) == 0 {
+            self.wake_host(false);
+        }
+    }
+
+    /// TICKET-230 — the waker queues gated idle workers only when no permit is free beyond the
+    /// queued tickets ([`width::full`]): with a free permit the woken worker takes it itself,
+    /// and a reserved ticket would make it wait behind a thread the OS has not run yet
+    /// (head-of-line wait). The `gated_idle` walk is skipped with it.
+    pub(super) fn reserve_gated_idle(&self) {
         if self.runnable.load(Ordering::Relaxed) > 0 && width::full() {
             for s in self
                 .gated_idle
@@ -704,10 +566,15 @@ impl MnSched {
                 width::reserve(s);
             }
         }
+    }
+
+    pub(super) fn notify_waiters(&self) {
+        self.reserve_gated_idle();
         self.cv.notify_all();
         if self.idle_sleepers.load(Ordering::Relaxed) > 0 {
             self.idle_cv.notify_all();
         }
+        self.wake_host(true);
     }
 
     /// TICKET-128 (W13-25) — wake exactly one idle worker, damped: a no-op while any worker is
@@ -722,12 +589,15 @@ impl MnSched {
         {
             self.idle_cv.notify_one();
         }
+        self.recruit_host();
     }
 
     /// Seed the run queue with the nursery's fibers (task order).
     pub(super) fn seed(&self, fibers: Vec<Fiber>) {
         self.runnable.fetch_add(fibers.len(), Ordering::Relaxed);
-        self.lock().global.extend(fibers);
+        let mut c = self.lock();
+        c.awake.task_started(fibers.len());
+        c.global.extend(fibers);
     }
 
     /// Per-connection `spawn` — inject a freshly-built handler fiber into a LIVE, running sched
@@ -742,7 +612,7 @@ impl MnSched {
     /// indices and `reduce_task_slots` flushes injected-task output deterministically.
     /// Inject into `scope_id` (an eager nursery's scope). The eager nursery owns its OWN sched (a
     /// single scope, the LAST scope), so the new slot is the flat `slots` END — keeping the scope's
-    /// `base_index..base_index+total` sub-range contiguous (the contract `reduce`/`take_scope_slots`
+    /// `base_index..base_index+total` sub-range contiguous (the contract `reduce`/`drain_scopes`
     /// rely on). The `debug_assert` pins that invariant: inject only ever targets the last scope, so
     /// growing it never overruns a later scope's range.
     #[cfg(test)]
@@ -780,7 +650,7 @@ impl MnSched {
         self.enqueue_locked(&mut c, fiber);
         let wids = self.claim_runners(&mut c);
         drop(c);
-        self.notify_waiters();
+        self.notify_new_work();
         (opened, wids)
     }
 
@@ -819,9 +689,10 @@ impl MnSched {
 
     /// TICKET-289 — `Task.cancel()`: cancel the one job whose Task channel is `ch`
     /// ([`JobEvent::CancelOne`]). A held job is dropped and its Task settles; a running job gets
-    /// its own flag tripped, then the fibers that flag wakes are drained, with no lock held.
-    /// A job that already ended is a no-op.
-    pub(super) fn cancel_job(&self, ch: &Arc<ChannelCore>) {
+    /// its own flag tripped, which it returns: the caller drains the fibers that flag wakes on
+    /// every sched of the run ([`super::sched::drain_live_scheds`]), with no lock held. A job that
+    /// already ended is a no-op.
+    pub(super) fn cancel_job(&self, ch: &Arc<ChannelCore>) -> Option<Arc<AtomicBool>> {
         let mut c = self.lock();
         let step = c.job_event(JobEvent::CancelOne(Arc::clone(ch)), self.quiesce.run_halt());
         drop(c);
@@ -829,9 +700,7 @@ impl MnSched {
             self.notify_waiters();
         }
         self.wake_sealed(step.sealed);
-        if let Some(flag) = step.cut_flag {
-            self.drain_job(&flag);
-        }
+        step.cut_flag
     }
 
     /// TICKET-232 — wake the readers of each handle channel [`SchedCore::settle_job`] sealed,
@@ -868,13 +737,9 @@ impl MnSched {
                 done: 0,
                 bytes: 0,
                 body_open: false,
-                body_blocked: false,
-                awaiting_builder: false,
                 cancel: Arc::clone(&origin.cancel),
                 ancestors: origin.ancestors.clone(),
                 deadlock_err: origin.deadlock_err.clone(),
-                owners_blocked: 0,
-                joins_blocked: 0,
                 parent_scope: None,
             };
             let id = c.scopes.open(cont);
@@ -883,6 +748,8 @@ impl MnSched {
         };
         fiber.task_index = base_index;
         c.slots.push(None);
+        // The task is alive from its slot on: a held job too, which ends through `task_done`.
+        c.awake.task_started(1);
         opened
     }
 
@@ -1054,8 +921,8 @@ impl MnSched {
     }
 
     /// Per-connection spawn — mark `scope_id`'s (eager) body as still producing tasks: a transient
-    /// `done == total` will not terminate it and `is_deadlocked` is vetoed, so farmed workers park
-    /// waiting for the next `inject` instead of exiting. Called at `EnterNursery`.
+    /// `done == total` will not terminate it, so farmed workers park waiting for the next `inject`
+    /// instead of exiting. Called at `EnterNursery`.
     pub(super) fn open_body(&self, scope_id: usize) {
         self.lock().scopes[scope_id].body_open = true;
     }
@@ -1078,7 +945,7 @@ impl MnSched {
 
     /// §2c1 — a NESTED eager scope has joined and every one of its tasks is done: remove it from the
     /// table and give the slot tail back, so a later `inject` into the enclosing scope can grow it in
-    /// place again when it is once more the last scope (`take_scope_slots`' `base..base+total` slice
+    /// place again when it is once more the last scope (`drain_scopes`' `base..base+total` slice
     /// stays contiguous).
     ///
     /// TICKET-199 — any scope whose `done == total` may be retired, not only the last one: scope
@@ -1137,71 +1004,6 @@ impl MnSched {
     /// TICKET-159 — scope `sid`'s cancel flag, for a shell that serves it.
     pub(super) fn scope_cancel(&self, sid: usize) -> Option<Arc<AtomicBool>> {
         self.lock().scopes.get(sid).map(|s| Arc::clone(&s.cancel))
-    }
-
-    /// §2c1 — register (or drop) a BLOCKED BODY's channel waits as demoted participants of this
-    /// sched, so `is_deadlocked_ignoring_jobs`' demoted-queue peek can see them.
-    ///
-    /// This is what makes the `body_blocked` relaxation SOUND. Lifting `body_open` tells the predicate
-    /// "this body cannot inject" — true — but says nothing about the body being the RENDEZVOUS PARTNER
-    /// of one of the sched's own parked fibers, which it very often is. Registering the channel puts
-    /// the body in the same set the demoted-worker path uses, so the peek vetoes exactly when a value
-    /// is already queued for it. Measured: without it, `Channel[int](1)` + `spawn: ch.send(0);
-    /// ch.send(1)` + two body `recv`s false-faulted `recv on an empty channel: deadlock` on 4 runs in
-    /// 8, against Go's `0 1`.
-    ///
-    /// Keyed by `Arc::as_ptr(core)`, the same key space `Vm::channel_core_ptr` uses, so a body and a
-    /// demoted worker blocked on the SAME channel share one refcounted entry.
-    /// **Both halves move under ONE lock acquisition, and that is a correctness requirement, not
-    /// tidiness.** Raising `body_blocked` lifts the deadlock veto; registering the channel is what
-    /// makes the un-vetoed predicate reach the right answer. Doing them as two acquisitions leaves a
-    /// window in which the veto is down and the channel is invisible, and an idle worker sampling
-    /// there reaps a perfectly satisfiable parked fiber: measured on `Channel[int](1)` with the
-    /// consumer in the `spawn` and the sender in the body, the consumer was killed after ONE `recv`
-    /// (`scopes=[(1,1)]`) and `main` then faulted `send on a full channel: deadlock`, 5 runs in 6.
-    pub(super) fn set_body_wait(
-        &self,
-        scope_id: usize,
-        wait: Option<&Arc<crate::vm::quiesce::PartyWait>>,
-        blocked: bool,
-        awaiting: bool,
-    ) {
-        {
-            let mut c = self.lock();
-            // ON: publish the wait BEFORE lifting the veto. OFF: drop the veto BEFORE retracting it.
-            // Either way the un-vetoed state is never observable without the wait.
-            if blocked && let Some(w) = wait {
-                c.register_waiter(crate::vm::block::Waiter {
-                    wait: Arc::clone(w),
-                    cancel: Vec::new(),
-                    fiber: false,
-                    scope: None,
-                    cut: false,
-                    holds_guard: false,
-                });
-            }
-            // TICKET-103 — the whole family, in this same acquisition: an unmarked continuation keeps
-            // `all_incomplete_awaiting_builder` false and lets the predicate fault a sibling the body
-            // feeds after its nested join.
-            // TICKET-199 — a retired `scope_id` has an empty family, so this is a no-op for it.
-            let family = c.scope_family(scope_id);
-            for i in family {
-                c.body_wait(i, blocked, awaiting);
-            }
-            if !blocked
-                && let Some(w) = wait
-                && let Some(tok) = c
-                    .waiters
-                    .iter()
-                    .find(|(_, x)| Arc::ptr_eq(&x.wait, w))
-                    .map(|(t, _)| *t)
-            {
-                c.unregister_waiter(tok);
-            }
-        }
-        if blocked {
-            self.notify_waiters();
-        }
     }
 }
 
@@ -1263,9 +1065,7 @@ pub(super) fn arm_timer_sleep(sched: Arc<MnSched>, mut fiber: Fiber, t: TimerSle
             is_assert: false,
             is_over_memory: false,
             is_timed_out: false,
-            is_deadlock: false,
             is_panic: false,
-            blocked: None,
         })
     } else {
         None

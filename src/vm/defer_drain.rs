@@ -77,6 +77,13 @@ pub(super) enum DrainCont {
     Catch(Box<Caught>),
 }
 
+impl Drain {
+    /// Does this drain run the `defer`s of a `--max-heap` abort ([`super::frames::Unwind::over_memory`])?
+    pub(super) fn over_memory(&self) -> bool {
+        matches!(&self.then, DrainCont::Unwind(u) if u.over_memory())
+    }
+}
+
 impl DrainCont {
     /// Whether the continuation is a fault or cancel unwind's: one that fails has already run the
     /// fault arm ([`Vm::on_step_fault`]).

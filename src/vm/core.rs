@@ -25,7 +25,7 @@ use std::time::Duration;
 /// count of readers that hold the box (the low 31 bits), and [`CUT`]: a cut released a holder, so
 /// every acquire refuses the box. `writer` is the task token of the writer
 /// (0 = none), read only on a failed acquire to find a same-task re-entry. A reader is anonymous
-/// here; the task that reads keeps its own list (`Vm::held_reads`). `sleepers` counts the tasks that
+/// here. `sleepers` counts the tasks that
 /// wait on the registry condvar for this box, so a release wakes them only when one exists.
 /// `wait_readers` counts the readers that wait with a [`WaitTicket`] (their flags are in
 /// `GuardGraph::readers`), so a write release admits them (Go `sync/rwmutex.go:214`, "Unblock
@@ -257,39 +257,17 @@ impl BoxLock {
     }
 }
 
-/// TICKET-016 (W8-3) — the process-global wait-for graph, read only on the slow path (a contended
-/// acquire). `waiting` maps a blocked task's token to the box and mode it wants. A walk from the
-/// requester follows `waiting` -> the box's writer (`BoxLock::writer`) or a writer that waits for
-/// it -> `waiting`: a walk that returns to the requester is a wait-for cycle, which faults instead
-/// of blocking. A reader is anonymous ([`BoxLock`]), so a cycle that passes through a read guard is
-/// left to the run's deadlock verdict (Go: `fatal error: all goroutines are asleep - deadlock!`).
+/// TICKET-016 (W8-3) — the process-global guard registry, read only on the slow path (a contended
+/// acquire): the readers that wait for each box. A lock cycle or a re-lock just blocks, and the
+/// run's deadlock verdict reports it (Go: `fatal error: all goroutines are asleep - deadlock!`).
 ///
 /// No std lock here lives across user code or a fiber park: the registry `Mutex` is held only for
 /// the map reads and writes below (and released by the `Condvar` wait).
 #[derive(Default)]
 struct GuardGraph {
-    waiting: HashMap<u64, (Arc<BoxLock>, GuardMode)>,
     /// The readers that wait for a box (keyed by its `BoxLock` address), each by its admission
     /// flag: [`BoxLock::release_write`] admits them all.
     readers: HashMap<usize, Vec<Arc<AtomicBool>>>,
-}
-
-impl GuardGraph {
-    /// The tasks a wait for `(lock, mode)` by `me` waits on: the writer, and for a read a writer
-    /// that waits for the same box.
-    fn blockers(&self, lock: &Arc<BoxLock>, mode: GuardMode, me: u64, out: &mut Vec<u64>) {
-        let w = lock.writer();
-        if w != 0 && w != me {
-            out.push(w);
-        }
-        if mode == GuardMode::Read {
-            for (t, (l, m)) in &self.waiting {
-                if *t != me && *m == GuardMode::Write && Arc::ptr_eq(l, lock) {
-                    out.push(*t);
-                }
-            }
-        }
-    }
 }
 
 fn guard_registry() -> &'static (Mutex<GuardGraph>, Condvar) {
@@ -310,19 +288,6 @@ pub enum GuardMode {
 pub struct GuardKey<'a> {
     pub lock: &'a Arc<BoxLock>,
     pub mode: GuardMode,
-}
-
-/// Why a guard acquire refused to block: a wait-for cycle exists. `SelfHeld` is the length-1 case
-/// (the requester already holds the box's write guard, e.g. a nested `set`/`update`/`write`, or a
-/// read, on the same box inside its own closure); `ReadHeld` is a write by a task that holds the
-/// box's read guard (M3.3, Q2: Go `RLock(); Lock()`); `Cycle` is a longer cycle: a cross-task or
-/// cross-box one (e.g. AB-BA), or a nested read past a waiting writer that waits for this task's
-/// outer read (Go: a recursive `RLock` with a writer queued deadlocks).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum GuardCycle {
-    SelfHeld,
-    ReadHeld,
-    Cycle,
 }
 
 /// RAII handle for a held guard (TICKET-016 / W8-3): dropping it releases the hold and wakes the
@@ -409,14 +374,12 @@ impl Drop for GenHold {
 ///
 /// It owns its lock: a fiber that parks for the box keeps its ticket in its task state
 /// (`Vm::guard_ticket`) across the park, so a parked writer stays counted, and the re-run acquire
-/// takes the box through it. A parked waiter's wait-for edge (`GuardGraph::waiting`) lives in it
-/// too ([`WaitTicket::park_edge`]), dropped at its take or its exit.
+/// takes the box through it.
 pub struct WaitTicket {
     lock: Arc<BoxLock>,
     mode: GuardMode,
     live: bool,
     admitted: Option<Arc<AtomicBool>>,
-    edge: Option<u64>,
 }
 
 impl WaitTicket {
@@ -441,7 +404,6 @@ impl WaitTicket {
             mode: key.mode,
             live,
             admitted,
-            edge: None,
         }
     }
 
@@ -459,36 +421,6 @@ impl WaitTicket {
     /// ([`BoxLock::looks_free`], [`BoxLock::park_waiter`]).
     pub fn looks_takeable(&self) -> bool {
         self.is_admitted() || self.lock.looks_free(self.mode)
-    }
-
-    /// The verdict's question of a parked waiter `me`: [`guard_wait_satisfiable`]'s answer.
-    pub fn satisfiable(&self, me: u64) -> bool {
-        wait_may_end(&self.lock, self.mode, self.admitted.as_ref(), me)
-    }
-
-    /// File this waiter's wait-for edge before it parks, so another task's acquire that closes a
-    /// cycle through it faults (AB-BA). `Err` when this wait closes one itself.
-    pub fn park_edge(&mut self, me: u64) -> Result<(), GuardCycle> {
-        let (mtx, _cv) = guard_registry();
-        let mut g = mtx.lock().unwrap_or_else(|e| e.into_inner());
-        g.waiting.insert(me, (Arc::clone(&self.lock), self.mode));
-        if wait_for_cycle(&g, me) {
-            g.waiting.remove(&me);
-            return Err(GuardCycle::Cycle);
-        }
-        self.edge = Some(me);
-        Ok(())
-    }
-
-    /// Drop the parked waiter's wait-for edge, if it filed one.
-    fn drop_edge(&mut self) {
-        if let Some(me) = self.edge.take() {
-            let (mtx, _cv) = guard_registry();
-            mtx.lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .waiting
-                .remove(&me);
-        }
     }
 
     /// A reader's admission flag (set by a write release), for its registered wait.
@@ -535,7 +467,6 @@ impl WaitTicket {
         if self.is_admitted() {
             // The release counted this read hold and dropped the registration.
             self.admitted = None;
-            self.drop_edge();
             return Some(UpdateGuard {
                 lock,
                 mode,
@@ -546,7 +477,6 @@ impl WaitTicket {
             // A counted writer's take moved it from waiting to holding.
             self.live = false;
             self.unregister();
-            self.drop_edge();
             return Some(UpdateGuard {
                 lock,
                 mode,
@@ -559,7 +489,6 @@ impl WaitTicket {
 
 impl Drop for WaitTicket {
     fn drop(&mut self) {
-        self.drop_edge();
         if self.live {
             // A waiting writer keeps out only readers and fresh writers, so its leaving frees
             // the box for nobody while a holder (or a verdict's cut) keeps it: no wake then. A
@@ -595,15 +524,11 @@ pub fn try_update_guard(key: GuardKey<'_>, me: u64) -> Option<UpdateGuard> {
     }
 }
 
-/// TICKET-193 — wait until `key` looks free for this waiter WITHOUT taking it: `Ok(true)` free,
-/// `Ok(false)` budget spent (`None` = no limit), `Err` a wait-for cycle. `Vm::guard_wait_block`
+/// TICKET-193 — wait until `key` looks free for this waiter WITHOUT taking it: `true` free,
+/// `false` budget spent (`None` = no limit). `Vm::guard_wait_block`
 /// waits here holding no width permit, then takes the permit, then the guard (permit before
 /// guard; DEC-141). The waiter's [`WaitTicket`] stays live across the gap, so no new reader gets in.
-pub fn await_update_guard_free(
-    ticket: &WaitTicket,
-    me: u64,
-    budget: Option<Duration>,
-) -> Result<bool, GuardCycle> {
+pub fn await_update_guard_free(ticket: &WaitTicket, budget: Option<Duration>) -> bool {
     let key = GuardKey {
         lock: &ticket.lock,
         mode: ticket.mode,
@@ -612,18 +537,14 @@ pub fn await_update_guard_free(
     let (mtx, cv) = guard_registry();
     let mut g = mtx.lock().unwrap_or_else(|e| e.into_inner());
     key.lock.sleepers.fetch_add(1, Ordering::SeqCst);
-    g.waiting.insert(me, (Arc::clone(key.lock), key.mode));
     let out = loop {
         if ticket.is_admitted() || key.lock.looks_free(key.mode) {
-            break Ok(true);
-        }
-        if wait_for_cycle(&g, me) {
-            break Err(GuardCycle::Cycle);
+            break true;
         }
         let left = match deadline {
             None => Duration::from_millis(50),
             Some(d) => match d.checked_duration_since(std::time::Instant::now()) {
-                None => break Ok(false),
+                None => break false,
                 Some(l) => l.min(Duration::from_millis(50)),
             },
         };
@@ -632,12 +553,11 @@ pub fn await_update_guard_free(
             .unwrap_or_else(|e| e.into_inner())
             .0;
     };
-    g.waiting.remove(&me);
     key.lock.sleepers.fetch_sub(1, Ordering::SeqCst);
     out
 }
 
-/// TICKET-063 — a registered guard wait (`PartyWait::Guard`): the box's lock, the mode, and
+/// TICKET-063 — a registered guard wait: the box's lock, the mode, and
 /// `taking`, which the waiter sets before each take attempt and clears when the attempt fails. A
 /// waiter that has just taken the guard stays registered until it leaves its wait loop, and its own
 /// hold is no wait: `taking` says so (a lock word cannot name an anonymous reader).
@@ -650,56 +570,6 @@ pub struct GuardWait {
     pub admitted: Option<Arc<AtomicBool>>,
 }
 
-/// TICKET-063 — would an acquire of `w` by `me`, issued now, NOT block? `true` too when the wait
-/// is a cycle (the acquire faults at once), and while the waiter takes the guard. Deliberately
-/// generous: a false `true` only vetoes the verdict.
-pub fn guard_wait_satisfiable(w: &GuardWait, me: u64) -> bool {
-    w.taking.load(Ordering::SeqCst) || wait_may_end(&w.lock, w.mode, w.admitted.as_ref(), me)
-}
-
-/// THE answer for a wait by `me` for `lock` in `mode`, in place or parked: admitted, free, its own
-/// write hold, or a cycle (the acquire faults at once).
-fn wait_may_end(
-    lock: &BoxLock,
-    mode: GuardMode,
-    admitted: Option<&Arc<AtomicBool>>,
-    me: u64,
-) -> bool {
-    if admitted.is_some_and(|f| f.load(Ordering::SeqCst))
-        || lock.looks_free(mode)
-        || lock.writer() == me
-    {
-        return true;
-    }
-    let (mtx, _cv) = guard_registry();
-    let g = mtx.lock().unwrap_or_else(|e| e.into_inner());
-    wait_for_cycle(&g, me)
-}
-
-/// Walk `waiting` -> blockers -> `waiting` -> ... from `start`, each task once: a walk that reaches
-/// `start` again is a wait-for cycle.
-fn wait_for_cycle(g: &GuardGraph, start: u64) -> bool {
-    let mut seen = std::collections::HashSet::new();
-    let mut work = vec![start];
-    let mut next = Vec::new();
-    while let Some(cur) = work.pop() {
-        let Some((lock, mode)) = g.waiting.get(&cur) else {
-            continue;
-        };
-        next.clear();
-        g.blockers(lock, *mode, cur, &mut next);
-        for &t in &next {
-            if t == start {
-                return true;
-            }
-            if seen.insert(t) {
-                work.push(t);
-            }
-        }
-    }
-    false
-}
-
 /// Test-only blocking acquire: the fast path, then a [`WaitTicket`] wait of at most `budget`.
 /// The engine path is `Vm::take_update_guard` (re-entry checks, halts, width permit, parties).
 #[cfg(test)]
@@ -707,21 +577,21 @@ pub fn acquire_update_guard_within<'a>(
     key: GuardKey<'a>,
     me: u64,
     budget: Duration,
-) -> Result<Option<UpdateGuard>, GuardCycle> {
+) -> Option<UpdateGuard> {
     if let Some(g) = try_update_guard(key, me) {
-        return Ok(Some(g));
+        return Some(g);
     }
     let deadline = std::time::Instant::now() + budget;
     let mut ticket = WaitTicket::new(key);
     loop {
         let left = deadline.saturating_duration_since(std::time::Instant::now());
-        if await_update_guard_free(&ticket, me, Some(left))?
+        if await_update_guard_free(&ticket, Some(left))
             && let Some(g) = ticket.try_take(me)
         {
-            return Ok(Some(g));
+            return Some(g);
         }
         if left.is_zero() {
-            return Ok(None);
+            return None;
         }
     }
 }
@@ -769,12 +639,19 @@ pub struct ChannelCore {
     /// timer handle is still served by its single job (it wakes whatever token sits in this bucket at
     /// the deadline). Only the snapshot-park path arms a job; the single-`recv` and demote paths don't.
     pub timer_armed: AtomicBool,
+    /// A `timer(ms)` channel's waiters: the tasks parked on it now, and whether its job fired. The
+    /// timer is a task of the run's awake count while both say so (`waiters > 0 && !fired`), Go
+    /// 1.23's rule: a timer nobody waits on keeps nothing awake ([`ChannelCore::timer_wait`]).
+    pub(super) timer_waits: Mutex<(u32, bool)>,
     /// `trip()` manual level-trigger latch (the primitive behind `std.cancel`'s `done()`). Once set
     /// true it is permanent: `recv`/`try_recv`/`wait` report ready (`true`) on every call thereafter,
     /// for any number of receivers — exactly like a passed `timer` deadline, but flipped on demand
     /// instead of by the clock. `false` for an ordinary `Channel[T]`. A `trip()` reuses `close()`'s
     /// wake fan-out (minus the `closed` flag) so a parked `recv`/`wait` re-runs and observes it.
     pub done_latch: AtomicBool,
+    /// Set once by `_submit_settled`: this channel is a Task's outcome handle, so a receive parked
+    /// on it (`t.get()`) is listed as an Executor join by the deadlock report.
+    pub handle: AtomicBool,
     /// TICKET-205 — gated threads waiting in place on this channel; a wake queues each for the permit.
     pub(super) gated: Mutex<Vec<GatedWaiter>>,
 }
@@ -901,6 +778,45 @@ impl ChannelCore {
             }
         }
         self.cv.notify_all();
+    }
+
+    /// A task is about to park on this timer channel: while it waits and the timer has not fired,
+    /// the timer is a task of `awake`. Called while the parking task is still awake, so the +1 is
+    /// in before its own `asleep`. The wait ends when the [`TimerWait`] drops: at the task's next
+    /// resume, or with its fiber.
+    pub(super) fn timer_wait(self: &Arc<Self>, awake: &Arc<super::quiesce::Awake>) -> TimerWait {
+        let mut w = self.timer_waits.lock().unwrap_or_else(|e| e.into_inner());
+        if w.0 == 0 && !w.1 {
+            awake.task_started(1);
+        }
+        w.0 += 1;
+        TimerWait(Arc::clone(self), Arc::clone(awake))
+    }
+
+    /// This timer's deadline passed and its job made the wake: it is no longer a task of `awake`
+    /// (an early `--timeout` wake does not call this). True when that
+    /// took `awake` to 0 with tasks alive ([`super::quiesce::Awake::task_ended`]).
+    pub(super) fn timer_fired(&self, awake: &super::quiesce::Awake) -> bool {
+        let mut w = self.timer_waits.lock().unwrap_or_else(|e| e.into_inner());
+        let held = w.0 > 0 && !w.1;
+        w.1 = true;
+        held && awake.task_ended()
+    }
+}
+
+/// One task's wait on a timer channel ([`ChannelCore::timer_wait`]). Dropping it ends the wait;
+/// the last waiter of an unfired timer takes the timer out of the count. It drops at the task's
+/// resume (a running task is awake, so that -1 never makes a verdict) or with a fiber the run's
+/// verdict or teardown ends (the verdict is already decided), so its result is not read.
+pub(super) struct TimerWait(Arc<ChannelCore>, Arc<super::quiesce::Awake>);
+
+impl Drop for TimerWait {
+    fn drop(&mut self) {
+        let mut w = self.0.timer_waits.lock().unwrap_or_else(|e| e.into_inner());
+        w.0 -= 1;
+        if w.0 == 0 && !w.1 {
+            let _ = self.1.task_ended();
+        }
     }
 }
 
@@ -1591,9 +1507,7 @@ pub(super) fn halt_over_backlog(
         // the run `OVER-MEMORY`, exactly like the parent-side abort in `Vm::run_until`.
         is_over_memory: true,
         is_timed_out: false,
-        is_deadlock: false,
         is_panic: false,
-        blocked: None,
     };
     match outcome {
         T::Done(r) => (

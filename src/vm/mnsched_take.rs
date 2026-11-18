@@ -40,6 +40,21 @@ impl MnSched {
         t
     }
 
+    /// Take this thread's slot off this sched's idle list, with any ticket reserved for it. A
+    /// visit to a guest ([`Vm::visit_guest`]) does this first: the visit lists the thread on the
+    /// guest, and a host that still listed it would reserve turns it never takes.
+    fn idle_unlist(&self) {
+        if !width::listed() {
+            return;
+        }
+        let me = width::my_slot();
+        let mut g = self.gated_idle.lock().unwrap_or_else(|e| e.into_inner());
+        g.retain(|s| !Arc::ptr_eq(s, &me));
+        me.set_listed(false);
+        drop(g);
+        width::cancel(&me);
+    }
+
     /// TICKET-128 (W13-25) — the body of [`Self::take_runnable`], split out so the wrapper can track
     /// whether this call spun (`spun`) before returning. See `take_runnable` for the recruit this
     /// enables.
@@ -63,12 +78,6 @@ impl MnSched {
         scope_id: usize,
         spun: &mut bool,
     ) -> Take {
-        // gaps.md W7-58 — "this worker has already asked the process-wide verdict since its last
-        // wait". Bounds the (relatively expensive, `parties`-locking) escalation below to ONE call per
-        // wait, so it can never spin. It is NOT a claim that the verdict's inputs only move on a
-        // notify — they do not, which is why the idle wait below is BOUNDED whenever this is set (see
-        // there). Cleared at every wait site.
-        let mut judged = false;
         // TICKET-213 — an idle Executor runner has already waited once for a next job.
         let mut lingered = false;
         let mut idle_since = None;
@@ -76,18 +85,13 @@ impl MnSched {
         struct IdleReg<'a>(&'a MnSched);
         impl Drop for IdleReg<'_> {
             fn drop(&mut self) {
-                if !width::listed() {
-                    return;
-                }
-                let me = width::my_slot();
-                let mut g = self.0.gated_idle.lock().unwrap_or_else(|e| e.into_inner());
-                g.retain(|s| !Arc::ptr_eq(s, &me));
-                me.set_listed(false);
-                drop(g);
-                width::cancel(&me);
+                self.0.idle_unlist();
             }
         }
         let _idle = IdleReg(self);
+        // A root worker visits the run's Executor scheds at most once per take on the fairness
+        // tick below (an idle one visits whenever one has a fiber runnable).
+        let mut visited = false;
         loop {
             // 0. D4d — every `GLOBAL_CHECK_INTERVAL`th schedule, pull from the global queue FIRST
             //    (before own local / stealing). Without this a worker continuously refilled by
@@ -116,7 +120,23 @@ impl MnSched {
                     tick.is_multiple_of(GLOBAL_CHECK_INTERVAL)
                 };
             if global_first {
+                let mut seen = Vec::new();
                 let mut c = self.lock();
+                // The run's Executor jobs share this root's workers: on the fairness tick a busy
+                // root worker runs them too, as an idle one does below.
+                if !visited
+                    && c.root
+                    && let Some(guest) = self.quiesce.runnable_guest(&mut seen, None)
+                {
+                    drop(c);
+                    visited = true;
+                    self.idle_unlist();
+                    if vm.visit_guest(&guest, wid) {
+                        width::release();
+                        return Take::Stop;
+                    }
+                    continue;
+                }
                 if let Some(f) = self.pop_global(&mut c) {
                     c.running += 1;
                     self.runnable.fetch_sub(1, Ordering::Relaxed); // runnable → running
@@ -158,6 +178,7 @@ impl MnSched {
                 continue;
             }
             // 3. Global queue (batch-grab) + termination/deadlock + park (core lock A).
+            let mut seen = Vec::new();
             let mut c = self.lock();
             if c.terminate {
                 c.release_runner(wid);
@@ -200,6 +221,27 @@ impl MnSched {
                     self.notify_waiters();
                 }
                 return Take::Run(first, Slice::Fresh);
+            }
+            // A visit to an Executor's sched ends when it has nothing runnable: the visitor goes
+            // back to its host ([`Vm::visit_guest`]), whose idle wait covers this sched's wakes.
+            if vm.guest_of.is_some() {
+                width::release();
+                return Take::Stop;
+            }
+            // The run's Executors have no threads of their own: an idle root worker runs their
+            // runnable jobs. The read is under this lock, which a guest's wake takes before it
+            // notifies (`MnSched::wake_host`), so a job made runnable after it is not missed.
+            if c.root
+                && let Some(guest) = self.quiesce.runnable_guest(&mut seen, None)
+            {
+                drop(c);
+                width::release();
+                self.idle_unlist();
+                if vm.visit_guest(&guest, wid) {
+                    width::release();
+                    return Take::Stop;
+                }
+                continue;
             }
             // Cross-nursery flat scheduler — SCOPE-SCOPED owner stop. A nested nursery's inline OWNER
             // (passed its own `scope_id`) returns `Stop` when ITS OWN scope is complete (`done == total`
@@ -250,131 +292,19 @@ impl MnSched {
                 self.notify_waiters();
                 return Take::Stop;
             }
-            // TICKET-118 (W13-8) — drain a cancelled family's parked fibers BEFORE judging a
-            // deadlock, so a `cancel` (or any scope-cancel) that trips an ANCESTOR flag a
-            // parked fiber's own re-check can't see (`SchedCore::scope_cancel_tripped`, only read by
-            // `park`/`park_send`/`park_wait`, not by this predicate scan) still requeues that fiber
-            // instead of getting faulted as deadlocked. `cancel_drain` moves the family's parks to
-            // `global`; each requeued fiber re-checks the same flags at its recv/send/`wait:`
-            // checkpoint and unwinds; a fiber parked in a `defer` does not honour the cancel
-            // ([`Fiber::honours_cancel`]), so it is not requeued for it; a
-            // park landing after the trip is caught by step 8's own re-check, not this scan. ONE read
-            // per lock hold: a trip landing between two separate reads could let this scan say
-            // `false` while the N4 veto inside `is_deadlocked`/`local_quiesced` said `true` (or vice
-            // versa), parking the worker on a stale verdict (TICKET-118 plan-validation, 2026-09-15
-            // 10:59Z) — `awaiting_drain` threads this ONE read into both calls below instead.
+            // TICKET-118 (W13-8) — drain a cancelled family's parked fibers before this worker
+            // sleeps, so a `cancel` that trips an ANCESTOR flag a parked fiber's own re-check can't
+            // see (`SchedCore::scope_cancel_tripped`, only read by `park`/`park_send`/`park_wait`)
+            // still requeues that fiber. `cancel_drain` moves the family's parks to `global`; each
+            // requeued fiber re-checks the same flags at its recv/send/`wait:` checkpoint and
+            // unwinds; a fiber parked in a `defer` does not honour the cancel
+            // ([`Fiber::honours_cancel`]), so it is not requeued for it; a park landing after the
+            // trip is caught by step 8's own re-check, not this scan.
             // TICKET-126 — gated by `CANCEL_GEN` (see `SchedCore::drain_scan_due`); the generation
             // read is this pass's one cancel read.
             if let Some(sid) = c.drain_scan_due(self) {
                 drop(c);
                 self.drain_family(sid);
-                continue;
-            }
-            let awaiting_drain = Some(false);
-            // D4a — deadlock predicate reads the authoritative `runnable` count rather than
-            // `global.is_empty()`: under the split queues there is no single queue to test, but
-            // `runnable == 0` means no fiber is queued in any local or the global. Sound because we
-            // hold the core lock and `running == 0` excludes the only out-of-lock mutator (a running
-            // worker's local push/steal), so no fiber can be in flight to become runnable.
-            if self.is_deadlocked_given(&c, awaiting_drain) {
-                // TICKET-232 — latch the verdict before any leaf is flagged; the lock is dropped
-                // for it, so the verdict is re-derived under the new hold.
-                // TICKET-236 — the licence is the one `flag_leaves_and_wake` cuts under. `None`
-                // is a declined licence or a moved epoch: wait (timed), never spin on it.
-                drop(c);
-                let Some(relocked) = self.latch_own_verdict(|_| self.may_fault_unproven()) else {
-                    vm.wait_door(&[], |_| {
-                        let (guard, _) = self
-                            .cv
-                            .wait_timeout(self.lock(), DEMOTE_POLL_BACKOFF)
-                            .unwrap_or_else(|e| e.into_inner());
-                        drop(guard);
-                    });
-                    judged = false;
-                    continue;
-                };
-                c = relocked;
-                // TICKET-103 — fault joined leaves first. A non-terminating flag `continue`s: a
-                // SENTINEL helper treats `Stop` as exit-forever, and the leaf's inline owner reaches
-                // its scope-scoped owner stop on the next pass.
-                // TICKET-129 (W13-5 residual) — `None` means the verdict is unproven and no peer
-                // licenses it yet: wait (timed — `judged = false` so the next pass re-derives the
-                // W7-58 verdict too), never spin on the same declined judgement.
-                let Some(done) = self.flag_leaves_and_wake(&mut c) else {
-                    vm.wait_door(&[], |_| {
-                        let (guard, _) = self
-                            .cv
-                            .wait_timeout(c, DEMOTE_POLL_BACKOFF)
-                            .unwrap_or_else(|e| e.into_inner());
-                        drop(guard);
-                    });
-                    judged = false;
-                    continue;
-                };
-                self.notify_waiters();
-                if done {
-                    return Take::Stop;
-                }
-                continue;
-            }
-            // gaps.md W7-58 — THE NURSERY OWNER'S JUDGE. The gate above declined because a job is
-            // outstanding (W7-56). That veto is right when the job is RUNNING, and wrong when the job
-            // is itself blocked forever — which is exactly W7-58's shape. The process-wide verdict can
-            // tell the two apart (a stuck job is a registered party with an unsatisfiable wait; a
-            // running one is unregistered, and `parties.len() < live` then vetoes), but ONLY a
-            // counted party polling `block_halt_check` ever asks it — and a nursery owner never
-            // reaches that call, it sits in this loop. So an idle worker asks on its behalf.
-            //
-            // **`drop(c)` is the most dangerous line in this change.** `quiesced` takes `parties` (P)
-            // and then, through `PartyWait::Nursery::satisfiable`, this same core lock (A). The one
-            // total order is P → A, so the guard MUST be released first; holding it here is a real
-            // hang, not a style nit. Everything below the gap is therefore re-derived: `continue`
-            // rather than fall through, so `c.terminate` and the queue gates at the top of the loop
-            // are re-evaluated rather than skipped with a stale verdict (a lost wakeup otherwise).
-            if !judged
-                && !self.body_held_by_fiber(&c)
-                && self.local_quiesced_given(&c, awaiting_drain)
-            {
-                // TICKET-099 — `judged` is set BEFORE the peer veto below, not after. It is what
-                // selects the timed `DEMOTE_POLL_BACKOFF` park further down over the untimed
-                // `self.cv.wait(c)` — and a vetoed sched needs that timed park: nothing notifies this
-                // sched's `cv` when a PEER quiesces later, so leaving `judged` false here would let a
-                // vetoed sched sleep forever with nothing left to re-examine it.
-                judged = true;
-                if self.any_peer_can_move() {
-                    continue;
-                }
-                drop(c);
-                // TICKET-223 — through the one latch the party judge shares: the verdict is a run
-                // halt BEFORE any victim below is flagged, so a party never runs past it.
-                // TICKET-236 — one epoch bracket over the party walk and the re-read of this
-                // sched: a waker that left inside it declines the verdict, and the timed park
-                // below re-judges.
-                let e0 = self.quiesce.left();
-                let verdict = self
-                    .quiesce
-                    .decide_since(e0, crate::vm::quiesce::Judge::Sched)
-                    .stands();
-                c = self.lock();
-                if verdict && self.is_deadlocked_ignoring_jobs(&c) && self.quiesce.left() == e0 {
-                    // TICKET-103 — same leaf-first flag as above. TICKET-129 — same declined-verdict
-                    // wait as above.
-                    let Some(done) = self.flag_leaves_and_wake(&mut c) else {
-                        vm.wait_door(&[], |_| {
-                            let (guard, _) = self
-                                .cv
-                                .wait_timeout(c, DEMOTE_POLL_BACKOFF)
-                                .unwrap_or_else(|e| e.into_inner());
-                            drop(guard);
-                        });
-                        continue;
-                    };
-                    self.notify_waiters();
-                    if done {
-                        return Take::Stop;
-                    }
-                    continue;
-                }
                 continue;
             }
             // D4e — runnable-gated park (replaces the D4c bounded `wait_timeout` poll). `runnable`
@@ -416,32 +346,12 @@ impl MnSched {
                     drop(guard);
                 });
                 self.spinning.fetch_sub(1, Ordering::Relaxed);
-                judged = false; // W7-58 — a real wait ended: the verdict's inputs may have moved.
                 continue;
             }
             debug_assert!(
                 c.global.is_empty(),
                 "D4e park invariant: runnable==0 but the global queue is non-empty"
             );
-            // gaps.md W7-58 — the untimed sleep is correct ONLY while the answer depends solely on
-            // this sched. When `judged` is set it does not: this worker asked the PROCESS-WIDE verdict
-            // and was told "not yet", and that verdict reads `parties` — a set that changes when some
-            // OTHER thread registers, with no notify to this sched (nothing pokes a sched on a party
-            // registration, and adding one would create a `parties → sched_registry → SchedCore` edge
-            // that inverts the P → A order this change establishes). So the untimed wait made the
-            // judge EDGE-TRIGGERED: measured, `ex.submit(job)` where `job` opens its own stuck
-            // `parallel:`, then `main` sleeping 300 ms before `ex.shutdown()`, hung 5/5 — the job's
-            // sched judged while `parties.len() == 1 < live == 2`, slept, and `main`'s later `Join`
-            // registration reached nobody. (The tell: adding a third job that finishes later made it
-            // fault, because `finish` pokes the sched.)
-            //
-            // Bounded ONLY in that state, deliberately: a sched that is not stuck-modulo-jobs still
-            // sleeps untimed, so the healthy path gains no poll at all. When it IS stuck this pays
-            // exactly the [`DEMOTE_POLL_BACKOFF`] cadence every other blocking-in-place site already
-            // pays (`block_wait_tick`, `demote_recv_block`, `demote_block_socket`,
-            // `block_until_deadline`), for the same reason: a lost wakeup then costs latency instead
-            // of the whole run.
-            //
             // TICKET-118 (W13-7) — only the marked joiner (`SchedCore::pool_joiner`) ever times or
             // yields here; every other idle worker keeps its untimed/timed choice above unchanged.
             match self.joiner_step(&c, me, &mut idle_since) {
@@ -454,55 +364,42 @@ impl MnSched {
                             .unwrap_or_else(|e| e.into_inner());
                         drop(guard);
                     });
-                    judged = false;
                     continue;
                 }
                 JoinerStep::Yield => {
                     drop(c);
                     crate::vm::pool::yield_slot(None);
-                    judged = false;
                     continue;
                 }
             }
-            if judged {
+            // TICKET-128 (W13-25) — a worker with NOTHING runnable sleeps on `idle_cv`, not `cv`,
+            // so a rendezvous handoff can recruit exactly this one sleeper (`recruit`) instead of
+            // broadcasting to every parked worker. `notify_waiters` still reaches this wait; only
+            // a bare `cv.notify_all()`/`notify_one()` would miss it.
+            // TICKET-205 — a waker reserves this thread's permit ticket WITHOUT `c`, so a ticket
+            // can land between the checks above and this wait, and the waker's `idle_sleepers`
+            // read can miss it. A LISTED sleeper therefore never sleeps untimed: a ticket can land
+            // without `c`. TICKET-230 - an unlisted sleeper can receive no ticket, so it sleeps
+            // untimed on `idle_cv` as before TICKET-230, and every wake reaches it through
+            // `notify_waiters` or `recruit`.
+            if !width::listed() {
                 vm.wait_door(&[], |_| {
-                    let (guard, _) = self
-                        .cv
-                        .wait_timeout(c, DEMOTE_POLL_BACKOFF)
-                        .unwrap_or_else(|e| e.into_inner());
+                    self.idle_sleepers.fetch_add(1, Ordering::Relaxed);
+                    let guard = self.idle_cv.wait(c).unwrap_or_else(|e| e.into_inner());
+                    self.idle_sleepers.fetch_sub(1, Ordering::Relaxed);
                     drop(guard);
                 });
-            } else {
-                // TICKET-128 (W13-25) — a worker with NOTHING runnable sleeps on `idle_cv`, not `cv`,
-                // so a rendezvous handoff can recruit exactly this one sleeper (`recruit`) instead of
-                // broadcasting to every parked worker. `notify_waiters` still reaches this wait; only
-                // a bare `cv.notify_all()`/`notify_one()` would miss it.
-                // TICKET-205 — a waker reserves this thread's permit ticket WITHOUT `c`, so a ticket
-                // can land between the checks above and this wait, and the waker's `idle_sleepers`
-                // read can miss it. A LISTED sleeper therefore never sleeps untimed: a ticket can land
-                // without `c`. TICKET-230 - an unlisted sleeper can receive no ticket, so it sleeps
-                // untimed on `idle_cv` as before TICKET-230, and every wake reaches it through
-                // `notify_waiters` or `recruit`.
-                if !width::listed() {
-                    vm.wait_door(&[], |_| {
-                        self.idle_sleepers.fetch_add(1, Ordering::Relaxed);
-                        let guard = self.idle_cv.wait(c).unwrap_or_else(|e| e.into_inner());
-                        self.idle_sleepers.fetch_sub(1, Ordering::Relaxed);
-                        drop(guard);
-                    });
-                } else if !width::reserved() {
-                    vm.wait_door(&[], |_| {
-                        self.idle_sleepers.fetch_add(1, Ordering::Relaxed);
-                        let (guard, _) = self
-                            .idle_cv
-                            .wait_timeout(c, DEMOTE_POLL_BACKOFF)
-                            .unwrap_or_else(|e| e.into_inner());
-                        self.idle_sleepers.fetch_sub(1, Ordering::Relaxed);
-                        drop(guard);
-                    });
-                }
+            } else if !width::reserved() {
+                vm.wait_door(&[], |_| {
+                    self.idle_sleepers.fetch_add(1, Ordering::Relaxed);
+                    let (guard, _) = self
+                        .idle_cv
+                        .wait_timeout(c, DEMOTE_POLL_BACKOFF)
+                        .unwrap_or_else(|e| e.into_inner());
+                    self.idle_sleepers.fetch_sub(1, Ordering::Relaxed);
+                    drop(guard);
+                });
             }
-            judged = false; // W7-58 — see above.
         }
     }
 
@@ -519,9 +416,17 @@ impl MnSched {
             self.runnable.fetch_add(1, Ordering::Relaxed); // running → ready (requeued)
         } else {
             fiber.state = FiberState::Blocked; // running → join-parked: runnable unchanged
-            c.scopes[origin].joins_blocked += 1;
-            c.scopes[fiber.scope_id].owners_blocked += 1;
             c.join_parked.push((origin, fiber));
+            if c.awake.asleep() {
+                drop(c);
+                self.on_deadlock();
+                return;
+            }
+            // Nothing became runnable: only the `cv` waiters re-check (an idle worker has no
+            // work to find, and a broadcast to every idle runner of the run is a herd).
+            drop(c);
+            self.cv.notify_all();
+            return;
         }
         drop(c);
         self.notify_waiters();
@@ -537,84 +442,13 @@ impl MnSched {
                 i += 1;
                 continue;
             }
-            let (origin, mut f) = c.join_parked.remove(i);
-            c.scopes[origin].joins_blocked -= 1;
-            c.scopes[f.scope_id].owners_blocked -= 1;
+            let (_, mut f) = c.join_parked.remove(i);
             f.state = FiberState::Ready;
             c.global.push_back(f);
             self.runnable.fetch_add(1, Ordering::Relaxed);
             woken += 1;
         }
+        c.awake.woken(woken);
         woken
-    }
-
-    /// TICKET-103 — [`SchedCore::flag_deadlock_leaves`], then wake the owners of the families it
-    /// completed. The sched-wide fallback (`Some(true)`) records join-parked owners itself.
-    ///
-    /// TICKET-129 (W13-5 residual) — `unproven_ok` is licensed by [`MnSched::may_fault_unproven`].
-    /// Returns `None` when the flag declined: the caller must wait, never spin (a bare `continue`
-    /// here would busy-loop on the same verdict).
-    pub(super) fn flag_leaves_and_wake(&self, c: &mut SchedCore) -> Option<bool> {
-        let ok = self.may_fault_unproven();
-        let err = self.verdict_err();
-        let done = c.flag_deadlock_leaves(&err, ok)?;
-        self.take_cut_requeued(c);
-        if !done {
-            self.wake_completed_joins(c);
-        }
-        Some(done)
-    }
-
-    /// TICKET-129 (W13-5 residual) — may an UNPROVEN deadlock verdict on this sched fault? Licensed
-    /// only when no live peer sched can still move or prove its own victims (Go's rule: fault only
-    /// when every goroutine in the process is parked). Called with this sched's own core lock (`self`)
-    /// already held — `try_lock`s the registry and each peer's core, reading contention as "a peer can
-    /// move" (never blocks, matches [`MnSched::any_peer_can_move`]'s discipline).
-    ///
-    /// Three clauses per peer (Digest gotchas 2-4, measured on the planning spike):
-    /// 1. no incomplete scope and no open body — the peer has FINISHED but its owner thread has not
-    ///    yet dropped its `BlockedOwnerGuard`. Faulting in that gap drops a live feeder (`g3`,
-    ///    `d2a`): decline. Not for an Executor's sched, which has no owner thread: its joiner is a
-    ///    registered party the process-wide verdict judges, and a finished, unjoined Executor
-    ///    would decline every verdict the drain's join waits on (a hang).
-    /// 2. no incomplete scope but an OPEN body — a finished-looking peer whose body is still open is
-    ///    NOT that window; treating it as a veto hung `j2.chz` at every run. Skip it (matches
-    ///    [`MnSched::peer_can_move`]'s own first clause).
-    /// 3. [`MnSched::can_still_move`] — the peer still has live work and may yet feed this sched's
-    ///    candidate: decline. (M3.2 fix 1 deleted clause 4, "the peer's own victims are proven": a
-    ///    holder-count proof is unsound once a channel slot can be shared.)
-    ///
-    /// Only when every live peer clears every clause does this return `true`.
-    pub(super) fn may_fault_unproven(&self) -> bool {
-        let g = match self.sched_registry.try_lock() {
-            Ok(g) => g,
-            Err(std::sync::TryLockError::WouldBlock) => return false,
-            Err(std::sync::TryLockError::Poisoned(p)) => p.into_inner(),
-        };
-        let live: Vec<_> = g.iter().filter_map(|w| w.upgrade()).collect();
-        drop(g);
-        for s in live
-            .iter()
-            .filter(|s| !std::ptr::eq(Arc::as_ptr(s), self as *const MnSched))
-        {
-            let c = match s.core.try_lock() {
-                Ok(c) => c,
-                Err(std::sync::TryLockError::WouldBlock) => return false,
-                Err(std::sync::TryLockError::Poisoned(p)) => p.into_inner(),
-            };
-            if !c.any_scope_incomplete() {
-                // An Executor has no owner thread: whoever joins it is a party of the process-wide
-                // verdict, so a finished Executor is not that window (an unjoined one stays
-                // finished until a join that may come only after this verdict).
-                if !c.any_body_open() && s.detached.is_none() {
-                    return false; // clause 1 — finished, guard not yet dropped
-                }
-                continue; // clause 2 — finished-looking but body open: not that window
-            }
-            if s.can_still_move(&c, false) {
-                return false; // clause 3 — peer may still move
-            }
-        }
-        true
     }
 }

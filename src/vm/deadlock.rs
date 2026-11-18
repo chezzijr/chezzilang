@@ -35,7 +35,7 @@ pub(crate) enum Wait {
     ExecutorJoin,
     /// A socket op.
     Socket,
-    /// A task of a `parallel:` block whose own wait no site named.
+    /// A task parked at the join of its `parallel:` block, sited at the `parallel` keyword.
     Nursery,
 }
 
@@ -52,7 +52,7 @@ impl Wait {
             Wait::RwSharedGuard => "waiting for the RwShared guard",
             Wait::ExecutorJoin => "waiting for an Executor join",
             Wait::Socket => "waiting on a socket",
-            Wait::Nursery => "blocked in a parallel: block",
+            Wait::Nursery => "waiting for a nursery join",
         }
     }
 
@@ -112,64 +112,20 @@ pub struct BlockedTask {
     pub frames: Vec<TraceFrame>,
 }
 
-/// A deadlock fault's blocked tasks, in spawn-tree order. Boxed on the error so a `RuntimeError`
-/// that carries none stays one pointer wider.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Blocked {
-    pub tasks: Vec<BlockedTask>,
-    /// One task's own cut ([`cut`]): its one entry has no frames yet, and takes the frames of the
-    /// task the fault ends ([`listing`]). `false` once the run's listing replaced it
-    /// ([`super::Vm::list_blocked`]).
-    own: bool,
-    /// The cut task's key in the run's [`Listing`], when the cut added it there: a later report
-    /// of this fault finds the task already listed ([`super::Vm::list_blocked`]).
-    key: Option<Vec<Step>>,
-}
-
-/// The fault of one blocked task the verdict cut: the header, and the task's own `wait` at `span`.
-/// `base` is the verdict's fault, whose markers it keeps. THE one way a deadlock fault is sited.
-pub(super) fn cut(base: &RuntimeError, wait: &str, span: Span) -> RuntimeError {
+/// The fault of one blocked task the verdict cut: the header at its wait's `span`. `base` is the
+/// verdict's fault, whose markers it keeps. THE one way a deadlock fault is sited; the report is
+/// the run's listing, not this fault ([`super::Vm::report`]).
+pub(super) fn cut(base: &RuntimeError, span: Span) -> RuntimeError {
     let mut e = base.clone();
-    e.message = header(1);
+    e.message = header();
     e.span = span;
-    e.blocked = Some(Box::new(Blocked {
-        tasks: vec![BlockedTask {
-            wait: wait.to_string(),
-            span,
-            frames: Vec::new(),
-        }],
-        own: true,
-        key: None,
-    }));
     e
 }
 
-/// The report's first line, for `n` blocked tasks.
-pub fn header(n: usize) -> String {
-    if n == 1 {
-        "deadlock: 1 task is blocked and cannot proceed".to_string()
-    } else {
-        format!("deadlock: {n} tasks are blocked and none can proceed")
-    }
-}
-
-/// The blocked tasks a deadlock verdict's fault reports: the run's listing the driver attached
-/// ([`super::Vm::list_blocked`]), or, for one task's own cut, that task with `trace` (the frames of
-/// the task the fault ends). Empty for every other fault, a `deadlock`-stamped one included (a
-/// fault that ends a run the verdict halted keeps its own text, DEC-135).
-pub fn listing(err: &RuntimeError, trace: &[TraceFrame]) -> Vec<BlockedTask> {
-    match &err.blocked {
-        Some(b) if b.own => b
-            .tasks
-            .iter()
-            .map(|t| BlockedTask {
-                frames: trace.to_vec(),
-                ..t.clone()
-            })
-            .collect(),
-        Some(b) => b.tasks.clone(),
-        None => Vec::new(),
-    }
+/// The report's first line: every task of the run (or of a `chezzi test` test) is blocked, as
+/// Go's `all goroutines are asleep - deadlock!`.
+pub fn header() -> String {
+    "deadlock: every task is blocked".to_string()
 }
 
 /// A task's place in the run's spawn tree: its parent's path and its index among the tasks and
@@ -189,12 +145,12 @@ pub(crate) struct TaskPath {
 const RUN: u64 = 0;
 const JOBS: u64 = 1;
 
-/// One step of a listing key: a child index of the path, or the task's own entry, which sorts
-/// after every child of the same task (a task's own wait follows its nursery's tasks).
+/// One step of a listing key: the task's own entry, which sorts before every child of the same
+/// task (pre-order, as Go lists goroutine 1 first), or a child index of the path.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum Step {
-    Child(u64),
     Own,
+    Child(u64),
 }
 
 impl Default for TaskPath {
@@ -259,16 +215,15 @@ pub(crate) struct Listing(Mutex<BTreeMap<Vec<Step>, Entry>>);
 type Taken = (&'static str, Span, Vec<(ProtoId, Span)>);
 
 impl Listing {
-    /// The cut task at `task` waits on `wait` at `span`, with `frames`; returns its key. A task's
-    /// own entry follows its children's (a nursery's tasks in place of the task that opened it,
-    /// then its own wait). A task is listed once: the first cut stands.
+    /// The cut task at `task` waits on `wait` at `span`, with `frames`. A task's own entry comes
+    /// before its children's (pre-order). A task is listed once: the first cut stands.
     pub(super) fn add(
         &self,
         task: &TaskPath,
         wait: &'static str,
         span: Span,
         frames: Vec<(ProtoId, Span)>,
-    ) -> Vec<Step> {
+    ) {
         let key: Vec<Step> = task
             .path
             .iter()
@@ -278,14 +233,13 @@ impl Listing {
         self.0
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .entry(key.clone())
+            .entry(key)
             .or_insert(Entry {
                 wait,
                 span,
                 frames,
                 reported: false,
             });
-        key
     }
 
     /// The fault of the task at `task`, cut on `wait` at `span` with `frames`, from the verdict's
@@ -299,12 +253,8 @@ impl Listing {
         span: Span,
         frames: Vec<(ProtoId, Span)>,
     ) -> RuntimeError {
-        let key = self.add(task, wait, span, frames);
-        let mut e = base.at_site(wait, span);
-        if let Some(b) = e.blocked.as_mut() {
-            b.key = Some(key);
-        }
-        e
+        self.add(task, wait, span, frames);
+        base.at_site(span)
     }
 
     /// Every entry no report took yet, in spawn-tree order; each is reported from now on.
@@ -317,15 +267,6 @@ impl Listing {
                 (e.wait, e.span, e.frames.clone())
             })
             .collect()
-    }
-
-    /// True when `key`'s task is in the listing and a report took it.
-    fn reported(&self, key: &[Step]) -> bool {
-        self.0
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(key)
-            .is_some_and(|e| e.reported)
     }
 }
 
@@ -359,34 +300,105 @@ impl super::Vm {
             .collect()
     }
 
-    /// A run's end, for a driver: a deadlock verdict's fault reports the run's listing, its first
-    /// task's site and the header. A cut whose task an earlier report listed (a job a test's
-    /// verdict cut, joined by the end-of-file drain), with no task left to list, is no fault: the
-    /// task is reported once. Every other result is returned as is. The listing is taken either
+    /// Whether the run's deadlock verdict is latched: the one read of "this run deadlocked" a
+    /// driver makes ([`super::quiesce::RunHalt::Deadlock`]).
+    pub fn deadlocked(&self) -> bool {
+        self.quiesce.run_halt() == super::quiesce::RunHalt::Deadlock
+    }
+
+    /// A run's end, for a driver: `r` with its trace and files, and, while the run's verdict is
+    /// latched, the run's listing, which makes it the deadlock report. The listing is taken either
     /// way.
-    pub(crate) fn list_blocked(&self, r: Result<(), RuntimeError>) -> Result<(), RuntimeError> {
+    pub fn report(&mut self, r: Result<(), RuntimeError>) -> Result<(), super::RunError> {
         let tasks = self.take_listing();
-        match r {
-            Err(mut e) if e.blocked.is_some() && !tasks.is_empty() => {
-                e.message = header(tasks.len());
-                e.span = tasks[0].span;
-                e.blocked = Some(Box::new(Blocked {
-                    tasks,
-                    own: false,
-                    key: None,
-                }));
-                Err(e)
-            }
-            Err(e)
-                if e.blocked.as_ref().is_some_and(|b| {
-                    b.key
-                        .as_ref()
-                        .is_some_and(|k| self.quiesce.listing.reported(k))
-                }) =>
-            {
-                Ok(())
-            }
-            r => r,
+        r.map_err(|e| {
+            let tasks = if self.deadlocked() { tasks } else { Vec::new() };
+            let trace = self.fault_trace.take().unwrap_or_default();
+            super::RunError::from_error(e, trace, self.program.file_table(), tasks)
+        })
+    }
+}
+
+impl super::MnSched {
+    /// THE deadlock verdict, Go's `checkdead`: the run's awake count reached 0 with tasks alive
+    /// ([`super::quiesce::Awake`]), so every task is asleep and none can wake another. It latches
+    /// the run's `RunHalt::Deadlock`, then ends every asleep task of every sched of the run at its
+    /// wait: each is listed there (joins included), dropped without running a `defer`, and the
+    /// guards it holds are cut ([`super::SchedCore::end_asleep`]). Nothing moves meanwhile:
+    /// with no task awake, no wake can happen. Called by the park or end whose `-1` reached 0,
+    /// after it released its sched's lock.
+    pub(super) fn on_deadlock(&self) {
+        let mut scheds: Vec<std::sync::Arc<super::MnSched>> = {
+            let mut g = self
+                .sched_registry
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            g.retain(|w| w.strong_count() > 0);
+            g.iter().filter_map(|w| w.upgrade()).collect()
+        };
+        scheds.retain(|s| !std::ptr::eq(std::sync::Arc::as_ptr(s), self));
+        // The deadline's own timer ([`super::MnSched::arm_deadline_wake`]) is a waker the count
+        // does not hold. The gate orders it against this check-then-latch: a requeue it made first
+        // is seen by the drains or the count below, and once this latches it requeues nothing.
+        let gate = self.quiesce.verdict_gate();
+        // A `--timeout` deadline that passed is the halt of the tasks parked under it: requeued,
+        // each returns the deadline at its wait (a task that hit it ended first, and its end took
+        // the count to 0). Only a run whose deadline has not passed is a deadlock.
+        let mut due = self.deadline_drain();
+        for s in &scheds {
+            due |= s.deadline_drain();
+        }
+        if due || !self.quiesce.awake.all_asleep() {
+            return;
+        }
+        latch_window_hook();
+        let Some(verdict) = self.quiesce.latch_deadlock() else {
+            return;
+        };
+        drop(gate);
+        super::DEADLOCKS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        // Every sched's fibers leave their waits first, then each ends: an end (a job a fiber
+        // joins) then wakes no fiber the verdict ends.
+        let mine = self.lock().take_asleep();
+        let taken: Vec<_> = scheds.iter().map(|s| s.lock().take_asleep()).collect();
+        // The root sched ends last: main's end there lets the driver report the listing, so
+        // every other task's entry must be in it first.
+        let mut ends: Vec<(&super::MnSched, _)> = std::iter::once((self, mine))
+            .chain(scheds.iter().map(|s| &**s).zip(taken))
+            .collect();
+        ends.sort_by_key(|(s, _)| s.lock().root);
+        for (s, fibers) in ends {
+            s.end_asleep(fibers, verdict);
+        }
+    }
+
+    /// Step 2 of [`super::MnSched::on_deadlock`] on this sched.
+    fn end_asleep(&self, fibers: Vec<super::Fiber>, verdict: u64) {
+        let mut c = self.lock();
+        c.end_asleep(fibers, &self.deadlock_err, verdict);
+        drop(c);
+        self.notify_waiters();
+    }
+}
+
+/// Debug-only: the milliseconds [`super::MnSched::on_deadlock`] sleeps between its last read of
+/// the count and its latch, so a test can hold that window open for a waker the count does not
+/// hold (the `--timeout` deadline timer).
+#[cfg(debug_assertions)]
+pub(crate) const LATCH_WINDOW_ENV: &str = "CHEZZI_TEST_DEADLOCK_LATCH_WINDOW_MS";
+
+fn latch_window_hook() {
+    #[cfg(debug_assertions)]
+    {
+        static MS: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+        let ms = *MS.get_or_init(|| {
+            std::env::var(LATCH_WINDOW_ENV)
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0)
+        });
+        if ms > 0 {
+            std::thread::sleep(std::time::Duration::from_millis(ms));
         }
     }
 }
@@ -420,9 +432,9 @@ mod tests {
     use super::*;
 
     /// A child counter at the `u32` boundary neither wraps nor collides with its parent's own
-    /// entry: both children are listed, before the parent.
+    /// entry: the parent is listed, then both children (pre-order).
     #[test]
-    fn a_child_past_u32_max_is_listed_before_its_parent() {
+    fn a_child_past_u32_max_is_listed_after_its_parent() {
         let mut parent = TaskPath {
             path: vec![RUN],
             next: u32::MAX.into(),
@@ -433,6 +445,6 @@ mod tests {
             listing.add(task, wait, Span::default(), Vec::new());
         }
         let waits: Vec<_> = listing.take().into_iter().map(|e| e.0).collect();
-        assert_eq!(waits, ["a", "b", "parent"]);
+        assert_eq!(waits, ["parent", "a", "b"]);
     }
 }

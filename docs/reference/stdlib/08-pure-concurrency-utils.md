@@ -75,8 +75,10 @@ and inserts are O(1) expected (the stored map keeps the heap map's hash index). 
 | `.fold(init, f)` | `(R, fn(R, E) -> R) -> R` | Reduces in insertion order; `R` is inferred from `init`. |
 | `.snapshot()` | `() -> Set[E]` | **concurrent read** returning a shallow **copy** of the whole set. |
 
-A writer called from a user `hash`/`eq` that re-enters the same box is a fatal deadlock, as in `write`: each
-writer takes the update guard that `set`/`write` take.
+A writer called from a user `hash`/`eq` that re-enters the same box blocks for good on its own guard,
+as in `write`: each writer takes the update guard that `set`/`write` take. A hook run inside a map/set
+probe waits in place, which counts awake, so that run hangs instead of reporting the deadlock
+(`gaps.md` W23-1).
 
 **`ConcurrentCounter[K: Hashable]`**: thread-safe frequency table over `RwShared[Map[K, int]]`.
 `count`/`total` are **concurrent reads**; `increment`/`add` take the **exclusive write lock** and do

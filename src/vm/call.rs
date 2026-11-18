@@ -302,9 +302,7 @@ impl Vm {
                     is_assert: false,
                     is_over_memory: false,
                     is_timed_out: false,
-                    is_deadlock: false,
                     is_panic: false,
-                    blocked: None,
                 })?;
                 self.lower_native(ret).map_err(|m| self.err(m, span))
             }
@@ -579,9 +577,7 @@ impl Vm {
             is_assert: false,
             is_over_memory: false,
             is_timed_out: false,
-            is_deadlock: false,
             is_panic: false,
-            blocked: None,
         })?;
         // A streamed `io.print`/`io.flush` whose stdout died emitted into a dead sink
         // ([`Vm::emit_out`], a no-op there) and still returned `Ok` — so the deterministic
@@ -844,9 +840,6 @@ impl Vm {
         // TICKET-147 — a defer fault stays the root cause; an aborted nursery's child fault fills the gap.
         if let Some(e) = defer_err.or(escaped) {
             self.pop();
-            // A deadlock-marked fault cuts the held guards before the frame drops one
-            // (`Vm::cut_if_fatal`).
-            self.cut_if_fatal([Some(&e)]);
             self.drop_ret(frame.ret, frame.base);
             return Err(e);
         }

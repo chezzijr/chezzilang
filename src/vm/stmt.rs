@@ -71,20 +71,16 @@ impl Vm {
     }
 
     /// TICKET-223 — THE post-drain read of "a hard halt cut this cleanup": this party is exiting
-    /// (`has_next_deferred` delivered the exit), the deadlock verdict is latched, or `rte` itself is a
-    /// hard halt (`--timeout`, `--max-heap`: [`executor_hard_halt`]) or a deadlock fault
-    /// (`is_deadlock`, DEC-135), which a cleanup met while a fault unwound or a recover block
-    /// drained (TICKET-289). `Err` carries `rte`, stamped fatal
-    /// for a verdict (DEC-135), so no `recover:` catches it; `has_next_deferred` already stops the
+    /// (`has_next_deferred` delivered the exit), the deadlock verdict is latched (DEC-135), or
+    /// `rte` itself is a hard halt (`--timeout`, `--max-heap`: [`executor_hard_halt`]), which a
+    /// cleanup met while a fault unwound or a recover block drained (TICKET-289). `Err` carries
+    /// `rte`, so no `recover:` catches it; `has_next_deferred` already stops the
     /// remaining `defer`s (DEC-152). `rte` keeps its message, so a delivered cause still outranks
     /// its stuck cleanup in the report (DEC-147). Every route that binds a `recover:`'s `Err`
     /// reads it: `finish_catch` and the recover-scoped `?` catch in `stmt.rs`.
     pub(super) fn cleanup_halt(&self, rte: RuntimeError) -> Result<RuntimeError, RuntimeError> {
-        if self.pending_exit.is_some() || executor_hard_halt(&rte) || rte.is_deadlock {
+        if self.pending_exit.is_some() || executor_hard_halt(&rte) || self.deadlocked() {
             return Err(rte);
-        }
-        if self.quiesce.run_halt() == RunHalt::Deadlock {
-            return Err(rte.deadlock());
         }
         Ok(rte)
     }
@@ -148,7 +144,7 @@ impl Vm {
     /// the join at `CHEZZI_THREADS=1`. What the aborted nurseries' children ended with is not
     /// reported: the verdict's fault stands, and its cut tasks are in the run's listing.
     pub(super) fn unwind_no_defer(&mut self, target_frame_len: usize) {
-        self.cut_held_guards(None);
+        self.cut_held_guards();
         self.unwind_deferred_escaped(target_frame_len, true, false);
     }
 
@@ -195,7 +191,7 @@ impl Vm {
                 _ => cause,
             },
             Some(Cut::Cancelled) => {
-                if report_escaped && replaced.as_ref().is_some_and(|e| !e.is_deadlock) {
+                if report_escaped && replaced.is_some() && !self.deadlocked() {
                     self.cancel_unwind_faulted = true;
                 }
                 replaced.unwrap_or(cause)
@@ -256,7 +252,6 @@ impl Vm {
             } else if run_defers && let Some(e) = self.drain_deferred(fi, 0) {
                 err = Some(e);
             }
-            self.cut_if_fatal([err.as_ref(), escaped_err.as_ref()]);
             self.pop_unwound_frame();
         }
         (err, escaped_err)

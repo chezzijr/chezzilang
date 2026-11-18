@@ -97,9 +97,7 @@ impl Vm {
                     is_assert: true,
                     is_over_memory: false,
                     is_timed_out: false,
-                    is_deadlock: false,
                     is_panic: false,
-                    blocked: None,
                 });
             }
             Op::GetLocal(slot) => {

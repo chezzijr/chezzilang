@@ -1,5 +1,5 @@
 //! TICKET-101 — TICKET-099's fix for a sibling send not waking a deeper-nursery receiver
-//! (`MnSched::wake_run_wide` / `peer_can_move`) traded that false `deadlock` for a hang on a
+//! (`MnSched::wake_run_wide`) traded that false `deadlock` for a hang on a
 //! GENUINE nested deadlock: a receiver parked in a nursery two levels deep, on a channel with no
 //! possible sender anywhere in the run, now never faults `deadlock:` — it hangs forever instead.
 //! Every other worker count hangs the same way (measured: rc=124 at `--threads=1`, `=2`, `=4`,
@@ -66,8 +66,16 @@ fn genuine_deadlock_two_nurseries_deep_faults_instead_of_hanging() {
             "CHEZZI_THREADS={threads}: expected a nonzero exit for an undetected deadlock, got \
              {status} (stderr: {stderr})"
         );
+        // One global check (plan 2026-11-17): every task waits, so every task is listed in
+        // pre-order, main first at its `parallel:` join (Go twin: fatal, all asleep).
         assert!(
-            stderr.contains("deadlock:"),
+            status.code() == Some(1)
+                && stderr.contains("deadlock: every task is blocked\n")
+                && stderr.contains("task 1: waiting for a nursery join at ")
+                && stderr.contains("dd101.chz:2:1\n")
+                && stderr.contains("task 2: waiting for a nursery join at ")
+                && stderr.contains("dd101.chz:4:9\n")
+                && stderr.contains("task 3: recv() on an empty channel at "),
             "CHEZZI_THREADS={threads}: expected a `deadlock: …` fault, got: {stderr}"
         );
 

@@ -1,335 +1,143 @@
-//! Process-wide quiescence detection — `docs/design/roadmap.md` §2d **step 0**, the sound successor to
-//! W7-12's per-executor predicate (`gaps.md` `W7-12r`).
+//! The run's deadlock count and run-wide halts.
 //!
-//! # The rule
-//!
-//! This is Go's own detector (`fatal error: all goroutines are asleep - deadlock!`) with ONE
-//! adaptation. Go counts: nothing runnable, nothing in a syscall/timer/netpoll ⇒ everything is stuck.
-//! Chezzi counts the same way — but because a blocked party here is a POLLING waiter rather than a
-//! runtime-scheduled G, a snapshot of "who is parked" is not enough on its own. So the verdict is:
-//!
-//! > every counted party is registered as blocked **AND** no registered party's wait condition is
-//! > already satisfiable.
-//!
-//! The second clause is what makes it safe, and it is the whole reason W7-12's counter-only attempts
-//! failed. A bounded cap-1 pipeline is permanently "all parties parked" while being perfectly healthy
-//! — but with `cap == 1` the channel is either non-empty (so the parked RECEIVER is satisfiable) or
-//! has a free slot (so the parked SENDER is), and it can never be neither. Two jobs on a genuinely
-//! empty channel, by contrast, are both unsatisfiable. Satisfiability separates "parked" from
-//! "unfeedable", which no progress counter or debounce window could (see `gaps.md` W7-12's rejected
-//! experiment, and the `parked-is-not-stuck` lesson).
-//!
-//! TICKET-185 — a rendezvous `Channel[T](0)` has no buffer: a blocked sender waits on its OFFER
-//! and a blocked receiver on its SLOT, each committed by CAS on the party's own `Pending`, so both
-//! sides are judged by that `Pending` and by the OTHER side's entries (`ChanState::recv_ready_for`),
-//! never against `cap`.
-//!
-//! # Counted parties, and why the count is sound
-//!
-//! `live = 1 (the main thread) + live_eager_bodies()`: one per registered sched that still holds an
-//! undone task that can move. Since TICKET-208 a job is a fiber of its Executor's detached sched,
-//! so a job that can still send counts through its sched, never as a party of its own. An
-//! UNDER-count of `live` is the one error direction that produces a false deadlock.
-//!
-//! **The load-bearing invariant.** A thread that is not a counted party — an `MnSched` worker, a
-//! netpoller callback, a timer callback, a blocking-pool thread — only ever runs user code while some
-//! counted party is inside a nursery or a native call. Such a party is live and NOT registered as
-//! blocked, so `blocked < live` and the verdict is vetoed. An uncounted sender therefore always
-//! implies a veto, which is why no separate "is a scheduler alive?" global is needed. The corollary is
-//! `BlockCtx::judged` (`vm/block.rs`): a party registers only when it has no scheduler of any kind and is not
-//! inside a native callback other than a `defer` drain.
-//!
-//! Both error directions are asymmetric and both fall the safe way:
-//!
-//! | mistake | effect | severity |
-//! |---|---|---|
-//! | a blocking site forgets to REGISTER | `blocked < live` → veto → hang | recoverable (missing answer) |
-//! | a satisfiability check is too generous | veto → hang | recoverable |
-//! | `live` under-counts a party that could send | **false deadlock on a live program** | the one unacceptable outcome |
+//! Go's detector (`fatal error: all goroutines are asleep - deadlock!`): [`Awake`] counts the
+//! tasks of the run that are not asleep. It changes only at a task's start, park, wake and end;
+//! the -1 that takes it to 0 with tasks still alive calls [`super::MnSched::on_deadlock`], the one
+//! verdict. [`QuiesceState`] holds the count, the run's listing and the run-wide halts (`os.exit`,
+//! a job's hard abort, the latched verdict) every party reads through [`QuiesceState::run_halt`].
 //!
 //! # Not a `static`
 //!
 //! Per-run state, held behind an `Arc` on the `Vm` and shared with every worker by
 //! `Vm::spawn_worker`, exactly like [`ExecRegistry`] and for exactly the same reason: `cargo test`
 //! runs many programs concurrently in ONE process, and a process-global registry would let one run's
-//! blocked parties be counted against another run's.
+//! state be counted against another run's.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use super::block::{Halt, WakeSet};
-use super::core::{ChannelCore, Pending};
-use crate::ast::Span;
-
-/// What one registered party is waiting for — and, through [`PartyWait::satisfiable`], whether that
-/// wait could already be over.
-///
-/// The channel cores are held by `Arc` rather than by `GcRef`: a party's heap is not reachable from
-/// the thread evaluating the verdict, and a core outlives every handle to it.
-pub(super) enum PartyWait {
-    /// A single blocking `recv` on an empty channel, with the receiver's own `Pending` when it
-    /// published a rendezvous slot (TICKET-185): its wait is over once a sender fills that slot.
-    Recv(Arc<ChannelCore>, Option<Arc<Pending>>),
-    /// A `send` blocked on its published OFFER (TICKET-185 — a full bounded or a rendezvous
-    /// channel): its wait is over exactly when the offer's `Pending` settles (taken, or closed).
-    Send(Arc<Pending>),
-    /// A `wait:` over N arms — an OR-edge (§2d's table): ready on ANY arm. `is_send` marks a SEND
-    /// arm, which is ready on free space rather than on a value; a RECV arm is ready exactly when a
-    /// single `recv` on its channel could resume ([`recv_satisfiable`]), a closed channel included
-    /// (D2: the poll takes a closed arm with `!RecvError`).
-    ///
-    /// TICKET-185 — the second field is the `wait:`'s ONE `Pending` (its offers and slots).
-    Wait(Vec<(Arc<ChannelCore>, bool)>, Option<Arc<Pending>>),
-    /// A thread inside an `Executor` join (`shutdown()` or the program-exit drain), waiting on that
-    /// core's `outstanding` to reach 0. This is the node whose absence made W7-12's arms unable to
-    /// see `main`-inside-`shutdown()`.
-    ///
-    /// **It carries the core, and the reason is a measured FALSE FAULT.** A `Join` that answered a
-    /// flat "never satisfiable" was wrong for an ALREADY-DRAINED join: `join_executor` registers
-    /// before it can take the executor lock, so `Executor(); e.shutdown()` — and the whole window
-    /// while the last job's `finish` wakes the joiner — put a permanently-unsatisfiable party in the
-    /// registry for a thread that was about to return and keep running. A sibling sampling in that
-    /// window faulted a live program (measured 2/20 runs on a loop of drained shutdowns beside a
-    /// blocked consumer). Its wait condition is exactly `outstanding() == 0`, so that is what it
-    /// answers.
-    ///
-    /// **…minus the joiner's OWN slot** — the `usize` is 1 when the joining thread is itself an
-    /// eager job of this very core, else 0. A job that calls `ex.shutdown()`/`ex.cancel()` on
-    /// the executor it is running under stays counted in that core's `outstanding` for the whole
-    /// wait, so a flat `outstanding() == 0` made its party self-referentially unsatisfiable: nothing
-    /// the run could do would ever satisfy it, which is exactly the shape the verdict reads as
-    /// "unfeedable". Measured on a healthy program whose every job ran to completion (`A` and `C`
-    /// both printed), `main`'s join faulted `deadlock` in 8/60 debug runs with `cancel` and
-    /// 8/8 with `shutdown`. [`super::Vm::join_executor`] computes the identical slack for its own
-    /// wait loop — the two must agree, or a joiner would return while its party still claimed to be
-    /// stuck.
-    Join(Arc<super::MnSched>, usize),
-    /// gaps.md W7-58 — a thread blocked inside a `parallel:` nursery join, waiting on that nursery's
-    /// tasks to finish. This is the node whose absence hung the W7-58 repro: `live` counts the
-    /// top-level `main` thread unconditionally (`1 +`), but a `main` sitting in `mn_worker_loop` never
-    /// registered, so `parties.len() < live` vetoed forever whenever the *other* counted party (an
-    /// eager `Executor` job) was the one genuinely stuck.
-    ///
-    /// **A LIVE QUERY, never a snapshot.** Its wait ends exactly when the nursery can move again, so
-    /// satisfiability re-asks the nursery's own predicate every time the verdict is evaluated. A
-    /// boolean captured at registration is `quiesce.rs`'s build-bug #1 all over again (a stale party
-    /// state read against fresh channel state), which measured 6/10 false faults.
-    Nursery(Arc<super::MnSched>),
-    /// TICKET-063 — a thread blocked waiting for a `Shared`/`RwShared` update guard (the box's core
-    /// identity, the waiting task's token). Covers a guard wait reached by the top-level/eager body
-    /// itself, e.g. `main` running `s.update(f)` where `f` runs `parallel: spawn: s.update(...)`; the
-    /// M:N-worker-side guard wait is registered separately, on `SchedCore::waiters`.
-    ///
-    /// The key holds the box's lock by its own `Arc` (M3.3), so it stays valid for the whole wait.
-    ///
-    /// Lock order: P (this registry) then G (the guard registry, `core::guard_wait_satisfiable`'s own
-    /// lock) — below `SchedCore` (A) exactly like every other arm here, and G is a leaf so no ABBA.
-    Guard(super::core::GuardWait, u64),
-}
-
-impl PartyWait {
-    /// Could this wait already be over? Evaluated by taking each core's queue lock, so the caller must
-    /// hold NO channel lock (see [`QuiesceState::quiesced`]).
-    ///
-    /// Deliberately generous — every "maybe" must answer `true`, because a false `true` only vetoes
-    /// the verdict (a hang) while a false `false` faults a live program.
-    ///
-    /// **Each arm mirrors, condition for condition, what its own blocking site in `netio.rs` actually
-    /// SETTLES on** — not what merely "changed". That is the same rule W7-13r(a) had to learn for the
-    /// `wait:` wake predicate, and getting it wrong here is not a spin but a permanent wrong answer in
-    /// one direction or the other: too generous hangs forever, too strict faults a live program.
-    pub(super) fn satisfiable(&self) -> bool {
-        match self {
-            // `Vm::block_recv` settles on a queued value, a `trip()` latch, or `closed` (which
-            // returns `ClosedEmpty` — the `for v in ch:` ends, a bare `recv` gives `!RecvError`; either is
-            // progress).
-            PartyWait::Recv(core, me) => recv_satisfiable(core, me.as_ref()),
-            // The blocking `send` settles once its offer does — taken by a receiver, or closed by
-            // `close()` (it faults `CLOSED_SEND`).
-            PartyWait::Send(p) => !p.is_queued(),
-            // `Vm::op_wait_poll`, arm kind by arm kind: the `wait:` settles once its `Pending` does
-            // (an offer taken or closed, a slot filled), or on any recv arm a single `recv` would
-            // settle on. A timer arm delivers on its own deadline with nobody sending, so it is
-            // never judged.
-            PartyWait::Wait(arms, me) => {
-                wait_satisfiable(arms.iter().map(|(c, s)| (&**c, *s)), me.as_ref())
-            }
-            // A join is over exactly when the executor owes nothing BUT this joiner's own job. See
-            // the variant's doc: answering a flat `false` here faulted an already-drained
-            // `shutdown()`, and ignoring `slack` faulted a job that shut down its own executor.
-            PartyWait::Join(sched, slack) => sched.lock().join_over(*slack),
-            // W7-58 — a nursery join is over exactly when the nursery can still move: the sched's OWN
-            // deadlock predicate, minus its W7-56 outstanding-job veto.
-            //
-            // **Not circular.** `local_quiesced` reads only `SchedCore` + this sched's own
-            // atomics — never `parties`, never `outstanding` — so the process-wide verdict never
-            // appears on its own right-hand side. TICKET-099 — this calls `local_quiesced` on purpose,
-            // NOT the sibling predicate that also carries a peer-sched veto: this arm feeds the
-            // process-wide verdict, which already does its own cross-sched accounting. A second veto
-            // here would over-count `live` and hang a genuinely deadlocked run (measured on three
-            // `*_still_fault` tests — see `live_eager_bodies` below). Dropping the W7-56 veto
-            // HERE (the reason for the `local_` half in the first place) is sound precisely because the
-            // job is then visible as its own party (an unregistered job is a live one, and
-            // `parties.len() < live` already vetoes).
-            //
-            // Lock order: `parties` (P) → `SchedCore` (A) → `ChannelCore::q` (Q) — the predicate's
-            // last gate peeks Q for every demoted fiber, which is the order `send_wake` already uses.
-            // The judge in `MnSched::take_runnable` DROPS its core guard before calling `quiesced`,
-            // and no other site takes `parties` while holding a core lock.
-            PartyWait::Nursery(sched) => {
-                let c = sched.lock();
-                // TICKET-125 — a sched whose every counted fiber is an owner blocked at a nested
-                // join has no parked victim to demand either (same DEC-112 bullet-3 relaxation as
-                // `live_eager_bodies` above).
-                // A finished nursery answers "satisfiable": its join is about to return.
-                !c.any_scope_incomplete() || sched.can_still_move(&c, !c.only_blocked_owners())
-            }
-            // TICKET-063 — mirrors `SchedCore::waiters`' veto in `local_quiesced`.
-            PartyWait::Guard(key, me) => super::core::guard_wait_satisfiable(key, *me),
-        }
-    }
-}
-
-/// TICKET-236 — could a blocked `recv` on `core` already resume? The one answer for a blocked
-/// party, a demoted waiter and a parked fiber. `me` is the receiver's own `Pending`, if it has
-/// one. Takes `core.q`, so the caller holds no channel lock.
-pub(super) fn recv_satisfiable(core: &ChannelCore, me: Option<&Arc<Pending>>) -> bool {
-    let g = core.q.lock().unwrap_or_else(|e| e.into_inner());
-    g.recv_ready_for(me)
-        || g.closed
-        || core.done_latch.load(Ordering::Relaxed)
-        || me.is_some_and(|p| !p.is_queued())
-}
-
-/// TICKET-236 — could a blocked `wait:` over `arms` (`(core, is_send)`) already resume? The one
-/// answer for a blocked party, a demoted waiter and a parked fiber. Takes each arm's `core.q`.
-pub(super) fn wait_satisfiable<'a>(
-    mut arms: impl Iterator<Item = (&'a ChannelCore, bool)>,
-    me: Option<&Arc<Pending>>,
-) -> bool {
-    me.is_some_and(|p| !p.is_queued())
-        || arms.any(|(core, is_send)| {
-            if is_send {
-                let g = core.q.lock().unwrap_or_else(|e| e.into_inner());
-                me.is_none() && (g.send_ready_for(core.cap, None) || g.closed)
-            } else {
-                recv_satisfiable(core, me) || core.timer.is_some()
-            }
-        })
-}
-
-/// TICKET-188 — one registered blocked party: what it waits for, and the wake set that may cut it.
-struct Party {
-    wait: Arc<PartyWait>,
-    wake: WakeSet,
-    /// TICKET-223 — the deadlock report this party gives when the verdict names it: its own text
-    /// and blocking site. `None` for a Join or Nursery party, whose report is the victims' slots
-    /// (DEC-208).
-    site: Option<(&'static str, Span)>,
-}
-
-/// TICKET-223 — the latched deadlock verdict ([`QuiesceState::decide`]).
+/// TICKET-223 — the latched deadlock verdict ([`QuiesceState::latch_deadlock`]).
 #[derive(Default)]
 struct DeadlockCell {
     decided: bool,
-    report: Option<(String, Span)>,
+    /// The latched verdict's id: each latch takes the next, so a `chezzi test` test's verdict
+    /// and a later test's are told apart ([`QuiesceState::verdict`]).
+    id: u64,
 }
 
-/// TICKET-223 — which judge asks [`QuiesceState::decide`]: a party at its own poll, or a sched
-/// worker with nothing runnable.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(super) enum Judge {
-    Party,
-    Sched,
-}
+/// One task in `Awake`'s `alive` half (the high 32 bits); `awake` is the low 32 bits.
+const ONE_ALIVE: u64 = 1 << 32;
 
-/// TICKET-256 — the one answer of [`QuiesceState::decide_since`]. A judge reads it for both of its
-/// acts: the latch, and the cut of a victim.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(super) enum Decision {
-    /// The verdict stands; it is latched when a party has a site.
-    Stands,
-    /// No verdict: a party can still move, or a waker left inside the bracket.
-    Declined,
-    /// The verdict stands, and the test pin gives the first decision to the other judge. A held
-    /// judge latches nothing and cuts nothing. Never answered in a release build.
-    Held,
-}
+/// The run's count of tasks that are not asleep, Go's `checkdead` count: `alive` tasks (started,
+/// not ended) and `awake` tasks among them (not parked in a bucket or at a join). It changes only
+/// at a task's start, park, wake and end, through the four methods below, which are its only
+/// writers. Both halves live in one atomic word, so every change is one RMW and every reader sees
+/// both at one instant. A task waiting in place (main at a party wait, a demoted waiter) stays
+/// awake: its wakers only notify a condvar. A wake adds its +1 inside the lock hold that
+/// publishes it, before the waker can park or end, as Go's `goready` runs before the M goes idle.
+///
+/// `awake` reaching 0 while `alive > 0` means every task is asleep: the caller whose write took
+/// it there runs the run's verdict ([`super::MnSched::on_deadlock`]).
+///
+/// A pending timer is a task of the count while a task is parked on it
+/// ([`super::core::ChannelCore::timer_wait`]), as Go 1.23's `checkdead` counts a timer only while
+/// a goroutine waits on its channel: a timer a `wait:` left behind keeps nothing awake.
+#[derive(Default)]
+pub(super) struct Awake(AtomicU64);
 
-impl Decision {
-    /// Does the verdict stand for this judge now? A held judge acts as a declined one.
-    pub(super) fn stands(self) -> bool {
-        match self {
-            Decision::Stands => true,
-            Decision::Declined | Decision::Held => false,
+impl Awake {
+    /// `n` new tasks, awake: before their parent continues.
+    pub(super) fn task_started(&self, n: usize) {
+        if n > 0 {
+            let d = n as u64 * (ONE_ALIVE + 1);
+            Self::check(self.0.fetch_add(d, Ordering::SeqCst) + d);
         }
     }
-}
 
-/// TICKET-223 — names the judge allowed to decide first (`party` or `sched`), so a test can force
-/// either order. Compiled only under `debug_assertions`: the release binary reads no test env.
-#[cfg(debug_assertions)]
-pub(crate) const VERDICT_JUDGE_ENV: &str = "CHEZZI_TEST_VERDICT_JUDGE";
+    /// An awake task ended. True when that took `awake` to 0 with tasks still alive.
+    pub(super) fn task_ended(&self) -> bool {
+        let prev = self.0.fetch_sub(ONE_ALIVE + 1, Ordering::SeqCst);
+        debug_assert!(prev & u64::from(u32::MAX) > 0, "an ended task was awake");
+        Self::verdict(prev.wrapping_sub(ONE_ALIVE + 1))
+    }
 
-/// TICKET-223 — `true` when [`VERDICT_JUDGE_ENV`] pins the OTHER judge, so `judge` must not decide
-/// first. A `party` pin holds back the sched judge only while a party with a site is registered:
-/// otherwise no party judge would ever decide. Always `false` in a release build.
-fn pinned_away(judge: Judge, has_site: bool) -> bool {
-    #[cfg(debug_assertions)]
-    {
-        static PIN: std::sync::OnceLock<Option<Judge>> = std::sync::OnceLock::new();
-        let pin = *PIN.get_or_init(|| match std::env::var(VERDICT_JUDGE_ENV).as_deref() {
-            Ok("party") => Some(Judge::Party),
-            Ok("sched") => Some(Judge::Sched),
-            _ => None,
-        });
-        match (pin, judge) {
-            (Some(Judge::Sched), Judge::Party) => true,
-            (Some(Judge::Party), Judge::Sched) => has_site,
-            _ => false,
+    /// An awake task parked: after its wait is registered, under the bucket's lock. True when
+    /// that took `awake` to 0 with tasks still alive.
+    pub(super) fn asleep(&self) -> bool {
+        let prev = self.0.fetch_sub(1, Ordering::SeqCst);
+        debug_assert!(prev & u64::from(u32::MAX) > 0, "a parking task was awake");
+        Self::verdict(prev.wrapping_sub(1))
+    }
+
+    /// `n` parked tasks made runnable, inside the lock hold that requeues them.
+    pub(super) fn woken(&self, n: usize) {
+        if n > 0 {
+            Self::check(self.0.fetch_add(n as u64, Ordering::SeqCst) + n as u64);
         }
     }
-    #[cfg(not(debug_assertions))]
-    {
-        let _ = (judge, has_site);
-        false
+
+    /// Whether every alive task is asleep now: the verdict's own condition, read again by
+    /// [`super::MnSched::on_deadlock`] after its deadline drains.
+    pub(super) fn all_asleep(&self) -> bool {
+        Self::verdict(self.0.load(Ordering::SeqCst))
+    }
+
+    /// Whether the count drains to no task alive within 2 s: the run's end, for a debug assert.
+    /// It waits because a token task (a deferred wake, a task's end with its wakes) is released
+    /// just after the wake it covers, so the woken main can reach its end first.
+    pub(super) fn drains(&self) -> bool {
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while self.0.load(Ordering::SeqCst) != 0 {
+            if std::time::Instant::now() > until {
+                return false;
+            }
+            std::thread::yield_now();
+        }
+        true
+    }
+
+    /// `awake <= alive` after a write.
+    fn check(now: u64) {
+        debug_assert!(
+            now & u64::from(u32::MAX) <= now >> 32,
+            "awake {} > alive {}",
+            now & u64::from(u32::MAX),
+            now >> 32
+        );
+    }
+
+    fn verdict(now: u64) -> bool {
+        Self::check(now);
+        now & u64::from(u32::MAX) == 0 && now >> 32 > 0
     }
 }
 
 /// The run's registry of blocked parties. One per `Vm::new`, shared by `Arc` with every worker.
 #[derive(Default)]
 pub(super) struct QuiesceState {
-    parties: Mutex<Vec<Party>>,
+    /// The run's awake count. Each `SchedCore` of the run holds the same `Arc`
+    /// ([`super::MnSched::join_run`]).
+    pub(super) awake: Arc<Awake>,
     /// The run's deadlock listing: every task the verdict cut, added at its cut. Each `SchedCore` of
     /// the run holds the same `Arc` ([`MnSched::join_run`]).
     pub(super) listing: Arc<super::deadlock::Listing>,
-    /// TICKET-236 — the run's epoch: the one owner of "a waker left the counts a verdict reads".
-    /// A judge reads scheds one lock at a time, so a job can send and finish between two of its
-    /// reads: each read is true and the pair describes no instant. Every way out of those counts
-    /// moves this ([`Self::note_left`]), and a verdict stands only if it did not move across the
-    /// judge's whole walk ([`Self::decide_since`]). Each `SchedCore` of the run holds the same
-    /// `Arc` (`MnSched::join_run`), so a sched moves it inside its own lock hold.
-    left: Arc<AtomicU64>,
-    /// §2c1 — every eager nursery alive in this run, by `Weak` (like [`super::SchedRegistry`]) —
-    /// every eager nursery (nested ones since TICKET-112, which is sound only with
-    /// `MnSched::body_is_fiber`).
-    ///
-    /// It exists because eager start broke the invariant `live`'s soundness rests on — *a nursery
-    /// fiber never coexists with a counted party*. It can now: top-level `main` runs the `parallel:`
-    /// body itself, so `main` blocked on `ch.recv()` while a live sibling is about to `send` registers
-    /// an (correctly) unsatisfiable `Recv` party while `live == 1` counts no nursery fibers at all —
-    /// `parties.len() >= live` with nothing satisfiable, i.e. a **false deadlock on a live program**,
-    /// the one unacceptable direction ([`Self::verdict`]'s table above).
-    ///
-    /// [`Self::live_eager_bodies`] adds one to `live` per nursery that still has an undone task, which
-    /// is the *safe* direction (an over-count only vetoes). It is deliberately NOT a `PartyWait`: a
-    /// party is a BLOCKED THREAD, and registering a non-thread inflates `parties.len()` toward `live`
-    /// — measured, that false-faulted `spawn: print(…)` beside `time.sleep_ms(300)` on `main`, a
-    /// program with no channel in it at all.
-    ///
-    /// Pruned lazily on read; a nursery that has JOINED contributes nothing anyway (its scope is
-    /// complete), so nothing has to deregister.
-    eager_bodies: Mutex<Vec<std::sync::Weak<super::MnSched>>>,
+    /// The one latch between the deadlock verdict and the `--timeout` deadline timer, a waker
+    /// the count does not hold ([`super::MnSched::arm_deadline_wake`]). The verdict holds it from
+    /// its deadline drains to its latch; the timer holds it while it requeues, and requeues nothing
+    /// once the verdict latched. So whichever takes it first wins: the verdict never latches over a
+    /// task the timer requeued, and the timer never requeues a task the verdict lists. Taken with no
+    /// lock held; a `SchedCore` lock is taken under it.
+    verdict_gate: Mutex<()>,
+    /// The run's root sched while its root fiber runs ([`super::Vm::run_root`]): its workers are
+    /// the run's one set of runner threads, and they run the Executors' jobs too (Go: one pool of
+    /// Ms), so an Executor starts no thread of its own while a host is set.
+    host: Mutex<std::sync::Weak<super::MnSched>>,
+    /// Every Executor sched of the run, by `Weak`: the scheds whose runnable fibers an idle host
+    /// worker takes ([`Self::runnable_guest`]). A leaf lock: nothing is locked under it.
+    guests: Mutex<Vec<std::sync::Weak<super::MnSched>>>,
+    /// Where the next [`Self::runnable_guest`] scan starts: the guest a scan last found, so a
+    /// visit that gives its thread back to another guest hands it to that one.
+    guest_turn: std::sync::atomic::AtomicUsize,
     /// The run-wide `os.exit` request (W7-47). `os.exit` writes `pending_exit` on whichever `Vm` ran
     /// the native, which for an eager `Executor` job is that job's isolated worker — a value nobody
     /// observes until the join. A party blocked in a socket/channel wait never reaches the join, so
@@ -427,22 +235,6 @@ impl RunHalt {
 }
 
 impl QuiesceState {
-    /// TICKET-236 — the epoch handle a `SchedCore` of this run holds.
-    pub(super) fn epoch(&self) -> Arc<AtomicU64> {
-        Arc::clone(&self.left)
-    }
-
-    /// TICKET-236 — a waker left the counts. The caller made its last channel effect already and
-    /// has not yet released the lock (or made the atomic change) that publishes the leave.
-    pub(super) fn note_left(&self) {
-        self.left.fetch_add(1, Ordering::SeqCst);
-    }
-
-    /// TICKET-236 — the epoch now; a judge reads it before its walk and compares after.
-    pub(super) fn left(&self) -> u64 {
-        self.left.load(Ordering::SeqCst)
-    }
-
     /// Publish an `os.exit`. First writer wins, exactly like Go: whichever `os.Exit` runs first sets
     /// the status, and a later one cannot rewrite it.
     pub(super) fn request_exit(&self, code: i32) {
@@ -528,7 +320,10 @@ impl QuiesceState {
     /// atomic is cleared with it to keep the mirror honest and to save the confirming lock.
     pub(super) fn clear_exit(&self) {
         *self.exit.lock().unwrap_or_else(|e| e.into_inner()) = None;
-        *self.deadlock.lock().unwrap_or_else(|e| e.into_inner()) = DeadlockCell::default();
+        self.deadlock
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .decided = false;
         // The hint covers a pending job fault too, and this reset never clears that.
         self.run_halt_hint
             .store(self.has_job_fault(), Ordering::Release);
@@ -585,20 +380,31 @@ impl QuiesceState {
         }
     }
 
-    /// TICKET-298 — a holder's cut at a wait is a fatal deadlock: latch the run's verdict at the
-    /// holder's own wait `msg`/`at`, unless a verdict is already latched (it never un-latches).
-    /// Takes the `deadlock` cell alone and no lock under it, so a caller may hold a `SchedCore`
-    /// lock (`Vm::in_place_cut`): P -> A -> D, and D is a leaf (see `decide_since`).
-    pub(super) fn latch_holder_cut(&self, msg: &str, at: Span) {
-        {
-            let mut cell = self.deadlock.lock().unwrap_or_else(|e| e.into_inner());
-            if cell.decided {
-                return;
-            }
-            cell.decided = true;
-            cell.report = Some((msg.to_string(), at));
+    /// [`Self::verdict_gate`], held for the caller's whole check-then-act.
+    pub(super) fn verdict_gate(&self) -> std::sync::MutexGuard<'_, ()> {
+        self.verdict_gate.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// The deadlock verdict's latch ([`super::MnSched::on_deadlock`]): the run halts as
+    /// `RunHalt::Deadlock`; returns the verdict's id. `None` when a verdict is latched already. It
+    /// never un-latches but at [`Self::clear_exit`] (a `chezzi test` test's own run).
+    pub(super) fn latch_deadlock(&self) -> Option<u64> {
+        let mut cell = self.deadlock.lock().unwrap_or_else(|e| e.into_inner());
+        if cell.decided {
+            return None;
         }
+        cell.decided = true;
+        cell.id += 1;
+        let id = cell.id;
+        drop(cell);
         self.run_halt_hint.store(true, Ordering::Release);
+        Some(id)
+    }
+
+    /// The latched verdict's id, while one is latched.
+    pub(super) fn verdict(&self) -> Option<u64> {
+        let cell = self.deadlock.lock().unwrap_or_else(|e| e.into_inner());
+        cell.decided.then_some(cell.id)
     }
 
     pub(super) fn has_job_fault(&self) -> bool {
@@ -617,232 +423,59 @@ impl QuiesceState {
             .take()
     }
 
-    /// TICKET-223 — the latched report's text and site, while a verdict is decided.
-    pub(super) fn deadlock_report(&self) -> Option<(String, Span)> {
-        let g = self.deadlock.lock().unwrap_or_else(|e| e.into_inner());
-        if g.decided { g.report.clone() } else { None }
+    /// Make `host` the run's root sched; returns the one it replaces, which the caller restores.
+    pub(super) fn set_host(
+        &self,
+        host: std::sync::Weak<super::MnSched>,
+    ) -> std::sync::Weak<super::MnSched> {
+        std::mem::replace(
+            &mut *self.host.lock().unwrap_or_else(|e| e.into_inner()),
+            host,
+        )
     }
 
-    /// TICKET-223 — take the latched report; the verdict stays decided. ONE caller, `Vm::rank_end`.
-    pub(super) fn take_deadlock_report(&self) -> Option<(String, Span)> {
-        self.deadlock
+    /// The run's root sched, while its root fiber runs.
+    pub(super) fn host(&self) -> Option<Arc<super::MnSched>> {
+        self.host
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .report
-            .take()
+            .upgrade()
     }
 
-    /// Register a blocked party for as long as the returned guard lives. It has no deadlock site.
-    /// Test-only: a production wait registers through its counts (`block::wait_steps`).
-    #[cfg(test)]
-    pub(super) fn block(self: &Arc<Self>, wait: PartyWait, wake: WakeSet) -> PartyGuard {
-        self.block_shared(Arc::new(wait), wake, None)
-    }
-
-    /// §2c1 — register a blocked party over an `Arc` the caller already holds, so ONE `PartyWait` can be both
-    /// the registered party AND the sched-side `SchedCore::waiters` entry. Two separately-built
-    /// waits for the same block could disagree about what the thread waits for; one cannot.
-    /// `site` is the party's deadlock report (TICKET-223).
-    pub(super) fn block_shared(
-        self: &Arc<Self>,
-        wait: Arc<PartyWait>,
-        wake: WakeSet,
-        site: Option<(&'static str, Span)>,
-    ) -> PartyGuard {
-        // TICKET-236 — a party that blocks leaves the "somebody is still running" count.
-        self.note_left();
-        self.parties
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .push(Party {
-                wait: Arc::clone(&wait),
-                wake,
-                site,
-            });
-        PartyGuard {
-            state: Arc::clone(self),
-            wait,
-        }
-    }
-
-    /// The verdict: is the whole run stuck?
-    ///
-    /// **The party lock is held across the WHOLE verdict, and that is a correctness requirement, not
-    /// a convenience.** An earlier revision snapshotted the list and released the lock before reading
-    /// any channel — and that races: a party can register, be fed, un-register and run on while the
-    /// stale snapshot still names it, so the verdict then reads channel states against a party set
-    /// that never existed at any single instant. Measured on the 300-handoff gate/data pipeline
-    /// (`an_eager_wait_block_is_woken_by_its_arm_not_by_the_poll_timeout`): the producer parked on
-    /// `gate` and the consumer parked on `data` were reported together with both channels empty — a
-    /// state that is unreachable in that program, because whichever party parked second must have fed
-    /// the other first. Holding the lock makes the party set and the channel reads ONE observation,
-    /// and the false positive is gone.
-    ///
-    /// **Lock discipline.** Order is `parties` (P) → `SchedCore` (A) → (`exec_registry` → one
-    /// `ExecutorCore::eager`) → `ChannelCore::q`, one at a time. Nothing anywhere acquires `parties`
-    /// while holding a channel, executor OR sched-core lock: every blocking site in `netio.rs`
-    /// registers BEFORE it locks the queue it then waits on, `join_executor` registers before it
-    /// takes `eager`, W7-58's nursery owner registers with no core lock held, and the W7-58 judge
-    /// inside `MnSched::take_runnable` DROPS its `SchedCore` guard before calling this. So this adds no
-    /// cycle. `parties` is globally exclusive, so at most one thread is ever inside this function and
-    /// it takes each `SchedCore` singly — there is no A→A' edge either. (Same rule the deleted
-    /// `eager_join_deadlocked` documented; it is tightened here, not relaxed.)
-    ///
-    /// TICKET-223 — test-only: both production judges call [`Self::decide`], which evaluates the
-    /// same predicate under the same lock discipline and latches it.
-    #[cfg(test)]
-    pub(super) fn quiesced(&self) -> bool {
-        self.verdict()
-    }
-
-    /// TICKET-223 — the ONE place a judge acts on the verdict. The first judge that sees it latches
-    /// it, with the report taken from the first registered party that has a site, and publishes it
-    /// as a run halt; a later call answers `true` once latched. A verdict that names no party site
-    /// (main at a join) latches nothing: its report is the victims' slots (DEC-208), and the run
-    /// may go on (DEC-147). The latch is taken under the party lock, so
-    /// it is set before any judge cuts a victim. [`Self::quiesced`] stays the pure predicate.
-    ///
-    /// Lock order: `parties` (P), then the verdict's own walk, then the `deadlock` cell alone. The
-    /// cell is never held across the walk, because `run_halt` reads it under a `SchedCore` lock.
-    ///
-    /// TICKET-256 — the latch holds the first registered party's own text and site, whichever judge
-    /// decides first. A sched's victims read it back through `MnSched::verdict_err`, so a party dies
-    /// with one text whether it reads its child's fault or the latch (DEC-063's rule).
-    pub(super) fn decide(&self, judge: Judge) -> Decision {
-        self.decide_since(self.left(), judge)
-    }
-
-    /// TICKET-236 — [`Self::decide`] for a judge whose walk began at epoch `e0`, before this
-    /// call. The verdict is declined when the epoch moved since `e0`: a waker left the counts
-    /// inside the bracket, so the reads describe no single instant. A declined judge re-enters
-    /// with a fresh epoch; in a true deadlock nothing leaves, so the next bracket stands.
-    pub(super) fn decide_since(&self, e0: u64, judge: Judge) -> Decision {
-        let parties = self.parties.lock().unwrap_or_else(|e| e.into_inner());
-        if self
-            .deadlock
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .decided
-        {
-            return Decision::Stands;
-        }
-        let site = parties.iter().find_map(|p| p.site);
-        if !self.verdict_on(&parties) || self.left() != e0 {
-            return Decision::Declined;
-        }
-        if pinned_away(judge, site.is_some()) {
-            return Decision::Held;
-        }
-        let mut cell = self.deadlock.lock().unwrap_or_else(|e| e.into_inner());
-        cell.decided = site.is_some();
-        cell.report = site.map(|(m, at)| (m.to_string(), at));
-        if site.is_some() {
-            self.run_halt_hint.store(true, Ordering::Release);
-        }
-        Decision::Stands
-    }
-
-    /// One evaluation under ONE hold of the party lock (see [`Self::quiesced`]).
-    #[cfg(test)]
-    fn verdict(&self) -> bool {
-        let parties = self.parties.lock().unwrap_or_else(|e| e.into_inner());
-        self.verdict_on(&parties)
-    }
-
-    /// The verdict over `parties`, which the caller holds locked.
-    fn verdict_on(&self, parties: &[Party]) -> bool {
-        // `1 +` is the main thread, which is a party for the whole run. Plus one per registered
-        // sched (an eager nursery, nested ones since TICKET-112, or an `Executor`'s detached
-        // sched since TICKET-208) that still holds an undone task that can move: those fibers are
-        // uncounted senders, and this is the term that stops a healthy `spawn: ch.send(1)` beside
-        // a blocking `ch.recv()` on `main` from reading as a deadlock. See `eager_bodies`.
-        let live = 1 + self.live_eager_bodies();
-        if parties.len() < live {
-            return false; // somebody is still running — they may yet send.
-        }
-        // TICKET-188 — a party whose wake set holds a recorded child fault resumes at its next halt
-        // read, so its cut is progress; `WakeSet::halt` takes owned scheds' core locks (A), legal
-        // under P. A tripped flag with no recorded fault is not a halt, so a genuine deadlock still
-        // faults. The veto reads only `Halt::ChildFault`: a pending cancel is not a promise of
-        // progress (a cancelled owner at its join waits on a child in an uncancellable `defer`).
-        !parties
-            .iter()
-            .any(|p| p.wait.satisfiable() || matches!(p.wake.halt(), Some(Halt::ChildFault { .. })))
-    }
-
-    /// §2c1 — publish an eager nursery's sched (every eager nursery since TICKET-112), so
-    /// [`Self::live_eager_bodies`] can count its
-    /// fibers as uncounted senders for as long as they are undone. Takes only this lock.
-    pub(super) fn register_eager_body(&self, sched: &Arc<super::MnSched>) {
-        let mut g = self.eager_bodies.lock().unwrap_or_else(|e| e.into_inner());
-        // A `parallel:` inside a loop registers once per iteration, and a run that never blocks never
-        // calls `live_eager_bodies` to prune — so compact here too, or 20 000 iterations leave 20 000
-        // dead `Weak`s behind. Amortised: the scan runs only when the vec has actually grown.
+    /// List an Executor's sched as one whose jobs the host's workers run.
+    pub(super) fn add_guest(&self, sched: &Arc<super::MnSched>) {
+        let mut g = self.guests.lock().unwrap_or_else(|e| e.into_inner());
         if g.len() >= 64 {
             g.retain(|w| w.strong_count() > 0);
         }
         g.push(Arc::downgrade(sched));
     }
 
-    /// §2c1 — how many live eager nurseries still hold an undone task. ONE per nursery, not one per
-    /// task: a single un-blocked sender is all it takes to veto the verdict, and `live` only has to
-    /// EXCEED `parties.len()`.
-    ///
-    /// Snapshots the registry and DROPS its lock before taking any `SchedCore` — the same walk
-    /// `Vm::halt_all_scheds` and `outstanding_jobs` use, so the established `parties` (P) →
-    /// `SchedCore` (A) order is unchanged and this lock never nests under one.
-    ///
-    /// A nursery that has JOINED reports every scope complete, so it contributes nothing and needs no
-    /// deregistration; dead `Weak`s are pruned here.
-    fn live_eager_bodies(&self) -> usize {
-        let live: Vec<_> = {
-            let mut g = self.eager_bodies.lock().unwrap_or_else(|e| e.into_inner());
-            if g.is_empty() {
-                return 0;
+    /// An Executor sched of the run other than `except` with a runnable fiber, if any, scanning
+    /// from the one the last scan found (round robin). Every sched it upgrades goes into `keep`,
+    /// so a caller under a core lock drops the last handle of none of them there.
+    pub(super) fn runnable_guest(
+        &self,
+        keep: &mut Vec<Arc<super::MnSched>>,
+        except: Option<&Arc<super::MnSched>>,
+    ) -> Option<Arc<super::MnSched>> {
+        let g = self.guests.lock().unwrap_or_else(|e| e.into_inner());
+        let n = g.len();
+        let start = self.guest_turn.load(Ordering::Relaxed);
+        for k in 0..n {
+            let i = (start + k) % n;
+            let Some(s) = g[i].upgrade() else {
+                continue;
+            };
+            let found = s.runnable.load(Ordering::Relaxed) > 0
+                && !except.is_some_and(|e| Arc::ptr_eq(e, &s));
+            keep.push(Arc::clone(&s));
+            if found {
+                self.guest_turn.store(i, Ordering::Relaxed);
+                return Some(s);
             }
-            let live: Vec<_> = g.iter().filter_map(|w| w.upgrade()).collect();
-            g.retain(|w| w.strong_count() > 0);
-            live
-        };
-        // "Can this nursery still send?" — it must have UNDONE work AND be able to move. Counting
-        // merely-incomplete nurseries over-counts `live` forever once their fibers are stuck, which
-        // vetoes the verdict and HANGS a genuinely deadlocked run (measured on three `*_still_fault`
-        // tests). The blocked-body-aware variant is the right question HERE and only here.
-        //
-        // TICKET-099 — `local_quiesced` on purpose, not the sibling predicate that also carries a
-        // peer-sched veto: this fn feeds the process-wide verdict, so it must not see that veto
-        // either. A vetoed body would count a quiesced-but-peer-vetoed nursery as `live`, inflate
-        // `live` past the party count, and reproduce exactly the hang the paragraph above measured.
-        // TICKET-112 — a NESTED sched (`body_is_fiber`) is judged with `require_parked = false`, the
-        // peer question. When every undone fiber is parked or blocked at a deeper join, it can send
-        // nothing until another registered sched moves, and that sched counts on its own. With
-        // `local_quiesced` here such a sched counted live forever and hung `exec_nested` at
-        // `CHEZZI_THREADS>=2`. Outermost scheds keep `local_quiesced` (DEC-101), EXCEPT when every
-        // counted fiber is an owner blocked at a nested join (`only_blocked_owners`, TICKET-125,
-        // DEC-112 bullet 3) — such a sched has no parked victim of its own to demand and hung
-        // `exec_join`/`b4a`/`e10`/`e11` at T>=2 the same way.
-        live.iter()
-            .filter(|s| {
-                let c = s.lock();
-                s.can_still_move(&c, !(s.body_is_fiber || c.only_blocked_owners()))
-            })
-            .count()
-    }
-}
-
-/// RAII registration of one blocked party. Dropped the moment the block ends — successfully or with a
-/// fault — so a party is never counted as stuck while it is running.
-pub(super) struct PartyGuard {
-    state: Arc<QuiesceState>,
-    wait: Arc<PartyWait>,
-}
-
-impl Drop for PartyGuard {
-    fn drop(&mut self) {
-        let mut g = self.state.parties.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(i) = g.iter().position(|p| Arc::ptr_eq(&p.wait, &self.wait)) {
-            g.swap_remove(i);
         }
+        None
     }
 }
 
@@ -887,67 +520,18 @@ mod tests {
         assert_eq!(q.run_halt(), RunHalt::Exit);
     }
 
-    /// TICKET-223 — the first judge latches the verdict with the registered party's site; a later
-    /// judge reads the latch even after the pure predicate has gone false, and `clear_exit` resets it.
-    #[test]
-    fn decide_latches_once_and_reports_the_party_site() {
-        let q = Arc::new(QuiesceState::default());
-        let g = q.block_shared(
-            Arc::new(PartyWait::Send(Pending::new())),
-            WakeSet::default(),
-            Some(("x", crate::ast::Span::default())),
-        );
-        assert_eq!(q.decide(Judge::Sched), Decision::Stands);
-        drop(g);
-        assert!(!q.quiesced());
-        assert_eq!(q.decide(Judge::Party), Decision::Stands);
-        assert_eq!(q.run_halt(), RunHalt::Deadlock);
-        assert!(q.take_deadlock_report().is_some());
-        q.clear_exit();
-        assert_eq!(q.run_halt(), RunHalt::Running);
-    }
-
-    /// TICKET-236 — a waker that left the counts inside a judge's bracket declines the verdict:
-    /// the judge's reads describe no single instant. The next bracket stands.
-    #[test]
-    fn a_task_leaving_inside_the_bracket_declines_the_verdict() {
-        let q = Arc::new(QuiesceState::default());
-        let _g = q.block_shared(
-            Arc::new(PartyWait::Send(Pending::new())),
-            WakeSet::default(),
-            Some(("x", crate::ast::Span::default())),
-        );
-        let e0 = q.left();
-        q.note_left();
-        assert_eq!(q.decide_since(e0, Judge::Sched), Decision::Declined);
-        assert_eq!(q.run_halt(), RunHalt::Running);
-        assert_eq!(q.decide_since(q.left(), Judge::Sched), Decision::Stands);
-        assert_eq!(q.run_halt(), RunHalt::Deadlock);
-    }
-
-    /// TICKET-223 — a verdict that names no party site (main at a join) is answered but not
-    /// latched: its report is the victims' slots (DEC-208), and a later call re-evaluates it.
-    #[test]
-    fn decide_without_a_party_site_latches_nothing() {
-        let q = Arc::new(QuiesceState::default());
-        let g = q.block(PartyWait::Send(Pending::new()), WakeSet::default());
-        assert_eq!(q.decide(Judge::Sched), Decision::Stands);
-        assert_eq!(q.run_halt(), RunHalt::Running);
-        drop(g);
-        assert_eq!(q.decide(Judge::Sched), Decision::Declined);
-    }
+    // TICKET-223's `decide_latches_once_and_reports_the_party_site` and
+    // `decide_without_a_party_site_latches_nothing` are deleted with the party judge (plan
+    // 2026-11-17: `main` is fiber 1, no party term; the awake count latches through
+    // `latch_deadlock`). `tests/awake_count_grid.rs` (`nothing` cells) and
+    // `tests/deadlock_is_fatal.rs` cover the latch and its report.
 
     /// TICKET-223 — a latched verdict outranks a waiting job fault (it cuts a `defer`, a job fault
     /// does not); an exit still outranks both.
     #[test]
     fn run_halt_ranks_a_verdict_above_a_job_fault() {
         let q = Arc::new(QuiesceState::default());
-        let _g = q.block_shared(
-            Arc::new(PartyWait::Send(Pending::new())),
-            WakeSet::default(),
-            Some(("x", crate::ast::Span::default())),
-        );
-        assert_eq!(q.decide(Judge::Party), Decision::Stands);
+        assert!(q.latch_deadlock().is_some());
         q.request_job_fault(super::super::RuntimeError::default(), Vec::new());
         assert_eq!(q.run_halt(), RunHalt::Deadlock);
         q.request_exit(17);

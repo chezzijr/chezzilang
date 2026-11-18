@@ -228,10 +228,12 @@ fn vm_wait_all_closed_multi_arm_takes_the_first_arm() {
 
 #[test]
 fn vm_wait_live_empty_no_else_top_level_deadlocks() {
-    let err = run_err(
+    let e = run_capture(
         "fn main():\n    ch := Channel[int]()\n    wait:\n        v := ch.recv(): print(v)\nmain()\n",
-    );
-    assert!(err.contains("deadlock"), "{err}");
+    )
+    .expect_err("expected the deadlock report");
+    // Go twin: `select` on one empty channel in main, fatal, all asleep.
+    assert_deadlock(&e, &[("wait: on channels that are all empty", 3)]);
 }
 
 /// W7-2 anti-detector-weakening fence: a GENUINE all-parked nursery (a `wait:` on live, empty
@@ -240,11 +242,18 @@ fn vm_wait_live_empty_no_else_top_level_deadlocks() {
 #[test]
 fn vm_wait_real_deadlock_still_reported_parallel() {
     let src = "fn w(a: Channel[int], b: Channel[int]):\n    wait:\n        v := a.recv(): print(v)\n        u := b.recv(): print(u)\nfn main():\n    a := Channel[int]()\n    b := Channel[int]()\n    parallel:\n        spawn w(a, b)\nmain()\n";
-    let mn = match run_capture(src) {
+    let e = match run_capture(src) {
         Ok(o) => panic!("expected a deadlock fault, got {o:?}"),
-        Err(e) => e.message,
+        Err(e) => e,
     };
-    assert!(mn.contains("deadlock"), "{mn}");
+    // Go twin: fatal, all asleep; main at its join, the task at its `wait:`.
+    assert_deadlock(
+        &e,
+        &[
+            ("waiting for a nursery join", 8),
+            ("wait: on channels that are all empty", 2),
+        ],
+    );
 }
 
 /// A spawned consumer `wait`s on two empty channels and
@@ -295,7 +304,14 @@ fn vm_wait_single_arm_takes_ready_value() {
 fn vm_wait_lone_blocked_parallel_deadlocks() {
     let src = "fn consumer(a: Channel[int], b: Channel[int]):\n    wait:\n        v := a.recv(): print(v)\n        w := b.recv(): print(w)\nfn main():\n    a := Channel[int]()\n    b := Channel[int]()\n    parallel:\n        spawn consumer(a, b)\nmain()\n";
     let err = run_capture(src).expect_err("lone blocked wait under --parallel must deadlock");
-    assert!(err.message.contains("deadlock"), "{}", err.message);
+    // Go twin: fatal, all asleep; main at its join, the consumer at its `wait:`.
+    assert_deadlock(
+        &err,
+        &[
+            ("waiting for a nursery join", 8),
+            ("wait: on channels that are all empty", 2),
+        ],
+    );
 }
 
 /// M:N blocking wait-park (TDD step 4): a spawned consumer `wait`s on two empty channels and parks

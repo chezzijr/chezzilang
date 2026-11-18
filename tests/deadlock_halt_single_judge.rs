@@ -5,6 +5,11 @@
 
 use std::process::Command;
 
+/// The one deadlock header (plan 2026-11-17): every task of the run is blocked. Every row of this
+/// file ends with every task asleep (Go twin: fatal `all goroutines are asleep`); the report's
+/// position is task 1's wait, and `main` is task 1.
+const HEADER: &str = "deadlock: every task is blocked";
+
 const SRC: &str = r#"import Executor, Shared from std.concurrency
 import std.time
 fn main():
@@ -60,7 +65,9 @@ fn deadlock_on_a_held_guard_ends_the_run_at_the_first_party_site() {
                             .expect("run chezzi");
                         let stdout = String::from_utf8_lossy(&out.stdout);
                         let stderr = String::from_utf8_lossy(&out.stderr);
-                        if stdout.contains("main: past the guard") || !stderr.contains("G.chz:14:5")
+                        if stdout.contains("main: past the guard")
+                            || !stderr.contains("G.chz:14:5")
+                            || !stderr.contains(HEADER)
                         {
                             bad.push(format!("run {run}: stdout {stdout:?}"));
                         }
@@ -178,7 +185,8 @@ fn main():
     print("AFTER")
 main()
 "#,
-        site: "6:32",
+        // Main is task 1, at its `shutdown()` join (Go twin: fatal, all asleep).
+        site: "8:5",
         after_ok: false,
         test_mode: false,
     },
@@ -203,7 +211,8 @@ fn main():
     print("AFTER")
 main()
 "#,
-        site: "7:18",
+        // Main is task 1, at its `shutdown()` join (Go twin: fatal, all asleep).
+        site: "16:5",
         after_ok: false,
         test_mode: false,
     },
@@ -224,7 +233,8 @@ fn main():
     print("AFTER")
 main()
 "#,
-        site: "6:5",
+        // Main is task 1, at its own `shutdown()` join (Go twin: fatal, all asleep).
+        site: "12:5",
         after_ok: false,
         test_mode: false,
     },
@@ -301,7 +311,8 @@ fn main():
     print("AFTER")
 main()
 "#,
-        site: "5:22",
+        // Main is task 1, at its `parallel:` join (Go twin: fatal, all asleep).
+        site: "4:5",
         after_ok: false,
         test_mode: false,
     },
@@ -322,7 +333,8 @@ fn main():
     print("AFTER")
 main()
 "#,
-        site: "7:22",
+        // Main is task 1, at its `parallel:` join (Go twin: fatal, all asleep).
+        site: "5:5",
         after_ok: false,
         test_mode: false,
     },
@@ -360,9 +372,10 @@ test fn b_runs():
 
 /// TICKET-223 — one row per cleanup funnel that can meet the verdict: the `on_step_fault` catch arm,
 /// its uncaught arm, a later `defer` in the same unwind, `do_try`'s recover-block and
-/// `parallel:`-body drains, and a stuck `defer` while a job fault waits. Run under pins {unset,
-/// party} only: a `sched` pin holds back the party judge, and these rows may have no idle sched
-/// left to judge.
+/// `parallel:`-body drains, and a stuck `defer` while a job fault waits. In every row the stuck `defer` is the last task awake, so it ends with every task
+/// asleep: the deadlock is the one report at that `defer`'s wait, the fault it cleans up after is
+/// not reported, and no later `defer` runs (Go twin: a deferred receive that blocks while
+/// panicking is fatal, all asleep).
 const CLEANUP_ROWS: &[Row] = &[
     Row {
         name: "cut_defer",
@@ -382,7 +395,7 @@ fn main():
     print("AFTER {r}")
 main()
 "#,
-        site: "4:5",
+        site: "9:19",
         after_ok: false,
         test_mode: false,
     },
@@ -404,7 +417,7 @@ fn main():
     print("AFTER")
 main()
 "#,
-        site: "4:5",
+        site: "9:19",
         after_ok: false,
         test_mode: false,
     },
@@ -427,7 +440,7 @@ fn main():
     owner(stuck)
 main()
 "#,
-        site: "4:5",
+        site: "11:19",
         after_ok: false,
         test_mode: false,
     },
@@ -494,15 +507,9 @@ main()
 ];
 
 /// Run one cell; `None` when it is good, else a description of what went wrong.
-fn run_cell(
-    path: &std::path::Path,
-    row: &Row,
-    t: &str,
-    seed: u32,
-    pin: Option<&str>,
-) -> Option<String> {
+fn run_cell(path: &std::path::Path, row: &Row, t: &str, seed: u32) -> Option<String> {
     use std::time::{Duration, Instant};
-    let cell = format!("{} T={t} seed={seed} pin={pin:?}", row.name);
+    let cell = format!("{} T={t} seed={seed}", row.name);
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_chezzi"));
     cmd.arg(if row.test_mode { "test" } else { "run" })
         .arg(path)
@@ -510,10 +517,6 @@ fn run_cell(
         .env("CHEZZI_SCHED_SEED", seed.to_string())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
-    match pin {
-        Some(p) => cmd.env("CHEZZI_TEST_VERDICT_JUDGE", p),
-        None => cmd.env_remove("CHEZZI_TEST_VERDICT_JUDGE"),
-    };
     let mut child = cmd.spawn().expect("spawn chezzi");
     // The pipes are drained on their own threads so a chatty child never blocks on a full pipe.
     let mut so = child.stdout.take().expect("stdout pipe");
@@ -556,6 +559,7 @@ fn run_cell(
         (&stderr, stderr.matches("runtime error (").count())
     };
     if status.code() != Some(1)
+        || !report.contains(HEADER)
         || !report.contains(&site)
         || reports != 1
         || (!row.after_ok && stdout.contains("AFTER"))
@@ -568,33 +572,26 @@ fn run_cell(
     None
 }
 
-/// TICKET-223 — the whole family: every shape x which judge may decide first x worker count x seed.
+/// TICKET-223 — the whole family: every shape x worker count x seed (one judge since plan
+/// 2026-11-17: the awake count).
 /// The run always ends at the first party's site with one report, and nothing prints after the
 /// verdict (since TICKET-246 a `RwShared.read` waits for a writer too: ex_rw, sp_rw); plus
 /// `CLEANUP_ROWS`, where nothing prints after the verdict and the cause keeps the report.
 /// Since TICKET-256 a `parallel:` body that waits at its own blocking op is the first party, so its
-/// op is the report (`sp_guard`, `sp_rw`, `sp_full_send`). Since the deadlock listing the report's
-/// position is the first blocked task's own wait: a body at the join is not listed, so `sp_chan`
-/// and `sp_cycle` report their first task's `recv`, and `ex_nested` its job's inner `shutdown()`.
+/// op is the report (`sp_guard`, `sp_rw`, `sp_full_send`). The report's position is task 1's own
+/// wait, and `main` is task 1, listed at its join too (plan 2026-11-17): `sp_chan` and `sp_cycle`
+/// report main's `parallel:`, and `ex_chan`, `ex_cycle` and `ex_nested` main's `shutdown()`.
 #[test]
 fn deadlock_verdict_grid_ends_at_the_first_party_site() {
     let dir = std::env::temp_dir().join(format!("chz-ticket223-grid-{}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("create fixture dir");
     let mut cells = Vec::new();
-    let pins: &[Option<&str>] = &[None, Some("party"), Some("sched")];
-    let cleanup_pins: &[Option<&str>] = &[None, Some("party")];
-    let rows = ROWS
-        .iter()
-        .map(|r| (r, pins))
-        .chain(CLEANUP_ROWS.iter().map(|r| (r, cleanup_pins)));
-    for (row, pins) in rows {
+    for row in ROWS.iter().chain(CLEANUP_ROWS.iter()) {
         let path = dir.join(format!("{}.chz", row.name));
         std::fs::write(&path, row.src).expect("write fixture");
-        for &pin in pins {
-            for t in ["1", "2", "0"] {
-                for seed in 1..=8u32 {
-                    cells.push((path.clone(), row, t, seed, pin));
-                }
+        for t in ["1", "2", "0"] {
+            for seed in 1..=8u32 {
+                cells.push((path.clone(), row, t, seed));
             }
         }
     }
@@ -606,10 +603,10 @@ fn deadlock_verdict_grid_ends_at_the_first_party_site() {
             s.spawn(|| {
                 loop {
                     let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    let Some((path, row, t, seed, pin)) = cells.get(i) else {
+                    let Some((path, row, t, seed)) = cells.get(i) else {
                         break;
                     };
-                    if let Some(b) = run_cell(path, row, t, *seed, *pin) {
+                    if let Some(b) = run_cell(path, row, t, *seed) {
                         bad.lock().unwrap().push(b);
                     }
                 }
@@ -625,12 +622,11 @@ fn deadlock_verdict_grid_ends_at_the_first_party_site() {
     );
 }
 
-/// TICKET-256 — a guard wait that starts while the sched judge cuts the task that holds the guard.
-/// `started` orders the two tasks without a sleep: the body asks for the guard the moment the
-/// holder is inside its `update` closure. Under the `party` pin the sched judge cut the holder
-/// although `decide_since` latched nothing, and the body's `update` ran and printed `AFTER`
-/// (TICKET-256). The cell count is large because the window is a few ms wide; the measured rate on a
-/// 28-core box is about 4 in 100 cells.
+/// TICKET-256 — a guard wait that starts while the holder of the guard blocks inside its `update`
+/// closure. `started` orders the two tasks without a sleep: the body asks for the guard the moment
+/// the holder is inside its closure. Once a sched judge cut the holder before any verdict was
+/// latched, and the body's `update` ran and printed `AFTER` (TICKET-256); the verdict must list
+/// both and print nothing after.
 #[test]
 fn guard_deadlock_with_handshake_never_runs_the_body_after_the_verdict() {
     let row = Row {
@@ -665,7 +661,7 @@ main()
         for _ in 0..8 {
             s.spawn(|| {
                 for seed in (1..=8u32).cycle().take(24) {
-                    if let Some(b) = run_cell(&path, &row, "1", seed, Some("party")) {
+                    if let Some(b) = run_cell(&path, &row, "1", seed) {
                         bad.lock().unwrap().push(b);
                     }
                 }

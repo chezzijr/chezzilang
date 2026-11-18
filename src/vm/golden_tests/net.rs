@@ -1519,7 +1519,14 @@ fn parallel_finished_task_leaves_sibling_deadlocked() {
     let src = "fn waiter(c: Channel[int]):\n    c.recv()\nfn quick():\n    print(\"quick\")\nfn main():\n    c := Channel[int]()\n    parallel:\n        spawn waiter(c)\n        spawn quick()\nmain()\n";
     let (out, _e, res, _c) = run_parallel_watchdog(src);
     let err = res.expect_err("a finished sibling that strands a recv-blocked task is a deadlock");
-    assert!(err.message.contains("deadlock"), "got: {}", err.message);
+    // Go twin: fatal, all asleep once `quick` ends; main at its join, the waiter at its `recv`.
+    super::tests::assert_deadlock(
+        &err,
+        &[
+            ("waiting for a nursery join", 7),
+            ("recv() on an empty channel", 2),
+        ],
+    );
     assert!(
         out.contains("quick"),
         "the finished task's output is still flushed: {out:?}"

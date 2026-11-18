@@ -18,6 +18,9 @@ mod child_rusage;
 const THREADS: [&str; 3] = ["1", "2", "0"];
 const BOUND: Duration = Duration::from_secs(2);
 
+/// The one deadlock header (plan 2026-11-17): every task of the run is blocked.
+const HEADER: &str = "deadlock: every task is blocked";
+
 #[derive(Clone, Copy, PartialEq)]
 enum Mode {
     Run,
@@ -680,6 +683,9 @@ ex := Executor(0)
 
 /// A parked job still counts toward the cap: the one running job waits for a held one. CPython
 /// `ThreadPoolExecutor(1)` hangs on this shape; the deadlock reap drops the held job and reports.
+/// Go twin (a semaphore-capped pool): fatal, all asleep; main is listed first at its
+/// `shutdown()` join, then the running job at its `recv()`. The held job never started, so it has
+/// no wait to list.
 #[test]
 fn executor_limit_deadlock_on_a_held_job_faults() {
     let src = "import std.concurrency\nimport AtomicInt, Executor, Shared from std.concurrency
@@ -698,7 +704,11 @@ print(\"after\")
     for t in THREADS {
         let g = run("dl", src, Mode::Run, t, None);
         if g.code != Some(1)
-            || !g.err.contains("task 1: recv() on an empty channel at ")
+            || !g.err.contains(HEADER)
+            || !g.err.contains("task 1: waiting for an Executor join at ")
+            || !g.err.contains("main.chz:11:1\n")
+            || !g.err.contains("task 2: recv() on an empty channel at ")
+            || !g.err.contains("main.chz:5:18\n")
             || g.out.contains("got")
             || g.out.contains("after")
         {
@@ -1244,7 +1254,9 @@ match t.get():
 
 /// The deadlock verdict is a run end, never a Task outcome: a job whose nursery waits on a channel
 /// nobody sends to ends the run with the deadlock report, rc 1, and the code after `shutdown()`
-/// never runs (the owner contract keeps the verdict as it was).
+/// never runs (the owner contract keeps the verdict as it was). Every task is asleep: main at its
+/// `shutdown()` join (task 1), the job at its `parallel:` join, then the job's child at its
+/// `recv()` (pre-order; Go twin: fatal, all asleep).
 #[test]
 fn a_deadlock_in_a_job_ends_the_run_and_is_not_its_tasks_outcome() {
     let src = "import std.concurrency
@@ -1264,7 +1276,14 @@ print(t.get())
     let mut misses = Vec::new();
     for t in THREADS {
         let g = run("job_deadlock", src, Mode::Run, t, None);
-        if g.code != Some(1) || !g.err.contains("deadlock:") || g.out.contains("REACHED") {
+        let listed = g.err.contains(&format!("{HEADER}\n"))
+            && g.err.contains("task 1: waiting for an Executor join at ")
+            && g.err.contains("main.chz:11:1\n")
+            && g.err.contains("task 2: waiting for a nursery join at ")
+            && g.err.contains("main.chz:5:5\n")
+            && g.err.contains("task 3: recv() on an empty channel at ")
+            && g.err.contains("main.chz:7:18\n");
+        if g.code != Some(1) || !listed || g.out.contains("REACHED") {
             misses.push(format!("T={t}: {}", g.show()));
         }
     }

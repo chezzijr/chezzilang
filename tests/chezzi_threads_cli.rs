@@ -1258,8 +1258,12 @@ fn run_with_hang_deadline(path: &Path, threads: &str) -> Option<std::process::Ou
     }
 }
 
+/// The one global verdict (plan 2026-11-17): exit 1 with `deadlock: every task is blocked`. Every
+/// shape this file pins with it ends with every task of the run asleep, inner nurseries and
+/// Executor jobs included, so Go's twin is fatal too (`all goroutines are asleep`).
 fn faulted_deadlock(out: &std::process::Output) -> bool {
-    !out.status.success() && String::from_utf8_lossy(&out.stderr).contains("deadlock")
+    out.status.code() == Some(1)
+        && String::from_utf8_lossy(&out.stderr).contains("deadlock: every task is blocked\n")
 }
 
 /// Writes `program` to a temp file and runs it [`NESTED_DEADLOCK_RUNS`] times at each of
@@ -1538,10 +1542,9 @@ fn w13_5_g3_recovered_panic_then_cousin_join_completes_at_thread_one_sampled() {
     );
 }
 
-/// W13-5 (TICKET-125) residual, T>=2 — CLOSED by TICKET-129. TICKET-135 (D1): the recovered shapes now abort. `SchedCore::flag_deadlock_leaves` now
-/// DECLINES an unproven verdict (`unproven_ok: bool`, `Option<bool>` return) unless
-/// `MnSched::may_fault_unproven` licenses it — no live peer sched can still move (M3.2 deleted the
-/// proven-victims clause with the leaf proof), matching Go's all-goroutines-parked rule. TICKET-125's own cross-sched deferral
+/// W13-5 (TICKET-125) residual, T>=2 — CLOSED by TICKET-129. TICKET-135 (D1): the recovered
+/// shapes now abort. A deadlock fires only when the run's awake count reaches 0, Go's
+/// all-goroutines-asleep rule. TICKET-125's own cross-sched deferral
 /// (`defer_to_provable_peer`) had cut the false-fault rate (~3/5 -> ~1/20 at T=4 on `d2a`) without
 /// reaching 0 and was reverted; TICKET-129 measured 0 false faults of 60 runs per worker count on
 /// `d2a`/`d2d`/`g3` (debug binary) before closing `docs/contributing/gaps.md`'s W13-5 row.

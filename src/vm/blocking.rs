@@ -106,33 +106,6 @@ impl Vm {
         Ok(())
     }
 
-    /// TICKET-134 — test-only: hold the window between the owner-fault rung and the verdict open
-    /// until the owner's nursery has recorded a fault, so the check-then-check race
-    /// [`Vm::block_halt_check`] closes is deterministically reachable. No-op unless armed via
-    /// [`OWNER_FAULT_WINDOW_ENV`] in this run's own `HostConfig.env`.
-    #[cfg(test)]
-    fn owner_fault_window_hook(&mut self) {
-        if !self.owns_nursery() {
-            return;
-        }
-        let armed = self
-            .host
-            .env
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .remove(OWNER_FAULT_WINDOW_ENV)
-            .is_some();
-        if !armed {
-            return;
-        }
-        let t0 = std::time::Instant::now();
-        while self.halt_requested().is_none() && t0.elapsed() < std::time::Duration::from_secs(10) {
-            self.wait_door(&[], |_| {
-                std::thread::sleep(std::time::Duration::from_millis(1))
-            });
-        }
-    }
-
     /// The `chezzi test --timeout` wall-clock halt, on its own so the ops that PARK a fiber can observe
     /// it too ([`Vm::chan_recv_step`], [`Vm::op_wait_poll`]) — a parked fiber reaches neither
     /// `jump_checked`'s loop back-edge nor [`Vm::block_halt_check`], so without a checkpoint at the op
@@ -185,16 +158,9 @@ impl Vm {
             self.adopt_run_fault(trace);
             return Some(err);
         }
-        // TICKET-223 — the latched deadlock verdict: every party ends with the report of the
-        // first party site the verdict named. `None` while main is at a join: the report there is
-        // the victims' slots (DEC-208), and the join must stay until they are recorded.
-        // The listing names each party's own wait; the latched report is the fallback for a party
-        // reached outside a wait.
-        let (msg, site) = self.quiesce.deadlock_report()?;
-        Some(match self.wait_site {
-            Some((wait, at)) => self.cut_at(&self.err(String::new(), at).deadlock(), wait, at),
-            None => self.err(String::new(), site).deadlock().at_site(&msg, site),
-        })
+        // A latched deadlock verdict ends every task at its wait itself
+        // ([`super::MnSched::on_deadlock`]): nothing to deliver here.
+        None
     }
 
     /// TICKET-208 — THE predicate "a run-wide halt is pending for this party": an `os.exit` from
@@ -251,16 +217,6 @@ impl Vm {
         // precisely top-level `main` — reaches that rung). ABOVE the deadlock verdict, because an
         // `Exit` outranks a synthesized `Deadlocked` — the precedence `reduce_task_slots` encodes.
         let read = self.halt_requested();
-        // A wait its sched's verdict cut ends with its own cut, before a cancel it reads now (a cut
-        // owner's abort tripped it; a cut task cancels no sibling). A blocked `parallel:` body in a
-        // native callback is judged by no process-wide verdict, so this is its one cut. An exit, a
-        // job fault, the latched verdict and a child fault keep their rungs below.
-        if !matches!(read, Some(super::block::Halt::ChildFault { .. }))
-            && !self.run_halt_due()
-            && let Some(e) = self.sched_cut_fault(span)
-        {
-            return Err(e);
-        }
         if let Some(e) = self.blocked_halt(read, span) {
             return Err(e);
         }
@@ -282,52 +238,12 @@ impl Vm {
     /// exit, a job fault, the verdict), with the report of the party site the latch recorded.
     pub(super) fn block_halt_check(&mut self, span: Span) -> Result<(), RuntimeError> {
         self.block_halts(span)?;
-        // TICKET-134 — test-only seam: widen the check-then-check window between the rung above and
-        // the verdict below so a racing fault is deterministically reachable in a test. No-op outside
-        // `#[cfg(test)]` and unless armed.
-        #[cfg(test)]
-        self.owner_fault_window_hook();
-        // The process-wide deadlock verdict (`future.md` §2d step 0), checked LAST so the two real
-        // halts still outrank it. Every counted party is registered as blocked and none of their wait
-        // conditions is satisfiable ⇒ nothing in this run can ever move again. No debounce: W7-12
-        // needed two consecutive observations to rule out "a value landed a microsecond before I
-        // looked", and the satisfiability re-check ([`quiesce::PartyWait::satisfiable`]) answers that
-        // question directly instead of waiting a tick to guess at it — a value that landed IS a
-        // satisfiable wait, so the verdict declines.
-        //
-        // TICKET-223 — this judge acts only through the one latch, `QuiesceState::decide`, which a
-        // sched worker's judge shares. The latched verdict is a run halt, so this party ends through
-        // `run_exit_err` with the report of the first registered party's site, whichever judge
-        // decided first.
-        if self.block_ctx().judged() && self.quiesce.decide(quiesce::Judge::Party).stands() {
-            // TICKET-134 — the child can record its fault and complete between the rung above and
-            // this verdict. A verdict that saw the nursery complete took the SchedCore lock after the
-            // child's fault-slot write, so this re-read sees the fault.
-            self.resume_halts(span)?;
-        }
+        // An in-place wait is awake and judges nothing: the run's awake count decides a deadlock
+        // ([`MnSched::on_deadlock`]).
         // TICKET-052 — an eager `Executor` job (`mn.is_none()`) about to wait another tick hands its
         // pool thread to a replacement, so the job that would unblock it can still get a thread.
         self.yield_pool_slot(Some(DEMOTE_POLL_BACKOFF));
         Ok(())
-    }
-
-    /// The fault of this thread's wait when a sched verdict cut every blocked task of the sched
-    /// ([`SchedCore::flag_deadlock`]), read by [`Vm::block_halts`] outside any core lock (it takes
-    /// each sched's): the sched this fiber runs on, or a sched whose `parallel:`
-    /// body this thread runs. A blocked body is one of the verdict's tasks: its mark
-    /// (`Vm::mark_bodies`) lifted the body's veto, so the verdict counted it stuck. `terminate`
-    /// alone is no cut: it also latches when every task is done and the body blocks.
-    pub(super) fn sched_cut_fault(&self, span: Span) -> Option<RuntimeError> {
-        let sched = self
-            .mn
-            .iter()
-            .chain(
-                self.owned_eager_scopes()
-                    .filter(|s| !s.fiber_owned)
-                    .map(|s| &s.sched),
-            )
-            .find(|s| s.lock().verdict_cut)?;
-        Some(self.cut_fault(sched, span))
     }
 
     /// Sleep until `deadline`, observing the same halts every other blocking-in-place path does
@@ -411,11 +327,7 @@ impl Vm {
             // through a state the next iteration would immediately take (W7-13). All are written
             // under `core.q` (`done_latch` since W7-13r(b)), so re-checking them under the guard the
             // wait consumes closes the window.
-            let on = Blocked::at(
-                quiesce::PartyWait::Recv(Arc::clone(core), Some(Arc::clone(&p))),
-                Wait::Recv.phrase(),
-                span,
-            );
+            let on = Blocked::at(Wait::Recv.phrase(), span);
             let latch = self.halt_latch();
             let r = self.block_wait_tick(WaitSpec::Recv, on, h, core, span, |g| {
                 g.recv_ready_for(Some(&p))
@@ -647,6 +559,9 @@ impl Vm {
                 let key = self.channel_core_ptr(h);
                 let core_job = self.channel_core(h);
                 let sched_job = Arc::clone(&sched);
+                // The timer is a task of the run's count while this fiber waits on it: on every
+                // park, a re-park too, before the job below can fire.
+                self.timer_wait = Some(core_job.timer_wait(&sched.quiesce.awake));
                 // Arm ONCE per timer channel: a re-park of this same wait (woken with no consumable
                 // value — e.g. a sibling `close` on another arm) re-runs WaitPoll and re-enters this
                 // block, but the CAS fails the second time so we do NOT submit a redundant job. The
@@ -674,12 +589,19 @@ impl Vm {
                     timer::submit_at(
                         fire_at,
                         Box::new(move || {
-                            if std::time::Instant::now() >= deadline {
+                            // Only the timer's own deadline fires it. An early wake (the run's
+                            // `--timeout` came first) leaves it pending: the woken task's resume
+                            // ends its wait, and a later wait on this timer counts it again.
+                            let fired = std::time::Instant::now() >= deadline;
+                            if fired {
                                 sched_job.send_wake(key, &core_job, Value::bool(true));
                             } else {
                                 deadline_gap_wake(&sched_job, key, &core_job, &gap_cancel);
                             }
                             sched_job.leave_inflight();
+                            if fired && core_job.timer_fired(&sched_job.quiesce.awake) {
+                                sched_job.on_deadlock();
+                            }
                         }),
                     );
                 }
@@ -751,11 +673,7 @@ impl Vm {
                 arms.iter().map(|(c, _)| Arc::clone(c)).collect();
             let refs: Vec<&Arc<ChannelCore>> = arm_cores.iter().collect();
             let _gated = self.gated_register(&refs);
-            let on = Blocked::at(
-                quiesce::PartyWait::Wait(arms, Some(Arc::clone(&p))),
-                Wait::select(has_send).phrase(),
-                span,
-            );
+            let on = Blocked::at(Wait::select(has_send).phrase(), span);
             let mut reg = self.wait_begin(wait_spec, Some(on), "wait", span)?;
             let counts = reg.take_counts();
             let latch = self.halt_latch();
@@ -869,14 +787,6 @@ impl Vm {
 /// test's blocking also lands here. Only ever read as a delta, and only ever compared with `>=`.
 #[cfg(test)]
 pub(crate) static BLOCK_WAITS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-
-/// TICKET-134 — test-only: hold the window between the owner-fault rung and the verdict open until
-/// the owner's nursery has recorded a fault. Fires once per run, only when the run's own
-/// `HostConfig.env` carries this key, so no other lib test can trip it (libtest runs the whole lib
-/// suite in one process, and `run_file_with` runs the VM on its own thread, so neither a global flag
-/// nor a thread-local can be scoped to one test — the per-run `HostConfig.env` can).
-#[cfg(test)]
-pub(crate) const OWNER_FAULT_WINDOW_ENV: &str = "CHEZZI_TEST_OWNER_FAULT_WINDOW";
 
 /// Test-only instrumentation: **W7-13's defect signature** — a [`Vm::block_wait_tick`] wait that
 /// slept its whole [`DEMOTE_POLL_BACKOFF`] tick and yet found the channel READY when it woke, i.e. a

@@ -143,9 +143,6 @@ impl Vm {
                 return Err(e);
             }
         };
-        if call.mode() == GuardMode::Read {
-            self.held_reads.push(Arc::as_ptr(&lock) as usize);
-        }
         self.held_guards.push(guard);
         let cur = self.box_get(call, h);
         let r = match self.push_callback_frame(f, &[cur], RetAction::Box(call), span) {
@@ -166,7 +163,6 @@ impl Vm {
     ) -> Result<Value, RuntimeError> {
         let base = self.stack.len() - BOX_SLOTS;
         let h = self.stack[base].as_obj().expect("a box slot holds the box");
-        self.cut_if_fatal([r.as_ref().err()]);
         let out = r.map(|r| match call {
             BoxCall::Update => {
                 self.shared_core(h).v.set(r);
@@ -179,46 +175,23 @@ impl Vm {
             BoxCall::Read | BoxCall::RwRead => r,
         });
         self.stack.truncate(base);
-        self.box_release(call);
+        self.box_release();
         out
     }
 
-    /// THE cut of this task's held guards: each releases `CUT`. A cut at a wait latches the run's
-    /// deadlock verdict there, so the cut is fatal even for a cancelled task (TICKET-298, owner
-    /// answer 2(b)).
-    pub(super) fn cut_held_guards(&mut self, site: Option<(&'static str, Span)>) {
+    /// THE cut of this task's held guards: each releases `CUT` (a task the deadlock verdict
+    /// drops at a per-test verdict in `chezzi test`).
+    pub(super) fn cut_held_guards(&mut self) {
         if self.held_guards.is_empty() {
             return;
         }
         super::core::cut_all(&mut self.held_guards);
-        if let Some((wait, at)) = site {
-            self.quiesce.latch_holder_cut(wait, at);
-        }
-    }
-
-    /// THE funnel from the fatal marker (`RuntimeError::is_deadlock`, DEC-135) to the guards: a
-    /// frame that drops while it holds a deadlock-marked fault cuts every held guard first. A fault
-    /// is stamped at seven sites and crosses from a child by value, so the funnel sits at the four
-    /// frame drops that hold a fault (`box_done`, `return_finish`, `unwind_deferred_escaped`,
-    /// `Vm::pop_unwinding`), and a new source needs no call of its own (TICKET-298).
-    pub(super) fn cut_if_fatal<'a>(
-        &mut self,
-        faults: impl IntoIterator<Item = Option<&'a RuntimeError>>,
-    ) {
-        if faults.into_iter().flatten().any(|e| e.is_deadlock) {
-            self.cut_held_guards(None);
-        }
     }
 
     /// Release the innermost guard a box-closure frame holds (LIFO: box frames nest). The guard
     /// releases as cut when [`Vm::cut_held_guards`] marked it.
-    pub(super) fn box_release(&mut self, call: BoxCall) {
-        let guard = self.held_guards.pop().expect("a box frame holds a guard");
-        if call.mode() == GuardMode::Read {
-            let read = self.held_reads.pop();
-            debug_assert_eq!(read, Some(Arc::as_ptr(guard.lock()) as usize));
-        }
-        drop(guard);
+    pub(super) fn box_release(&mut self) {
+        drop(self.held_guards.pop().expect("a box frame holds a guard"));
     }
 
     /// Run a box method `f` with its popped receiver `h` and `args` rooted on the operand stack.
@@ -334,12 +307,7 @@ impl Vm {
     ) -> Result<R, RuntimeError> {
         let _guard = self.box_guard(&core.lock, GuardMode::Read, span)?;
         let cur = core.v.get();
-        // The reader's own list (`Vm::held_reads`), read on a failed acquire to find a re-entry.
-        let held = self.held_reads.len();
-        self.held_reads.push(Arc::as_ptr(&core.lock) as usize);
-        let r = pick(self, cur);
-        self.held_reads.truncate(held);
-        r
+        pick(self, cur)
     }
 
     /// The ONE single-entry writer of a `RwShared` container: run `op` on the live value under the
@@ -745,6 +713,7 @@ impl Vm {
             ExecutorMethod::StdSubmitSettled => {
                 self.arity_err("_submit_settled", args, 2, span)?;
                 let ch = self.task_channel("_submit_settled", args[1], span)?;
+                ch.handle.store(true, Ordering::Relaxed);
                 let flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
                 self.executor_submit(h, args[0], JobSettle { ch, flag }, span)?;
                 Ok(Value::nil())
@@ -784,6 +753,8 @@ impl Vm {
                     sched.drop_held();
                     sched.drain_family(0);
                 }
+                // The scopes under the flag (a job's nested nursery, a job's own Executor) too.
+                crate::vm::sched::drain_live_scheds(&self.sched_registry, &core.cancel);
                 // TICKET-118 (W13-8) — a cancel is a wake source too.
                 crate::vm::sched::poke_live_scheds(&self.sched_registry);
                 // TICKET-289 — no join: `cancel()` returns at once, and `shutdown()` (or the run
@@ -809,8 +780,11 @@ impl Vm {
     /// TICKET-289 — `Task.cancel()` (`std.concurrency._cancel_job`): cancel the one job of
     /// Executor `h` whose Task channel is `ch`. A job that already ended is a no-op.
     pub(super) fn cancel_task_job(&self, h: GcRef, ch: &Arc<ChannelCore>) {
-        if let Some(sched) = self.executor_core(h).sched() {
-            sched.cancel_job(ch);
+        if let Some(sched) = self.executor_core(h).sched()
+            && let Some(flag) = sched.cancel_job(ch)
+        {
+            // The scopes under the job's flag on every other sched (an Executor the job made).
+            crate::vm::sched::drain_live_scheds(&self.sched_registry, &flag);
         }
         // A cancel is a wake source too (TICKET-118, W13-8).
         crate::vm::sched::poke_live_scheds(&self.sched_registry);
@@ -913,14 +887,14 @@ impl Vm {
     /// deadlock verdict drains them too, so a finished job's buffered output still reaches the sink
     /// (`run_file`'s in-process sink holds it only in the job's slot); the drain's own result is
     /// discarded, and the verdict and its trace stand. Any other fault, and a pending exit, skip the
-    /// drain as before. A verdict's fault then reports the run's listing ([`Vm::list_blocked`]).
+    /// drain as before. A verdict's fault then reports the run's listing ([`Vm::report`]).
     pub(crate) fn finish_run(&mut self, r: Result<(), RuntimeError>) -> Result<(), RuntimeError> {
         // TICKET-208 — a run ended by a job fault drains too: every scope is already cancelled,
         // and a finished job's buffered output must still reach the sink.
         let job = self.quiesce.has_job_fault();
         let r = match self.rank_end(r) {
             Ok(()) => self.drain_live_executors(),
-            Err(e) if (e.is_deadlock || job) && self.pending_exit.is_none() => {
+            Err(e) if (self.deadlocked() || job) && self.pending_exit.is_none() => {
                 let trace = (self.fault_trace.take(), self.fault_trace_depth);
                 // The drain's blocked jobs join the run's listing; the verdict stands.
                 let _ = self.drain_live_executors();
@@ -936,7 +910,18 @@ impl Vm {
                 Err(e)
             }
         };
-        self.list_blocked(r)
+        // Main's end, after its last join (`Vm::run` started it). Every task has ended then,
+        // unless a hard halt (an exit, a job fault, a `--timeout`) or main's own fault (Go: a
+        // panic in `main` exits with goroutines running) dropped tasks unfinished.
+        self.quiesce.awake.task_ended();
+        let halt = self.quiesce.run_halt();
+        debug_assert!(
+            !(halt == RunHalt::Deadlock || (halt == RunHalt::Running && r.is_ok()))
+                || self.timeout_ms != 0
+                || self.quiesce.awake.drains(),
+            "a run ended with tasks alive or awake"
+        );
+        r
     }
 
     /// Like [`Vm::drain_live_executors`], but skips the first `from` registry entries. `from` is a
@@ -945,6 +930,34 @@ impl Vm {
     /// This is what lets a per-test drain join only the executors ITS test created, leaving one built
     /// at module top level or in `before_all` alive for the tests that follow.
     pub(super) fn drain_live_executors_from(&mut self, from: usize) -> Result<(), RuntimeError> {
+        if self.pending_exit.is_some() {
+            self.flush_finished_jobs_from(from);
+            return Ok(());
+        }
+        let live = self
+            .exec_registry
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .skip(from)
+            .any(|c| c.sched().is_some());
+        if !live {
+            return Ok(());
+        }
+        // The joins wait, so they run as a root fiber: each parks until its Executor is done.
+        let r = self
+            .run_root(vec![super::exec::RootStep::Drain(from)], Vec::new())
+            .map(|_| ());
+        // A job's exit can end that fiber before its join took what the jobs printed.
+        if self.quiesce.pending().is_some() {
+            self.flush_finished_jobs_from(from);
+        }
+        r
+    }
+
+    /// [`Vm::drain_live_executors_from`]'s joins, on the root fiber ([`super::exec::RootStep::Drain`]).
+    /// A join that parks returns its park sentinel with `exec_join_suspend` set; the step re-runs.
+    pub(super) fn drain_executors_from(&mut self, from: usize) -> Result<(), RuntimeError> {
         if self.pending_exit.is_some() {
             self.flush_finished_jobs_from(from);
             return Ok(());
@@ -981,7 +994,7 @@ impl Vm {
             // TICKET-048 — the program-exit drain has no call site of its own, so it names where
             // this Executor was created.
             if let Err(e) = self.join_executor(&core, core.created_at) {
-                if e.blocked.is_some() && core.sched().is_none() {
+                if self.deadlocked() && core.sched().is_none() {
                     deadlock = deadlock.or(Some(e));
                     continue;
                 }

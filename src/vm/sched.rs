@@ -216,21 +216,26 @@ pub(super) enum JoinCover {
 /// window at `n >= 2` purely because the gate lets that loop run. Requires a pre-existing scheduler bug
 /// to reach, so no code change here — recorded so the next reader sees the trade.
 ///
-/// **And do not "restore" the old cover without reading what it actually did.** The pre-W8-8 joiner
-/// loop did not rescue the lost fiber — nothing can; its slot is gone either way. What it did was sit
-/// in `take_runnable` as an idle worker and therefore EVALUATE `is_deadlocked`, whose clause requires
-/// `parked_n > 0 || any_fiber_waiter()`. So the old behaviour was: a scheduler-internal panic with at
-/// least one parked sibling reported **`deadlock`** — a confidently WRONG verdict for a panicked
-/// runtime — and with no parked sibling it hung anyway (the predicate declines, and the joiner's own
-/// `take_runnable` then does the same untimed `cv.wait`). The change therefore narrows to: one
-/// wrong-verdict case becomes a hang. Per this repo's standing rule that a heuristic verdict must
-/// DECLINE rather than emit a confident wrong answer (`docs/contributing/gaps.md` W7-12, the `parked-is-not-stuck`
-/// line of cases), that is the better of two bad outcomes, not a regression to undo. The real fix is
-/// not a joiner loop — it is deciding what the scheduler should do when a worker thread panics at
-/// all, which every `catch_unwind` in this file swallows today and which is a design question wider
-/// than this gate.
+/// The pre-W8-8 joiner loop did not rescue the lost fiber either: its slot is gone. The real fix
+/// is not a joiner loop — it is deciding what the scheduler should do when a worker thread panics
+/// at all, which every `catch_unwind` in this file swallows today and which is a design question
+/// wider than this gate.
 pub(super) fn eager_joiner_runs_fibers(n: usize) -> bool {
     n >= 2
+}
+
+/// A cancel of `flag` (`Executor.cancel()`, `Task.cancel()`) drains the parked fibers under it
+/// on every live sched of the run, before the canceller goes on: a nested Executor a job created
+/// holds its jobs on a sched of its own, and an idle worker's later scan is a wake the run's
+/// awake count cannot see, so the canceller could park first and read every task asleep.
+pub(super) fn drain_live_scheds(sched_registry: &crate::vm::SchedRegistry, flag: &Arc<AtomicBool>) {
+    let live: Vec<_> = {
+        let g = sched_registry.lock().unwrap_or_else(|e| e.into_inner());
+        g.iter().filter_map(|w| w.upgrade()).collect()
+    };
+    for s in live {
+        s.drain_job(flag);
+    }
 }
 
 /// TICKET-118 (W13-8), extracted from `spawn_into`'s completion closure — poke every live
@@ -250,38 +255,5 @@ pub(super) fn poke_live_scheds(sched_registry: &crate::vm::SchedRegistry) {
     for s in live {
         drop(s.lock());
         s.notify_waiters();
-    }
-}
-
-/// TICKET-095 — RAII handle for `SchedCore::blocked_owners`. Held across the span in which a fiber's
-/// OS thread is blocked inline in a nested nursery join; dropped when the join returns, decrementing
-/// the counter and re-notifying idle workers so a scope that just became genuinely stuck (not merely
-/// counted-blocked) is re-evaluated. TICKET-099 — also decrements `cross_sched_blocked_owners` when
-/// the join was into a CHILD sched (`blocked_owner_guard`'s cross-sched branch).
-pub(super) struct BlockedOwnerGuard {
-    pub(super) sched: Arc<MnSched>,
-    pub(super) cross_sched: bool,
-    /// TICKET-103 — the owner fiber's own scope, whose `owners_blocked` this guard holds.
-    pub(super) scope: Option<usize>,
-    /// TICKET-103 — the same-sched nursery origin scope whose `joins_blocked` this guard holds.
-    pub(super) joined: Option<usize>,
-}
-
-impl Drop for BlockedOwnerGuard {
-    fn drop(&mut self) {
-        {
-            let mut c = self.sched.lock();
-            c.blocked_owners -= 1;
-            if self.cross_sched {
-                c.cross_sched_blocked_owners -= 1;
-            }
-            if let Some(s) = self.scope {
-                c.scopes[s].owners_blocked -= 1;
-            }
-            if let Some(j) = self.joined {
-                c.scopes[j].joins_blocked -= 1;
-            }
-        }
-        self.sched.notify_waiters();
     }
 }

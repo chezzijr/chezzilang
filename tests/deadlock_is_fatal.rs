@@ -5,6 +5,9 @@
 
 use std::process::{Command, Output};
 
+/// The one deadlock header (plan 2026-11-17): every task of the run is blocked.
+const HEADER: &str = "deadlock: every task is blocked";
+
 /// Write `src` to a fixture file and `chezzi run` it, optionally pinning `CHEZZI_THREADS`.
 fn run_fixture(name: &str, src: &[&str], threads: Option<&str>) -> Output {
     let dir = std::env::temp_dir().join(format!("chz-ticket135-{}", std::process::id()));
@@ -28,12 +31,14 @@ fn assert_fatal_deadlock(out: &Output, forbidden_stdout: &str, what: &str) {
         "{what}: a deadlock verdict must abort the program, but `recover:` caught it (stdout: {stdout:?})"
     );
     assert!(
-        !out.status.success() && stderr.contains("deadlock"),
-        "{what}: expected a fatal `deadlock` at nonzero rc, got {} (stderr: {stderr})",
+        out.status.code() == Some(1) && stderr.contains(HEADER),
+        "{what}: expected a fatal `{HEADER}` at rc 1, got {} (stderr: {stderr})",
         out.status
     );
 }
 
+// Go twin of each fixture: fatal `all goroutines are asleep - deadlock!`; `recover()` cannot catch
+// a fatal error.
 #[test]
 fn recover_does_not_catch_a_deadlock() {
     let out = run_fixture(
@@ -85,4 +90,12 @@ fn a_deadlocked_executor_job_aborts_shutdown() {
     ];
     let out = run_fixture("exec135.chz", &src, None);
     assert_fatal_deadlock(&out, "after shutdown", "executor shutdown");
+    // Main is task 1, listed at its `shutdown()` join; the job follows at its `recv()`.
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("task 1: waiting for an Executor join at ")
+            && stderr.contains("exec135.chz:6:19")
+            && stderr.contains("task 2: recv() on an empty channel at "),
+        "executor shutdown: main and its job must both be listed (stderr: {stderr})"
+    );
 }

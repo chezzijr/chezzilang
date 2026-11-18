@@ -369,7 +369,11 @@ fn outcome(src: &str, threads: &str, want: &str) -> String {
     match run(src, threads) {
         None => "TIMEOUT".to_string(),
         Some((0, out, _)) if out.trim() == want => "ok".to_string(),
-        Some((code, out, err)) if code != 0 && err.contains("deadlock") && !out.contains("t 2") => {
+        // The one global verdict (plan 2026-11-17). Each `deadlock` program below ends with every
+        // task asleep (Go twin: fatal, all goroutines asleep).
+        Some((1, out, err))
+            if err.contains("deadlock: every task is blocked\n") && !out.contains("t 2") =>
+        {
             "deadlock".to_string()
         }
         Some((code, out, err)) => format!("rc={code} stdout={out:?} stderr={err:?}"),

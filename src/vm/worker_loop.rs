@@ -7,7 +7,6 @@ use super::sched::JoinCover;
 #[cfg(test)]
 use super::sched::RunnerCount;
 use super::sched::eager_joiner_runs_fibers;
-use super::sched::poke_live_scheds;
 use super::sched::spawn_worker_thread;
 use super::*;
 
@@ -18,7 +17,7 @@ thread_local! {
 }
 
 /// TICKET-289 — test-only: arms [`Vm::window_hook`] once per run, through that run's
-/// own `HostConfig.env` (the seam `OWNER_FAULT_WINDOW_ENV` uses).
+/// own `HostConfig.env`.
 #[cfg(test)]
 pub(crate) const FINISH_DRAIN_WINDOW_ENV: &str = "CHEZZI_TEST_FINISH_DRAIN_WINDOW";
 
@@ -203,8 +202,8 @@ impl Vm {
 
     /// TICKET-063 — the second stage of a `Shared`/`RwShared` update-guard wait: its demote
     /// ([`Vm::wait_demote`]). A guard wait has no promised external progress — it returns only
-    /// when the owner (one of the parties the verdict already judges) releases — so it registers
-    /// a `PartyWait::Guard` waiter, never `inflight` (DEC-063). With `self.mn` `None` the bracket
+    /// when the owner releases — so it registers a waiter, never `inflight` (DEC-063), and a lock
+    /// cycle is reported by the run's one deadlock verdict. With `self.mn` `None` the bracket
     /// keeps DEC-052's immediate `yield_pool_slot(None)`.
     pub(super) fn guard_wait_enter(
         &mut self,
@@ -217,11 +216,7 @@ impl Vm {
         self.wait_demote(
             reg,
             WaitSpec::Guard,
-            Some(Blocked::at(
-                quiesce::PartyWait::Guard(key, self.guard_token),
-                wait,
-                span,
-            )),
+            Some(Blocked::at(wait, span)),
             what,
             span,
         )
@@ -302,7 +297,17 @@ impl Vm {
 
     /// The replacement worker of [`Vm::spawn_replacement_worker`], built but not started: the
     /// watcher of long C calls starts it (`sysmon`), on a thread that has no `Vm`.
+    /// A visit's thread is a host worker, so its replacement is one too ([`Vm::visit_guest`]).
     pub(super) fn spare(&self, sched: &Arc<MnSched>, wid: usize) -> Spare {
+        if let Some(host) = &self.guest_of
+            && let Some(cancel) = host.scope_cancel(0)
+        {
+            return Spare {
+                shell: self.spawn_shell(host, &cancel),
+                sched: Arc::clone(host),
+                wid,
+            };
+        }
         let cancel = self
             .cancel
             .as_ref()
@@ -312,6 +317,52 @@ impl Vm {
             sched: Arc::clone(sched),
             wid,
         }
+    }
+
+    /// A root worker with nothing of its own to run takes the runnable jobs of the Executor sched
+    /// `guest` on this thread, and comes back once `guest` has none runnable or the host (this
+    /// shell's sched) has a fiber runnable: the run's workers are its only runner threads, as Go
+    /// has one pool of Ms. `wid` is this worker's, and the visit runs through the GC door.
+    /// Returns whether the visit demoted: a replacement host worker now covers `wid`
+    /// ([`Vm::spare`]), so this worker leaves.
+    pub(super) fn visit_guest(&mut self, guest: &Arc<MnSched>, wid: usize) -> bool {
+        let (Some(host), Some(cancel)) = (self.mn.clone(), guest.scope_cancel(0)) else {
+            return false;
+        };
+        let mut shell = self.spawn_shell(guest, &cancel);
+        shell.guest_of = Some(host);
+        let wid = wid.min(guest.locals.len() - 1);
+        guest.visitors.fetch_add(1, Ordering::Relaxed);
+        self.wait_door(&[], |_| shell.mn_worker_loop(guest, wid, SENTINEL_SCOPE));
+        guest.visitors.fetch_sub(1, Ordering::Relaxed);
+        shell.demoted
+    }
+
+    /// Does a visit ([`Vm::visit_guest`]) owe its thread back: the host has a fiber runnable,
+    /// or, on the fairness tick (`fair`), the host ended (its run's end must not wait for a job,
+    /// Go: `main` returns with goroutines running) or another Executor of the run has a fiber
+    /// runnable?
+    fn host_wants_thread(&self, sched: &Arc<MnSched>, fair: bool) -> bool {
+        self.guest_of.as_ref().is_some_and(|h| {
+            h.runnable.load(Ordering::Relaxed) > 0
+                || fair && h.lock().terminate
+                || fair
+                    && self
+                        .quiesce
+                        .runnable_guest(&mut Vec::new(), Some(sched))
+                        .is_some()
+        })
+    }
+
+    /// A root worker's fiber may keep its thread at a slice end only while no Executor job of
+    /// the run waits for a thread, and a visit's only while its host has none runnable
+    /// ([`Vm::visit_guest`]).
+    fn guest_waits(&self, sched: &Arc<MnSched>) -> bool {
+        if self.guest_of.is_some() {
+            return self.host_wants_thread(sched, false);
+        }
+        self.quiesce.host().is_some_and(|h| Arc::ptr_eq(&h, sched))
+            && self.quiesce.runnable_guest(&mut Vec::new(), None).is_some()
     }
 
     /// D2b — a worker shell's lifetime: pull a runnable fiber, run it to its next park/finish, settle,
@@ -384,6 +435,7 @@ impl Vm {
         let _turn = OwnTurn;
         let mut tick: u64 = 0;
         let mut kept: Option<Fiber> = None;
+        let mut ran = false;
         loop {
             #[cfg(test)]
             if PANIC_AT_LOOP_TOP.with(|p| p.replace(false)) {
@@ -396,9 +448,13 @@ impl Vm {
             // when no fiber is runnable, and the `kept` re-run skips it, so a busy fiber outside the
             // family (a spinner) held a faulting owner's unwind forever at T=1. The kept fiber goes
             // back to the queue for the runner that continues after this owner.
-            if boundary_stop
-                && owner_scope != SENTINEL_SCOPE
-                && sched.lock().owner_scope_done(owner_scope)
+            // A visit to an Executor's sched gives the thread back to its host at a fiber
+            // boundary once the host has a fiber runnable, or on the fairness tick another
+            // Executor does, after one fiber of the visit ran.
+            if (ran && self.host_wants_thread(sched, tick.is_multiple_of(GLOBAL_CHECK_INTERVAL)))
+                || boundary_stop
+                    && owner_scope != SENTINEL_SCOPE
+                    && sched.lock().owner_scope_done(owner_scope)
             {
                 if let Some(f) = kept.take() {
                     sched.yield_fiber(f);
@@ -423,6 +479,7 @@ impl Vm {
             if slice == Slice::Fresh {
                 tick = next;
             }
+            ran = true;
             self.width_acquire();
             let task_index = fiber.task_index;
             let scope_id = fiber.scope_id;
@@ -477,7 +534,8 @@ impl Vm {
                     if !self.demoted
                         && !sched_seed::on()
                         && width::holds()
-                        && sched.runnable.load(Ordering::Relaxed) == 0 =>
+                        && sched.runnable.load(Ordering::Relaxed) == 0
+                        && !self.guest_waits(sched) =>
                 {
                     kept = Some(fiber);
                 }
@@ -515,6 +573,14 @@ impl Vm {
                     if outcome.aborts() {
                         self.window_hook(PRE_FINISH_WINDOW_ENV);
                     }
+                    // A task whose end can drain its family (below) holds a token task of the
+                    // run's count across that drain, so its own end never reads as every task
+                    // asleep before the cancel wakes its parked siblings.
+                    let hold =
+                        fiber.job_cancel.is_none() && (outcome.aborts() || sched.mem_cap != 0);
+                    if hold {
+                        sched.quiesce.awake.task_started(1);
+                    }
                     let (aborts, job_fault) =
                         sched.finish_with(task_index, scope_id, outcome, self.cancel.as_deref());
                     if job_fault {
@@ -538,11 +604,15 @@ impl Vm {
                         #[cfg(test)]
                         self.window_hook(FINISH_DRAIN_WINDOW_ENV);
                         sched.drain_family(scope_id);
+                        // The scopes under the tripped flag (a nested nursery of a sibling) too, in
+                        // the token's hold: an idle worker's later scan is a wake the count cannot
+                        // see (`SchedCore::drain_scan_due`).
+                        if let Some(flag) = &self.cancel {
+                            sched.drain_job(flag);
+                        }
                     }
-                    // A finished Executor job is one fewer live sender for every other sched: an
-                    // idle worker elsewhere must ask its verdict again.
-                    if sched.detached.is_some() {
-                        poke_live_scheds(&self.sched_registry);
+                    if hold && sched.quiesce.awake.task_ended() {
+                        sched.on_deadlock();
                     }
                 }
             }
@@ -576,8 +646,8 @@ impl Vm {
             //       the queue — it cannot be holding an unconsumed yield. Of its four sites, the
             //       owner-stop, deadlock and W7-58 branches all `notify_all` before returning; the
             //       `c.terminate` branch does not, which is benign because both writers of
-            //       `terminate` (`MnSched::finish`, `flag_deadlock`) `notify_all` right after setting
-            //       it, and the run is ending regardless.
+            //       `terminate` (`MnSched::finish`, the verdict's `end_asleep`) wake the workers
+            //       right after setting it, and the run is ending regardless.
             //   (b) this `self.demoted` return — the hole, closed by the notify below.
             //   (c) a panic is NOT an exit: `run_one_fiber` wraps its whole body in `catch_unwind` and
             //       converts a panic into `Disp::Finish(panic_outcome(..))`, so the loop continues. The
@@ -634,11 +704,13 @@ impl Vm {
                     self.cancel_outer = ancestors;
                 }
             }
-            // TICKET-103 — `blocked_owner_guard` counts this fiber on its own scope.
+            // TICKET-103 — the scope of the running fiber (a nested nursery's `parent_scope`).
             self.fiber_scope = Some(fiber.scope_id);
         }
         self.suspend = None;
         self.wait_suspend = None; // set by `op_wait_poll`'s M:N snapshot-park (→ `Disp::WaitPark`)
+        // The resume ends the fiber's timer wait, whatever woke it; a re-park waits again.
+        drop(fiber.timer_wait.take());
         self.send_suspend = None; // set by a full bounded `send` (→ `Disp::SendPark`)
         self.guard_suspend = None; // set by a guard wait's park (→ `Disp::GuardPark`)
         self.exec_join_suspend = None; // set by an Executor join's park (→ `Disp::ExecJoinPark`)
@@ -667,8 +739,6 @@ impl Vm {
         let resume_native = fiber.resume_native.take();
         self.pending = fiber.pending.take();
         self.fault_park = fiber.fault_park.take();
-        let verdict_cut = fiber.defer_cut.take();
-        let park_site = fiber.park_site;
         let disp = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             // D5 — lower + push the offloaded native's result before resuming, so the operand stack
             // holds what the `Call` would have pushed and `run_until` continues correctly. The `Err`
@@ -778,23 +848,6 @@ impl Vm {
                     self.push(v);
                 }
             }
-            // A fiber the verdict cut while it waited in a `defer` ([`SchedCore::cut_parked`]) ends
-            // that wait with the verdict's fault here, before its rewound op re-runs. A fiber that
-            // parked mid fault-unwind resumes that unwind instead (its family is done now). Inside a
-            // `defer` only an `Escape` park happens (a fault unwind there runs at the drain's level,
-            // so `Unwind::parks` is false), and the verdict cuts it only when
-            // `cut_aborting_families` finds no stuck member, which no tried shape reaches
-            // (2026-11-07: a member stuck in its own `defer` or in a nested join is always cut).
-            if self.join_suspend.is_none()
-                && self.fault_park.is_none()
-                && let Some(how) = verdict_cut
-            {
-                // A cut guard wait leaves its box's line: its rewound op never re-runs.
-                self.guard_ticket = None;
-                if let Err(e) = self.take_verdict_cut(how, park_site, span) {
-                    return Disp::Finish(self.classify_mn_outcome(Err(e)));
-                }
-            }
             // TICKET-287 — a fiber that parked mid fault-unwind ([`FaultPark`](super::frames::FaultPark))
             // resumes that unwind here, not at its `ip`. It may park again at a lower level. A park
             // raised by this resume's own halt arms above (`join_suspend` already set) has not
@@ -820,6 +873,11 @@ impl Vm {
                 ),
                 FiberState::Ready | FiberState::Blocked => self.run_until(0),
             };
+            // A run's root fiber goes on to its next step (`main` is fiber 1).
+            let res = match fiber.ctx.root.as_deref_mut() {
+                Some(plan) => self.root_steps(plan, res),
+                None => res,
+            };
             if res.is_ok() && self.offload.is_some() {
                 // D5 — the fiber hit a blocking native; hand it to the dirty pool. Mutually exclusive
                 // with `suspend`/`yield_now` (offload returns up via the `paused()` gate before any
@@ -831,7 +889,11 @@ impl Vm {
                 // returns up via the `paused()` gate before any other safepoint runs.
                 Disp::PollPark(self.poll_park.take().unwrap())
             } else if res.is_ok() && self.join_suspend.is_some() {
-                // TICKET-103 — the fiber parked at a fiber-owned nursery's `JoinNursery`.
+                // TICKET-103 — the fiber parked at a fiber-owned nursery's `JoinNursery`, sited at
+                // the nursery's `parallel` keyword.
+                let at = self.nursery_spans.last().copied().unwrap_or(span);
+                self.park_site
+                    .get_or_insert((super::deadlock::Wait::Nursery.phrase(), at));
                 Disp::JoinPark(self.join_suspend.take().unwrap())
             } else if res.is_ok() && self.guard_suspend.is_some() {
                 // A guard wait: its ticket travels in the context `swap_task` saves below.
@@ -878,6 +940,7 @@ impl Vm {
         fiber.cancel_unwind_faulted = self.cancel_unwind_faulted;
         // A fiber that parks carries its site; one that runs on carries `None`.
         fiber.park_site = self.park_site.take();
+        fiber.timer_wait = self.timer_wait.take();
         fiber.park_deadline = self.deadline;
         self.swap_task(&mut fiber.ctx);
         disp
@@ -887,9 +950,9 @@ impl Vm {
     /// fiber's outcome. It is a `Fault`, so [`MnSched::finish_with`] trips the fiber's cancel for it
     /// as for any fault — and it MUST: `mn_worker_loop` treats a `Fault` as an abort and calls
     /// `cancel_drain`, but a requeued sibling with `cancel == false` just re-runs `recv` and PARKS
-    /// AGAIN; the scope then quiesces uncancelled, `is_deadlocked` fires (correctly, by its own
-    /// rules), and `flag_deadlock` drops those siblings without `unwind_deferred` — their `defer`s
-    /// never run, hidden behind the panic-fault (`reduce_task_slots` ranks Fault > Deadlocked).
+    /// AGAIN; the run's deadlock verdict then ends those siblings without `unwind_deferred` — their
+    /// `defer`s never run, hidden behind the panic-fault (`reduce_task_slots` ranks Fault >
+    /// Deadlocked).
     pub(super) fn panic_outcome(
         &mut self,
         p: Box<dyn std::any::Any + Send>,
@@ -998,7 +1061,7 @@ impl Vm {
     /// adopts it as a delivered cut and reports that party's trace ([`Vm::adopt_child_fault`]).
     pub(super) fn reduce_task_slots(
         &mut self,
-        slots: Vec<Option<TaskOutcome>>,
+        slots: impl IntoIterator<Item = Option<TaskOutcome>>,
     ) -> Result<(), RuntimeError> {
         let (res, trace) = self.reduce_slots(slots);
         if let (Err(_), Some(trace)) = (&res, trace) {
@@ -1012,7 +1075,7 @@ impl Vm {
     /// an exit or a synthesized deadlock.
     pub(super) fn reduce_slots(
         &mut self,
-        slots: Vec<Option<TaskOutcome>>,
+        slots: impl IntoIterator<Item = Option<TaskOutcome>>,
     ) -> (Result<(), RuntimeError>, Option<Vec<TraceFrame>>) {
         let mut first_exit: Option<i32> = None;
         let mut first_fault: Option<(RuntimeError, Vec<TraceFrame>)> = None;
@@ -1029,9 +1092,9 @@ impl Vm {
         let mut first_cancel_fault: Option<(RuntimeError, Vec<TraceFrame>)> = None;
         // TICKET-284 — how much exit output this reduce took; its take counted each one.
         let mut exits = 0;
-        // Whether a slot ended with the verdict's cut: then this join's fault is the verdict's, and
-        // the run's listing reports its tasks ([`super::deadlock::Listing`]).
-        let mut cut = false;
+        // A `Deadlocked` slot is a fault only while the verdict that ended it is latched: an
+        // earlier `chezzi test` test's verdict already reported the task ([`Vm::take_listing`]).
+        let latched = self.quiesce.verdict();
         for slot in slots {
             // W7-60 — a `None` here means the slot was already drained by `MnSched::take_finished_streams`
             // on a `join_executor` bail-out (its output is flushed, its outcome consumed), which is
@@ -1081,8 +1144,7 @@ impl Vm {
                     // fault output ordering is a separate, pre-existing nondeterminism (see the
                     // single-producer case covered by the test
                     // `parallel_faulting_task_flushes_partial_output_3engine`).
-                    cut |= err.is_verdict(self.quiesce.run_halt());
-                    if first_hard_fault.is_none() && (executor_hard_halt(&err) || err.is_deadlock) {
+                    if first_hard_fault.is_none() && executor_hard_halt(&err) {
                         first_hard_fault = Some((err.clone(), trace.clone()));
                     }
                     self.out.extend_from_slice(&out);
@@ -1091,10 +1153,14 @@ impl Vm {
                         first_fault = Some((err, trace));
                     }
                 }
-                TaskOutcome::Deadlocked { err, out, stderr } => {
-                    cut |= err.is_verdict(self.quiesce.run_halt());
-                    // The M:N deadlock detector recorded EVERY still-parked fiber with this synthetic
-                    // outcome (`flag_deadlock`). Unlike a real `Fault`, ALL parked buffers flush at
+                TaskOutcome::Deadlocked {
+                    err,
+                    out,
+                    stderr,
+                    verdict,
+                } => {
+                    // The deadlock verdict recorded EVERY asleep fiber with this outcome
+                    // ([`super::MnSched::on_deadlock`]). Unlike a real `Fault`, ALL parked buffers flush at
                     // their task-order slot (no `is_none()` gate) — so with two-or-more parked fibers
                     // a higher-index printer's output is preserved, matching what a strictly sequential
                     // run would have printed live before the deadlock returned. Only ONE deadlock error
@@ -1104,7 +1170,7 @@ impl Vm {
                     // arise under a race) still resolves deterministically.
                     self.out.extend_from_slice(&out);
                     self.stderr.extend_from_slice(&stderr);
-                    if deadlock_err.is_none() {
+                    if deadlock_err.is_none() && latched == Some(verdict) {
                         deadlock_err = Some(err);
                     }
                 }
@@ -1127,9 +1193,8 @@ impl Vm {
         }
         // W7-5 review Fix 1: `first_hard_fault` (if any) wins over `first_fault` here — the
         // precedence is `Exit` > hard-halt-marked `Fault` > ordinary `Fault` > `Deadlocked`, lowest
-        // index winning within each kind. A deadlock-marked `Fault` (a party's own verdict, e.g. an
-        // eager job) ranks with the hard halts (TICKET-135); a synthesized `Deadlocked` slot still
-        // ranks last (TICKET-062). This changes ONLY which error propagates; it does not
+        // index winning within each kind; a `Deadlocked` slot ranks last (TICKET-062). This
+        // changes ONLY which error propagates; it does not
         // touch the `Exit`-over-`Fault` rule above or the nursery's abort semantics (every fault
         // still trips the shared cancel flag the same way it always did).
         // W7-47 — `first_exit` only ever comes from a SLOT, so an `os.exit` issued by an `Executor`
@@ -1139,11 +1204,8 @@ impl Vm {
         // TICKET-208 — the run-wide halt, read through its one funnel after a slot's own exit and
         // before any slot fault: a `recover:` around this nursery must not catch a sibling fault
         // and outlive a job fault that ends the run. Every slot's output is already flushed.
-        // The latched deadlock verdict is the one a cut slot reports, and a deadlock fault is
-        // fatal, so no `recover:` catches it either.
         if first_exit.is_none()
             && let Some(e) = self.run_exit_err(Span::RUNTIME)
-            && !(e.is_deadlock && cut)
         {
             return (Err(e), None);
         }
@@ -1176,10 +1238,20 @@ impl Vm {
     /// it keeps it only with `pending_exit` set, because an exit runs no `defer` (DEC-219), so it
     /// gets there at once. `main` holds its own output, a fiber that leaves for another cause may
     /// still run a `defer` (DEC-270: not waited for), and a fiber already counted keeps the count
-    /// it has: each of these ends the taker's counts here.
+    /// it has: each of these ends the taker's counts here. `main` is the run's root fiber (fiber
+    /// 1, [`Vm::run_root`]): no flush reads its slot, and its own run-end flush waits for every
+    /// count, so it keeps none.
+    /// Is this shell running a run's root fiber (`main`, task 0 of scope 0 of a root sched)?
+    fn on_root_fiber(&self) -> bool {
+        self.fiber_scope == Some(0) && self.mn.as_ref().is_some_and(|s| s.lock().root)
+    }
+
     pub(super) fn adopt_exit_output(&mut self, n: usize) {
-        let keep =
-            n > 0 && self.fiber_scope.is_some() && self.pending_exit.is_some() && !self.exit_origin;
+        let keep = n > 0
+            && self.fiber_scope.is_some()
+            && self.pending_exit.is_some()
+            && !self.exit_origin
+            && !self.on_root_fiber();
         if keep {
             self.exit_origin = true;
         }
@@ -1405,8 +1477,19 @@ impl Spare {
         .is_ok()
     }
 
-    /// Does its sched have a fiber that waits for a runner?
+    /// Does its sched have a fiber that waits for a runner? A host's workers also run the run's
+    /// Executor jobs ([`Vm::visit_guest`]), so a runnable job counts for a host's spare.
     pub(super) fn queued(&self) -> bool {
         self.sched.runnable.load(Ordering::Relaxed) > 0
+            || self
+                .shell
+                .quiesce
+                .host()
+                .is_some_and(|h| Arc::ptr_eq(&h, &self.sched))
+                && self
+                    .shell
+                    .quiesce
+                    .runnable_guest(&mut Vec::new(), None)
+                    .is_some()
     }
 }

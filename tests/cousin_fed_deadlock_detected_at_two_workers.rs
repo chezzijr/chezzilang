@@ -85,8 +85,31 @@ fn cousin_fed_recovered_deadlock_is_fatal_not_a_hang_at_two_and_four_workers() {
             use std::io::Read as _;
             let _ = e.read_to_string(&mut stderr);
         }
+        // One global check (plan 2026-11-17): every task waits, so the one header lists every task
+        // in pre-order, a task before its children (Go twin: fatal, all goroutines asleep).
+        let listing = [
+            "deadlock: every task is blocked\n",
+            "task 1: waiting for a nursery join at ",
+            "cousin_fed.chz:5:5\n",
+            "task 2: waiting for a nursery join at ",
+            "cousin_fed.chz:8:17\n",
+            "task 3: recv() on an empty channel at ",
+            "cousin_fed.chz:10:34\n",
+            "task 4: recv() on an empty channel at ",
+            "cousin_fed.chz:20:26\n",
+            "task 5: recv() on an empty channel at ",
+            "cousin_fed.chz:18:30\n",
+        ];
+        let mut rest = stderr.as_str();
+        let in_order = listing.iter().all(|needle| match rest.find(needle) {
+            Some(i) => {
+                rest = &rest[i + needle.len()..];
+                true
+            }
+            None => false,
+        });
         assert!(
-            !status.success() && stderr.contains("deadlock"),
+            status.code() == Some(1) && in_order,
             "CHEZZI_THREADS={threads}: expected a fatal `deadlock`, got {status} — stdout: {stdout} stderr: {stderr}"
         );
         assert!(

@@ -31,8 +31,8 @@ mod width;
 use crate::base::op;
 use core::{
     AtomicCore, AtomicIntCore, Backing, ChannelCore, ExecRegistry, ExecutorCore,
-    GUARD_DEMOTE_BUDGET, GuardCycle, GuardKey, GuardMode, ListenerCore, ReaderCore, RwSharedCore,
-    SharedCore, SocketCore, WriterCore,
+    GUARD_DEMOTE_BUDGET, GuardKey, GuardMode, ListenerCore, ReaderCore, RwSharedCore, SharedCore,
+    SocketCore, WriterCore,
 };
 use heap::{
     Fields, HandleKind, Heap, Identity, MapData, MapEntry, ModuleData, Obj, SetData, SetEntry,
@@ -40,7 +40,7 @@ use heap::{
 use op::{CapEntry, CapSrc, NO_IC, Op, Program, ProtoId, TID_NONE, WaitMeta};
 use quiesce::RunHalt;
 use std::os::fd::AsRawFd;
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use value::{GcRef, Value, ValueView};
 
@@ -75,12 +75,9 @@ use crate::{lexer, parser};
 /// A wall-clock trip is non-deterministic, so this is always `false` off the `chezzi test --timeout`
 /// path — which is the only place that sets a deadline at all.
 ///
-/// `is_deadlock` marks a FATAL deadlock fault (TICKET-135, D1): the `run_until` Err funnel makes
-/// `recover:` transparent to it, and it is re-stamped after every unwind. Two kinds of fault carry
-/// it. A scheduler verdict's fault is cut at a wait ([`deadlock::cut`], so `blocked` is `Some`) or
-/// stamped while the run's verdict is latched ([`quiesce::RunHalt::Deadlock`]). A lock cycle or a
-/// re-entry (`Vm::guard_cycle_err`, TICKET-298) is fatal with no verdict behind it: it reports
-/// itself. [`RuntimeError::is_verdict`] is THE reader of that split; do not re-derive it.
+/// A deadlock is no marker on the error: it is the run's latched [`quiesce::RunHalt::Deadlock`],
+/// and its report is the run's listing ([`Vm::take_listing`]), which a driver attaches
+/// ([`Vm::report`]).
 ///
 /// `is_panic` marks a fault raised by `panic(...)`; `run_until`'s catch never relocates it to the
 /// user's call into std (TICKET-148).
@@ -91,23 +88,10 @@ pub struct RuntimeError {
     pub is_assert: bool,
     pub is_over_memory: bool,
     pub is_timed_out: bool,
-    pub is_deadlock: bool,
     pub is_panic: bool,
-    /// A deadlock verdict's cut ([`deadlock::cut`]): the task's own wait, until the driver attaches
-    /// the run's listing ([`Vm::list_blocked`]). `None` for every other fault.
-    pub blocked: Option<Box<deadlock::Blocked>>,
 }
 
 impl RuntimeError {
-    /// THE owner of "a scheduler verdict decided this fault", against a lock cycle or a re-entry
-    /// that reports itself (see [`RuntimeError::is_deadlock`]): a deadlock-marked fault is a
-    /// verdict's when it carries a verdict's cut (`blocked`) or `halt` says the run's verdict is
-    /// latched. A verdict's fault ends the run through the verdict (`MnSched::finish_with`, the
-    /// nursery join's listing cut); a self-reporting one ends it with its own text (TICKET-298).
-    pub(super) fn is_verdict(&self, halt: RunHalt) -> bool {
-        self.is_deadlock && (self.blocked.is_some() || halt == RunHalt::Deadlock)
-    }
-
     /// Stamp the over-memory marker onto this error (see [`RuntimeError::is_over_memory`]). Used to
     /// force the marker back on after an unwind, where a `defer` that faults mid-unwind would
     /// otherwise replace the marked error with an unmarked one.
@@ -124,18 +108,10 @@ impl RuntimeError {
         self
     }
 
-    /// Stamp the deadlock marker onto this error (see [`RuntimeError::is_deadlock`]). Sibling of
-    /// [`RuntimeError::timed_out`] — set at every scheduler verdict site, and forced back on after an
-    /// unwind so a mid-unwind `defer` fault cannot strip it and let `recover:` catch the verdict.
-    pub(crate) fn deadlock(mut self) -> Self {
-        self.is_deadlock = true;
-        self
-    }
-
-    /// This verdict, reported as the blocking op of one waiter: its own text and span, every
-    /// marker kept. The one way a sched's deadlock fault is re-sited.
-    pub(crate) fn at_site(&self, msg: &str, span: Span) -> Self {
-        deadlock::cut(self, msg, span)
+    /// This verdict's fault, sited at one waiter's wait: the header at `span`, every marker kept.
+    /// The one way a sched's deadlock fault is re-sited.
+    pub(crate) fn at_site(&self, span: Span) -> Self {
+        deadlock::cut(self, span)
     }
 
     /// Mark this fault as raised by `panic(...)` (see [`RuntimeError::is_panic`]).
@@ -212,25 +188,27 @@ pub struct RunError {
     /// `Program` existed (a resolve/compile-time error) — `render_span` falls back to the historical
     /// `line N, col M` form in either case, never a wrong or partial path.
     pub files: Vec<(u32, std::path::PathBuf)>,
-    /// A deadlock verdict's blocked tasks ([`deadlock::listing`]); empty for every other fault.
-    /// [`format_trace`] prints them in place of `trace`.
+    /// A deadlock verdict's blocked tasks (the run's listing, [`Vm::report`]); empty for every
+    /// other fault. [`format_trace`] prints them in place of `trace`.
     pub blocked: Vec<deadlock::BlockedTask>,
 }
 
 impl RunError {
+    /// `e` with its trace and files; a non-empty `blocked` makes it the deadlock report: the
+    /// header, sited at its first task.
     fn from_error(
         e: RuntimeError,
         trace: Vec<TraceFrame>,
         files: Vec<(u32, std::path::PathBuf)>,
+        blocked: Vec<deadlock::BlockedTask>,
     ) -> Self {
-        let blocked = deadlock::listing(&e, &trace);
         RunError {
             message: if blocked.is_empty() {
                 e.message
             } else {
-                deadlock::header(blocked.len())
+                deadlock::header()
             },
-            span: e.span,
+            span: blocked.first().map_or(e.span, |t| t.span),
             trace,
             files,
             blocked,
@@ -604,6 +582,17 @@ static DEMOTES: AtomicUsize = AtomicUsize::new(0);
 /// How many workers this process has demoted so far (see [`DEMOTES`]).
 pub fn demote_count() -> usize {
     DEMOTES.load(Ordering::Relaxed)
+}
+
+/// Every deadlock verdict of this process: its awake count dropped to 0 with tasks alive
+/// ([`quiesce::Awake`], [`MnSched::on_deadlock`]). `CHEZZI_SCHED_STATS=1` prints it as
+/// `deadlocks=<n>`.
+static DEADLOCKS: AtomicUsize = AtomicUsize::new(0);
+
+/// How many times the awake count of a run of this process reached 0 with tasks alive (see
+/// [`DEADLOCKS`]).
+pub fn deadlock_count() -> usize {
+    DEADLOCKS.load(Ordering::Relaxed)
 }
 
 /// One activation record.
@@ -1163,6 +1152,10 @@ pub struct Vm {
     /// path raises for the same op, and the op's span. Set beside `suspend` / `send_suspend` /
     /// `wait_suspend`, moved to [`Fiber::park_site`] by `run_one_fiber`.
     park_site: Option<(&'static str, Span)>,
+    /// The timer the running fiber is about to park on ([`ChannelCore::timer_wait`]): set beside
+    /// `suspend` / `wait_suspend` by a timer park, moved to [`Fiber::timer_wait`] by
+    /// `run_one_fiber`.
+    timer_wait: Option<core::TimerWait>,
     /// The wait this thread is in right now, as the deadlock listing names it (its phrase and
     /// span): set by [`Vm::wait_begin`] / [`Vm::wait_demote`] from the wait's [`block::Blocked`],
     /// cleared by [`Vm::wait_end`]. A party the run's latched verdict ends reports this wait, not
@@ -1192,11 +1185,6 @@ pub struct Vm {
     /// field just holds it while the fiber is swapped in. The resumed `net.connect` re-run takes it to
     /// finish the connect. `None` whenever no connect is mid-flight.
     pending_connect: Option<ConnectInProgress>,
-    /// M3.3 — the `RwShared` boxes (their `BoxLock` addresses) this task holds the read guard on,
-    /// innermost last. A reader is anonymous in the lock word, so a failed acquire reads this list
-    /// to find a same-task re-entry (`Vm::guard_reentry`). Live mirror of [`FiberCtx::held_reads`]:
-    /// a box closure is a frame, so its task can park holding the read.
-    held_reads: Vec<usize>,
     /// The guards this task's box-closure frames hold (`RetAction::Box`), innermost last. Live
     /// mirror of [`FiberCtx::held_guards`]: a parked holder keeps them, and a dropped task releases
     /// them. The frame's exit releases its guard ([`Vm::drop_ret`]).
@@ -1341,7 +1329,7 @@ pub struct Vm {
     back_edge_tick: u16,
     /// Depth of deferred calls running on the Rust stack ([`Vm::run_one_deferred`]: the
     /// synchronous hard-halt drains, `--max-heap` / `--timeout`); the drains on the dispatch loop
-    /// are [`Vm::drains`]. `BlockCtx::judged` reads it: a wait in such a drain is still judged.
+    /// are [`Vm::drains`]. [`Vm::block_ctx`] reads it.
     /// A cancel is NEVER delivered while either is non-empty ([`Vm::in_defer`]): a `defer` IS the
     /// cleanup a cancelled task is being unwound to run, so its body (loops, blocking ops, HOF
     /// callbacks — every cancellation checkpoint) must run to completion. Defers also drain on the
@@ -1414,6 +1402,9 @@ pub struct Vm {
     /// [`Vm::run_one_fiber`] and NOT part of [`FiberCtx`] (a demoted thread runs exactly one fiber to
     /// settle, then exits, so it never carries the flag into another fiber).
     demoted: bool,
+    /// Set on a root worker's visit to an Executor's sched ([`Vm::visit_guest`]): the host root
+    /// sched this shell gives its thread back to once the host has a runnable fiber.
+    guest_of: Option<Arc<MnSched>>,
     /// The replacement worker this worker armed for the watcher of long C calls (`sysmon`): the
     /// watcher starts it in place of [`Vm::demote_once`] when it retakes a call's permit.
     extern_spare: Option<sysmon::Armed>,
@@ -1476,8 +1467,6 @@ mod block;
 mod compare;
 mod equality;
 mod hash;
-#[cfg(test)]
-use block::Waiter;
 use block::{BlockMode, Blocked, WaitReg, WaitSpec};
 mod call;
 mod defer_drain;

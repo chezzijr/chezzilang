@@ -52,13 +52,10 @@ impl LevelThen {
 }
 
 impl Vm {
-    /// A nursery's sched-wide deadlock fault: a blocked task of `parallel:` at `span`, for a task
-    /// whose own wait no site named. Every cut that knows its wait re-sites it
-    /// ([`RuntimeError::at_site`]).
-    fn nursery_deadlock_err(&self, span: Span) -> RuntimeError {
-        self.err(String::new(), span)
-            .deadlock()
-            .at_site(super::deadlock::Wait::Nursery.phrase(), span)
+    /// A nursery's sched-wide deadlock fault at `span`, for a task whose own wait no site named.
+    /// Every cut that knows its wait re-sites it ([`RuntimeError::at_site`]).
+    pub(super) fn nursery_deadlock_err(&self, span: Span) -> RuntimeError {
+        self.err(String::new(), span).at_site(span)
     }
 
     /// Launch a fiber's initial task in the (already swapped-in) child context: push the callee's
@@ -764,7 +761,7 @@ impl Vm {
         }
         {
             // gaps.md W7-58 — the join's counts, for exactly that span (dropped before the reduce).
-            let _counts = self.nursery_counts(&sched, 0);
+            let _counts = self.nursery_counts();
             let shell = self.joiner_shell(&sched, &cancel, 0, JoinCover::None);
             // M1.5 — the join waits detached; an inline loop attaches its own token.
             self.wait_door(&[], |_| {
@@ -782,11 +779,11 @@ impl Vm {
         // run_capture_counting_picks).
         #[cfg(test)]
         super::RUN_PICKS.with(|p| p.set(p.get() + sched.picks.load(Ordering::Relaxed)));
-        let slots = sched.take_scope_slots(0);
+        let r = self.reduce_task_slots(sched.drain_scopes(&[0]));
         if self.mn_enlisted == 0 {
             self.mn_enlist_sched = None;
         }
-        self.reduce_task_slots(slots)
+        r
     }
 
     /// Cross-nursery flat scheduler — a NESTED `parallel:` nursery reusing the ONE global sched. EARLY-
@@ -827,10 +824,8 @@ impl Vm {
         }
         let wid = self.wid;
         {
-            // A party on the `(None, Some(held))` late-spawn arm; a blocked owner on its own sched
-            // on the `(Some(sched), _)` arm, so `is_deadlocked_ignoring_jobs` can tell it apart from
-            // a running worker.
-            let _counts = self.nursery_counts(sched, scope_id);
+            // The join's wait hands the body's runner slot over (`Vm::counts`).
+            let _counts = self.nursery_counts();
             let shell = self.joiner_shell(sched, &cancel, wid, JoinCover::None);
             // M1.5 — the join waits detached; an inline loop attaches its own token.
             self.wait_door(&[], |_| {
@@ -840,8 +835,7 @@ impl Vm {
                 sched.wait_for_scope(scope_id);
             });
         }
-        let slots = sched.take_scope_slots(scope_id);
-        self.reduce_task_slots(slots)
+        self.reduce_task_slots(sched.drain_scopes(&[scope_id]))
     }
 
     /// Cross-nursery flat scheduler — EARLY-ENLIST every OUTER still-pending nursery (those above the
@@ -877,14 +871,7 @@ impl Vm {
             let _ = std::mem::take(&mut self.nurseries[i]);
             let cancel = Arc::new(AtomicBool::new(false));
             let scope_id = sched.register_scope(total, Arc::clone(&cancel), self.scope_ancestors());
-            // Mark the scope as awaiting the builder's own join: its parked fibers have the live builder
-            // body as a feeder, so the deadlock predicate must not fault them until the builder reaches
-            // this scope's `JoinNursery` (which clears the flag). (Cross-nursery flat scheduler — #1/#2.)
-            let base = {
-                let mut c = sched.lock();
-                c.scopes[scope_id].awaiting_builder = true;
-                c.scopes[scope_id].base_index
-            };
+            let base = sched.lock().scopes[scope_id].base_index;
             let fibers: Vec<Fiber> = prepared
                 .into_iter()
                 .enumerate()
@@ -907,16 +894,12 @@ impl Vm {
             .mn_enlist_sched
             .clone()
             .expect("join_enlisted_scope without a held sched");
-        // The builder has reached THIS scope's join — it is no longer feeding it from body code, it is now
-        // blocked draining it. Clear `awaiting_builder` so a genuine post-body deadlock (this scope parked
-        // with no live sender) faults instead of being vetoed. (Cross-nursery flat scheduler — #1/#2.)
-        sched.lock().builder_joined(scope_id);
         let cancel = Arc::clone(&sched.lock().scopes[scope_id].cancel);
         let wid = self.wid;
         // A shell runs no code of its own: every fiber it schedules in carries its own module view
         // (`FiberCtx`).
         {
-            let _counts = self.nursery_counts(&sched, scope_id);
+            let _counts = self.nursery_counts();
             let shell = self.joiner_shell(&sched, &cancel, wid, JoinCover::None);
             // M1.5 — the join waits detached; an inline loop attaches its own token.
             self.wait_door(&[], |_| {
@@ -926,12 +909,12 @@ impl Vm {
                 sched.wait_for_scope(scope_id);
             });
         }
-        let slots = sched.take_scope_slots(scope_id);
+        let r = self.reduce_task_slots(sched.drain_scopes(&[scope_id]));
         self.mn_enlisted -= 1;
         if self.mn_enlisted == 0 {
             self.mn_enlist_sched = None;
         }
-        self.reduce_task_slots(slots)
+        r
     }
 
     /// Cross-nursery flat scheduler — reclaim an EARLY-ENLISTED scope whose nursery ESCAPED past its
@@ -944,28 +927,14 @@ impl Vm {
     /// use this only when the escape carries none (see [`Vm::drain_escaped_nursery`]).
     pub(super) fn abort_enlisted_scope(&mut self, scope_id: usize) -> Option<RuntimeError> {
         let sched = self.mn_enlist_sched.clone()?;
-        // N4 — ARM the cancel-teardown veto BEFORE clearing `awaiting_builder` (which is the veto that
-        // has been holding the deadlock predicate off this scope): a GAPLESS handoff. Clearing first —
-        // as this did — leaves a window in which the scope has NEITHER veto, and an idle worker's
-        // `take_runnable` landing in it sees the quiesce (`running == 0` — the inline builder is not
-        // counted — `runnable == 0`, `parked_n > 0`) and declares a spurious DEADLOCK, whose
-        // `flag_deadlock` DROPS this scope's parked fibers without `unwind_deferred` (their `defer`s
-        // never run) and reaps every OTHER scope's parked fibers too (it sets global `terminate`).
-        // `trip_scope_cancel` stores under the core lock, so the flag is published to any worker that
-        // takes that lock to evaluate the predicate. THEN clear `awaiting_builder` so the cancel quiesce
-        // is observed promptly rather than vetoed. (Cross-nursery flat scheduler — #1/#2.)
         sched.trip_scope_cancel(scope_id);
-        let cancel = {
-            let mut c = sched.lock();
-            c.builder_joined(scope_id);
-            Arc::clone(&c.scopes[scope_id].cancel)
-        };
+        let cancel = Arc::clone(&sched.lock().scopes[scope_id].cancel);
         sched.drain_family(scope_id);
         let wid = self.wid;
         // A shell needs no module view of its own (see `join_enlisted_scope`).
         {
             // The cancel-teardown drain blocks this thread just as the normal join does.
-            let _counts = self.nursery_counts(&sched, scope_id);
+            let _counts = self.nursery_counts();
             let shell = self.joiner_shell(&sched, &cancel, wid, JoinCover::None);
             // M1.5 — the join waits detached; an inline loop attaches its own token.
             self.wait_door(&[], |_| {
@@ -975,12 +944,12 @@ impl Vm {
                 sched.wait_for_scope(scope_id);
             });
         }
-        let slots = sched.take_scope_slots(scope_id);
+        let r = self.escape_child_fault(sched.drain_scopes(&[scope_id]));
         self.mn_enlisted -= 1;
         if self.mn_enlisted == 0 {
             self.mn_enlist_sched = None;
         }
-        self.escape_child_fault(slots)
+        r
     }
 
     /// TICKET-147 — reduce an aborted (escaped) nursery's slots into the fault its children ended
@@ -988,7 +957,10 @@ impl Vm {
     /// sites honor it through `pending_exit`.
     /// TICKET-195 — it reduces through [`Vm::reduce_slots`], never [`Vm::reduce_task_slots`]: this
     /// runs inside the party's OWN fault's unwind, so the child's fault must not become a cut.
-    fn escape_child_fault(&mut self, slots: Vec<Option<TaskOutcome>>) -> Option<RuntimeError> {
+    fn escape_child_fault(
+        &mut self,
+        slots: impl IntoIterator<Item = Option<TaskOutcome>>,
+    ) -> Option<RuntimeError> {
         self.reduce_slots(slots)
             .0
             .err()
@@ -1098,18 +1070,12 @@ impl Vm {
         // nursery, a sibling, or a descendant — not just an ancestor, so it shares the run's registry
         // and `wake_run_wide` walks it directly rather than through a hierarchical chain.
         inner.sched_registry = Arc::clone(&self.sched_registry);
-        // TICKET-112 — this eager sched is NESTED: its body runs on the fiber of `self`'s own sched
-        // (`self.mn.is_some()`), not on a dedicated drainer thread. See `MnSched::body_is_fiber`.
-        inner.body_is_fiber = self.mn.is_some();
         // gaps.md W7-56 — see `run_mn_nursery_outermost`.
         inner.exec_registry = Arc::clone(&self.exec_registry);
         // gaps.md W7-58 — so an idle worker of this sched can JUDGE the process-wide verdict on
         // behalf of a nursery owner, which never reaches `block_halt_check`.
         inner.join_run(&self.quiesce);
         inner.detached = detached.map(Arc::downgrade);
-        if detached.is_some() {
-            inner.body_is_fiber = false; // no body at all: its submitters are other parties
-        }
         let sched = Arc::new(inner);
         self.register_sched(&sched);
         // Structured concurrency — an eager nursery is a nested scope: its handlers must observe the
@@ -1122,11 +1088,10 @@ impl Vm {
             {
                 let mut c = sched.lock();
                 c.scopes[0].body_open = true;
-                c.scopes[0].body_blocked = true;
                 c.leaf_site = true;
                 c.exec_limit = core.limit;
             }
-            self.quiesce.register_eager_body(&sched);
+            self.quiesce.add_guest(&sched);
             return Some(EagerScope {
                 sched,
                 cancel,
@@ -1150,17 +1115,6 @@ impl Vm {
         if self.mn.is_none() {
             self.slice_in_place = true;
         }
-        // §2c1 — an eager nursery publishes itself so the process-wide verdict counts its undone
-        // fibers as uncounted senders. Without it, top-level `main` blocked on `ch.recv()` while a
-        // live sibling is about to `send` is `parties.len() >= live` with nothing satisfiable — a
-        // false deadlock on a live program.
-        //
-        // TICKET-112 — NESTED eager nurseries are registered too, not just OUTERMOST ones: a NESTED
-        // sched's fibers are also live senders the process-wide verdict must count (`recursive`
-        // false-faulted past the granted-slot path at the default worker count without this). Sound
-        // only together with `MnSched::body_is_fiber` and `live_eager_bodies`' `can_still_move`
-        // read with `require_parked` false — see `## Decisions` bullet 3.
-        self.quiesce.register_eager_body(&sched);
         Some(EagerScope {
             sched,
             cancel,
@@ -1194,8 +1148,7 @@ impl Vm {
             let mut c = sched.lock();
             c.scopes[scope].deadlock_err = Some(self.nursery_deadlock_err(nursery_span));
             // TICKET-125 — this scope's fibers can only be fed once the OWNING fiber's own join
-            // returns; a family faulting that fiber (`flag_deadlock_leaves`) must treat this scope
-            // as interior, not a leaf, or the owner is dropped without unwinding it (W13-4).
+            // returns.
             c.scopes[scope].parent_scope = self.fiber_scope;
         }
         Some(EagerScope {
@@ -1220,9 +1173,8 @@ impl Vm {
     ///   (TICKET-211: `MnSched::claim_runners` in `inject_or_extend`, `Vm::start_runners`).
     ///   `close_body` gives the body's runner bit back, and the inline joiner runs fibers only if
     ///   `MnSched::claim_joiner` finds a slot left under the worker count.
-    /// - **The W7-58 party.** A top-level joiner is a counted party: without its count, `main`
-    ///   sitting in `mn_worker_loop` is invisible to the process-wide verdict (`parties.len() <
-    ///   live` vetoes forever). [`Vm::nursery_counts`] counts it only with no sched under it.
+    /// - **The W7-58 party.** `main` at this join is asleep in the run's awake count, so a run
+    ///   whose every task is asleep still fires the one verdict ([`MnSched::on_deadlock`]).
     pub(super) fn join_eager_nursery(&mut self, scope: EagerScope) -> Result<(), RuntimeError> {
         if scope.fiber_owned {
             return self.join_fiber_owned_nursery(scope);
@@ -1247,7 +1199,7 @@ impl Vm {
             {
                 // §2c1 — the ENCLOSING body is parked here for the duration, so it cannot inject:
                 // the counts clear its `body_open` veto, or a genuine nested deadlock hangs.
-                let _counts = self.nursery_counts(&sched, sid);
+                let _counts = self.nursery_counts();
                 // T1-fix (W8-8, nested arm) — this scope has NO drainer of its own; the OUTER scope's
                 // `chezzi-eager` drainer already drains the shared global queue (scope-blind) and
                 // cannot self-stop while `main` sits here (`scopes[0].body_open` stays true), so at a
@@ -1271,17 +1223,14 @@ impl Vm {
                     }
                 });
             }
-            let slots: Vec<_> = sids
-                .iter()
-                .flat_map(|&s| sched.take_scope_slots(s))
-                .collect();
+            let r = self.reduce_task_slots(sched.drain_scopes(&sids));
             for &s in sids.iter().rev() {
                 sched.retire_scope(s);
             }
-            return self.reduce_task_slots(slots);
+            return r;
         }
         {
-            let _counts = self.nursery_counts(&sched, sid);
+            let _counts = self.nursery_counts();
             // TICKET-118 (W13-7) — only the top-level `Vm` (`mn.is_none()`) may hand its pool slot
             // over while it waits here (DEC-052).
             let _joiner = self.mn.is_none().then(|| sched.pool_joiner_guard());
@@ -1330,6 +1279,14 @@ impl Vm {
             return false;
         };
         let exec = sched.detached.is_some();
+        // An Executor's jobs run on the host's workers (Go: one pool of Ms): no thread starts and
+        // the claim is given back. The enqueue that follows wakes the host ([`MnSched::wake_host`]).
+        if exec && self.quiesce.host().is_some() {
+            for wid in wids {
+                sched.unclaim_runner(wid);
+            }
+            return true;
+        }
         if let Some(core) = sched.detached.as_ref().and_then(|w| w.upgrade()) {
             core.runner_starts.fetch_add(wids.len(), Ordering::Relaxed);
         }
@@ -1406,7 +1363,7 @@ impl Vm {
         // `join_eager_nursery`'s nested arm); the owner's drainer and sibling scopes are untouched.
         if drainer.is_none() {
             {
-                let _counts = self.nursery_counts(&sched, sid); // see `join_eager_nursery`'s nested arm
+                let _counts = self.nursery_counts(); // see `join_eager_nursery`'s nested arm
                 // T1-fix (W8-8, nested arm) — same gate as `join_eager_nursery`'s nested arm above,
                 // over the same family (TICKET-103).
                 let mut shell = self.joiner_shell(&sched, &cancel, 0, JoinCover::RunnersAbort);
@@ -1420,20 +1377,17 @@ impl Vm {
                     }
                 });
             }
-            let slots: Vec<_> = sids
-                .iter()
-                .flat_map(|&s| sched.take_scope_slots(s))
-                .collect();
+            let r = self.escape_child_fault(sched.drain_scopes(&sids));
             for &s in sids.iter().rev() {
                 sched.retire_scope(s);
             }
-            return self.escape_child_fault(slots);
+            return r;
         }
         {
             // §2c1 — the same counts as `join_eager_nursery`: a top-level escape settles its handlers
             // on `main`, which must be a counted party for that span or the process-wide verdict
             // vetoes forever.
-            let _counts = self.nursery_counts(&sched, sid);
+            let _counts = self.nursery_counts();
             let shell = self.joiner_shell(&sched, &cancel, 0, JoinCover::RunnersAbort);
             // M1.5 — the join waits detached; an inline loop attaches its own token.
             self.wait_door(&[], |_| {
@@ -1475,7 +1429,7 @@ impl Vm {
         let sids = scope.sids();
         if !scope.sched.lock().family_done(scope.scope) {
             let wid = self.wid;
-            let _counts = self.nursery_counts(&scope.sched, scope.scope);
+            let _counts = self.nursery_counts();
             let mut shell = self.joiner_shell(&scope.sched, &scope.cancel, wid, JoinCover::None);
             // M1.5 — the join waits detached; an inline loop attaches its own token.
             self.wait_door(&[], |_| {
@@ -1487,14 +1441,11 @@ impl Vm {
                 }
             });
         }
-        let slots: Vec<_> = sids
-            .iter()
-            .flat_map(|&s| scope.sched.take_scope_slots(s))
-            .collect();
+        let r = self.reduce_task_slots(scope.sched.drain_scopes(&sids));
         for &s in sids.iter().rev() {
             scope.sched.retire_scope(s);
         }
-        self.reduce_task_slots(slots)
+        r
     }
 
     /// TICKET-103/TICKET-132 — `abort_eager_nursery` for a fiber-owned nursery: trip the family's
@@ -1507,7 +1458,7 @@ impl Vm {
         cancel_fiber_owned_family(&scope);
         if !scope.sched.lock().family_done(scope.scope) {
             let wid = self.wid;
-            let _counts = self.nursery_counts(&scope.sched, scope.scope);
+            let _counts = self.nursery_counts();
             let mut shell = self.joiner_shell(&scope.sched, &scope.cancel, wid, JoinCover::None);
             // M1.5 — the join waits detached; an inline loop attaches its own token.
             self.wait_door(&[], |_| {
@@ -1519,14 +1470,11 @@ impl Vm {
                 }
             });
         }
-        let slots: Vec<_> = sids
-            .iter()
-            .flat_map(|&s| scope.sched.take_scope_slots(s))
-            .collect();
+        let r = self.escape_child_fault(scope.sched.drain_scopes(&sids));
         for &s in sids.iter().rev() {
             scope.sched.retire_scope(s);
         }
-        self.escape_child_fault(slots)
+        r
     }
 
     /// D2b — build a thin host **shell** `Vm` for the M:N engine: a worker `Vm` with the nursery

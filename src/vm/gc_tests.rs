@@ -1201,7 +1201,8 @@ main()";
             let mut vm = Vm::new(Arc::new(test_program(src).expect("compiles")));
             vm.gc_stress = false;
             let before = test_counts().1;
-            let result = vm.run();
+            // In place: the counts are this thread's, and `main` as fiber 1 runs on a worker.
+            let result = vm.run_in_place();
             let freed = test_counts().1 - before;
             vm.finish_run(result).expect("runs");
             (captured(vm.out), vm.gc_coord.stop_stats().0, freed)

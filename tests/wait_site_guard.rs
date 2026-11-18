@@ -62,6 +62,13 @@ const WAITS: &[&str] = &[
 /// or `""`, why a wait there needs no door)
 const ALLOWED: &[(&str, &str, &str, &str)] = &[
     (
+        "deadlock.rs",
+        "latch_window_hook",
+        "",
+        "a debug-only test hook (CHEZZI_TEST_DEADLOCK_LATCH_WINDOW_MS): a bounded sleep that a stop \
+         of the world outlasts; never armed in a release build or outside its one test",
+    ),
+    (
         "gc_coord.rs",
         "*",
         "",
@@ -692,6 +699,12 @@ const STEP_ALLOWED: &[(&str, &str, &str)] = &[
         "a panic out of a callback re-takes the permit before an FFI trampoline resumes Chezzi code",
     ),
     (
+        "exec.rs",
+        "run_root",
+        "the thread that starts a run becomes worker 0 (main is fiber 1): it gives its permit back \
+         before its runner loop, which takes one per fiber; it is not a wait",
+    ),
+    (
         "pool.rs",
         "worker_loop",
         "a pool thread returns its permit at the end of a job",
@@ -750,38 +763,27 @@ fn every_wait_step_comes_from_the_table() {
     );
 }
 
-/// The spellings that register a wait's counts for the deadlock verdicts by hand, each with the
-/// files that own it: `block.rs` takes the counts from `block::wait_steps`, `quiesce.rs` holds the
-/// party registry, and `mnsched.rs` holds the waiter registry and the body marks it publishes.
-/// A parked fiber counts through its park, so the park owners hold the rest: [`PARK_OWNERS`].
+/// The spellings that register a wait's counts by hand, each with the files that own it: `block.rs`
+/// takes the counts from `block::wait_steps`, and `mnsched.rs` holds the waiter registry. A parked
+/// fiber counts through its park, so the park owners hold the rest: [`PARK_OWNERS`]. The run's
+/// deadlock count (`quiesce::Awake`) has its own writers rule in `tests/owner_guards.rs`.
 const COUNTS: &[(&str, &[&str])] = &[
-    ("block_shared(", &["block.rs", "quiesce.rs"]),
     ("register_waiter(", &["block.rs", "mnsched.rs"]),
-    ("set_body_wait(", &["block.rs", "mnsched.rs"]),
-    ("owner_blocked(", &["block.rs", "mnsched.rs"]),
-    ("owners_blocked +=", &["block.rs", "mnsched_take.rs"]),
-    ("joins_blocked +=", &["block.rs", "mnsched_take.rs"]),
     ("inflight.fetch_add(", PARK_OWNERS),
-    ("block_party_guard(", &[]),
-    ("nursery_party_guard(", &[]),
-    ("blocked_bodies_guard(", &[]),
-    ("blocked_owner_guard(", &["block.rs"]),
 ];
 
 /// The files whose park paths count a parked fiber themselves: `block.rs` (a demoted wait's
-/// `inflight`), `mnsched_take.rs` (`MnSched::park_join`'s owner and join counts),
-/// `mnsched_verdict.rs` (the offload and netpoller parks' `inflight`), and `channel.rs` and
-/// `blocking.rs` (a timer park's pending `inflight`).
+/// `inflight`), `mnsched_verdict.rs` (the offload and netpoller parks' `inflight`), and
+/// `channel.rs` and `blocking.rs` (a timer park's pending `inflight`).
 const PARK_OWNERS: &[&str] = &[
     "block.rs",
-    "mnsched_take.rs",
     "mnsched_verdict.rs",
     "channel.rs",
     "blocking.rs",
 ];
 
-/// A wait takes its verdict counts from its `WaitSpec` through `Vm::wait_begin` or
-/// `Vm::nursery_counts`: no other site registers a party, a waiter, a body mark or a blocked owner.
+/// A wait takes its counts from its `WaitSpec` through `Vm::wait_begin` or `Vm::nursery_counts`:
+/// no other site registers a waiter or an in-flight count.
 #[test]
 fn every_wait_count_comes_from_the_table() {
     let src = Path::new("src/vm");
@@ -803,7 +805,7 @@ fn every_wait_count_comes_from_the_table() {
     }
     assert!(
         bad.is_empty(),
-        "a site registers a deadlock-verdict count by hand. Name the wait's `WaitSpec` and use \
+        "a site registers a wait count by hand. Name the wait's `WaitSpec` and use \
          `Vm::wait_begin` (or `Vm::nursery_counts` for a nursery join):\n{}",
         bad.join("\n")
     );

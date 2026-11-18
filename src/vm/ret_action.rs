@@ -176,7 +176,7 @@ impl Vm {
     /// give back what its `ret` holds. Its slots below the frame go with the caller's stack.
     pub(super) fn drop_ret(&mut self, ret: RetAction, base: usize) {
         match ret {
-            RetAction::Box(call) => self.box_release(call),
+            RetAction::Box(_) => self.box_release(),
             RetAction::Gen(_) => self.gen_drop(base),
             RetAction::Push
             | RetAction::Discard

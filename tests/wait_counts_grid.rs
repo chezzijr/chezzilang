@@ -1,21 +1,18 @@
-//! The counts a wait registers for the two deadlock verdicts come from one table,
-//! `block::wait_steps` (party, body marks, waiter or `inflight`, blocked owner). This grid runs
-//! each wait kind in each context a program reaches, as a genuine deadlock and as a live program,
-//! at `CHEZZI_THREADS` 1, 2 and the default. One test per (op, context). The `Builder` context
-//! is not a cell: a program reaches it only when the OS refuses the eager nursery's drainer thread.
-//! `vm::tests::extern_mnsched::w758_only_a_thread_with_no_scheduler_under_it_counts_a_nursery_party`
-//! runs its `Nursery` party cell on a real `Vm`.
+//! The counts a wait registers come from one table, `block::wait_steps`; the one deadlock verdict
+//! reads the run's awake count. This grid runs each wait kind in each context a program reaches,
+//! as a genuine deadlock and as a live program, at `CHEZZI_THREADS` 1, 2 and the default. One test
+//! per (op, context). The `Builder` context is not a cell: a program reaches it only when the OS
+//! refuses the eager nursery's drainer thread.
 //!
 //! Expected results are Go 1.27 run output of the same shapes (`GOMAXPROCS=1` and 4): every dead
 //! cell prints `fatal error: all goroutines are asleep - deadlock!`, every live cell prints its
-//! value, and a `select` with a `time.After` arm takes the timer. Two kinds of cell differ from Go
-//! by decision:
-//! - `main_cb` (main inside a native callback) is an unjudged party (DEC-136, DEC-181): a dead
-//!   channel, guard or join wait there hangs, never settles (`docs/contributing/gaps.md` W23-1). A
-//!   nursery join there is a party (the `1 +` of `live`), so it reports the deadlock.
-//! - `job` reports the deadlock of a job's own wait as a fault of the run, as Go does.
-//! - `main_defer` (main's `defer:`, a judged party) reports the deadlock, as Go's deferred
-//!   receive does.
+//! value, and a `select` with a `time.After` arm takes the timer. Under the one global check (plan
+//! 2026-11-17) every dead cell has every task asleep and ends with `deadlock: every task is
+//! blocked`, exit 1, as Go's does:
+//! - `main_cb` (main inside a `map` callback): the callback runs as a frame and parks (W23-1's
+//!   narrowing), so a dead wait there is all asleep too (Go twin: fatal, all asleep).
+//! - `job` reports the deadlock of a job's own wait, main listed at its `t.get()`, as Go does.
+//! - `main_defer` (main's `defer:`) reports the deadlock, as Go's deferred receive does.
 //!
 //! Each program's `time.sleep_ms` delays a feeder; a cell's outcome does not depend on the order of
 //! the feed and the wait.
@@ -136,13 +133,11 @@ fn program(op: &str, ctx: &str, live: bool) -> String {
 enum Want {
     /// exit 0, one of these `r` lines, then `end`
     Settles(&'static [&'static str]),
-    /// a nonzero exit whose stderr names a deadlock
+    /// exit 1 with the one deadlock header
     Deadlock,
-    /// W23-1: a hang (killed at the deadline) or a deadlock fault, never a settle
-    Declines,
 }
 
-fn want(op: &str, ctx: &str, live: bool) -> Want {
+fn want(op: &str, live: bool) -> Want {
     if op == "wait_timer" {
         return Want::Settles(if live { &["r 1", "r 9"] } else { &["r 9"] });
     }
@@ -152,9 +147,6 @@ fn want(op: &str, ctx: &str, live: bool) -> Want {
             "guard" => &["r 2"],
             _ => &["r 0"],
         });
-    }
-    if ctx == "main_cb" && op != "nursery" {
-        return Want::Declines;
     }
     Want::Deadlock
 }
@@ -179,15 +171,16 @@ fn cell(op: &str, ctx: &str) {
                 ),
             };
             let deadlock = got.as_ref().is_some_and(|o| {
-                !o.status.success() && String::from_utf8_lossy(&o.stderr).contains("deadlock")
+                o.status.code() == Some(1)
+                    && String::from_utf8_lossy(&o.stderr)
+                        .contains("deadlock: every task is blocked")
             });
-            let ok = match want(op, ctx, live) {
+            let ok = match want(op, live) {
                 Want::Settles(lines) => got.as_ref().is_some_and(|o| {
                     let out = String::from_utf8_lossy(&o.stdout);
                     o.status.success() && lines.iter().any(|l| out == format!("{l}\nend\n"))
                 }),
                 Want::Deadlock => deadlock,
-                Want::Declines => got.is_none() || deadlock,
             };
             if !ok {
                 misses.push(format!(

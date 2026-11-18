@@ -324,7 +324,12 @@ fn sleep_synchronised_tests() -> BTreeSet<String> {
 /// rejected it (the walk returns 68). Obtain it by compiling once with an empty array and copying
 /// the "sleeps but is not listed" list `no_new_rust_test_sleeps_to_order_two_events` reports,
 /// verbatim, the same way `stack_trace_reports_call_chain`'s golden was obtained.
-const SLEEP_SYNCHRONISED_TESTS: [&str; 120] = [
+const SLEEP_SYNCHRONISED_TESTS: [&str; 118] = [
+    // `tests/timer_wait_count.rs`. Its `time.sleep_ms(50)` is inside the fixture .chz program's
+    // SOURCE STRING: the sender waits so the `wait:` parks with its timer arm armed before the recv
+    // arm wins (the shape under test is a timer left armed with no waiter). The Rust test orders
+    // nothing with it; the deadlock assertion holds for either order.
+    "a_timer_left_by_one_test_does_not_hide_the_next_tests_deadlock",
     "cousin_fed_recovered_deadlock_is_fatal_not_a_hang_at_two_and_four_workers",
     // TICKET-208, `tests/executor_task_grid.rs`. Every `time.sleep_ms` of these five is inside a
     // fixture .chz program's SOURCE STRING: a job's long work (3 s, 6 s) that a cut must end, or a
@@ -440,13 +445,6 @@ const SLEEP_SYNCHRONISED_TESTS: [&str; 120] = [
     "net_read_timeout_bounds_whole_call_across_codepoint_parks",
     "net_write_timeout_when_buffer_full",
     "no_event_does_not_inject",
-    // TICKET-134. Its 300ms `time.sleep_ms` is inside the fixture .chz program's SOURCE STRING. It
-    // only lets the owner block before the child faults; the ordering that matters is enforced by
-    // the `owner_fault_window_hook` latch, and a lost race fails loudly on `window not exercised`.
-    "owner_fault_recorded_after_the_fault_rung_still_outranks_the_deadlock_verdict",
-    // TICKET-134. Same reason as the recv entry above: the sleep only orders the owner's block
-    // before the child's fault, and `owner_fault_window_hook` is the real latch.
-    "owner_fault_recorded_after_the_fault_rung_still_outranks_the_full_send_deadlock_verdict",
     "a_blocking_defer_body_completes_when_the_task_is_cancelled",
     "blocking_native_is_an_entry_cancellation_checkpoint",
     "read_timeout_returns_err",
@@ -511,11 +509,6 @@ const SLEEP_SYNCHRONISED_TESTS: [&str; 120] = [
     "cut_owner_defer_fault_ranks_below_the_child_fault",
     "cut_owner_trace_is_the_childs_trace",
     "outside_executor_job_survives_owner_cut_in_shutdown",
-    // TICKET-236. Its 50ms sleep is a window the epoch must NOT move across while `settle_job` is
-    // blocked at the seal: a wait for something that must not happen has no event to receive. A
-    // `try_lock` handshake orders the two threads; the sleep can only let a wrong order pass on a
-    // stalled box, never fail the right one.
-    "a_cut_job_seal_moves_the_epoch_after_the_seal",
     // TICKET-284, `src/vm/tests/executor_cut.rs`. Its `time.sleep_ms(120000)` is inside a fixture
     // .chz program's SOURCE STRING: an uninterruptible sibling that the exit must end at once (the
     // cell is a hang check). It orders no two events in the Rust test's own control flow.
@@ -543,9 +536,9 @@ const SLEEP_SYNCHRONISED_TESTS: [&str; 120] = [
     // fixture .chz program's SOURCE STRING, never a happens-before edge in the Rust test's own
     // control flow: the sibling's fault lands while the task waits in its `defer` (the seeded
     // yield mid-drain is the shape under test), and the `sleep` cell's sleep IS the verdict path
-    // under test (a timer sleep before the stuck wait). The assertions hold the cause's report.
-    "defer_cut_keeps_the_cancel_across_a_yield",
-    "stuck_cleanup_reports_the_cause_on_every_verdict_path",
+    // under test (a timer sleep before the stuck wait). The assertions hold the deadlock report.
+    "a_stuck_defer_after_a_fault_is_the_deadlock_across_a_yield",
+    "stuck_cleanup_is_the_deadlock_on_every_former_verdict_path",
 ];
 
 #[test]

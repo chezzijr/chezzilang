@@ -22,7 +22,8 @@ Three shapes:
 | `Channel[T](0)` | **rendezvous** (Go's `make(chan T)`) | blocks until a receiver is already waiting |
 | `Channel[T](cap)`, `cap > 0` | **bounded** FIFO (Go's buffered channel) | blocks/parks while `cap` messages are queued; resumes once a `recv` frees a slot |
 
-A full/rendezvous `send` with no possible consumer is a deadlock fault, not an over-fill or a hang.
+A full/rendezvous `send` that no task can ever take blocks, and once every task of the run is
+blocked the run ends with `deadlock: every task is blocked`, not an over-fill.
 
 Methods: `send(x: T) -> None` · `try_send(x: T) -> bool` (`false` = closed, full, **or** rendezvous
 with no waiting receiver; never blocks) · `recv() -> T!RecvError` (`!RecvError` on every call once
@@ -68,15 +69,17 @@ against other tasks (a `get`-then-`set` races). `set` and `get` take the same gu
 
 | from inside `s.update(f)` / `rw.write(f)` / `rw.read(f)` | behaviour |
 |---|---|
-| `s.get()` / `s.read(g)` / `s.set(x)` / `s.update(g)` — same `Shared` box | **fatal deadlock**: `"deadlock: this task already holds the update guard on this Shared box ..."` (Go: `Lock` in `Lock` deadlocks) |
-| `rw.get()` / `rw.read(g)` / `rw.set(x)` / `rw.write(g)` — same `RwShared`, inside its `write` | **fatal** the same way |
-| `rw.set(x)` / `rw.write(g)` — same `RwShared`, inside its `read` | **fatal deadlock**: `"deadlock: this task already holds the read guard on this RwShared box ..."` (Go: `Lock` in `RLock` deadlocks) |
-| `rw.get()` / `rw.read(g)` — same `RwShared`, inside its `read` | legal while no writer waits; past a waiting writer it is a **fatal deadlock** with `a lock cycle` (Go: a recursive `RLock` with a writer queued deadlocks) |
+| `s.get()` / `s.read(g)` / `s.set(x)` / `s.update(g)` — same `Shared` box | **blocks for good** on its own guard (Go: `Lock` in `Lock` deadlocks) |
+| `rw.get()` / `rw.read(g)` / `rw.set(x)` / `rw.write(g)` — same `RwShared`, inside its `write` | **blocks** the same way |
+| `rw.set(x)` / `rw.write(g)` — same `RwShared`, inside its `read` | **blocks** the same way (Go: `Lock` in `RLock` deadlocks) |
+| `rw.get()` / `rw.read(g)` — same `RwShared`, inside its `read` | legal while no writer waits; past a waiting writer it **blocks** behind the writer (Go: a recursive `RLock` with a writer queued deadlocks) |
 | `print(s)` | legal: a print takes no guard and shows the value as it is |
 
 A cross-task `set`/`update`/`write` on the SAME box from a *different*, healthy task BLOCKS behind the
-guard. Only a real wait-for cycle (same-task re-entry, or a longer AB-BA cycle across boxes) is a
-fatal deadlock: no `recover:` catches it.
+guard. A re-lock or a lock cycle (an AB-BA cycle across boxes) has no fault of its own: its tasks
+block, and once every task of the run is blocked the one deadlock check ends the run with
+`deadlock: every task is blocked`, each listed as `waiting for the Shared guard` (or `the RwShared
+guard`) at its call. No `recover:` catches it. If another task still runs, the run hangs, as in Go.
 
 ### `RwShared[T]` — cross-task read-write cell (many readers OR one writer)
 `get() -> T` · `set(x: T) -> None` · `read(f: fn(T) -> R) -> R` (shared read guard; returns `f`'s
@@ -144,7 +147,7 @@ User code calls `submit`.
   cancel (`concurrency.md` "Job states").
 - `cancel()` cancels held jobs only. A `submit` that returned without a fault and is under the cap
   always starts, and runs to its first cancellation point. The one exception is a run halt (an
-  `os.exit`, a deadlock verdict), which drops it.
+  `os.exit`, a deadlock), which drops it.
 - A `submit` that reads the Executor as shut returns an already-settled Task whose `get()` is
   `!"submit on a shut-down Executor (it no longer accepts work)"`. A `submit` racing a job's
   `cancel()` can meet this refusal.
@@ -172,10 +175,12 @@ The same holds for a `spawn`ed task, which also starts at the `spawn` (Go's `go 
 nursery's join (`concurrency.md` §4).
 
 A blocking `recv`/`send`/`wait:` inside a job, or in `main` while jobs run, **blocks and waits**. A
-`deadlock` fault comes only once the whole run is stuck: every party blocked, none of their waits
-satisfiable. That is Go's rule (`all goroutines are asleep`), so `ex.submit(fn(): ch.recv())` with
-nobody to send faults in milliseconds instead of hanging, while `ex.submit(fn(): ch.send(42))` then
-`ch.recv()` in `main` works. Residual cases: [`gaps.md`](../../contributing/gaps.md).
+`deadlock` comes only once every task of the run is blocked (jobs and main included). That is Go's
+rule (`all goroutines are asleep`), so `ex.submit(fn(): ch.recv())` with nobody to send, then
+`ex.shutdown()`, ends the run at once with `deadlock: every task is blocked`, main listed at its
+`shutdown()` (`waiting for an Executor join`) and the job at its `recv()`, while
+`ex.submit(fn(): ch.send(42))` then `ch.recv()` in `main` works. A partial deadlock (some tasks
+stuck while another runs) hangs, as in Go. Residual cases: [`gaps.md`](../../contributing/gaps.md).
 
 ### `Socket` / `Listener` — from `std.net` (see §4)
 - `Socket`: `read(n: int, timeout_ms: int? = None) -> str!` · `write(s: str, timeout_ms: int? = None) -> int!` ·

@@ -16,20 +16,15 @@ takes steps 2 and 3 once at the start of the wait and `Vm::wait_end` undoes them
 | 2. hold no runner permit for the whole wait, and give a `parallel:` body's runner slot to its sched | every row of the table below but `extern`, when the thread holds one; the end takes a free permit first, else queues |
 | 3. demote (hand the runner slot to a replacement) | the `D` cells below; a nursery join hands its slot over in its own joiner, in its `D` and `I` cells |
 
-The same table gives each wait the counts it registers for the deadlock verdicts. `Vm::wait_end`
-drops them before it takes the permit back; an in-place channel tick drops them after the permit
-take, before its next pop:
-
-| wait | counts |
-|---|---|
-| ends by itself (timer, sleep, offload, host fd, socket, connect, a timed `wait:`) | none; a demoted one is `inflight` |
-| `recv`, `send`, an untimed `wait:`, a guard, an Executor join | a party on a judged thread (`main`, a `main` `defer:`), the eager bodies of its thread marked blocked on it; a demoted one is a waiter |
-| a nursery join or abort | a party on a thread with no sched under it (`main`, the builder, `main` in a callback); a blocked owner on a fiber's thread; the eager bodies of its thread wait for it |
-| an `extern` C call | none: a thread in C is running, so both verdicts decline while it lasts (Go: a goroutine in cgo is not asleep) |
-
-A wait that ends by itself is a live party, so both verdicts decline while it lasts: a `wait:` whose
-timer arm is live returns at the deadline, as Go's `select` with `time.After` does.
-`tests/wait_counts_grid.rs` runs each wait kind in each context as a deadlock and as a live program.
+The run's one deadlock check does not read this table. It reads one run-wide count of the tasks
+that are not asleep, which changes only when a task starts, parks, is woken or ends (Go's
+`checkdead`). A parked fiber is asleep: a channel, `wait:`, guard or join wait parks it. A task
+that waits in place stays awake: a stdin read, a demoted wait (an FFI callback, a map/set probe
+hook), a blocking native, a socket, a C call. A pending timer counts as awake while a task waits on it and it has not fired, so a
+`wait:` whose timer arm is live returns at the deadline, as Go's `select` with `time.After` does.
+When the count reaches 0 with tasks alive, the run ends with `deadlock: every task is blocked`
+([02-channel.md](02-channel.md)). `tests/wait_counts_grid.rs` runs each wait kind in each context as
+a deadlock and as a live program, and `tests/awake_count_grid.rs` pins the count itself.
 
 A guard wait takes the permit back in the middle, before it takes the guard (a thread that took the
 guard first would park the guard's owner behind permit holders), and gives it back again if it loses
@@ -100,7 +95,7 @@ A fiber's nursery join in a Demote context hands its runner slot to a replacemen
 runs no other fiber on its stack, because that fiber could wait for something only the buried frame
 can give.
 
-A Builder `R` cell for `recv`/`wait:` is the "deadlock — no runnable task can send" fault: a blocking
+A Builder `R` cell for `recv`/`wait:` is the `deadlock: <wait>: no runnable task can send` fault: a blocking
 `recv`, `for v in ch:` or `wait:` issued directly in an inline `parallel:` body (not inside a
 `spawn:`) faults there, and the diagnostic points at the fix: put blocking work in a `spawn:`.
 
@@ -110,16 +105,14 @@ How `will_return` drives the deadlock accounting, and the cells judged against G
 **Deliberate differences from Go**, each a `R` or hang cell of the table:
 
 - A socket op in an Executor job returns the "doesn't own its thread" `!e`; `connect` there too.
-- An unjudged context (`main` inside a nested native callback, a job inside one) with nothing that
-  can satisfy it HANGS, where Go faults: the verdict declines rather than risk a false fault
-  ([`lessons.md`](../../contributing/lessons.md) §4). Since 2026-11-07 a callback that runs as a
-  frame (a hook, an operator, a HOF callback, a sort comparator, a `from_iter` drain, a box closure,
-  a generator body, a `defer` drain) is not one: `recv/main_cb/Nothing` (`[0].map(op)`) faults
-  `deadlock`, and so does `recv/main_defer/Nothing`. A wait in a hard-halt `defer` drain
-  (`--max-heap`, `--timeout`) runs on the Rust stack and is still judged in `main`, through the
-  `deferring` exception of `BlockCtx::judged`.
-  What still hangs is the nested list of `docs/contributing/gaps.md` W23-1, pinned by the `Residual`
-  kinds of `tests/callback_park_grid.rs`.
+- A wait that blocks in place inside a nested native callback (an FFI callback, a user `hash`/`eq`
+  in a map/set probe) stays awake, so with nothing that can satisfy it the run HANGS, where Go
+  faults (Go has no such case). Since 2026-11-07 a callback that runs as a frame (a hook, an
+  operator, a HOF callback, a sort comparator, a `from_iter` drain, a box closure, a generator body,
+  a `defer` drain) parks: `recv/main_cb/Nothing` (`[0].map(op)`) is the deadlock, and so is
+  `recv/main_defer/Nothing`. A wait in a `--max-heap` hard-halt `defer` drain parks too, so its
+  deadlock is reported. What still hangs is the nested list of `docs/contributing/gaps.md` W23-1,
+  pinned by the `Residual` kinds of `tests/callback_park_grid.rs`.
 
 ---
 
@@ -154,7 +147,7 @@ top-level `main` blocks it and succeeds, as CPython (0.1 ms) and Go (314 µs) bo
   `chezzi run: unknown flag '--timeout=500'`), and `main` has no scope, so there is no cancel flag to
   trip. `accept()`/`read()`/`write()` on `main` with no `timeout_ms` therefore blocks forever on an fd
   that never becomes ready — Go-identical. Pass a `timeout_ms` when you need a bound.
-- **A socket-blocked `main` SUPPRESSES the process-wide deadlock verdict** while its op is
+- **A socket-blocked `main` is awake, so no deadlock is reported** while its op is
   outstanding — for a never-ready fd, permanently. `main` in `accept()` plus an `Executor` job blocked
   on a `Channel` nothing can send: Chezzi prints `listening` and hangs (rc=124). Go hangs identically —
   an open socket is a runnable party, so `all goroutines are asleep` never fires (measured, rc=124).

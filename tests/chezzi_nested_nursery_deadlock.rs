@@ -8,6 +8,11 @@
 
 use std::process::Command;
 
+/// The one deadlock header (plan 2026-11-17): every task of the run is blocked. A stuck inner
+/// nursery is reported only when every task of the run is asleep; each fatal shape below is one
+/// (Go twin: fatal, all goroutines asleep).
+const HEADER: &str = "deadlock: every task is blocked";
+
 fn run_at_threads_1(path: &std::path::Path) -> std::process::Output {
     Command::new(env!("CARGO_BIN_EXE_chezzi"))
         .arg("run")
@@ -74,8 +79,8 @@ fn a_recovered_inner_deadlock_is_fatal_at_threads_1() {
         let stdout = String::from_utf8_lossy(&out.stdout);
         let stderr = String::from_utf8_lossy(&out.stderr);
         assert!(
-            !out.status.success() && stderr.contains("deadlock"),
-            "round {round}: expected a fatal `deadlock`, got {} — stderr: {stderr}",
+            out.status.code() == Some(1) && stderr.contains(HEADER),
+            "round {round}: expected a fatal `{HEADER}`, got {} — stderr: {stderr}",
             out.status
         );
         assert!(
@@ -460,9 +465,9 @@ fn read_pipes(child: &mut std::process::Child) -> (String, String) {
 
 /// The depth `recursive` runs at, per worker count.
 ///
-/// TICKET-112 lifted the T>=2 clamp: a nested eager sched now counts as live work in the
-/// process-wide verdict (`QuiesceState::live_eager_bodies`), so `recursive` no longer false-faults
-/// past the granted-slot path at any worker count. Full depth everywhere.
+/// TICKET-112 lifted the T>=2 clamp: a nested eager body is an awake task of the run's awake
+/// count, so `recursive` no longer false-faults past the granted-slot path at any worker count.
+/// Full depth everywhere.
 fn recursive_depth(_threads: Option<&str>) -> usize {
     30
 }
@@ -581,8 +586,8 @@ fn nested_nursery_genuine_deadlocks_still_fault_at_every_worker_count() {
                 };
                 let (stdout, stderr) = read_pipes(&mut child);
                 assert!(
-                    !status.success()
-                        && stderr.contains("deadlock")
+                    status.code() == Some(1)
+                        && stderr.contains(HEADER)
                         && !stdout.contains("inner err")
                         && !stdout.contains("job err"),
                     "{name}, CHEZZI_THREADS={threads:?}, round {round}: expected a fatal \

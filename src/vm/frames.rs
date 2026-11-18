@@ -68,15 +68,26 @@ pub(super) enum UnwindThen {
     },
     /// The cancel funnel of a fiber's outermost loop ([`Vm::cancel_unwind`]).
     Cancel,
+    /// A `--max-heap` abort at the dispatch loop's top ([`Vm::run_until`]): every `defer` of the
+    /// unwound frames runs, on frames, so a wait in one parks the task and counts it asleep (plan
+    /// 2026-11-17, owner); no level is joined, as the synchronous hard-halt unwind joins none.
+    OverMemory,
 }
 
 impl Unwind {
+    /// Is a `--max-heap` abort the unwind's cause? A deadlock verdict that ends the task in one of
+    /// its `defer`s keeps the marker, as [`Vm::unwind_result`] ranks a hard halt's cleanup fault.
+    pub(super) fn over_memory(&self) -> bool {
+        self.rte.is_over_memory
+    }
+
     /// Does the unwind park at a fiber-owned nursery that is not done? Only at a fiber's outermost
     /// loop.
     fn parks(&self) -> bool {
         match self.then {
             UnwindThen::Fault { base_level, .. } => base_level == 0,
             UnwindThen::Cancel => true,
+            UnwindThen::OverMemory => false,
         }
     }
 }
@@ -350,8 +361,15 @@ impl Vm {
                     // between two of its `defer`s it waits for the next collection.
                     match self.owned_drain(base_level) {
                         None => {
-                            let d = self.unwind_deferred(base_level, false);
-                            return Err(self.unwind_result(over_rte, d, false).over_memory());
+                            // `Ok`: the unwind runs on as a drain of this loop.
+                            self.unwind_on(Unwind {
+                                target: base_level,
+                                rte: over_rte,
+                                defer_err: None,
+                                escaped_err: None,
+                                then: UnwindThen::OverMemory,
+                            })?;
+                            continue;
                         }
                         Some(t) if self.frames.len() > t + 1 => {
                             let d = self.unwind_deferred(t + 1, false);
@@ -700,10 +718,9 @@ impl Vm {
         // it preserves the bypass in MORE cases (a cancelled task is more likely to die), which
         // is the safe direction. Do not "simplify" it away without re-deriving that.
         // TICKET-135 (D1): a deadlock verdict is fatal like Go's `all goroutines are asleep`.
-        // `recover:` is transparent to it: the fault takes the uncaught path (defers and
-        // escaped-nursery reports unchanged) and the marker is re-stamped so a faulting
-        // `defer` cannot strip it.
-        let fatal = rte.is_deadlock;
+        // `recover:` is transparent to every fault of a run whose verdict is latched: the fault
+        // takes the uncaught path (defers and escaped-nursery reports unchanged).
+        let fatal = self.deadlocked();
         let caught_here =
             !fatal && matches!(self.handlers.last().copied(), Some(h) if h.frame_len > base_level);
         // TICKET-208 — a delivered job fault (`Cut::RunFault`) bypasses `recover:` as a cancel
@@ -801,12 +818,6 @@ impl Vm {
         self.frames.len() - self.drains.len()
     }
 
-    /// Drop the top frame of unwind `u`, through [`Vm::cut_if_fatal`].
-    fn pop_unwinding(&mut self, u: &Unwind) {
-        self.cut_if_fatal([Some(&u.rte), u.defer_err.as_ref(), u.escaped_err.as_ref()]);
-        self.pop_unwound_frame();
-    }
-
     /// Run the unwind `u` on from the top frame, frame by frame: leave each of the frame's
     /// `parallel:` levels (its body `defer`s, then the abort, innermost first; TICKET-299), abort
     /// the frame's implicit nursery ([`Vm::escaped_floor`]), run its remaining `defer`s, drop it. The dispatch loop runs a
@@ -816,11 +827,12 @@ impl Vm {
     /// [`Vm::resume_fault_unwind`] re-enters here at the same frame.
     pub(super) fn unwind_on(&mut self, mut u: Unwind) -> Result<(), RuntimeError> {
         let park = u.parks();
+        let joins = !matches!(u.then, UnwindThen::OverMemory);
         while self.frames.len() > u.target {
             let fi = self.frames.len() - 1;
             // TICKET-299: a `parallel:` level of the frame runs its body `defer`s, then its abort,
             // innermost first (`Vm::leave_level`); the frame's implicit nursery and `defer`s follow.
-            if self.nurseries.len() > self.level_floor(fi) {
+            if joins && self.nurseries.len() > self.level_floor(fi) {
                 let top = self.nurseries.len() - 1;
                 // A `defer` that will not run (a pending `os.exit`, a halt that cuts cleanup) stays
                 // in the frame: only a record that runs makes the drain below progress.
@@ -844,23 +856,25 @@ impl Vm {
                 u.escaped_err = u.escaped_err.or(child);
                 continue;
             }
-            let floor = self.escaped_floor(fi);
-            // TICKET-287 — a fiber-owned escaped nursery that is not done stops the unwind BEFORE
-            // this frame's abort and `defer`s.
-            if park && let Some(origin) = self.park_abort_origin(floor) {
-                self.join_suspend = Some(origin);
-                self.fault_park = Some(FaultPark::Unwind(u));
-                return Ok(());
+            if joins {
+                let floor = self.escaped_floor(fi);
+                // TICKET-287 — a fiber-owned escaped nursery that is not done stops the unwind
+                // BEFORE this frame's abort and `defer`s.
+                if park && let Some(origin) = self.park_abort_origin(floor) {
+                    self.join_suspend = Some(origin);
+                    self.fault_park = Some(FaultPark::Unwind(u));
+                    return Ok(());
+                }
+                let child = self.drain_escaped_nursery(floor);
+                u.escaped_err = u.escaped_err.or(child);
             }
-            let child = self.drain_escaped_nursery(floor);
-            u.escaped_err = u.escaped_err.or(child);
             if self.drains_on_frames() && !self.frames[fi].deferred.is_empty() {
                 return self.drain_then(0, DrainCont::Unwind(Box::new(u)));
             }
             if let Some(e) = self.drain_deferred(fi, 0) {
                 u.defer_err = Some(e);
             }
-            self.pop_unwinding(&u);
+            self.pop_unwound_frame();
         }
         match u.then {
             UnwindThen::Fault {
@@ -875,6 +889,9 @@ impl Vm {
             UnwindThen::Cancel => {
                 Err(self.unwind_result(u.rte, u.defer_err.or(u.escaped_err), true))
             }
+            UnwindThen::OverMemory => {
+                Err(self.unwind_result(u.rte, u.defer_err, false).over_memory())
+            }
         }
     }
 
@@ -886,7 +903,7 @@ impl Vm {
         drained: Option<RuntimeError>,
     ) -> Result<(), RuntimeError> {
         u.defer_err = drained.or(u.defer_err);
-        self.pop_unwinding(&u);
+        self.pop_unwound_frame();
         self.unwind_on(u)
     }
 
@@ -974,7 +991,6 @@ impl Vm {
         fatal: bool,
         std_site: Option<(Span, Span)>,
     ) -> Result<(), RuntimeError> {
-        let rte = if fatal { rte.deadlock() } else { rte };
         // TICKET-148 — relocate a NATIVE std fault to the user's call into std, for the
         // caught stamp below AND the uncaught headline (the trace keeps its frames). A
         // superseding `defer` fault (a different span) and a `panic` stay where they are.
@@ -1381,7 +1397,7 @@ impl Vm {
     ) -> Result<RuntimeError, RuntimeError> {
         match self.cleanup_halt(rte) {
             Ok(rte) => Ok(rte),
-            Err(e) if e.is_deadlock => {
+            Err(e) if self.deadlocked() => {
                 self.unwind_no_defer(base_level);
                 Err(e)
             }

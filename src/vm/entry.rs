@@ -23,14 +23,14 @@ pub(super) fn captured(buf: Vec<u8>) -> String {
 /// Run a single-file program from source on the dedicated VM thread; returns output produced so
 /// far + the outcome (test entry point).
 #[cfg(test)]
-pub fn run_program(src: &str) -> (String, Result<(), RuntimeError>) {
+pub fn run_program(src: &str) -> (String, Result<(), RunError>) {
     let (out, result) = run_program_bytes(src);
     (captured(out), result)
 }
 
 /// [`run_program`] without the lossy [`captured`] decode — the raw sink bytes.
 #[cfg(test)]
-pub fn run_program_bytes(src: &str) -> (Vec<u8>, Result<(), RuntimeError>) {
+pub fn run_program_bytes(src: &str) -> (Vec<u8>, Result<(), RunError>) {
     let src = src.to_string();
     std::thread::Builder::new()
         .stack_size(VM_STACK_BYTES)
@@ -50,22 +50,28 @@ pub(super) fn test_program(src: &str) -> Result<Program, RuntimeError> {
         is_assert: false,
         is_over_memory: false,
         is_timed_out: false,
-        is_deadlock: false,
         is_panic: false,
-        blocked: None,
     })
 }
 
 #[cfg(test)]
-pub(super) fn run_program_inner(src: &str) -> (Vec<u8>, Result<(), RuntimeError>) {
+pub(super) fn run_program_inner(src: &str) -> (Vec<u8>, Result<(), RunError>) {
     let program = match test_program(src) {
         Ok(p) => p,
-        Err(e) => return (Vec::new(), Err(e)),
+        Err(e) => return (Vec::new(), Err(RunError::plain(e))),
     };
     let mut vm = Vm::new(Arc::new(program));
     let result = vm.run();
-    let result = vm.finish_run(result);
+    let result = end_run(&mut vm, result);
     (vm.out, result)
+}
+
+/// A test driver's end of a run: [`Vm::finish_run`], then the report a driver prints
+/// ([`Vm::report`]), so a deadlock carries the run's listing.
+#[cfg(test)]
+fn end_run(vm: &mut Vm, r: Result<(), RuntimeError>) -> Result<(), RunError> {
+    let r = vm.finish_run(r);
+    vm.report(r)
 }
 
 /// Assert two program outputs contain the SAME lines regardless of order — for a concurrency test
@@ -115,23 +121,48 @@ thread_local! {
 /// [`run_capture`], plus the number of scheduler picks the run made (TICKET-164). Runs on its own
 /// thread like [`run_program_bytes`], since [`RUN_PICKS`] is thread-local to the VM's own thread.
 #[cfg(test)]
-pub fn run_capture_counting_picks(src: &str) -> (Result<String, RuntimeError>, usize) {
+pub fn run_capture_counting_picks(src: &str) -> (Result<String, RunError>, usize) {
     run_capture_counting(src, &RUN_PICKS)
 }
 
+#[cfg(test)]
+impl Vm {
+    /// Every module's top level on THIS thread's own `Vm`, in place, not as the run's root fiber
+    /// (`main` is fiber 1 on whichever worker takes it, [`Vm::run_root`]): for a white-box test
+    /// that reads this thread's counters or this `Vm`'s caches. Starts as [`Vm::run`] does;
+    /// [`Vm::finish_run`] ends main's count.
+    pub(crate) fn run_in_place(&mut self) -> Result<(), RuntimeError> {
+        self.run_start();
+        for idx in 0..self.program.modules.len() {
+            let (proto, home) = self.init_module(idx)?;
+            self.run_proto(proto, home, None, Vec::new(), false, true, Span::RUNTIME)?;
+        }
+        Ok(())
+    }
+}
+
 /// [`run_capture`], plus the value `counter` reached during the run (TICKET-233). Runs on its own
-/// thread like [`run_program_bytes`], since every counter is thread-local to the VM's own thread.
+/// thread like [`run_program_bytes`], since every counter is thread-local to the VM's own thread:
+/// the program runs in place on it ([`Vm::run_in_place`]).
 #[cfg(test)]
 pub fn run_capture_counting(
     src: &str,
     counter: &'static std::thread::LocalKey<std::cell::Cell<usize>>,
-) -> (Result<String, RuntimeError>, usize) {
+) -> (Result<String, RunError>, usize) {
     let src = src.to_string();
     std::thread::Builder::new()
         .stack_size(VM_STACK_BYTES)
         .spawn(move || {
             counter.with(|c| c.set(0));
-            let (out, result) = run_program_inner(&src);
+            let (out, result) = match test_program(&src) {
+                Ok(p) => {
+                    let mut vm = Vm::new(Arc::new(p));
+                    let r = vm.run_in_place();
+                    let r = end_run(&mut vm, r);
+                    (vm.out, r)
+                }
+                Err(e) => (Vec::new(), Err(RunError::plain(e))),
+            };
             (result.map(|()| captured(out)), counter.with(|c| c.get()))
         })
         .expect("failed to spawn VM thread")
@@ -168,14 +199,14 @@ pub fn run_file_counting_runners(
 
 /// Run a single-file program and return its full stdout, or the error (test helper).
 #[cfg(test)]
-pub fn run_capture(src: &str) -> Result<String, RuntimeError> {
+pub fn run_capture(src: &str) -> Result<String, RunError> {
     run_capture_bytes(src).map(captured)
 }
 
 /// [`run_capture`] without the lossy [`captured`] decode — for callers that need the raw bytes
 /// (W6-9b), e.g. a golden comparison sensitive to non-UTF-8 output.
 #[cfg(test)]
-pub fn run_capture_bytes(src: &str) -> Result<Vec<u8>, RuntimeError> {
+pub fn run_capture_bytes(src: &str) -> Result<Vec<u8>, RunError> {
     let (out, result) = run_program_bytes(src);
     result.map(|()| out)
 }
@@ -184,25 +215,25 @@ pub fn run_capture_bytes(src: &str) -> Result<Vec<u8>, RuntimeError> {
 /// `stress` collects before every instruction (surfaces missing GC roots); otherwise the normal
 /// allocation-threshold trigger drives collection (test helper for GC assertions).
 #[cfg(test)]
-pub fn run_with(src: &str, stress: bool) -> (Result<String, RuntimeError>, usize) {
+pub fn run_with(src: &str, stress: bool) -> (Result<String, RunError>, usize) {
     run_with_cfg(src, stress)
 }
 
 /// The body of [`run_with`]: compile, run on a fresh VM thread, report output and live objects.
 #[cfg(test)]
-pub fn run_with_cfg(src: &str, stress: bool) -> (Result<String, RuntimeError>, usize) {
+pub fn run_with_cfg(src: &str, stress: bool) -> (Result<String, RunError>, usize) {
     let src = src.to_string();
     std::thread::Builder::new()
         .stack_size(VM_STACK_BYTES)
         .spawn(move || {
             let program = match test_program(&src) {
                 Ok(p) => p,
-                Err(e) => return (Err(e), 0),
+                Err(e) => return (Err(RunError::plain(e)), 0),
             };
             let mut vm = Vm::new(Arc::new(program));
             vm.gc_stress |= stress;
             let result = vm.run();
-            let result = vm.finish_run(result);
+            let result = end_run(&mut vm, result);
             let live = vm.heap.live();
             (result.map(|()| captured(vm.out)), live)
         })
@@ -216,15 +247,15 @@ pub fn run_with_cfg(src: &str, stress: bool) -> (Result<String, RuntimeError>, u
 /// `Vec`, not via a per-call `run_until` recursion — so it survives a stack far below the production
 /// [`VM_STACK_BYTES`].
 #[cfg(test)]
-pub fn run_capture_on_stack(src: &str, stack_bytes: usize) -> Result<String, RuntimeError> {
+pub fn run_capture_on_stack(src: &str, stack_bytes: usize) -> Result<String, RunError> {
     let src = src.to_string();
     std::thread::Builder::new()
         .stack_size(stack_bytes)
         .spawn(move || {
-            let program = test_program(&src)?;
+            let program = test_program(&src).map_err(RunError::plain)?;
             let mut vm = Vm::new(Arc::new(program));
             let result = vm.run();
-            vm.finish_run(result).map(|()| captured(vm.out))
+            end_run(&mut vm, result).map(|()| captured(vm.out))
         })
         .expect("failed to spawn VM thread")
         .join()
@@ -245,18 +276,18 @@ pub fn run_capture_stress(src: &str) -> String {
 /// nursery (a `?`/return that skipped its `JoinNursery`) shows up as a non-zero residual — the
 /// white-box check for the `do_return` nursery-truncation fix (test helper).
 #[cfg(test)]
-pub fn run_capture_nursery_len(src: &str) -> (Result<String, RuntimeError>, usize) {
+pub fn run_capture_nursery_len(src: &str) -> (Result<String, RunError>, usize) {
     let src = src.to_string();
     std::thread::Builder::new()
         .stack_size(VM_STACK_BYTES)
         .spawn(move || {
             let program = match test_program(&src) {
                 Ok(p) => p,
-                Err(e) => return (Err(e), 0),
+                Err(e) => return (Err(RunError::plain(e)), 0),
             };
             let mut vm = Vm::new(Arc::new(program));
             let result = vm.run();
-            let result = vm.finish_run(result);
+            let result = end_run(&mut vm, result);
             let nursery_depth = vm.nurseries.len();
             (result.map(|()| captured(vm.out)), nursery_depth)
         })
@@ -371,9 +402,7 @@ pub fn run_built(
                     is_assert: false,
                     is_over_memory: false,
                     is_timed_out: false,
-                    is_deadlock: false,
                     is_panic: false,
-                    blocked: None,
                 })),
                 None,
             );
@@ -425,11 +454,8 @@ pub fn run_built(
     if let Some(code) = vm.pending_exit {
         return (vm.out, vm.stderr, Ok(()), Some(code));
     }
-    // The stack trace was captured at the uncaught fault (before frames unwound); attach it.
-    let trace = vm.fault_trace.take().unwrap_or_default();
-    // Snapshot the file-id → path table from the compiled program while it's still in hand — this is
-    // the last point before `vm` (and its `Arc<Program>`) is consumed below.
-    let files: Vec<(u32, std::path::PathBuf)> = vm.program.file_table();
-    let result = result.map_err(|e| RunError::from_error(e, trace, files));
+    // The stack trace captured at the uncaught fault (before frames unwound), the file-id → path
+    // table while the compiled program is still in hand, and a verdict's listing.
+    let result = vm.report(result);
     (vm.out, vm.stderr, result, None)
 }

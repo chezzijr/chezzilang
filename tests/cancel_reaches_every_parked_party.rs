@@ -385,6 +385,9 @@ fn late_exit():
 const SUBMIT_BAD: &str = "ex := Executor()\n_ := ex.submit(bad)\ntime.sleep_ms(100)\n";
 const SUBMIT_SLOWBAD: &str = "ex := Executor()\n_ := ex.submit(slowbad)\n";
 const DEADLOCK: &str = "_ := Channel[int]().recv()\n";
+/// The one deadlock header (plan 2026-11-17). The `deadlock` cells end with every task asleep: the
+/// job has faulted and ended, and main waits (Go twin: fatal, all asleep).
+const HEADER: &str = "deadlock: every task is blocked";
 const GROW: &str = "xs: List[str] = []\ni := 0\nwhile true:\n    xs.push(\"{i} abcdefghijklmnopqrstuvwxyz0123456789abcd\")\n    i += 1\n";
 
 /// One ranking cell: name, the `chezzi test` flag (`None` = `chezzi run`, `""` = no flag), the main
@@ -424,7 +427,7 @@ fn ranking_cells() -> Vec<RankCell> {
             "run deadlock",
             None,
             bad(DEADLOCK),
-            vec!["deadlock"],
+            vec![HEADER],
             vec![index],
         ),
         // An exit published AFTER an earlier job fault outranks it (DEC-200). The exit sits in a
@@ -481,7 +484,7 @@ fn ranking_cells() -> Vec<RankCell> {
             "test deadlock",
             Some(""),
             bad(DEADLOCK),
-            vec!["ERROR", "deadlock"],
+            vec!["ERROR", HEADER],
             vec![index],
         ),
         rank(

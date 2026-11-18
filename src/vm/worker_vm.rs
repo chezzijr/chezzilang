@@ -159,7 +159,6 @@ impl Vm {
         core: &Arc<ExecutorCore>,
         span: Span,
     ) -> Result<(), RuntimeError> {
-        use crate::vm::quiesce::PartyWait;
         let Some(sched) = core.sched() else {
             return Ok(());
         };
@@ -181,10 +180,7 @@ impl Vm {
         } else {
             let mut reg = self.wait_begin(
                 WaitSpec::Join,
-                Some(
-                    Blocked::on(PartyWait::Join(Arc::clone(&sched), slack))
-                        .named(super::deadlock::Wait::ExecutorJoin, span),
-                ),
+                Some(Blocked::named(super::deadlock::Wait::ExecutorJoin, span)),
                 "an Executor join",
                 span,
             )?;
@@ -196,7 +192,7 @@ impl Vm {
                     break Some(e);
                 }
                 if let Some(m) = self.mn.clone()
-                    && self.in_place_cut(&m.lock(), reg.tok())
+                    && self.in_place_cut(&m.lock())
                 {
                     break Some(self.cut_fault(&m, span));
                 }
@@ -223,7 +219,7 @@ impl Vm {
             // a cancelled job. A hard halt (`--max-heap`, `--timeout`), a deadlock and an exit still
             // raise: a hard abort is never a Task outcome.
             let cancelled = core.cancel.load(Ordering::Relaxed);
-            let slots = scope
+            let slots: Vec<_> = scope
                 .sched
                 .take_slots()
                 .into_iter()
@@ -235,7 +231,7 @@ impl Vm {
                         | TaskOutcome::CancelledFault {
                             err, out, stderr, ..
                         },
-                    ) if !executor_hard_halt(&err) && !err.is_deadlock => {
+                    ) if !executor_hard_halt(&err) && !self.deadlocked() => {
                         Some(TaskOutcome::Cancelled { out, stderr })
                     }
                     // Cancel outranks a deadlock verdict (DEC-135): a job the verdict ended after

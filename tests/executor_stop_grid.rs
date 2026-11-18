@@ -299,7 +299,13 @@ fn check(state: State, stop: Stop, stopper: Stopper, kind: Kind, g: &Got) -> Opt
         && stop == Stop::Shutdown
         && kind == Kind::Bounded1
     {
-        return (g.code != Some(1) || !g.err.contains("deadlock") || !silent)
+        // One global check (plan 2026-11-17): main and the stopper both wait at an Executor
+        // join, so every task is asleep; both are listed, main first (Go twin: fatal, all
+        // asleep). The held target never started, so it has no wait to list.
+        let listed = g.err.contains("deadlock: every task is blocked\n")
+            && g.err.contains("task 1: waiting for an Executor join at ")
+            && g.err.contains("task 2: waiting for an Executor join at ");
+        return (g.code != Some(1) || !listed || !silent)
             .then(|| "the self-wait must end the run with a deadlock fault".to_string());
     }
     // Exception 1 — nothing orders the stopper's `shut` write after main's `shut` read, so the

@@ -247,15 +247,18 @@ fn sched_seed_smoke_two_leaf_always_faults_at_one_worker() {
             std::time::Duration::from_secs(20),
         )
         .unwrap_or_else(|e| panic!("seed {seed} did not run: {e:?}"));
-        assert_ne!(
+        assert_eq!(
             cap.code,
-            Some(0),
+            Some(1),
             "seed {seed} should fault, got rc={:?} stdout={:?}",
             cap.code,
             cap.stdout_text()
         );
+        // One global check (plan 2026-11-17): every task waits, so the one header (Go twin: fatal,
+        // all asleep).
         assert!(
-            cap.stderr_text().contains("deadlock"),
+            cap.stderr_text()
+                .contains("deadlock: every task is blocked\n"),
             "seed {seed} should report a deadlock on stderr; got {:?}",
             cap.stderr_text()
         );

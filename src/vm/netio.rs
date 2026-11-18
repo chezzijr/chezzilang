@@ -101,15 +101,6 @@ pub(super) enum Decoded {
     NeedMore,
 }
 
-/// M3.3 — THE text of a same-task re-entry fault on a box guard (Q1, Q2): `guard` is the guard the
-/// task holds, `kind` the box, `nested` the calls that re-enter, `closure` the closure they run in.
-fn reentry_text(guard: &str, kind: &str, nested: &str, closure: &str) -> String {
-    format!(
-        "deadlock: this task already holds the {guard} guard on this {kind} box — a nested \
-         {nested} on the same box inside its own {closure} closure"
-    )
-}
-
 impl Vm {
     /// B3.1 — clone out the shared `Arc<ChannelCore>` behind a `Channel` handle (refcount bump). The
     /// `Arc` is held only for the duration of the calling method, so locking it does not borrow the
@@ -167,7 +158,7 @@ impl Vm {
     /// guard comes free (TICKET-200).
     ///
     /// A fiber with no host frame under it (`BlockMode::Park`) parks instead: a short spin, then it
-    /// files its wait-for edge and keeps its [`core::WaitTicket`] in its state (`guard_ticket`),
+    /// keeps its [`core::WaitTicket`] in its state (`guard_ticket`),
     /// sets `guard_suspend` and returns [`Vm::park_sentinel`] `Err`, which the box method
     /// turns into a rewind ([`Vm::shared_method`]). The re-run takes the guard through the ticket.
     pub(super) fn take_update_guard<'a>(
@@ -183,101 +174,54 @@ impl Vm {
         {
             return Ok(guard);
         }
-        let reentry = match held {
-            Some(_) => None,
-            None => self.guard_reentry(key),
-        };
-        let result = match reentry {
-            Some(cycle) => Err(cycle),
-            None if self.block_mode(WaitSpec::Guard) == BlockMode::Park => {
-                let ticket = held.unwrap_or_else(|| core::WaitTicket::new(key));
-                self.guard_park(ticket, span)?
-            }
-            None => {
-                // M3.3 — the ticket keeps a waiting writer counted from here to its take or its
-                // exit, across both stages and the permit handoff (Go writer preference).
-                let mut ticket = held.unwrap_or_else(|| core::WaitTicket::new(key));
-                self.wait_halt(span)?;
-                let until = std::time::Instant::now() + GUARD_DEMOTE_BUDGET;
-                // One wait over both stages: the permit is given back for all of it.
-                let mut reg = self.wait_permit(WaitSpec::Guard);
-                let staged = loop {
-                    let left = until.saturating_duration_since(std::time::Instant::now());
-                    match self.guard_free_then_take(&reg, &mut ticket, None, left, span) {
-                        Err(halt) => break Some(Err(halt)),
-                        Ok(Ok(Some(g))) => break Some(Ok(Ok(g))),
-                        Ok(Err(c)) => break Some(Ok(Err(c))),
-                        Ok(Ok(None)) if left.is_zero() => break None,
-                        Ok(Ok(None)) => {}
-                    }
-                };
-                let r = match staged {
-                    Some(r) => r,
-                    None => self.guard_wait_block(&mut reg, key, &mut ticket, what, span),
-                };
-                self.wait_end(reg, &[]);
-                r?
-            }
-        };
-        let kind = key.lock.kind;
-        result.map_err(|cycle| self.guard_cycle_err(cycle, kind, span))
-    }
-
-    /// THE fault of a lock cycle or a re-entry: a fatal deadlock, decided here, so it cuts this
-    /// task's held guards before any frame drops one (a `defer` re-entry reaches `return_finish`,
-    /// which pops the box frame first). A cancelled task's cleanup fault is swallowed (DEC-147), so
-    /// its cut latches the run's verdict at this wait; an uncancelled task's fault reports itself
-    /// (TICKET-298).
-    fn guard_cycle_err(
-        &mut self,
-        cycle: GuardCycle,
-        kind: core::BoxKind,
-        span: Span,
-    ) -> RuntimeError {
-        let site = self
-            .is_cancelled()
-            .then(|| (super::deadlock::Wait::guard(kind).phrase(), span));
-        self.cut_held_guards(site);
-        match cycle {
-            GuardCycle::SelfHeld => self.err(
-                reentry_text("update", kind.name(), "set/update/write", "update/write"),
-                span,
-            ),
-            GuardCycle::ReadHeld => {
-                self.err(reentry_text("read", kind.name(), "set/write", "read"), span)
-            }
-            GuardCycle::Cycle => self.err(
-                "deadlock: two or more tasks each hold a Shared/RwShared update guard the \
-                 other is waiting for (a lock cycle)"
-                    .to_string(),
-                span,
-            ),
+        // A re-lock or a lock cycle just blocks: the run's deadlock verdict reports it.
+        if self.block_mode(WaitSpec::Guard) == BlockMode::Park {
+            let ticket = held.unwrap_or_else(|| core::WaitTicket::new(key));
+            return self.guard_park(ticket, span);
         }
-        .deadlock()
+        // M3.3 — the ticket keeps a waiting writer counted from here to its take or its
+        // exit, across both stages and the permit handoff (Go writer preference).
+        let mut ticket = held.unwrap_or_else(|| core::WaitTicket::new(key));
+        self.wait_halt(span)?;
+        let until = std::time::Instant::now() + GUARD_DEMOTE_BUDGET;
+        // One wait over both stages: the permit is given back for all of it.
+        let mut reg = self.wait_permit(WaitSpec::Guard);
+        let staged = loop {
+            let left = until.saturating_duration_since(std::time::Instant::now());
+            match self.guard_free_then_take(&reg, &mut ticket, None, left, span) {
+                Err(halt) => break Some(Err(halt)),
+                Ok(Some(g)) => break Some(Ok(g)),
+                Ok(None) if left.is_zero() => break None,
+                Ok(None) => {}
+            }
+        };
+        let r = match staged {
+            Some(r) => r,
+            None => self.guard_wait_block(&mut reg, key, &mut ticket, what, span),
+        };
+        self.wait_end(reg, &[]);
+        r
     }
 
     /// The `Park` half of [`Vm::take_update_guard`]: a wait that does not end at once is a
     /// cancellation point and a deadline checkpoint, then spins [`GUARD_SPINS`] short rounds,
-    /// then parks the fiber holding `ticket` (`Ok(Err(cycle))` when its wait-for edge closes a
-    /// cycle). A parked fiber is woken by a release ([`core::BoxLock::wake_parked`]).
+    /// then parks the fiber holding `ticket`. A parked fiber is woken by a release
+    /// ([`core::BoxLock::wake_parked`]).
     fn guard_park(
         &mut self,
         mut ticket: core::WaitTicket,
         span: Span,
-    ) -> Result<Result<core::UpdateGuard, GuardCycle>, RuntimeError> {
+    ) -> Result<core::UpdateGuard, RuntimeError> {
         let me = self.guard_token;
         self.wait_halt(span)?;
         self.deadline_halt(span)?;
         for _ in 0..GUARD_SPINS {
             if let Some(g) = ticket.try_take(me) {
-                return Ok(Ok(g));
+                return Ok(g);
             }
             for _ in 0..GUARD_SPIN_LOOPS {
                 std::hint::spin_loop();
             }
-        }
-        if let Err(cycle) = ticket.park_edge(me) {
-            return Ok(Err(cycle));
         }
         let kind = ticket.lock().kind;
         self.guard_suspend = Some(ticket.lock().park_key());
@@ -291,23 +235,6 @@ impl Vm {
     /// [`Vm::executor_method`]); never a fault.
     pub(super) fn park_sentinel(span: Span) -> RuntimeError {
         super::exec::plain_err(String::new(), span)
-    }
-
-    /// M3.3 — a failed fast acquire of `key` that is this task's own re-entry, the one wait that is
-    /// certain never to end: the task holds the write guard (`SelfHeld`), writes a box it reads
-    /// (`ReadHeld`, Q2), or reads again a box it reads while a writer waits for that outer read
-    /// (`Cycle`: the writer waits for this task, this task for the writer). A fast acquire fails on
-    /// a box the task reads only when a writer waits, so the third case needs no second load.
-    fn guard_reentry(&self, key: GuardKey<'_>) -> Option<GuardCycle> {
-        if key.lock.writer() == self.guard_token {
-            return Some(GuardCycle::SelfHeld);
-        }
-        let reads = self.held_reads.contains(&(Arc::as_ptr(key.lock) as usize));
-        match key.mode {
-            GuardMode::Write if reads => Some(GuardCycle::ReadHeld),
-            GuardMode::Read if reads => Some(GuardCycle::Cycle),
-            GuardMode::Write | GuardMode::Read => None,
-        }
     }
 
     /// TICKET-193/194 — THE guard order: wait for the guard to look free holding no width permit,
@@ -327,14 +254,10 @@ impl Vm {
         taking: Option<&std::sync::atomic::AtomicBool>,
         budget: std::time::Duration,
         span: Span,
-    ) -> Result<Result<Option<core::UpdateGuard>, GuardCycle>, RuntimeError> {
+    ) -> Result<Option<core::UpdateGuard>, RuntimeError> {
         let me = self.guard_token;
-        match self.wait_door(&[], |_| {
-            core::await_update_guard_free(ticket, me, Some(budget))
-        }) {
-            Err(c) => return Ok(Err(c)),
-            Ok(false) => return Ok(Ok(None)),
-            Ok(true) => {}
+        if !self.wait_door(&[], |_| core::await_update_guard_free(ticket, Some(budget))) {
+            return Ok(None);
         }
         self.block_halts(span)?;
         // The sched-wide verdict cut this in-place waiter: it ends here with its own wait instead
@@ -342,7 +265,7 @@ impl Vm {
         // budget first). A cut of the holder is the lock's own `CUT` (the box is no progress for a
         // waiter, `core::UpdateGuard::mark_cut`).
         if let Some(sched) = self.mn.as_ref().map(Arc::clone)
-            && self.in_place_cut(&sched.lock(), reg.tok())
+            && self.in_place_cut(&sched.lock())
         {
             return Err(self.cut_fault(&sched, span));
         }
@@ -354,14 +277,14 @@ impl Vm {
             }
         };
         mark(true);
-        Ok(Ok(match ticket.try_take(me) {
+        Ok(match ticket.try_take(me) {
             None => {
                 mark(false);
                 self.wait_rerelease(reg);
                 None
             }
             g => g,
-        }))
+        })
     }
 
     /// TICKET-063 — the unbounded half of [`Vm::take_update_guard`], reached once the 5 ms bounded
@@ -378,7 +301,7 @@ impl Vm {
         ticket: &mut core::WaitTicket,
         what: &str,
         span: Span,
-    ) -> Result<Result<core::UpdateGuard, GuardCycle>, RuntimeError> {
+    ) -> Result<core::UpdateGuard, RuntimeError> {
         let owned = core::GuardWait {
             lock: Arc::clone(key.lock),
             mode: key.mode,
@@ -399,26 +322,20 @@ impl Vm {
                 super::DEMOTE_POLL_BACKOFF,
                 span,
             ) {
-                Ok(Ok(Some(g))) => break Ok(Ok(g)),
-                Ok(Err(cycle)) => break Ok(Err(cycle)),
+                Ok(Some(g)) => break Ok(g),
                 Err(e) => break Err(e),
-                Ok(Ok(None)) => {}
+                Ok(None) => {}
             }
             if let Err(e) = self.block_halt_check(span) {
                 break Err(e);
             }
             if let Some(sched) = self.mn.as_ref().map(Arc::clone) {
                 let c = sched.lock();
-                if self.in_place_cut(&c, reg.tok()) {
+                if self.in_place_cut(&c) {
                     drop(c);
                     // The waiter names its own wait (the text and span its party site carries
                     // above), as on the process-wide verdict: a guard wait is not a channel wait.
                     break Err(self.cut_fault(&sched, span));
-                }
-                if sched.is_deadlocked(&c) {
-                    // TICKET-232 — the next pass ends the wait through the run halt or `terminate`.
-                    drop(c);
-                    sched.fault_own_deadlock();
                 }
             }
         };

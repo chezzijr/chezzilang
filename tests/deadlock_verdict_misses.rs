@@ -5,6 +5,9 @@ use std::io::Read;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
+/// The one deadlock header (plan 2026-11-17): every task of the run is blocked.
+const HEADER: &str = "deadlock: every task is blocked";
+
 /// Run `src` under `chezzi run`; kill it after 10 s. Returns (stdout, stderr, code), code None on timeout.
 fn run(name: &str, src: &[&str]) -> (String, String, Option<i32>) {
     run_with_threads(name, src, None)
@@ -65,8 +68,9 @@ fn main_defer_that_can_never_complete_faults_deadlock() {
         ],
     );
     assert_eq!(out, "x\n");
+    // Go twin: a deferred receive in main with no other goroutine is fatal, all asleep.
     assert!(
-        code == Some(1) && err.contains("deadlock"),
+        code == Some(1) && err.contains(HEADER),
         "a never-completing main-thread defer must fault `deadlock`, got code {code:?} (stderr: {err})"
     );
 }
@@ -126,11 +130,12 @@ fn rendezvous_send_deadlock_names_the_missing_receiver() {
 /// Every worker count the verdict must hold at: `1`, `2` and the default pool.
 const THREAD_COUNTS: [Option<&str>; 3] = [Some("1"), Some("2"), None];
 
-/// Assert `res` faulted `deadlock` (exit 1) rather than hanging (`code None`).
+/// Assert `res` faulted with the one deadlock header (exit 1) rather than hanging (`code None`).
+/// Every caller's shape has every task asleep (Go twin: fatal `all goroutines are asleep`).
 fn assert_deadlock(what: &str, threads: Option<&str>, res: &(String, String, Option<i32>)) {
     let (out, err, code) = res;
     assert!(
-        *code == Some(1) && err.contains("deadlock"),
+        *code == Some(1) && err.contains(HEADER),
         "{what} must fault `deadlock` at CHEZZI_THREADS={threads:?}, got code {code:?} (stdout: {out:?}, stderr: {err})"
     );
 }
@@ -202,7 +207,9 @@ fn module_top_level_defer_that_can_never_complete_faults_deadlock() {
 
 #[test]
 fn executor_job_and_main_nested_nursery_trees_fault_deadlock() {
-    // h1 (W14-10): fixed by TICKET-135's D1; pinned here at every worker count.
+    // h1 (W14-10): fixed by TICKET-135's D1; pinned here at every worker count. Every task of both
+    // trees waits (main at `parallel:`, then at `shutdown()`; the job's tree at its joins and
+    // receives), so the one global check sees all asleep. Go twin: fatal, all asleep.
     let src = [
         "import std.concurrency\nimport Executor from std.concurrency",
         "fn job(never: Channel[int]):",
@@ -288,7 +295,7 @@ fn assert_live_defer_completes(name: &str, src: &[&str], expect_out: &str) {
 
 // Negative controls (parked is not stuck): each `defer` recvs from a channel a STILL-LIVE task will
 // send to, ordered by a handshake (`go`), never a sleep (DEC-050). A false `deadlock` here is worse
-// than the hang the widening of `BlockCtx::judged` fixes.
+// than a hang.
 
 #[test]
 fn main_defer_that_a_live_job_will_feed_still_completes() {

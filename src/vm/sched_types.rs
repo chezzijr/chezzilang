@@ -105,8 +105,6 @@ pub(super) struct FiberCtx {
     pub(super) fault_trace_depth: usize,
     /// The task's guard identity ([`Vm::guard_token`]); 0 until its first swap-in.
     pub(super) guard_token: u64,
-    /// See [`Vm::held_reads`]: the read guards the task holds, carried across a park.
-    pub(super) held_reads: Vec<usize>,
     /// See [`Vm::held_guards`]: the guards the task's box-closure frames hold. Dropping a context
     /// releases them.
     pub(super) held_guards: Vec<super::core::UpdateGuard>,
@@ -175,6 +173,9 @@ pub(super) struct FiberCtx {
     /// its first schedule. It lives in the context, not in [`FiberState`], so the context alone
     /// roots it. `None` once started, and for every non-fiber context. NOT moved by `swap_ctx`.
     pub(super) start: Option<PendingCall>,
+    /// The steps left of a run's root fiber (`main` is fiber 1, [`Vm::run_root`]); `None` for
+    /// every other context. Holds no heap value. NOT moved by `swap_ctx`.
+    pub(super) root: Option<Box<super::exec::RootPlan>>,
 }
 
 /// Scheduling state of a fiber on the M:N scheduler.
@@ -221,33 +222,42 @@ pub(super) struct Fiber {
     /// with the cap off. Every park gap re-check reads it, and [`MnSched::deadline_drain`] requeues
     /// the parked fiber once it passes.
     pub(super) park_deadline: Option<std::time::Instant>,
+    /// The timer this fiber parked on ([`Vm::timer_wait`]): its wait ends at the fiber's resume,
+    /// or when the fiber drops.
+    pub(super) timer_wait: Option<super::core::TimerWait>,
     /// TICKET-287 — this fiber's carried [`Vm::fault_park`] while it is parked mid fault-unwind.
     pub(super) fault_park: Option<super::frames::FaultPark>,
     /// TICKET-289 — an Executor job's own cancel flag ([`JobSettle::flag`]); `None` for every
     /// other fiber. A running job reads it in place of its scope's shared flag.
     pub(super) job_cancel: Option<Arc<AtomicBool>>,
-    /// The verdict cut this fiber's wait inside a `defer` it parked in ([`SchedCore::cut_parked`]);
-    /// the resume ends the wait with the cut (`Vm::take_verdict_cut`).
-    pub(super) defer_cut: Option<VerdictCut>,
     /// This fiber's [`Vm::cut`] and `cancel_unwind_faulted` while it is not the running fiber:
     /// saved at every leave of `run_one_fiber` and taken back at the resume.
     pub(super) cut: Option<super::block::Cut>,
     pub(super) cancel_unwind_faulted: bool,
 }
 
-/// How a verdict cut a fiber parked in a `defer`, as it cuts a demoted cleanup's in-place wait
-/// ([`Vm::in_place_cut`]).
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(super) enum VerdictCut {
-    /// The sched-wide verdict ([`SchedCore::flag_deadlock`], a joined leaf): the wait ends with
-    /// the verdict's fault, which ranks below a cause the task already holds.
-    Sched,
-    /// An aborting family's cut ([`SchedCore::cut_aborting_families`]): the scope's cancel, so the
-    /// task unwinds as `Cancelled` unless it holds a cut already.
-    Family,
-}
-
 impl Fiber {
+    /// A run's root fiber (`main` is fiber 1, [`Vm::run_root`]): task 0 of scope 0, started with
+    /// no frame; its first run starts its first [`FiberCtx::root`] step.
+    pub(super) fn root(ctx: CtxBox) -> Fiber {
+        Fiber {
+            ctx,
+            state: FiberState::Ready,
+            task_index: 0,
+            scope_id: 0,
+            span: Span::RUNTIME,
+            resume_native: None,
+            pending: None,
+            fault_park: None,
+            park_site: None,
+            park_deadline: None,
+            timer_wait: None,
+            job_cancel: None,
+            cut: None,
+            cancel_unwind_faulted: false,
+        }
+    }
+
     /// TICKET-286 — has the `--timeout` deadline this fiber parked under passed?
     pub(super) fn deadline_due(&self) -> bool {
         self.park_deadline
@@ -267,16 +277,19 @@ impl Fiber {
         self.ctx.drains.is_empty()
     }
 
-    /// Does this parked fiber hold a box guard? Such a fiber is never cut as its family's cancel
-    /// (`cut_as_family`, `sched_core.rs`).
-    pub(super) fn holds_guard(&self) -> bool {
-        !self.ctx.held_guards.is_empty()
-    }
-
     /// The park gap re-check's cancel half: `scope_tripped` (this fiber's scope cancel, or an
     /// ancestor's) or a nursery this fiber owns, for a fiber that honours a cancel.
     pub(super) fn cancel_wakes(&self, scope_tripped: bool) -> bool {
-        self.honours_cancel() && (scope_tripped || self.owned_tripped())
+        self.honours_cancel() && (scope_tripped || self.job_tripped() || self.owned_tripped())
+    }
+
+    /// An Executor job's own flag (`Task.cancel()`, [`Fiber::job_cancel`]) is tripped. Its trip
+    /// runs under the sched lock a park re-checks under, so a trip between the wait's own check
+    /// and its park requeues the fiber instead of leaving it parked past the drain.
+    fn job_tripped(&self) -> bool {
+        self.job_cancel
+            .as_ref()
+            .is_some_and(|j| j.load(Ordering::Relaxed))
     }
 
     /// TICKET-188 — does a cancel of scope `family` wake this parked fiber? It is a member of the
@@ -393,12 +406,12 @@ pub(super) enum TaskOutcome {
         /// reports the faulting party's frames, never its own (`Vm::adopt_child_fault`).
         trace: Vec<TraceFrame>,
     },
-    /// The M:N deadlock detector aborted a nursery: EVERY still-parked fiber was recorded with this
-    /// synthetic `DEADLOCK_MSG` outcome (see [`SchedCore::flag_deadlock`]). It is DISTINCT from
+    /// The run's deadlock verdict ended this task at its wait: every asleep fiber is recorded with
+    /// this synthetic `DEADLOCK_MSG` outcome (see [`SchedCore::end_asleep`]). It is DISTINCT from
     /// `Fault` so `reduce_task_slots` can flush ALL parked buffers in task order (matching the serial
     /// engine, which printed those lines live before the deadlock returned) — a real multi-fault
-    /// reduce still flushes only the terminal fault's buffer. Only ever originates in `flag_deadlock`
-    /// (M:N); the legacy-pool reduce never produces it. In practice a real fault/exit trips
+    /// reduce still flushes only the terminal fault's buffer. Only ever originates in
+    /// `SchedCore::record_deadlocked`; the legacy-pool reduce never produces it. In practice a real fault/exit trips
     /// `terminate` before the deadlock detector fires, so a slot vector is normally all-`Deadlocked`;
     /// but the invariant is NOT relied upon — `reduce_task_slots` applies a strict `Exit` > `Fault` >
     /// `Deadlocked` precedence for the terminal outcome, so a mixed vector (were one to arise under a
@@ -407,6 +420,8 @@ pub(super) enum TaskOutcome {
         err: RuntimeError,
         out: Vec<u8>,
         stderr: Vec<u8>,
+        /// The id of the verdict that ended the task ([`super::quiesce::QuiesceState::verdict`]).
+        verdict: u64,
     },
 }
 
@@ -609,7 +624,7 @@ pub(super) struct EagerScope {
     /// body. The eager body has no inline worker between `EnterNursery` and `JoinNursery`, so a live
     /// drainer that does not depend on the bounded pool is what guarantees liveness — on a 1-core box
     /// the pool would farm zero helpers, and nested eager nurseries would exhaust the pool (an
-    /// undetectable hang, since `body_open` vetoes the deadlock predicate). Joined at the end of
+    /// undetectable hang, since the running body stays counted awake). Joined at the end of
     /// `join_eager_nursery`/`abort_eager_nursery` (it exits once the sched terminates). `None` only if
     /// the thread failed to spawn (then the inline join worker is the sole drainer — bounded loops
     /// still complete, just without mid-body concurrency).
@@ -638,7 +653,7 @@ pub(super) struct EagerScope {
     /// kill — measured, `examples/parallel_cross_nursery_{circular,fanout}.chz` both faulted
     /// `deadlock: every task in this parallel: block is blocked…`. One sched with one scope per
     /// nursery restores it: the inline owner drains the GLOBAL queue, so it runs a sibling scope's
-    /// fiber, and `is_deadlocked` sees the enclosing scope's still-open body and vetoes.
+    /// fiber, and the body stays counted awake until it parks.
     pub(super) scope: usize,
     /// TICKET-103 — scope lives on the spawning fiber's own sched (`self.mn`) because no private
     /// eager sched was available (`worker_count() == 1` or a denied `NestedDrainerSlot`); no
@@ -733,45 +748,6 @@ pub(super) enum ParkedEntry {
     ExecJoin(Fiber, std::sync::Weak<MnSched>, usize),
 }
 
-impl ParkedEntry {
-    /// TICKET-236 — could this parked fiber already resume? Asks the channels its `PendingOp`
-    /// names through the one pair of answers every blocked thing uses
-    /// ([`quiesce::recv_satisfiable`], [`quiesce::wait_satisfiable`]). A fiber with nothing to
-    /// ask (no `pending`, no channel, already claimed) answers `true`, which only declines the
-    /// verdict. `here` is the core of `me`, the sched this entry is parked on (it is locked): a
-    /// join answers [`SchedCore::join_of_over`].
-    pub(super) fn satisfiable(&self, here: &SchedCore, me: &MnSched) -> bool {
-        match self {
-            ParkedEntry::Recv(f) => f.pending.as_ref().is_none_or(|op| {
-                op.at
-                    .first()
-                    .is_none_or(|(core, _, _)| quiesce::recv_satisfiable(core, Some(&op.p)))
-            }),
-            ParkedEntry::Send(f) => f.pending.as_ref().is_none_or(|op| !op.p.is_queued()),
-            ParkedEntry::Guard(f) => f
-                .ctx
-                .guard_ticket
-                .as_ref()
-                .is_none_or(|t| t.satisfiable(f.ctx.guard_token)),
-            ParkedEntry::ExecJoin(_, s, slack) => s
-                .upgrade()
-                .is_none_or(|s| here.join_of_over(me, &s, *slack)),
-            ParkedEntry::Wait(wp) => {
-                let g = wp.fiber.lock().unwrap_or_else(|e| e.into_inner());
-                g.as_ref()
-                    .and_then(|f| f.pending.as_ref())
-                    .is_none_or(|op| {
-                        op.at.is_empty()
-                            || quiesce::wait_satisfiable(
-                                op.at.iter().map(|(c, _, s)| (&**c, *s)),
-                                Some(&op.p),
-                            )
-                    })
-            }
-        }
-    }
-}
-
 pub(super) struct MnSched {
     pub(super) core: Mutex<SchedCore>,
     pub(super) cv: Condvar,
@@ -780,17 +756,18 @@ pub(super) struct MnSched {
     // to the per-fiber `scopes[fiber.scope_id].cancel`, and its last reader (the netpoller's `register`,
     // via `poll_park_offload`) now takes that same per-scope flag. The outermost cancel lives on
     // `scopes[0].cancel` like every other scope's.
-    /// The prebuilt `deadlock` fault, cloned into every still-parked fiber's slot when the predicate
-    /// fires, so the join's lowest-index-fault reduce propagates it (`DEADLOCK_MSG`). The parked
-    /// fiber's OWN buffered stdout travels into its slot alongside this error (see `flag_deadlock`),
-    /// so a parked task's partial output flushes at its task-order slot like a real fault would.
+    /// The prebuilt `deadlock` fault, cloned into every still-parked fiber's slot when the run's
+    /// verdict fires, so the join's lowest-index-fault reduce propagates it (`DEADLOCK_MSG`). The
+    /// parked fiber's OWN buffered stdout travels into its slot alongside this error (see
+    /// `record_deadlocked`), so a parked task's partial output flushes at its task-order slot like a
+    /// real fault would.
     pub(super) deadlock_err: RuntimeError,
     /// D4a — the authoritative count of *runnable* fibers (queued and waiting to be picked up; not
     /// running, parked, or done). In D2b's single shared queue this exactly mirrors `runq.len()`, but
     /// it lives here as an atomic so D4b can split `runq` into per-worker local rings + a global
-    /// overflow (no single queue to `.len()`) while the deadlock predicate stays a cheap O(1) read.
+    /// overflow (no single queue to `.len()`) while "no work anywhere" stays a cheap O(1) read.
     /// Maintained under the core lock alongside every queue mutation; read by `take_runnable` to test
-    /// "no work anywhere" — for BOTH the deadlock predicate AND (D4e) the park gate. **Every
+    /// "no work anywhere" for (D4e) the park gate. **Every
     /// `fetch_add`/`fetch_sub` site holds the core lock** (`seed` is the sole exception — it runs
     /// before any worker is spawned); the only out-of-lock queue movements (`try_steal`, the
     /// batch-grab surplus push) are net-zero on this count, so they touch no atomic at all. D4e's
@@ -808,10 +785,9 @@ pub(super) struct MnSched {
     pub(super) steal_ctr: AtomicUsize,
     /// D5 — count of fibers currently off in the dirty/blocking pool (a 4th fiber state beyond
     /// running / runnable / parked / done). A blocking native offload transitions running→inflight;
-    /// the pool's completion transitions inflight→runnable. Read by the deadlock predicate
-    /// ([`MnSched::is_deadlocked`]) so an in-flight blocking call vetoes a false deadlock fire — the
-    /// fiber *will* come back runnable. Like `runnable`, only ever mutated under the core lock, so the
-    /// predicate's read is sound.
+    /// the pool's completion transitions inflight→runnable. An in-flight fiber stays counted awake
+    /// (`QuiesceState::awake`), so it never lets the deadlock verdict fire: it *will* come back
+    /// runnable. Like `runnable`, only ever mutated under the core lock.
     pub(super) inflight: AtomicUsize,
     /// W7-26r — the run's `--max-heap` cap (`0` = off), copied from the creating VM's heap. Uniform
     /// per run (the cap lives in the run's one heap core), so one field is the whole story. Read by `finish` to decide a scope's retained-backlog verdict — the observation site
@@ -827,40 +803,22 @@ pub(super) struct MnSched {
     /// to and `Vm::wake_on_send_key` already walks). A `send`/`close` on THIS sched must be able to
     /// wake a receiver parked on ANY other sched — sibling, ancestor or descendant — not just an
     /// ancestor, so `MnSched::wake_run_wide` walks this instead of the old upward-only ancestor chain.
-    /// Assigned AFTER construction (like `exec_registry`/`quiesce` below), so the predicate's
-    /// unit fixtures keep an empty registry — i.e. today's behaviour, which is what they test.
+    /// Assigned AFTER construction (like `exec_registry`/`quiesce` below), so the unit fixtures
+    /// keep an empty registry.
     pub(super) sched_registry: crate::vm::SchedRegistry,
-    /// TICKET-112 — `true` for a PRIVATE NESTED eager sched (`activate_eager_nursery` with
-    /// `self.mn.is_some()`): its scope-0 body is run by a fiber of ANOTHER sched, not a thread of its
-    /// own. That fiber is counted on its own sched's `running`/`runnable`/`parked_n`/`inflight`/
-    /// `blocked_owners`, and every sched sits in `sched_registry` and `QuiesceState::eager_bodies` — so
-    /// its liveness is always visible somewhere else. `quiesced_core`'s body clause and
-    /// `is_deadlocked_ignoring_jobs`'s own-verdict decline both read this flag. Always `false` for an
-    /// OUTERMOST eager sched, whose body runs on its own dedicated drainer thread.
-    pub(super) body_is_fiber: bool,
     /// TICKET-208 — `Some` for an `Executor`'s sched: a scope with no body thread, whose submitters
-    /// are other parties. Such a sched never judges itself locally ([`MnSched::is_deadlocked_given`])
-    /// and its runners leave when no task is unfinished.
+    /// are other parties. Its runners leave when no task is unfinished.
     pub(super) detached: Option<std::sync::Weak<ExecutorCore>>,
-    /// gaps.md W7-56 — the run's [`ExecRegistry`], so [`MnSched::is_deadlocked`] can see an eager
-    /// `Executor` job as a live, UNCOUNTED feeder. The predicate's counters model fibers of THIS
-    /// sched only; an `ex.submit(f)` job runs on the shared pool with no fiber, no `runnable`, no
-    /// `inflight` — so a nursery whose only task parks on a channel that job is about to feed
-    /// quiesces and faults a healthy program. Same veto `quiesce::QuiesceState::quiesced` already
-    /// applies process-wide (`parties.len() < live`), for the same reason.
+    /// gaps.md W7-56 — the run's [`ExecRegistry`]: the `Executor`s this run has live.
     ///
-    /// Assigned AFTER construction (like `exec_registry`) rather than through `new`, so the predicate's
-    /// unit fixtures keep an empty registry — i.e. today's behaviour, which is what they test.
+    /// Assigned AFTER construction (like `sched_registry`) rather than through `new`, so the unit
+    /// fixtures keep an empty registry.
     pub(super) exec_registry: crate::vm::core::ExecRegistry,
-    /// gaps.md W7-58 — the run's [`quiesce::QuiesceState`], so an idle worker of this sched can JUDGE
-    /// the process-wide verdict. A nursery OWNER never reaches [`Vm::block_halt_check`] (it sits in
-    /// `mn_worker_loop`, not in a blocking native), so a run whose only stuck parties are nursery
-    /// owners has no polling judge at all and would hang with the party registration alone.
+    /// gaps.md W7-58 — the run's [`quiesce::QuiesceState`]: its awake count, whose park or end to
+    /// 0 calls [`MnSched::on_deadlock`], and its `RunHalt` latch.
     ///
-    /// Assigned AFTER construction (like `sched_registry`/`exec_registry`) rather than through `new`, so
-    /// the predicate's unit fixtures keep an empty state — i.e. today's behaviour, which is what they
-    /// test (an empty registry means `live == 1` and `parties` empty, so `quiesced` is never reached
-    /// past its count gate).
+    /// Assigned AFTER construction (like `sched_registry`/`exec_registry`) rather than through
+    /// `new`, so the unit fixtures keep an empty state.
     pub(super) quiesce: Arc<quiesce::QuiesceState>,
     /// TICKET-128 (W13-25) — the idle sleep for a worker with NOTHING runnable (`runnable == 0`).
     /// Split off `cv` (which stays for every timed wait, the joiner, and terminate/deadlock/cancel
@@ -875,6 +833,10 @@ pub(super) struct MnSched {
     /// `runnable > 0` but nothing grabbed yet). `recruit` skips waking an idle sleeper while any
     /// worker is already spinning — a spinner will pick up the work on its own next pass.
     pub(super) spinning: AtomicUsize,
+    /// Host workers visiting this Executor's sched now ([`Vm::visit_guest`]). A handoff wake
+    /// recruits no host worker while one visits: the visitor takes the handed-off fiber, and it
+    /// checks this sched again under the host's lock after it leaves.
+    pub(super) visitors: AtomicUsize,
     /// TICKET-159/211 — how many runner leases `Vm::start_runners` handed to `runner_cache` for this
     /// sched are still serving it. The count lives on the sched because the thread that starts them
     /// (a spawning fiber, or the body at its own block) is not the thread that waits for them:
@@ -913,37 +875,9 @@ pub(super) struct JoinScope {
     pub(super) bytes: usize,
     /// `true` while an EAGER nursery's body is still running (between `EnterNursery` and `JoinNursery`)
     /// and may still `inject` more tasks. While set, a transient `done == total` for this scope must NOT
-    /// terminate the global sched and `is_deadlocked` is vetoed (the body is live work the sched can't
-    /// see). `JoinNursery` clears it. Always `false` for a lazy (queue-at-join) nursery.
+    /// terminate the global sched (the body is live work the sched can't see). `JoinNursery` clears
+    /// it. Always `false` for a lazy (queue-at-join) nursery.
     pub(super) body_open: bool,
-    /// §2c1 — `true` while this eager scope's body thread is itself BLOCKED in place (parked on a
-    /// channel / `wait:` / an executor join — the body marks of a wait's counts set and clear
-    /// this, `block::wait_steps`).
-    ///
-    /// `body_open` means "the body may still `inject`". While the body is blocked that is FALSE — it
-    /// cannot reach another `spawn` until something wakes it — so the DEADLOCK predicate must stop
-    /// vetoing on it, or a top-level nursery (whose body is open for essentially the whole program)
-    /// would turn every genuine `main`-plus-sibling deadlock into a hang. Derived from what is
-    /// *impossible*, not from what looks idle — the same shape as `awaiting_builder` below.
-    ///
-    /// **TERMINATE still vetoes on plain `body_open`** (`all_scopes_done() && !any_body_open()`): the
-    /// body is only blocked, not finished, and it may well `spawn` again after it wakes. Only
-    /// [`SchedCore::any_body_injecting`] — the deadlock predicate's question — honours this flag.
-    pub(super) body_blocked: bool,
-    /// Cross-nursery flat scheduler — `true` while this scope is an EARLY-ENLISTED outer nursery still
-    /// awaiting the inline builder's own `JoinNursery` (`early_enlist_outer` sets it; `join_enlisted_scope`
-    /// / `abort_enlisted_scope` clear it as the builder begins draining the scope). While set, the scope's
-    /// parked fibers have a live external feeder — the builder body, which may still `send`/`close`/`spawn`
-    /// — so a quiesce in which EVERY incomplete scope is `awaiting_builder` is NOT a deadlock: the builder
-    /// has finished all nested service and will return to the body to feed them (see
-    /// `all_incomplete_awaiting_builder` + `is_deadlocked`).
-    ///
-    /// §2c1 — an EAGER scope now raises it too, for the span in which its body is parked in a NESTED
-    /// nursery's join (`BodyMark::Awaiting`). The meaning is identical: a builder will
-    /// return to this scope and may then `send`/`close`, so a quiesce in which the inner scope is DONE
-    /// is not a deadlock. It stays `false` for a body blocked on a CHANNEL — that body resumes only if
-    /// somebody feeds it, so it promises no progress.
-    pub(super) awaiting_builder: bool,
     /// This scope's cancel token (the SAME `Arc` cloned onto fibers running in this scope; distinct
     /// per nursery so an inner fault cancels ONLY its scope, never an outer sibling — the structured-
     /// concurrency invariant). Read by `park`/`park_wait`'s gap re-check and the running fiber's
@@ -957,22 +891,13 @@ pub(super) struct JoinScope {
     /// grandchild hangs the teardown forever. Read at every checkpoint via the shell's re-pointed
     /// `Vm::cancel_outer` (`Vm::halt_requested`).
     pub(super) ancestors: Vec<Arc<AtomicBool>>,
-    /// This scope's own deadlock fault, used instead of `MnSched::deadlock_err` when set. `flag_deadlock`
-    /// clones ONE error into every parked fiber's slot (DEC-048), so a scope with a more specific span
-    /// (the owner-fiber arm of `run_mn_nursery_nested`) overrides it here. `None` for every other scope,
-    /// including an early-enlisted outer scope (DEC-048: it reports the BUILDER's span) and the
-    /// `(None, Some(held))` late-spawn arm (no `blocked_owners` bracket, so no per-scope span either).
+    /// This scope's own deadlock fault, used instead of `MnSched::deadlock_err` when set. The
+    /// verdict clones ONE error into every asleep fiber's slot with no park site (DEC-048,
+    /// `record_deadlocked`), so a scope with a more specific span (the owner-fiber arm of
+    /// `run_mn_nursery_nested`) overrides it here. `None` for every other scope, including an
+    /// early-enlisted outer scope (DEC-048: it reports the BUILDER's span) and the
+    /// `(None, Some(held))` late-spawn arm.
     pub(super) deadlock_err: Option<RuntimeError>,
-    /// TICKET-103 — the fibers OF THIS SCOPE blocked at a nested join: inline ones (of
-    /// `SchedCore::blocked_owners`) and join-parked ones (`SchedCore::join_parked`). A joined family
-    /// holding one is interior for `flag_deadlock_leaves`: that fiber may feed it once its own join
-    /// returns.
-    pub(super) owners_blocked: usize,
-    /// TICKET-103 — owners joining the nursery whose ORIGIN scope this is, on this same sched:
-    /// inline ones (set by `join_fiber_owned_nursery`, `abort_fiber_owned_nursery` and
-    /// `run_mn_nursery_nested`'s owner arm) and join-parked ones (`MnSched::park_join`). Its family
-    /// is a target for `flag_deadlock_leaves`.
-    pub(super) joins_blocked: usize,
     /// TICKET-125 — the scope of the fiber that owns this fiber-owned nursery; `None` otherwise.
     pub(super) parent_scope: Option<usize>,
 }
@@ -1035,10 +960,6 @@ impl ScopeTable {
 
     pub(super) fn ids(&self) -> Vec<usize> {
         self.live.iter().map(|(i, _)| *i).collect()
-    }
-
-    pub(super) fn count(&self) -> usize {
-        self.live.len()
     }
 
     /// The newest live scope: the only one that owns the `slots` tail and may grow in place.
@@ -1138,14 +1059,16 @@ pub(super) struct JobStep {
 }
 
 pub(super) struct SchedCore {
-    /// TICKET-236 — the run's epoch, the same `Arc` as this sched's
-    /// [`quiesce::QuiesceState::epoch`] ([`MnSched::join_run`] is the one place that pairs them).
-    /// Held here so each way out of the counts moves it inside the lock hold that writes the
-    /// count ([`SchedCore::note_left`]).
-    pub(super) left: Arc<AtomicU64>,
     /// The run's deadlock listing, the same `Arc` as [`quiesce::QuiesceState::listing`]: a parked
     /// fiber the verdict cuts adds its entry here ([`SchedCore::record_deadlocked`]).
     pub(super) listing: Arc<super::deadlock::Listing>,
+    /// The run's awake count, the same `Arc` as [`quiesce::QuiesceState::awake`] (paired by
+    /// [`MnSched::join_run`]): a park, a wake and a task's start and end move it inside the lock
+    /// hold that makes the change.
+    pub(super) awake: Arc<quiesce::Awake>,
+    /// True on a run's root sched ([`Vm::run_root`]): its task 0 of scope 0 is `main` (fiber 1),
+    /// whose end hands main's count back to the driving thread.
+    pub(super) root: bool,
     /// The global overflow / seed queue. Seed + every coordinator-path requeue (deadlock flag,
     /// cancel drain) land here; per-worker requeues go to a worker's `locals[wid]` (D4c). Drained by
     /// a worker only after its own local is empty, so the global queue is the shared fallback.
@@ -1158,29 +1081,11 @@ pub(super) struct SchedCore {
     pub(super) parked: std::collections::HashMap<usize, Vec<ParkedEntry>>,
     /// Decision-F per-task outcome slots, FLAT across every nursery scope, indexed by
     /// `Fiber::task_index` (= `scopes[scope_id].base_index + local_i`). `None` until that task ends.
-    /// Kept flat (not partitioned into `JoinScope`) so `finish`/`flag_deadlock`/`inject`/`reduce` index
+    /// Kept flat (not partitioned into `JoinScope`) so `finish`/`end_asleep`/`inject`/`reduce` index
     /// by a single global index, minimizing churn; each scope owns a contiguous `base_index..base+total`
-    /// sub-range (reduce/take operate per-scope on that sub-slice — see `take_scope_slots`).
+    /// sub-range (reduce/take operate per-scope on that sub-slice — see `drain_scopes`).
     pub(super) slots: Vec<Option<TaskOutcome>>,
     pub(super) running: usize, // fibers currently swapped into a worker (executing)
-    /// Of `running`, how many are fibers whose OS thread is blocked in a NESTED nursery join on THIS
-    /// sched. Such a fiber cannot send, yield or spawn until its child scope moves, so it is stuck by
-    /// construction — see `is_deadlocked_ignoring_jobs`'s `running == blocked_owners` clause.
-    pub(super) blocked_owners: usize,
-    /// TICKET-099 — of `blocked_owners`, how many are blocked on a CHILD SCHED (a private eager
-    /// nursery of its own), not a scope on THIS sched. This sched has NO visibility into that child's
-    /// progress (it is not one of `scopes`), so — unlike a same-sched `blocked_owners` fiber, whose
-    /// child scope's own siblings would show up in THIS sched's `running`/`runnable` if they could feed
-    /// it — this sched cannot tell whether the child is genuinely stuck or about to resolve. A nonzero
-    /// count vetoes only THIS sched's OWN fault decision (`is_deadlocked_ignoring_jobs`), the same way
-    /// `is_deadlocked`'s `outstanding_jobs` veto does for an uncounted `Executor` sender: the child's
-    /// own deadlock detection (if genuine) will fire on the CHILD sched instead, and its `Fault`
-    /// propagates back through this fiber's own call return (`MnSched::finish_with` trips its cancel)
-    /// exactly like any other task failure — never through this sched declaring itself deadlocked.
-    /// `local_quiesced` does NOT read this field: a peer sched's veto (`peer_can_move` →
-    /// `local_quiesced`) must still see THIS sched as quiesced, or the child's own genuine deadlock is
-    /// vetoed forever (the hang this ticket's cross-sched `blocked_owner_guard` widening fixes).
-    pub(super) cross_sched_blocked_owners: usize,
     /// TICKET-118 (W13-7) — the OS thread of the top-level `Vm` (`mn.is_none()`) joining this
     /// sched's nursery, the only thread that may hand its bounded-pool slot over while it waits
     /// (DEC-052).
@@ -1189,13 +1094,10 @@ pub(super) struct SchedCore {
     /// cancelled scope owing a drain. Written only by [`SchedCore::drain_scan_due`].
     pub(super) drain_scan_gen: u64,
     pub(super) parked_n: usize, // total fibers across every `parked` bucket
-    /// Parked fibers [`SchedCore::cut_aborting_families`] moved to `global`, owed their
-    /// `runnable` count by the verdict's caller ([`MnSched::take_cut_requeued`]).
-    pub(super) cut_requeued: usize,
     /// TICKET-103 — owners parked at the `JoinNursery` of a fiber-owned nursery (`Disp::JoinPark`),
     /// as `(origin scope id, fiber)`. In neither `running` nor `parked_n`. Woken by
     /// `MnSched::wake_completed_joins` once every scope of the origin's family is done; recorded
-    /// `Deadlocked` by `flag_deadlock`.
+    /// `Deadlocked` by the run's verdict ([`SchedCore::take_asleep`]).
     pub(super) join_parked: Vec<(usize, Fiber)>,
     /// The scheds holding a fiber parked in an `Executor` join of this sched, with the join's
     /// slack and bucket key (`MnSched::park_exec_join`). [`SchedCore::task_done`] wakes each whose
@@ -1211,16 +1113,13 @@ pub(super) struct SchedCore {
     pub(super) scopes: ScopeTable,
     pub(super) terminate: bool, // every worker loop exits once set (all scopes done, deadlock, or os.exit/fault)
     /// TICKET-296: the deadlock verdict cut every blocked-in-place waiter of this sched. Read through
-    /// `SchedCore::cut_in_place`. `flag_deadlock` latches `terminate` only when no demoted fiber is
+    /// `SchedCore::cut_in_place`. `end_asleep` latches `terminate` only when no demoted fiber is
     /// left to resume: a cut fiber unwinds and can requeue itself.
     pub(super) verdict_cut: bool,
-    /// TICKET-181 — THE registry of blocked waiters the counters cannot see: every demoted recv
-    /// or `wait:`, every M:N guard wait, and every blocked body of this sched's thread
-    /// (the body marks of a wait's counts, `block::wait_steps`), keyed by a token. Each entry answers "can you still be
-    /// satisfied?" ([`crate::vm::block::Waiter::satisfiable`]: a cancel flag it would honour, or its
-    /// `PartyWait`), and `quiesced_core_given` vetoes while any can — the ONE veto clause. A new
-    /// blocking shape adds a `PartyWait` arm, never a new list here. `fiber` entries are the demoted
-    /// victims the verdict may claim. Registered/un-registered under core lock A; a demoted wait's
+    /// TICKET-181 — the registry of blocked-in-place waiters of this sched, keyed by a token
+    /// ([`crate::vm::block::Waiter`]). `fiber` entries are demoted fibers: while one is registered,
+    /// the verdict's `end_asleep` keeps the sched's workers ([`MnSched::any_fiber_waiter`]).
+    /// Registered/un-registered under core lock A; a demoted wait's
     /// entry is removed in the same lock hold as the pop that ends it (DEC-176).
     pub(super) waiters: std::collections::HashMap<u64, crate::vm::block::Waiter>,
     pub(super) next_waiter_tok: u64,

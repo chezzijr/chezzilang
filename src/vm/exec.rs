@@ -12,9 +12,7 @@ pub(super) fn plain_err(message: String, span: Span) -> RuntimeError {
         is_assert: false,
         is_over_memory: false,
         is_timed_out: false,
-        is_deadlock: false,
         is_panic: false,
-        blocked: None,
     }
 }
 
@@ -100,9 +98,7 @@ impl Vm {
             is_assert: false,
             is_over_memory: false,
             is_timed_out: false,
-            is_deadlock: false,
             is_panic: false,
-            blocked: None,
         })
     }
 
@@ -188,13 +184,13 @@ impl Vm {
             guard_suspend: None,
             exec_join_suspend: None,
             park_site: None,
+            timer_wait: None,
             wait_site: None,
             pending: None,
             fault_park: None,
             offload: None,
             poll_park: None,
             pending_connect: None,
-            held_reads: Vec::new(),
             held_guards: Vec::new(),
             guard_ticket: None,
             held_gens: Vec::new(),
@@ -213,6 +209,7 @@ impl Vm {
             repr_active: Vec::new(),
             wid: 0,         // D5 owe #3 (Path C) — set in mn_worker_loop
             demoted: false, // D5 owe #3 (Path C)
+            guest_of: None,
             extern_spare: None,
             slice_in_place: false,
             run_permit: None,
@@ -282,7 +279,6 @@ impl Vm {
             ctx.guard_token = fresh_guard_token();
         }
         std::mem::swap(&mut self.guard_token, &mut ctx.guard_token);
-        std::mem::swap(&mut self.held_reads, &mut ctx.held_reads);
         std::mem::swap(&mut self.held_guards, &mut ctx.held_guards);
         std::mem::swap(&mut self.guard_ticket, &mut ctx.guard_ticket);
         std::mem::swap(&mut self.held_gens, &mut ctx.held_gens);
@@ -793,8 +789,17 @@ impl Vm {
 
     // ----- top-level drivers -----
 
-    /// Run every module in dependency order, then the entry's `main()`.
+    /// Run every module's top level in dependency order, as the run's root fiber.
     pub(super) fn run(&mut self) -> Result<(), RuntimeError> {
+        self.run_start();
+        let steps = (0..self.program.modules.len())
+            .map(RootStep::Module)
+            .collect();
+        self.run_root(steps, Vec::new()).map(|_| ())
+    }
+
+    /// The start of a run on this thread: its runner permit, its heap attach, main's count.
+    pub(super) fn run_start(&mut self) {
         // TICKET-230 — the run's main thread is one of the N runners. The guard keeps a second
         // `run()` on this `Vm` from dropping the first permit and running with none.
         #[cfg(test)]
@@ -804,10 +809,201 @@ impl Vm {
         }
         // M1.5 — this thread runs the program: it joins the run's heap until the `Vm` drops.
         self.gc_attach();
-        for idx in 0..self.program.modules.len() {
-            self.run_module(idx)?;
+        // Main is the run's first task; it ends in `Vm::finish_run`.
+        self.quiesce.awake.task_started(1);
+    }
+
+    /// THE driver of a run's root fiber (plan 2026-11-16 Task 1): `steps` run as fiber 1, scope 0,
+    /// of a fresh [`MnSched`], as Go's `main` is goroutine 1, so every wait in them parks or is
+    /// judged like any task's. This thread is worker 0 of that sched, and `worker_count() - 1`
+    /// pool shells help. `args` sit on the fiber's stack for an [`RootStep::Invoke`]. Returns
+    /// the value the last step kept (`nil` if none), or the fiber's fault, exit or deadlock,
+    /// reduced as a join reduces a slot; a fault carries the fiber's own trace.
+    pub(super) fn run_root(
+        &mut self,
+        steps: Vec<RootStep>,
+        args: Vec<Value>,
+    ) -> Result<Value, RuntimeError> {
+        // The kept value lands in this cell, rooted on this `Vm`'s stack across the run.
+        let cell = self.heap.alloc(Obj::Cell(RCell::new(Value::nil())));
+        self.push(Value::obj(cell));
+        let cancel = Arc::new(AtomicBool::new(false));
+        let nworkers = worker_count();
+        let mut inner = MnSched::new(
+            1,
+            nworkers,
+            Arc::clone(&cancel),
+            self.nursery_deadlock_err(Span::RUNTIME),
+            self.heap.mem_cap(),
+        );
+        inner.sched_registry = Arc::clone(&self.sched_registry);
+        inner.exec_registry = Arc::clone(&self.exec_registry);
+        inner.join_run(&self.quiesce);
+        let sched = Arc::new(inner);
+        sched.mark_all_runners_claimed();
+        self.register_sched(&sched);
+        {
+            let mut c = sched.lock();
+            c.scopes[0].ancestors = self.scope_ancestors();
+            c.root = true;
         }
-        Ok(())
+        // This sched's workers run the run's Executor jobs too, while it lives.
+        let prev_host = self.quiesce.set_host(Arc::downgrade(&sched));
+        let mut stack = Vec::with_capacity(1 + args.len());
+        stack.push(Value::obj(cell));
+        stack.extend(args);
+        let ctx = FiberCtx {
+            stack,
+            owns_side: true,
+            module_objs: Arc::clone(&self.module_objs),
+            task: self.task.child(),
+            root: Some(Box::new(RootPlan {
+                steps: steps.into(),
+            })),
+            ..FiberCtx::default()
+        };
+        let ctx = self.root_registry.register(ctx);
+        // One runner thread per other worker (Go: one M per P), not the process pool: the pool
+        // starts `worker_count()` threads of its own beside this one. Every thread is born before
+        // the seed: no fiber runs while this thread still spawns (main's code could cap the
+        // address space under a thread not yet born, as the pool's up-front start never let it).
+        for wid in 1..nworkers {
+            let shell = self.spawn_shell(&sched, &cancel);
+            if super::sched::spawn_worker_thread(shell, &sched, "chezzi-mn", wid, SENTINEL_SCOPE)
+                .is_err()
+            {
+                sched.unclaim_runner(wid);
+            }
+        }
+        sched.seed(vec![Fiber::root(ctx)]);
+        // Main is one task of the run's count: this thread hands its count to fiber 1, which
+        // hands it back at its end ([`MnSched::finish_with`]). The seed counted the fiber awake.
+        self.quiesce.awake.task_ended();
+        let mut shell = self.spawn_shell(&sched, &cancel);
+        // This thread is worker 0 under the gate like any worker: its loop takes the permit for
+        // each fiber and gives it back at a wait. Kept across the scope wait, it would hold the
+        // only permit at T=1 from the worker that resumes the root.
+        self.width_release();
+        self.wait_door(&[], |_| {
+            // Scope 0 (`main`) can end before its children (an `os.exit`): this thread works
+            // until the sched ends, not until scope 0 ends, so a lone worker runs them too.
+            shell.mn_worker_loop(&sched, 0, SENTINEL_SCOPE);
+            // The root's whole family: a demoted child the verdict cuts in place lists itself
+            // before the root's own slot is reduced.
+            sched.wait_for_completion();
+        });
+        self.quiesce.set_host(prev_host);
+        drop(shell);
+        #[cfg(test)]
+        super::RUN_PICKS.with(|p| p.set(p.get() + sched.picks.load(Ordering::Relaxed)));
+        let (r, trace) = self.reduce_slots(sched.drain_scopes(&[0]));
+        if r.is_err() && self.deadlocked() {
+            // The verdict ended every task where it waited: what each buffered follows main's
+            // output, in slot order (a parked join reduced none of them).
+            let _ = self.reduce_slots(sched.take_rest_slots());
+        }
+        let cell = self.pop();
+        if let Err(e) = r {
+            // The root's fault is its own: its trace is the report's, with no cut on this `Vm`.
+            if let Some(trace) = trace {
+                self.fault_trace = Some(trace);
+                self.fault_trace_depth = usize::MAX;
+            }
+            return Err(e);
+        }
+        let h = cell.as_obj().expect("the root's result cell");
+        let Obj::Cell(slot) = self.heap.get(h) else {
+            unreachable!("the root's result cell is a cell");
+        };
+        Ok(slot.get())
+    }
+
+    /// The root fiber's steps after `res`, its last run: each next step starts once the one
+    /// before it returned with no frame left and nothing paused. A step that parks leaves the
+    /// rest for the resume.
+    pub(super) fn root_steps(
+        &mut self,
+        plan: &mut RootPlan,
+        mut res: Result<(), RuntimeError>,
+    ) -> Result<(), RuntimeError> {
+        while res.is_ok() && !self.paused() && self.frames.is_empty() {
+            let Some(step) = plan.steps.pop_front() else {
+                break;
+            };
+            res = self.root_step(step, plan);
+        }
+        res
+    }
+
+    fn root_step(&mut self, step: RootStep, plan: &mut RootPlan) -> Result<(), RuntimeError> {
+        let mark = self.stack.len();
+        match step {
+            RootStep::Module(idx) => {
+                let (proto, home) = self.init_module(idx)?;
+                plan.steps.push_front(RootStep::Ret {
+                    mark,
+                    then: RootRet::Drop,
+                });
+                self.push_frame(proto, home, None, Vec::new(), false, true, Span::RUNTIME)?;
+                self.run_until(0)
+            }
+            RootStep::Entry(name) => {
+                let (callee, span) = self.entry_callee(&name)?;
+                if self.push_callback_frame(callee, &[], RetAction::Push, span)? {
+                    plan.steps.push_front(RootStep::Ret {
+                        mark,
+                        then: RootRet::Entry(span),
+                    });
+                    return self.run_until(0);
+                }
+                let ret = self.invoke_value(callee, Vec::new(), span)?;
+                match self.top_level_error(ret, span) {
+                    Some(e) => Err(e),
+                    None => Ok(()),
+                }
+            }
+            RootStep::Invoke(proto) => {
+                debug_assert!(mark >= 1, "the result cell sits below an invoke's args");
+                let home = self.entry_home();
+                plan.steps.push_front(RootStep::Ret {
+                    mark: 1,
+                    then: RootRet::Keep,
+                });
+                self.push_frame_in_place(proto, home, None, 1, Span::RUNTIME)?;
+                self.run_until(0)
+            }
+            RootStep::Drain(from) => match self.drain_executors_from(from) {
+                // The join parked: the drain re-runs on the resume (every join is idempotent).
+                Err(_) if self.exec_join_suspend.is_some() => {
+                    plan.steps.push_front(RootStep::Drain(from));
+                    Ok(())
+                }
+                r => r,
+            },
+            RootStep::Ret { mark, then } => {
+                let v = if self.stack.len() > mark {
+                    self.stack[mark]
+                } else {
+                    Value::nil()
+                };
+                let r = match then {
+                    RootRet::Drop => Ok(()),
+                    RootRet::Entry(span) => match self.top_level_error(v, span) {
+                        Some(e) => Err(e),
+                        None => Ok(()),
+                    },
+                    RootRet::Keep => {
+                        let cell = self.stack[0].as_obj().expect("the root's result cell");
+                        if let Obj::Cell(slot) = self.heap.write(cell).get(cell) {
+                            slot.set(v);
+                        }
+                        Ok(())
+                    }
+                };
+                self.stack.truncate(mark);
+                r
+            }
+        }
     }
 
     /// The entry module's runtime object (its globals/home), valid after `run()` has initialized the
@@ -832,19 +1028,11 @@ impl Vm {
         Ok(())
     }
 
+    /// One `chezzi test` invoke: `proto` on `args`, as a root fiber of its own ([`Vm::run_root`]),
+    /// so a fault, a cut or a deadlock in one test ends only that fiber.
     fn run_invoke(&mut self, proto: ProtoId, args: Vec<Value>) -> Result<Value, RuntimeError> {
         self.reset_for_invoke();
-        let floor = self.nurseries.len();
-        let home = self.entry_home();
-        let r = self.run_proto(proto, home, None, args, true, false, Span::RUNTIME);
-        // The result rides the operand stack across the reclaim, which can wait and so collect.
-        let Ok(v) = r else {
-            let _ = self.drain_escaped_nursery(floor);
-            return r;
-        };
-        self.push(v);
-        let _ = self.drain_escaped_nursery(floor);
-        Ok(self.pop())
+        self.run_root(vec![RootStep::Invoke(proto)], args)
     }
 
     /// The per-invocation reset EVERY `chezzi test` entry point shares — [`Vm::invoke_test`],
@@ -918,6 +1106,13 @@ impl Vm {
     /// the entry module's namespace (so a re-exported import works too) and calls it with no args.
     /// A missing name (or a non-callable binding) is a clear runtime error rather than a silent no-op.
     pub fn invoke_entrypoint(&mut self, fn_name: &str) -> Result<(), RuntimeError> {
+        self.run_root(vec![RootStep::Entry(fn_name.into())], Vec::new())
+            .map(|_| ())
+    }
+
+    /// [`Vm::invoke_entrypoint`]'s callee and the span of its call: the named binding of the entry
+    /// module, which must be callable.
+    fn entry_callee(&mut self, fn_name: &str) -> Result<(Value, Span), RuntimeError> {
         let span = Span::RUNTIME;
         let home = self.entry_home();
         // Read the binding by name from the entry module's slot table (mirrors `module_define`).
@@ -950,15 +1145,10 @@ impl Vm {
         // `entry_decl_span` returns either a true lexed coordinate or `None` — never a coordinate
         // with an unresolvable file id. `render_span` already omits the path for a file id it can't
         // resolve, so this invents nothing (DEC-048).
-        let entry_span = self.entry_decl_span(callee).unwrap_or(span);
         // Symmetric with the unhandled-top-level-Err rule: if the entry fn returns `Err(..)`/`None`,
-        // surface it as "unhandled error: <detail>" (rc=1) rather than silently discarding it. This
-        // lets a manifest entrypoint legitimately be `-> T!` and use `?`.
-        let ret = self.invoke_value(callee, Vec::new(), entry_span)?;
-        if let Some(e) = self.top_level_error(ret, entry_span) {
-            return Err(e);
-        }
-        Ok(())
+        // surface it as "unhandled error: <detail>" (rc=1) rather than silently discarding it
+        // ([`RootRet::Entry`]). This lets a manifest entrypoint legitimately be `-> T!` and use `?`.
+        Ok((callee, self.entry_decl_span(callee).unwrap_or(span)))
     }
 
     /// `chezzi test` — invoke a suite method/lifecycle hook proto with `self` bound to `recv` (a
@@ -1096,32 +1286,22 @@ impl Vm {
     /// top's `defer`s unwind counts too (no timestamp is kept). Only executors created since `mark`
     /// count (a test's own; `0` for a whole run).
     ///
-    /// Call it BEFORE any drain or reap: a drain takes the slots this reads. A replaced deadlock
-    /// keeps its `.deadlock()` stamp (DEC-135), so `finish_run` still drains on it.
+    /// Call it BEFORE any drain or reap: a drain takes the slots this reads. A job fault that
+    /// outranks a latched verdict drops the verdict's listing, so the driver reports the job fault
+    /// ([`Vm::report`]); `finish_run` still drains on the latched verdict.
     pub fn rank_end(&mut self, r: Result<(), RuntimeError>) -> Result<(), RuntimeError> {
         // The ONLY taker of the job-fault cell, and it reports what it takes — for an `Ok` run
         // too: a job can fault while a passing run reads no halt.
         let job = self.quiesce.take_job_fault();
-        // TICKET-223 — the ONLY taker of the deadlock report too, so a drain after the verdict finds
-        // no report and its join waits for the victims (the verdict itself stays latched).
-        let dl = self.quiesce.take_deadlock_report();
         if self.pending_exit.is_some() {
             return r;
         }
         if let Some((je, trace)) = job {
             self.adopt_child_fault(None, trace);
-            return Err(if matches!(&r, Err(e) if e.is_deadlock) {
-                je.deadlock()
-            } else {
-                je
-            });
+            self.take_listing();
+            return Err(je);
         }
-        match (r, dl) {
-            (Ok(()), Some((msg, site))) => {
-                Err(self.err(String::new(), site).deadlock().at_site(&msg, site))
-            }
-            (r, _) => r,
-        }
+        r
     }
 
     /// The per-test A2 join: drain (join) only the executors created SINCE `mark`, i.e. by the test
@@ -1134,7 +1314,9 @@ impl Vm {
         self.rank_end(r)
     }
 
-    pub(super) fn run_module(&mut self, idx: usize) -> Result<(), RuntimeError> {
+    /// Build module `idx`'s runtime object and bind its imports; returns its top level and the
+    /// object, for [`RootStep::Module`] to run.
+    pub(super) fn init_module(&mut self, idx: usize) -> Result<(ProtoId, GcRef), RuntimeError> {
         let m = self.program.modules[idx].clone();
         // M19 Phase 2b: pre-size the namespace to the compiler's slot count and build its name→slot
         // index from `global_slots`, so `DefineGlobalSlot(i)` / bind-import writes land in the slot
@@ -1186,19 +1368,11 @@ impl Vm {
             self.bind_import(mod_obj, imp)?;
         }
 
-        // Run the module body once. No module auto-runs `main` — it's an ordinary function the
-        // program calls itself (scripting-language model). An unhandled `Err`/`None` reaching the
-        // top level via a top-level `?` exits during this call; a bare dropped value does not.
-        self.run_proto(
-            m.toplevel,
-            mod_obj,
-            None,
-            Vec::new(),
-            false,
-            true,
-            Span::RUNTIME,
-        )?;
-        Ok(())
+        // The caller runs the module body once. No module auto-runs `main` — it's an ordinary
+        // function the program calls itself (scripting-language model). An unhandled `Err`/`None`
+        // reaching the top level via a top-level `?` exits during that run; a bare dropped value
+        // does not.
+        Ok((m.toplevel, mod_obj))
     }
 
     pub(super) fn bind_import(
@@ -1270,6 +1444,38 @@ impl Vm {
     }
 
     // ----- arithmetic / comparison -----
+}
+
+/// One step of a run's root fiber ([`Vm::run_root`]).
+#[derive(Debug)]
+pub(super) enum RootStep {
+    /// initialize module `idx` and run its top level
+    Module(usize),
+    /// call the entry module's named fn (a `module:function` manifest entrypoint)
+    Entry(Box<str>),
+    /// `chezzi test`: call this zero-arg or suite proto on the args above the result cell
+    Invoke(ProtoId),
+    /// the run's end: join every live Executor from this registry index
+    Drain(usize),
+    /// the frame the step before pushed returned: its value sits at stack index `mark`
+    Ret { mark: usize, then: RootRet },
+}
+
+/// What [`RootStep::Ret`] does with the returned value.
+#[derive(Debug, Clone, Copy)]
+pub(super) enum RootRet {
+    /// a module top level's: dropped
+    Drop,
+    /// the entrypoint's: an unhandled `Err`/`None` is the run's fault
+    Entry(Span),
+    /// an invoke's: kept in the root's result cell
+    Keep,
+}
+
+/// The steps a root fiber has left. It travels in the fiber's context ([`FiberCtx::root`]).
+#[derive(Debug, Default)]
+pub(super) struct RootPlan {
+    pub(super) steps: std::collections::VecDeque<RootStep>,
 }
 
 /// A new task identity for the guard registry (`Vm::guard_token`), from a process-wide counter;

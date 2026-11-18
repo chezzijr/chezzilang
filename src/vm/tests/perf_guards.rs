@@ -147,7 +147,18 @@ fn assert_false_default_message() {
 
 #[test]
 fn assert_comparison_failure_shows_both_operands() {
-    let err = run_capture("xs := [1, 2, 3]\nassert xs.len() == 4\n").unwrap_err();
+    // The in-process run's own error, before a driver's report drops its markers.
+    let err = std::thread::Builder::new()
+        .stack_size(VM_STACK_BYTES)
+        .spawn(|| {
+            let p = test_program("xs := [1, 2, 3]\nassert xs.len() == 4\n").expect("compiles");
+            let mut vm = Vm::new(Arc::new(p));
+            let r = vm.run();
+            vm.finish_run(r).unwrap_err()
+        })
+        .expect("spawn")
+        .join()
+        .expect("VM thread panicked");
     assert_eq!(err.message, "assertion failed: 3 == 4");
     assert_eq!(err.span.line, 2);
     assert!(err.is_assert);
@@ -925,7 +936,8 @@ fn poly_ic_site_latches_sticky_on_5th_type() {
     let module = parser::parse(tokens).unwrap();
     let program = crate::compiler::compile_module_standalone(&module).unwrap();
     let mut vm = Vm::new(Arc::new(program));
-    vm.run().expect("run");
+    // In place: the IC under test is this `Vm`'s, and `main` as fiber 1 runs on a worker shell.
+    vm.run_in_place().expect("run");
     assert_eq!(vm.out, b"15\n");
     // Exactly one method-call site (the `x.id()` in `sum`), and it must have gone sticky with all
     // 4 ways filled by the first four distinct tids.

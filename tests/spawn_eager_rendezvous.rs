@@ -16,8 +16,7 @@
 //! to 200 did not move debug off 0/10. So a green run here does not prove the fix present; what it
 //! does prove is that the shipping semantics are right on every run it makes, and it fails loudly if
 //! the shape regresses to the PRE-§2c1 behaviour (which faulted 6 runs in 6, in debug and release
-//! alike). The red evidence for the fix itself is the release measurement above,
-//! reproduced by reverting the one `if` in `MnSched::is_deadlocked_ignoring_jobs`.
+//! alike). The red evidence for the fix itself is the release measurement above.
 //!
 //! **The rendezvous needs real worker threads**: a spawned task starts eagerly, so the blocking body
 //! can reach it.
@@ -108,8 +107,15 @@ fn a_genuine_rendezvous_deadlock_still_faults() {
             "a genuine both-recv deadlock must fault, not succeed (iteration {i})"
         );
         let err = String::from_utf8_lossy(&out.stderr);
+        // One global check (plan 2026-11-17): both tasks wait, main (task 1) at the body's own
+        // `recv()`, then the sibling (Go twin: fatal, all asleep, goroutine 1 first).
         assert!(
-            err.contains("deadlock"),
+            out.status.code() == Some(1)
+                && err.contains("deadlock: every task is blocked\n")
+                && err.contains("task 1: recv() on an empty channel at ")
+                && err.contains("both_recv.chz:6:14\n")
+                && err.contains("task 2: recv() on an empty channel at ")
+                && err.contains("both_recv.chz:5:18\n"),
             "expected a deadlock fault on iteration {i}, got: {err}"
         );
     }

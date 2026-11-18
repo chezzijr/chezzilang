@@ -5,9 +5,10 @@
 //! (`demotes=199`). 100 spawned tasks each `shutdown()` an Executor whose job waits for a sibling's
 //! send: the same, `demotes=0` (Go 1.27: 1000 result waiters start no thread).
 //!
-//! The two guard verdicts keep the base binary's text (`96d3d719`) at T=1, 2 and 4: an AB-BA lock
-//! cycle faults, and a guard wait in a `defer` of a cancelled task that nothing releases is cut, so
-//! the sibling's fault is the report.
+//! The guard deadlocks end with the one global report (plan 2026-11-17) at T=1, 2 and 4: an AB-BA
+//! lock cycle just blocks, and a guard wait in a `defer` of a cancelled task that nothing releases
+//! blocks too; once every task is asleep the run lists each one at its wait, `main` first at its
+//! `parallel:` join (Go twin of each: fatal `all goroutines are asleep - deadlock!`).
 
 use std::process::{Command, Stdio};
 
@@ -140,14 +141,20 @@ fn main():
 main()
 ";
 
-const ABBA_ERR: &str = "runtime error (main.chz:13:5): deadlock: two or more tasks each hold a \
-Shared/RwShared update guard the other is waiting for (a lock cycle)
-  at ba (called at main.chz:20:13)
-  at <spawned task> (called at main.chz:19:9)
+/// Both holders block at their second `update` (Go twin: AB-BA `sync.Mutex` is fatal, all asleep).
+const ABBA_ERR: &str = "runtime error (main.chz:16:5): deadlock: every task is blocked
+  task 1: waiting for a nursery join at main.chz:16:5
+    at main (called at main.chz:21:1)
+  task 2: waiting for the Shared guard at main.chz:9:5
+    at ab (called at main.chz:18:13)
+    at <spawned task> (called at main.chz:17:9)
+  task 3: waiting for the Shared guard at main.chz:13:5
+    at ba (called at main.chz:20:13)
+    at <spawned task> (called at main.chz:19:9)
 ";
 
 #[test]
-fn ab_ba_guard_cycle_faults() {
+fn ab_ba_guard_cycle_blocks_and_gets_the_global_report() {
     for t in ["1", "2", "4"] {
         let (code, out, err, _) = run("abba", ABBA, t);
         assert_eq!(
@@ -181,11 +188,26 @@ fn main():
 main()
 ";
 
-/// TICKET-298 (owner answer 2(b)): the stuck `defer` holds the guard, so the verdict does not cut it
-/// as its family's cancel. It is a fatal deadlock that lists the holder at its wait.
-const DEFER_CUT_ERR: &str =
-    "runtime error (main.chz:6:10): deadlock: 1 task is blocked and cannot proceed
-  task 1: recv() on an empty channel at main.chz:6:10
+/// TICKET-298 (owner answer 2(b)): the stuck `defer` holds the guard; once the panic cancels both
+/// sleepers, every task is asleep and the run lists each at its wait: `main` at its join, the
+/// holder at its `recv()`, and the other `defer` at the guard unless it took the guard first and
+/// ended (Go twin: fatal, all asleep; the panic is not reported).
+const DEFER_CUT_ERR: &str = "runtime error (main.chz:11:5): deadlock: every task is blocked
+  task 1: waiting for a nursery join at main.chz:11:5
+    at main (called at main.chz:21:1)
+  task 2: recv() on an empty channel at main.chz:6:10
+    at hold (called at main.chz:13:19)
+    at <spawned task> (called at main.chz:12:9)
+  task 3: waiting for the Shared guard at main.chz:16:19
+    at <spawned task> (called at main.chz:15:9)
+";
+
+/// The order of `DEFER_CUT` where the `inc` `defer` takes the guard first and ends.
+const DEFER_CUT_INC_FIRST_ERR: &str =
+    "runtime error (main.chz:11:5): deadlock: every task is blocked
+  task 1: waiting for a nursery join at main.chz:11:5
+    at main (called at main.chz:21:1)
+  task 2: recv() on an empty channel at main.chz:6:10
     at hold (called at main.chz:13:19)
     at <spawned task> (called at main.chz:12:9)
 ";
@@ -194,17 +216,17 @@ const DEFER_CUT_ERR: &str =
 fn a_guard_holder_stuck_in_a_cancelled_defer_is_a_fatal_deadlock() {
     for t in ["1", "2", "4"] {
         let (code, out, err, _) = run("dcut", DEFER_CUT, t);
-        assert_eq!(
-            (code, out.as_str(), err.as_str()),
-            (1, "", DEFER_CUT_ERR),
-            "T={t}"
+        assert!(
+            code == 1 && out.is_empty() && (err == DEFER_CUT_ERR || err == DEFER_CUT_INC_FIRST_ERR),
+            "T={t}: rc={code} stdout={out:?}\n{err}"
         );
     }
 }
 
 /// A nested nursery deadlocks inside `hold`, which holds the guard; its sibling task waits for
-/// that guard (`NESTED_GUARD`) or on a channel `hold` never sends to (`NESTED_RECV`). The base
-/// binary's verdict (`96d3d719`) lists both tasks, at T=1, 2 and 4.
+/// that guard (`NESTED_GUARD`) or on a channel `hold` never sends to (`NESTED_RECV`). The listing
+/// holds every task at T=1, 2 and 4: `main` at its join, `hold`'s task at its inner join, the inner
+/// child at the guard, and the sibling (Go twin: fatal, all asleep).
 const NESTED_GUARD: &str = "import Shared from std.concurrency
 import std.time
 fn inc(v: int) -> int:
@@ -230,19 +252,28 @@ fn main():
 main()
 ";
 
-const NESTED_GUARD_ERR: &str = "runtime error (main.chz:15:17): deadlock: 2 tasks are blocked and \
-none can proceed
-  task 1: waiting for the Shared guard at main.chz:15:17
+const NESTED_GUARD_ERR: &str = "runtime error (main.chz:17:5): deadlock: every task is blocked
+  task 1: waiting for a nursery join at main.chz:17:5
+    at main (called at main.chz:23:1)
+  task 2: waiting for a nursery join at main.chz:13:9
+    at hold (called at main.chz:19:13)
+    at <spawned task> (called at main.chz:18:9)
+  task 3: waiting for the Shared guard at main.chz:15:17
     at <spawned task> (called at main.chz:14:13)
-  task 2: waiting for the Shared guard at main.chz:21:13
+  task 4: waiting for the Shared guard at main.chz:21:13
     at <spawned task> (called at main.chz:20:9)
 ";
 
 /// The other order of `NESTED_GUARD` (the sibling takes the guard first; at T=4 on base too): the
 /// sibling ends, and only `hold`'s nested child is blocked.
-const NESTED_GUARD_SIB_FIRST_ERR: &str = "runtime error (main.chz:15:17): deadlock: 1 task is \
-blocked and cannot proceed
-  task 1: waiting for the Shared guard at main.chz:15:17
+const NESTED_GUARD_SIB_FIRST_ERR: &str = "runtime error (main.chz:17:5): deadlock: every task is \
+blocked
+  task 1: waiting for a nursery join at main.chz:17:5
+    at main (called at main.chz:23:1)
+  task 2: waiting for a nursery join at main.chz:13:9
+    at hold (called at main.chz:19:13)
+    at <spawned task> (called at main.chz:18:9)
+  task 3: waiting for the Shared guard at main.chz:15:17
     at <spawned task> (called at main.chz:14:13)
 ";
 
@@ -270,11 +301,15 @@ fn main():
 main()
 ";
 
-const NESTED_RECV_ERR: &str = "runtime error (main.chz:11:17): deadlock: 2 tasks are blocked and \
-none can proceed
-  task 1: waiting for the Shared guard at main.chz:11:17
+const NESTED_RECV_ERR: &str = "runtime error (main.chz:14:5): deadlock: every task is blocked
+  task 1: waiting for a nursery join at main.chz:14:5
+    at main (called at main.chz:22:1)
+  task 2: waiting for a nursery join at main.chz:9:9
+    at hold (called at main.chz:16:13)
+    at <spawned task> (called at main.chz:15:9)
+  task 3: waiting for the Shared guard at main.chz:11:17
     at <spawned task> (called at main.chz:10:13)
-  task 2: recv() on an empty channel at main.chz:18:19
+  task 4: recv() on an empty channel at main.chz:18:19
     at <spawned task> (called at main.chz:17:9)
 ";
 
@@ -303,7 +338,8 @@ fn nested_verdict_lists_a_parked_guard_waiter() {
 
 /// A test that deadlocks while it holds a module-global `Shared` leaves the box cut for the rest of
 /// the run: a later test fn that touches it fails with a deadlock at its own `update` (owner answer
-/// 1(a), TICKET-298; Go blocks every `Lock` of a `Mutex` nobody unlocked). The text at T=1, 2 and 4.
+/// 1(a), TICKET-298; Go blocks every `Lock` of a `Mutex` nobody unlocked: fatal, all asleep). Each
+/// test's verdict is its own. The text at T=1, 2 and 4.
 const CUT_THEN_TEST: &str = "import Shared from std.concurrency
 s := Shared[int](0)
 fn inc(v: int) -> int:
@@ -321,11 +357,10 @@ test fn updates_after():
 ";
 
 const CUT_THEN_TEST_OUT: &str =
-    "ERROR holds_and_deadlocks (main_test.chz:7:11) deadlock: 1 task is \
-blocked and cannot proceed
+    "ERROR holds_and_deadlocks (main_test.chz:7:11) deadlock: every task is blocked
   task 1: recv() on an empty channel at main_test.chz:7:11
     at stuck (called at main_test.chz:11:5)
-ERROR updates_after (main_test.chz:13:5) deadlock: 1 task is blocked and cannot proceed
+ERROR updates_after (main_test.chz:13:5) deadlock: every task is blocked
   task 1: waiting for the Shared guard at main_test.chz:13:5
 
 2 test(s): 0 passed, 0 failed, 2 errored
@@ -358,9 +393,9 @@ fn a_test_after_a_cut_holder_cannot_take_the_guard() {
     }
 }
 
-/// A holder parked in a `defer` of its `update` closure, inside a nested nursery the verdict cuts:
-/// the defer's deadlock fault returns through the closure frame, and that release is a cut one,
-/// so the sibling that waits for the guard never takes it (review S1b, plan Task 6).
+/// A holder parked in a `defer` of its `update` closure, inside a nested nursery: the holder keeps
+/// the guard while it waits, so the sibling that waits for the guard never takes it, and once
+/// every task is asleep the run ends with the one report (review S1b; Go twin: fatal, all asleep).
 const DEFER_HOLDER: &str = "import Shared from std.concurrency
 import std.time
 fn sib(v: int) -> int:
@@ -391,7 +426,10 @@ fn a_cut_holder_in_a_defer_gives_its_guard_to_no_waiter() {
         for i in 0..5 {
             let (code, out, err, _) = run(&format!("dholder{i}"), DEFER_HOLDER, t);
             assert!(
-                code == 1 && out == "f took 0\n" && err.contains("deadlock"),
+                code == 1
+                    && out == "f took 0\n"
+                    && err.contains("deadlock: every task is blocked")
+                    && err.contains("waiting for the Shared guard at main.chz:20:13"),
                 "T={t} run {i}: rc={code} stdout={out:?} stderr={err:?}"
             );
         }

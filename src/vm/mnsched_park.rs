@@ -66,6 +66,10 @@ impl MnSched {
                 .or_default()
                 .push(ParkedEntry::Recv(fiber));
             c.parked_n += 1;
+            if c.awake.asleep() {
+                drop(c);
+                self.on_deadlock();
+            }
         }
     }
 
@@ -96,6 +100,10 @@ impl MnSched {
                 .or_default()
                 .push(ParkedEntry::Send(fiber));
             c.parked_n += 1;
+            if c.awake.asleep() {
+                drop(c);
+                self.on_deadlock();
+            }
         }
     }
     /// Park the running fiber for the `Shared`/`RwShared` guard whose bucket key is `key`
@@ -124,6 +132,10 @@ impl MnSched {
                 .or_default()
                 .push(ParkedEntry::Guard(fiber));
             c.parked_n += 1;
+            if c.awake.asleep() {
+                drop(c);
+                self.on_deadlock();
+            }
         }
     }
 
@@ -138,10 +150,18 @@ impl MnSched {
             Ok(c) => c,
             Err(std::sync::TryLockError::Poisoned(e)) => e.into_inner(),
             Err(std::sync::TryLockError::WouldBlock) => {
+                // The deferred wake is a pending task until it has woken the bucket, so the
+                // releaser's own end cannot take the count to 0 first.
+                self.quiesce.awake.task_started(1);
                 let s = Arc::clone(self);
                 super::timer::submit_at(
                     std::time::Instant::now(),
-                    Box::new(move || s.wake_key(key, WakeKind::All)),
+                    Box::new(move || {
+                        s.wake_key(key, WakeKind::All);
+                        if s.quiesce.awake.task_ended() {
+                            s.on_deadlock();
+                        }
+                    }),
                 );
                 return;
             }
@@ -149,9 +169,7 @@ impl MnSched {
         let mut c = c;
         let n = self.wake_bucket(&mut c, key, WakeKind::All);
         drop(c);
-        if n > 0 {
-            self.notify_waiters();
-        }
+        self.notify_woken(n);
     }
 
     /// Park the running fiber in an `Executor` join of `joined` owed `slack`
@@ -184,11 +202,18 @@ impl MnSched {
                 slack,
             ));
             c.parked_n += 1;
+            // The join check below runs with no lock of this sched: a token task keeps the count
+            // awake until the join is read, so a join already over never reads as all asleep.
+            c.awake.task_started(1);
+            c.awake.asleep();
         }
         let mut j = joined.lock();
         if j.join_over(slack) {
             drop(j);
             self.wake_key(key, WakeKind::All);
+            if self.quiesce.awake.task_ended() {
+                self.on_deadlock();
+            }
             return;
         }
         let me = Arc::downgrade(self);
@@ -198,6 +223,10 @@ impl MnSched {
             .any(|(s, n, _)| s.ptr_eq(&me) && *n == slack)
         {
             j.exec_joiners.push((me, slack, key));
+        }
+        drop(j);
+        if self.quiesce.awake.task_ended() {
+            self.on_deadlock();
         }
     }
 
@@ -210,9 +239,9 @@ impl MnSched {
     /// broadcast-to-every-idle-worker cost is paid per message. `recruit` controls whether that
     /// worker is ALSO nudged awake: a waker that keeps running passes `true`, because it may block
     /// its own thread in a `Kind::Inline` native before anyone else reaches the handed-off fiber.
-    /// With `n == 0` it still notifies (DEC-128's receive-side rule). Falls back to the old
-    /// broadcast path when more than one fiber woke, or the `runnext` slot was already occupied by a
-    /// fresher handoff.
+    /// With `n == 0` it notifies nobody ([`Self::notify_woken`]). Falls back to the old broadcast
+    /// path when more than one fiber woke, or the `runnext` slot was already occupied by a fresher
+    /// handoff.
     pub(super) fn handoff_wake(
         &self,
         key: usize,
@@ -266,15 +295,15 @@ impl MnSched {
             }
         } else {
             drop(c);
-            self.notify_waiters();
+            self.notify_woken(n);
         }
     }
 
     /// TICKET-185 — the M:N `send`: [`ChanState::send`]'s one decision (closed / buffer / give to a
     /// slot / offer / full) made under the sched lock, then, when the value MOVED, the wake: a
     /// cap-0 give hands the one slot owner to `wid`'s `runnext`; a buffered push wakes every
-    /// receiver parked on `key`. An `Offered` result wakes nobody here: the caller wakes the
-    /// receivers once, through [`MnSched::handoff_wake`] (a parked fiber, TICKET-128's `runnext`) or
+    /// receiver parked on `key`, one of them through `runnext` ([`Self::hand_off`]). An `Offered`
+    /// result wakes nobody here: the caller wakes the receivers once, through [`MnSched::handoff_wake`] (a parked fiber, TICKET-128's `runnext`) or
     /// [`MnSched::close_wake`]'s fan-out (a party blocking in place).
     pub(super) fn send_commit(
         &self,
@@ -303,9 +332,12 @@ impl MnSched {
             self.wake_run_wide(key, WakeKind::Settled);
             return out;
         }
-        self.wake_bucket(&mut c, key, WakeKind::All);
-        drop(c);
-        self.notify_waiters();
+        // A buffered push that woke one receiver hands it to `runnext` too: the sender keeps
+        // running, and a global push let an idle runner take the receiver, so the pair crossed
+        // threads on every message (`send_one_channel` 1.8x at T=4 once main ran on the root
+        // sched's `worker_count()` runners).
+        let n = self.wake_bucket(&mut c, key, WakeKind::All);
+        self.hand_off(c, n, wid, true);
         self.wake_run_wide(key, WakeKind::All);
         core.wake_all();
         out
@@ -316,9 +348,9 @@ impl MnSched {
     pub(super) fn recv_wake(&self, key: usize, core: &Arc<ChannelCore>) {
         let kind = WakeKind::Settled;
         let mut c = self.lock();
-        self.wake_bucket(&mut c, key, kind);
+        let n = self.wake_bucket(&mut c, key, kind);
         drop(c);
-        self.notify_waiters();
+        self.notify_woken(n);
         core.wake_all();
         self.wake_run_wide(key, kind);
     }
@@ -412,6 +444,10 @@ impl MnSched {
                 .push(ParkedEntry::Wait(Arc::clone(&wp)));
         }
         c.parked_n += 1; // ONE fiber, regardless of arm count
+        if c.awake.asleep() {
+            drop(c);
+            self.on_deadlock();
+        }
     }
 
     /// D3 — the running fiber exhausted its reduction budget; requeue it at the TAIL of the **global**
@@ -449,8 +485,8 @@ impl MnSched {
     ///    so it is reachable only with the global queue already empty — the worker would have grabbed
     ///    its own just-yielded fiber first. It cannot be the thing that leaves a yielded fiber
     ///    unconsumed.
-    /// 3. `runnable` accounting is unchanged (still incremented under this same lock), so
-    ///    `is_deadlocked`'s `runnable == 0` predicate cannot false-fire on a yielded fiber.
+    /// 3. `runnable` accounting is unchanged (still incremented under this same lock), and a
+    ///    yielded fiber never parks, so it stays counted awake and the deadlock verdict cannot fire.
     /// 4. Ordering is unchanged (global tail), so round-robin fairness is exactly as before — pinned by
     ///    `mnsched_yield_fiber_requeues_at_tail`, unmodified.
     ///
@@ -659,6 +695,7 @@ impl MnSched {
         if !keep.is_empty() {
             c.parked.insert(key, keep);
         }
+        c.awake.woken(woken);
         woken
     }
 
@@ -706,17 +743,39 @@ impl MnSched {
         let mut c = self.lock();
         let n = self.wake_bucket(&mut c, key, kind);
         drop(c);
-        if n > 0 {
-            self.notify_waiters();
+        self.notify_woken(n);
+    }
+
+    /// THE wake after a bucket drain ([`Self::wake_bucket`]) that requeued `n` fibers: a drain
+    /// that requeued none changes no `runnable`/`parked_n`/`global` a worker reads, so it wakes
+    /// nobody. Live because every parker re-checks its channel under this same core lock (`park`,
+    /// `park_send`, `park_wait`): a racing fiber is either in the bucket (`n > 0`) or sees the new
+    /// state and requeues itself. A thread blocked in place on the channel is woken by
+    /// `core.wake_all`, not here. An empty-drain broadcast woke every idle worker of the sched on
+    /// each buffered send and recv: with a run's `worker_count() - 1` idle runners
+    /// ([`Vm::run_root`]) that herd took the core lock from the fibers doing the channel ops.
+    /// A drain of `n` wakes at most `n` idle sleepers, as Go's `ready` wakes one P per goroutine:
+    /// a broadcast woke every idle runner per Executor round trip (`trips` 1.3x at T=4, 1.7x at
+    /// T=8). Every state a sleeper waits on besides a runnable fiber (terminate, cancel, a scope
+    /// done) is published through [`Self::notify_waiters`], never here.
+    pub(super) fn notify_woken(&self, n: usize) {
+        if n == 0 {
+            return;
         }
+        self.reserve_gated_idle();
+        self.cv.notify_all();
+        for _ in 0..n.min(self.idle_sleepers.load(Ordering::Relaxed)) {
+            self.idle_cv.notify_one();
+        }
+        self.wake_host(true);
     }
 
     pub(super) fn send_wake(&self, key: usize, core: &Arc<ChannelCore>, v: Value) {
         let mut c = self.lock();
         core.q.lock().unwrap_or_else(|e| e.into_inner()).push(v);
-        self.wake_bucket(&mut c, key, WakeKind::All);
+        let n = self.wake_bucket(&mut c, key, WakeKind::All);
         drop(c);
-        self.notify_waiters();
+        self.notify_woken(n);
         // gaps.md B5 — also wake a receiver parked on this channel in an ANCESTOR (parent) nursery's
         // sched (eager nested nursery only; no-op otherwise). Value is already queued above.
         self.wake_run_wide(key, WakeKind::All);

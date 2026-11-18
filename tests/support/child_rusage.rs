@@ -13,10 +13,8 @@ use std::process::Command;
 /// child can't deadlock on a full pipe buffer while we wait. `threads` sets `CHEZZI_THREADS`
 /// explicitly for the child (callers used to hardcode `HERD_WORKERS`; TICKET-059's callers need
 /// `1`).
-// `wait4` IS the reap (it's `waitpid` + rusage in one syscall) — clippy can't see that, only that
-// `Child::wait()`/`.output()` was never called on `child`.
-#[allow(clippy::zombie_processes)]
 #[cfg(unix)]
+#[allow(dead_code)]
 pub fn run_timed(
     args: &[&str],
     threads: &str,
@@ -24,6 +22,40 @@ pub fn run_timed(
     std::time::Duration,
     std::time::Duration,
     std::time::Duration,
+    std::process::ExitStatus,
+    String,
+) {
+    let (wall, rusage, status, stdout) = run_rusage(args, threads);
+    let user = std::time::Duration::new(
+        rusage.ru_utime.tv_sec as u64,
+        (rusage.ru_utime.tv_usec as u32) * 1000,
+    );
+    let sys = std::time::Duration::new(
+        rusage.ru_stime.tv_sec as u64,
+        (rusage.ru_stime.tv_usec as u32) * 1000,
+    );
+    (wall, user, sys, status, stdout)
+}
+
+/// The child's peak resident set in KiB (`ru_maxrss`), its exit status and its stdout; measured as
+/// [`run_timed`] measures.
+#[cfg(unix)]
+#[allow(dead_code)]
+pub fn run_max_rss(args: &[&str], threads: &str) -> (i64, std::process::ExitStatus, String) {
+    let (_, rusage, status, stdout) = run_rusage(args, threads);
+    (rusage.ru_maxrss, status, stdout)
+}
+
+// `wait4` IS the reap (it's `waitpid` + rusage in one syscall) — clippy can't see that, only that
+// `Child::wait()`/`.output()` was never called on `child`.
+#[allow(clippy::zombie_processes)]
+#[cfg(unix)]
+fn run_rusage(
+    args: &[&str],
+    threads: &str,
+) -> (
+    std::time::Duration,
+    libc::rusage,
     std::process::ExitStatus,
     String,
 ) {
@@ -64,19 +96,9 @@ pub fn run_timed(
 
     let stdout = stdout_reader.join().expect("stdout reader thread");
     let _stderr = stderr_reader.join().expect("stderr reader thread");
-
-    let user = std::time::Duration::new(
-        rusage.ru_utime.tv_sec as u64,
-        (rusage.ru_utime.tv_usec as u32) * 1000,
-    );
-    let sys = std::time::Duration::new(
-        rusage.ru_stime.tv_sec as u64,
-        (rusage.ru_stime.tv_usec as u32) * 1000,
-    );
     (
         wall,
-        user,
-        sys,
+        rusage,
         std::process::ExitStatus::from_raw(status),
         stdout,
     )

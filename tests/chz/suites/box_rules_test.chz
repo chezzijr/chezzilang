@@ -14,8 +14,8 @@ fn msg_of[T](r: T!Error, where_: str) -> str:
         !e: return e.error()
     return ""
 
-# ---- rule 3: an AB-BA cycle in ONE task is a fatal deadlock ----
-# TICKET-298: `recover:` cannot catch it, so `tests/cut_release_grid.rs`
+# ---- rule 3: an AB-BA cycle in ONE task blocks: the one fatal deadlock report ----
+# (plan 2026-11-17) `recover:` cannot catch it, so `tests/cut_release_grid.rs`
 # (`a_recovered_reentry_or_lock_cycle_is_fatal`) holds it.
 
 # ---- rule 5: what a closure may do inside the box ----

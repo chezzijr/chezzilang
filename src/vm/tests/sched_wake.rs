@@ -1089,13 +1089,9 @@ main()
 }
 
 /// D5 owe #3 (Path C) — a `recv` inside a native callback with **no possible sender** must still
-/// **fault `deadlock`**, not hang. This is the load-bearing half of the pragmatic deadlock scope:
-/// the demoted thread is registered as a fiber waiter (a 5th fiber state), which feeds
-/// [`MnSched::is_deadlocked`] (`parked_n>0 || any_fiber_waiter()`). The demote's registration
-/// notifies `cv` so the idle replacement worker re-evaluates the predicate; on fire, `flag_deadlock`
-/// sets `terminate`, the demoted thread observes it within `DEMOTE_POLL_BACKOFF` and faults in place,
-/// and `wait_for_completion` lets the join reduce the deadlock outcome. Watchdog 30 s: a regressed
-/// predicate (or a missing notify) would HANG here instead of faulting.
+/// **fault `deadlock`**, not hang. One global check (plan 2026-11-17): the callback's wait parks,
+/// so the run's awake count reaches 0 and the one report lists every task. Watchdog 30 s: a missed
+/// sleep would HANG here instead of faulting.
 #[test]
 fn d5_owe3_path_c_recv_in_callback_no_sender_still_deadlocks() {
     let src = "\
@@ -1124,13 +1120,16 @@ main()
     let _ = std::fs::remove_file(&entry);
     match result {
         Ok((_out, _err, res, _code)) => match res {
-            Err(e) => {
-                let s = format!("{e:?}");
-                assert!(
-                    s.contains("deadlock"),
-                    "Path C: no-sender recv-in-callback should fault deadlock, got: {s}"
-                );
-            }
+            // A callback's `recv` parks like any wait (plan 2026-11-17): every task asleep, main at
+            // its join, the task at its `recv`. Go twin: `<-ch` inside a func passed to
+            // `slices.IndexFunc`, fatal, all asleep.
+            Err(e) => assert_deadlock(
+                &e,
+                &[
+                    ("waiting for a nursery join", 8),
+                    ("recv() on an empty channel", 3),
+                ],
+            ),
             Ok(()) => panic!("Path C: no-sender recv-in-callback unexpectedly succeeded"),
         },
         Err(_) => panic!(
@@ -1302,118 +1301,10 @@ main()
     }
 }
 
-/// TICKET-134 — `Vm::block_halt_check` reads the owner's nursery fault, then reads the deadlock
-/// verdict, as two separate observations of shared state. A child that faults between them makes the
-/// verdict see a complete nursery and report a synthesized `deadlock` instead of the child's real
-/// fault. The `owner_fault_window_hook` seam (`src/vm/netio.rs`) widens that window so the race is
-/// deterministically reachable: it blocks between the two reads until the child's fault lands.
-#[test]
-fn owner_fault_recorded_after_the_fault_rung_still_outranks_the_deadlock_verdict() {
-    let src = "\
-import std.time
-
-fn main():
-    ch := Channel[int]()
-    parallel:
-        spawn:
-            time.sleep_ms(300)
-            panic(\"task died\")
-        print(ch.recv())
-
-main()
-";
-    let entry = write_temp_chz("t134_owner_fault_window", src);
-    let cfg = crate::native::HostConfig::default();
-    // The literal equals `blocking::OWNER_FAULT_WINDOW_ENV`. It is spelled out, not imported, so this
-    // test still compiles on a base without the seam (the pipeline's red-on-base check copies only
-    // this file there). The hook `remove`s the key when it arms, so a key still present after the
-    // run means THIS run never reached the window.
-    const KEY: &str = "CHEZZI_TEST_OWNER_FAULT_WINDOW";
-    cfg.env
-        .lock()
-        .unwrap()
-        .insert(KEY.to_string(), "1".to_string());
-    let env = std::sync::Arc::clone(&cfg.env);
-    let run_entry = entry.clone();
-    let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let _ = tx.send(run_file_with(&run_entry, cfg));
-    });
-    let result = rx.recv_timeout(std::time::Duration::from_secs(30));
-    let _ = std::fs::remove_file(&entry);
-    assert!(
-        !env.lock().unwrap().contains_key(KEY),
-        "window not exercised: the hook never armed in this run"
-    );
-    match result {
-        Ok((_out, _err, res, _code)) => match res {
-            Err(e) => {
-                let s = format!("{e:?}");
-                assert!(s.contains("task died"), "got: {s}");
-                assert!(!s.contains("deadlock"), "got: {s}");
-            }
-            Ok(()) => panic!("t134: expected the child's fault to propagate, program succeeded"),
-        },
-        Err(_) => panic!("hung — t134 owner-fault-window regressed"),
-    }
-}
-
-/// TICKET-134 — the same race as
-/// [`owner_fault_recorded_after_the_fault_rung_still_outranks_the_deadlock_verdict`], through the
-/// bounded-`send` funnel instead of `recv`: the owner blocks in `chan_send_step`'s block-in-place
-/// loop with the cap-1 buffer already full, and `owner_fault_window_hook` holds the same window open
-/// until the child's fault lands.
-#[test]
-fn owner_fault_recorded_after_the_fault_rung_still_outranks_the_full_send_deadlock_verdict() {
-    let src = "\
-import std.time
-
-fn main():
-    ch := Channel[int](1)
-    parallel:
-        spawn:
-            time.sleep_ms(300)
-            panic(\"task died\")
-        ch.send(1)
-        ch.send(2)
-
-main()
-";
-    let entry = write_temp_chz("t134_owner_fault_window_send", src);
-    let cfg = crate::native::HostConfig::default();
-    // The literal equals `blocking::OWNER_FAULT_WINDOW_ENV`. It is spelled out, not imported, so this
-    // test still compiles on a base without the seam (the pipeline's red-on-base check copies only
-    // this file there). The hook `remove`s the key when it arms, so a key still present after the
-    // run means THIS run never reached the window.
-    const KEY: &str = "CHEZZI_TEST_OWNER_FAULT_WINDOW";
-    cfg.env
-        .lock()
-        .unwrap()
-        .insert(KEY.to_string(), "1".to_string());
-    let env = std::sync::Arc::clone(&cfg.env);
-    let run_entry = entry.clone();
-    let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let _ = tx.send(run_file_with(&run_entry, cfg));
-    });
-    let result = rx.recv_timeout(std::time::Duration::from_secs(30));
-    let _ = std::fs::remove_file(&entry);
-    assert!(
-        !env.lock().unwrap().contains_key(KEY),
-        "window not exercised: the hook never armed in this run"
-    );
-    match result {
-        Ok((_out, _err, res, _code)) => match res {
-            Err(e) => {
-                let s = format!("{e:?}");
-                assert!(s.contains("task died"), "got: {s}");
-                assert!(!s.contains("deadlock"), "got: {s}");
-            }
-            Ok(()) => panic!("t134: expected the child's fault to propagate, program succeeded"),
-        },
-        Err(_) => panic!("hung — t134 owner-fault-window-send regressed"),
-    }
-}
+// TICKET-134's two window tests (`owner_fault_recorded_after_the_fault_rung_still_outranks_the_
+// deadlock_verdict` and its full-`send` twin) are deleted with the party judge they raced (plan
+// 2026-11-17: `main` parks as fiber 1 and the run's awake count decides). A child fault beside an
+// owner parked in `recv` stays covered by `w10_16_owner_parked_recv_reports_child_fault_not_deadlock`.
 
 /// TICKET-289 — a job whose nursery child faults while the job is parked in a full `send` must end
 /// with the child's fault. `finish` records the fault, and `drain_family` wakes the parked owner a
@@ -1757,8 +1648,8 @@ main()
     }
 }
 
-/// §6d M:N wait-in-callback DEMOTE with no possible sender must still fault `deadlock`, not hang —
-/// the demote loop's self-detected-deadlock path (`is_deadlocked` over the registered arm channels).
+/// §6d M:N wait-in-callback with no possible sender must still fault `deadlock`, not hang: the
+/// one global report (plan 2026-11-17).
 #[test]
 fn vm_wait_in_native_callback_no_sender_deadlocks() {
     let src = "\
@@ -1797,9 +1688,13 @@ main()
     let _ = std::fs::remove_file(&entry);
     match result {
         Ok((_out, _err, res, _code)) => match res {
-            Err(e) => assert!(
-                format!("{e:?}").contains("deadlock"),
-                "no-sender wait-in-callback should deadlock: {e:?}"
+            // As the recv cell above: main at its join, the task at its `wait:` (plan 2026-11-17).
+            Err(e) => assert_deadlock(
+                &e,
+                &[
+                    ("waiting for a nursery join", 18),
+                    ("wait: on channels that are all empty", 2),
+                ],
             ),
             Ok(()) => panic!("no-sender wait-in-callback unexpectedly succeeded"),
         },
@@ -1810,9 +1705,9 @@ main()
 /// D5 owe #3 Path C (#1 false-positive) — the deadlock checker must NOT fault an innocent parked
 /// sibling when a demoted fiber has a value racing into its queue. F1 demotes on `a` inside a native
 /// `xs.map`, then wakes F2 via `c.send(7)`; F2 snapshot-parks on `c`; F3 feeds `a` then finishes.
-/// The bad interleaving (microseconds): F3's `running→0` quiesce can fire the predicate before F1
-/// pops its queued `10`, wrongly killing the parked F2. With the #1 fix (`is_deadlocked` peeks the
-/// demoted channel `a`, which holds `10`) the fire is vetoed. Run many times to expose the race; the
+/// The bad interleaving (microseconds): F3's end before F1 pops its queued `10` once read as a
+/// deadlock, wrongly killing the parked F2. F1 waits in place, so it stays counted awake and no
+/// verdict fires. Run many times to expose the race; the
 /// output must ALWAYS be `7` and NEVER a spurious `deadlock`. Watchdog per iteration.
 #[test]
 fn d5_owe3_path_c_no_false_deadlock_when_demoted_fiber_has_queued_value() {

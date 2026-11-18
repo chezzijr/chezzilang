@@ -189,7 +189,13 @@ fn want(call: &str, ctx: &str, var: &str) -> (Vec<String>, i32, Option<&'static 
                 (vec![after], 1, Some("boom"))
             }
         }
-        "dead" => (vec![format!("r {v}\n")], 1, Some("deadlock")),
+        // Every task waits after the call (plan 2026-11-17: the one header; the pure-Go twin is
+        // fatal, all asleep).
+        "dead" => (
+            vec![format!("r {v}\n")],
+            1,
+            Some("deadlock: every task is blocked\n"),
+        ),
         "live" => (vec![format!("r {v}\nlate\nend\n")], 0, None),
         other => panic!("no variant {other}"),
     }

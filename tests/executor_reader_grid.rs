@@ -41,8 +41,11 @@ impl Got {
     fn ended(&self) -> bool {
         self.out.lines().any(|l| l == "end")
     }
+    /// The one global verdict (plan 2026-11-17): every task of the run is blocked. Each
+    /// `Deadlock` cell is all-asleep once the cut lands (the reader, main and any parked job wait;
+    /// the stopper and the idle Executors are done), so Go's twin is fatal too.
     fn deadlock_fault(&self) -> bool {
-        self.code.is_some_and(|c| c != 0) && self.err.contains("deadlock")
+        self.code == Some(1) && self.err.contains("deadlock: every task is blocked\n")
     }
 }
 

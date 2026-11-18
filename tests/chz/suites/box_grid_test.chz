@@ -286,9 +286,9 @@ test fn shared_captured_local_read_is_fine():
     assert s.get() == 13
     assert s.read(fn(x): x + ks[0]) == 14
 
-# A re-entry of the box's own guard (`get`, `read`, `set`, `update` inside `update`/`read`) is a fatal
-# deadlock since TICKET-298: `recover:` cannot catch it, so `tests/cut_release_grid.rs`
-# (`a_recovered_reentry_or_lock_cycle_is_fatal`) holds it.
+# A re-entry of the box's own guard (`get`, `read`, `set`, `update` inside `update`/`read`) blocks,
+# so the run ends in the one fatal deadlock report (plan 2026-11-17): `recover:` cannot catch it, so
+# `tests/cut_release_grid.rs` (`a_recovered_reentry_or_lock_cycle_is_fatal`) holds it.
 
 # M3.3: a print reads the box's one slot and takes no guard (Go's `fmt` takes no lock), so a box
 # prints inside its own `update`.
@@ -405,7 +405,7 @@ test fn shared_capture_stored_into_the_state_is_the_captured_object():
 #
 # `write` / `set` run like `Shared.update` / `set` (under the write guard, in place). `read(f)` and
 # `get()` take the read guard and work on the live value: a mutation inside `read` reaches the box,
-# and a `write` nested in it is a fatal deadlock (M3.3, Q2; TICKET-298).
+# and a `write` nested in it blocks: the one fatal deadlock report (M3.3, Q2; plan 2026-11-17).
 
 fn rshow_self(s: RwShared[int], x: int) -> int:
     print(s)
@@ -522,8 +522,8 @@ test fn rwshared_read_closure_writes_its_capture():
     assert s.read(fn(x): keep(seen, x)) == 10
     assert seen == [10]
 
-# Q2 (M3.3): a `write` inside the same task's `read` is a certain deadlock (Go `readwrite/main.go`),
-# fatal since TICKET-298: `tests/cut_release_grid.rs` holds it. A read nested in a read is Go's
+# Q2 (M3.3): a `write` inside the same task's `read` is a certain deadlock (Go `readwrite/main.go`):
+# it blocks and the run ends in the one fatal report; `tests/cut_release_grid.rs` holds it. A read nested in a read is Go's
 # recursive `RLock` (`a_read_inside_a_read_of_the_same_box_is_legal`, `shared_handle_test.chz`).
 
 # A print takes no guard, so a `RwShared` prints inside its own `write` (kept from the deleted

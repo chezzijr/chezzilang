@@ -2,7 +2,7 @@
 
 How the M:N engine implements the user-facing rules in
 [`docs/reference/concurrency/`](../reference/concurrency/01-model.md). Read this before you change the
-scheduler, the deadlock verdict, the width gate or `wait:`. Each rule names its ticket, so
+scheduler, the deadlock check, the width gate or `wait:`. Each rule names its ticket, so
 `git log --grep TICKET-NNN` finds the commit and test that own it.
 
 ## Runner claims
@@ -23,123 +23,86 @@ in `src/vm/runner_cache.rs` for up to one second and serves the next nursery's r
 nursery rounds do not start 20 000 x `n - 1` OS threads. The inline joiner runs fibers only if
 the claim has a slot left (`claim_joiner`), so the runner count stays `worker_count()`.
 
-## The deadlock verdict
+## The deadlock check
 
-**One verdict, one halt (TICKET-223).** The first judge to see the verdict (main at its own
-wait, or an idle scheduler worker) latches it, and every party ends through the run-halt funnel
-that `os.exit` and a job fault use, so no party runs past it. Main blocked at a wait reports that
-wait's site: main locking a `Shared` guard that a stuck job holds is listed as
-`waiting for the Shared guard` at its own `update`, as Go reports
-`goroutine 1 [sync.Mutex.Lock]`. Main at a join (`shutdown()`, the end of a `parallel:` block)
-reports the victims' sites. A cleanup that meets the verdict is fatal too: no further `defer`
-runs, no `recover:` catches the unwind it ran in (a `?` inside `recover:` included), and the cause
-it was cleaning up after keeps the report (Go prints `fatal error: all goroutines are asleep -
-deadlock!` and nothing after). A latched verdict is due inside a `defer` even while a job fault
-waits; the job fault stays the report. A verdict that names only a join party latches nothing: its
-report is the victims' slots.
+**One count, one check (plan 2026-11-17, Go's `checkdead`).** `quiesce::Awake` counts the tasks of
+the run: `alive` (started, not ended) and `awake` among them (not parked). Both halves live in one
+atomic word, so each change is one read-modify-write and every reader sees both at one instant.
+The count changes only at a task's start (`Awake::task_started`, before its parent continues), park
+(`Awake::asleep`, after the wait is registered, under the bucket's lock), wake (`Awake::woken`,
+inside the lock hold that requeues the woken fiber) and end (`Awake::task_ended`).
+`tests/owner_guards.rs` `the_awake_count_has_four_writers` fails on any other writer. The count is
+its own fact: it is not a sum of a sched's `running`, `runnable` or `inflight`, so no judge walks
+the scheds to decide it.
 
-**A scheduler's own verdict latches before it cuts a victim (TICKET-232).** A scheduler that
-sees all of its own tasks parked (a `parallel:` block's deadlock) goes through one entry,
-`MnSched::latch_own_verdict`: it latches the verdict first, then faults the parked tasks. Before,
-five sites faulted the tasks with no latch. A faulted task unwound and freed the `Shared` guard
-it held, main took the guard and ran on: `print("AFTER")` ran past the deadlock in 27 to 67 of
-600 runs (`tests/deadlock_verdict_stress.rs`). The latched report is the first blocked party's
-own site, whichever judge decides first (TICKET-256, owner decision 2026-10-14): a `parallel:`
-body that waits at `s.update` is listed as `waiting for the Shared guard` at that line. Since
-2026-11-06 the report lists every blocked task (`docs/reference/concurrency/05-cancel.md`). The scheduler writes the same
-report into the tasks it faults, so main ends with one text whichever it reads first. Go
-agrees: its trace lists main at its `Lock` first, and nothing after the lock runs. A wait registers as a blocked party
-before it marks its body blocked, so a judge never sees a blocked body with no party.
+**Who is asleep.** A fiber parked on a channel, `wait:`, guard or join bucket. Main is fiber 1, so
+its waits are parks like any task's. A task waiting in place is awake: a stdin read, a blocking
+native, a socket, a C call, a demoted wait (an FFI callback, a map/set probe hook), as a goroutine
+in a syscall keeps its M busy in Go. A timer is a task of the count while a task is parked on its
+channel and it has not fired (`ChannelCore::timer_wait` / `ChannelCore::timer_fired`), Go 1.23's
+rule: a timer nobody waits on (a `wait:` another arm won) keeps nothing awake, so a later deadlock
+is reported at once. The wait ends at the task's resume or with its fiber.
 
-**Every blocked thing is asked, and a verdict stands only inside one epoch (TICKET-236).** Two
-windows let a verdict fault a healthy program. Both are closed by derivation, not by a retry.
+**The order rule.** A wake adds its +1 inside the lock hold that publishes it, before the waker can
+park or end, as Go's `goready` puts the woken G on a run queue before the M goes idle. A wake that
+published first and counted after would let the waker's own -1 reach 0 with a live task in a queue:
+a false fatal deadlock. A task that ends with wakes still to make (`drain_family` after a fault, a
+timer channel's send) holds a token task across them, so its end is not the -1 that reaches 0.
 
-*The cut window.* `ex.cancel()` cuts a job: the job leaves the counts, its handle is sealed,
-the scheduler lock drops, and only then the reader of the handle is requeued. A parked reader
-was only counted (`parked_n`), never asked about its channel, so a judge in that window read
-"all parked". A nursery task reading a cut job's handle faulted `deadlock: every task in this
-parallel: block is blocked …` in 10 of 10 runs at `CHEZZI_THREADS=2` and 9 of 10 at the default
-count (300 rounds, release). Now one pair of answers, `recv_satisfiable` and `wait_satisfiable`
-(`src/vm/quiesce.rs`), serves a blocked party, a demoted waiter and a parked task
-(`ParkedEntry::satisfiable`): a channel that is ready, closed or sealed vetoes the verdict.
-`parked_n` still says "a victim is in view" (DEC-101); it is no longer evidence of "stuck".
+**The check.** The -1 that takes `awake` to 0 with `alive > 0` (from `asleep` or `task_ended`, a
+fired timer's included) calls `MnSched::on_deadlock` (`src/vm/deadlock.rs`), its one definition
+(`tests/owner_guards.rs` `the_deadlock_verdict_has_one_definition`). It takes the run's
+`verdict_gate`, which orders it against the `--timeout` deadline timer, a waker the count does not
+hold: a deadline that passed requeues its tasks (they return the deadline at their waits) and the
+check declines; once the check latches, the timer requeues nothing. It reads `all_asleep` again,
+latches `RunHalt::Deadlock` (`QuiesceState::latch_deadlock`), and ends every asleep task of every
+sched of the run at its wait (`SchedCore::take_asleep`, `SchedCore::end_asleep`): each adds its
+listing entry at its own wait, joins included, is dropped without running a `defer`, and has the
+guards it holds cut. Nothing moves meanwhile: with no task awake, no wake can happen. The root sched
+ends last, so main's end lets the driver render the listing with every other task's entry in it.
+`RuntimeError` carries no deadlock flag: every reader asks `run_halt() == RunHalt::Deadlock`
+(`Vm::deadlocked`).
 
-*The read order.* A judge reads schedulers one lock at a time. A job can send and finish between
-two reads: the judge saw the reader blocked on an empty channel, then saw the job done. Each
-read is true and the pair describes no instant. This needs no `ex.cancel()`: a reader inside
-a `map` callback faulted in 3 to 5 of 60 runs (100 rounds) on the base binary. Now the run has
-one epoch (`QuiesceState::left`). Every way a waker leaves the counts a verdict reads moves it,
-and each verdict entry (`QuiesceState::decide_since`, `MnSched::latch_own_verdict`, the nursery
-owner's judge in `take_runnable`) reads it before its walk and declines if it moved. In a real
-deadlock nothing leaves, so the next walk stands.
+**Always fatal.** `recover:` does not catch it, and no `defer` runs after it (Go prints
+`fatal error: all goroutines are asleep - deadlock!` and nothing after). A lock cycle or a re-lock
+is not a fault of its own: its tasks park on the guard, and the check reports them like any other
+wait. A partial deadlock (some tasks stuck while another runs) is not reported: the run hangs, as in
+Go, and `chezzi test --timeout` is the backstop.
 
-The rule for a bump: it FOLLOWS the leaver's last channel effect (a send, a seal, a close, a
-cancel trip) and PRECEDES the release of the lock that publishes the count, or the atomic change
-itself. `SchedCore::settle_job` seals a cut job's handle inside the lock hold that ends the job,
-so it bumps as its last statement. The fields `quiesced_core_given` reads, and what each write
-toward "stuck" goes through:
+**Per test in `chezzi test`.** The count covers the run, and tests run one at a time, so a latch
+during a test is that test's deadlock. Its latch id (`QuiesceState::verdict`) tells it from a later
+test's. The test fails with the listing, its tasks are dropped, and a guard one of them held is
+released `CUT` (`UpdateGuard::mark_cut` through `Vm::cut_held_guards` and `core::cut_all`), so a
+later test that takes the box blocks at its own call, and the check lists it there. The count is back to main
+alone for the next test.
 
-| field | way out | moves the epoch through |
-|---|---|---|
-| `running` | a park, a yield, a finish, a demote, an offload | `SchedCore::leave_running` |
-| scope `done` | a task ends, is reaped or is dropped | `SchedCore::task_done` |
-| scope table | a finished scope is retired | `SchedCore::scope_retired` |
-| `blocked_owners`, `cross_sched_blocked_owners` | an owner blocks at a nested join | `SchedCore::owner_blocked` |
-| scope `body_open` | the body reached its join | `SchedCore::body_closed` |
-| scope `body_blocked`, `awaiting_builder` | `set_body_wait` (block and unblock) | `SchedCore::body_wait` |
-| scope `awaiting_builder` | the builder reached the scope's join | `SchedCore::builder_joined` |
-| `inflight` | an offload, a timer or a poll completes | `MnSched::leave_inflight` (bump first: the count is read under no lock) |
-| `parties` | a party blocks | `QuiesceState::block_shared` |
-| a job handle's seal | a job is cut | `SchedCore::settle_job` (bump last) |
-
-A transfer between two counts inside ONE lock hold needs no bump: `runnable` down beside
-`running` up (a pick), `joins_blocked` down beside `runnable` up or `blocked_owners` down,
-`cross_sched_blocked_owners` down beside `blocked_owners` down, a cancel drain of `parked`
-beside `runnable` up, a waiter unregistered beside `running` up. `parked_n` and a demoted
-waiter are added in the lock hold of a `leave_running`. Splitting a transfer across two lock
-holds reopens the window. A new term in `quiesced_core_given` needs a row here: its writers by
-grep, and for each either a method with a row in
-`vm::tests::every_way_out_of_the_counts_moves_the_epoch` or the count it transfers into. The
-epoch is per run: `MnSched::join_run` is the one place that pairs a scheduler with its run's
-state.
-
-*The licence comes before the latch.* A latch never un-latches. `latch_own_verdict(licence)`
-first checks the verdict and the caller's licence to cut (`may_fault_unproven`; M3.2 deleted
-the `victims_proven` holder-count proof, unsound once two tasks share a channel slot) under the
-scheduler lock, then latches, then checks
-both again. Before, it latched first and kept the latch when the licence declined. A declined
-judge takes its timed wait and re-judges.
-
-A real deadlock is still reported: a job cut before it sends on a PLAIN channel leaves its
-reader with no waker, and the run faults at every worker count
-(`a_cut_plain_channel_feeder_is_still_a_deadlock`). The grid is `tests/executor_reader_grid.rs`:
-reader (main, nursery task, task in a callback, task in a `defer`, job of another Executor, job
-of the same Executor) x wait (`recv`, `Task.get`, plain channel) x job end x cutter x worker
-count. Every cell with a cut feeder of a plain channel is a deadlock fault.
+The grids: `tests/awake_count_grid.rs` (each wait kind x context, live and dead, at T=1, 2, 4 and
+seeds 1-3: every live cell `deadlocks=0`, every dead one `deadlocks=1`), `tests/wait_counts_grid.rs`,
+`tests/deadlock_latch_race.rs` (the deadline timer against the latch, through the debug-only
+`CHEZZI_TEST_DEADLOCK_LATCH_WINDOW_MS` hook) and `tests/deadlock_verdict_stress.rs`.
 
 ## Guard waits
 
 **A fiber's guard wait parks (2026-11-08), as a goroutine's `sync.Mutex` wait does.** A contended
 `set`/`update`/`write` in a fiber (the `Park` cell) retries its take a few times (a few
-microseconds, as Go spins), then files its wait-for edge (`GuardGraph::waiting`, so AB-BA
-is still a fatal `a lock cycle` deadlock), lists its sched with the box (`BoxLock::park_waiter`) and parks
+microseconds, as Go spins), then lists its sched with the box (`BoxLock::park_waiter`) and parks
 (`ParkedEntry::Guard`). Its `WaitTicket` travels in the task's `FiberCtx` (`Vm::guard_ticket`), so a
 parked writer stays counted (writer preference) and a parked reader keeps its admission; the rewound
 method call re-runs and takes the box through that ticket. A release (`release_write`, the last
 reader's drop, a ticket drop) wakes the box's bucket on each listed sched (`MnSched::wake_cross`; a
-wake that finds the sched's core lock held hops to the timer thread). The verdict asks a parked
-waiter the same question as an in-place one (`core::wait_may_end`). 200 waiters at `--threads=2`:
+wake that finds the sched's core lock held hops to the timer thread). A parked guard waiter is
+asleep in the run's count; an AB-BA cycle or a re-lock just parks, and the deadlock check lists it.
+200 waiters at `--threads=2`:
 `demotes=0` (`tests/park_scale.rs`; base 199).
 
-A holder that a deadlock cut never released its guard, as a deadlocked goroutine never
-unlocks its `sync.Mutex`: its release (any release the cut marks: the deadlock unwind, a cut `defer`, a closure
-that is not a frame; or the verdict's drop of a parked holder's context, `record_deadlocked`) frees the box with the `CUT` bit of its lock word
-set (`UpdateGuard::mark_cut`, set by `Vm::cut_held_guards` or `Vm::cut_if_fatal`). No task takes a `CUT` box again
-for the rest of the run, a waiter, a fresh acquire and a later `chezzi test` fn alike (Go blocks every `Lock` of a
-`Mutex` nobody unlocks, TICKET-298), so a waiter stays blocked and the next verdict lists it; a cut write release
-admits no waiting reader and wakes nobody, and a waiting writer that leaves wakes the box's waiters only when the
-box looks free (a woken parked waiter is runnable, which the verdict reads as progress). A test fn that touches a
-box a deadlocked test left cut errors with a deadlock at its own `update`.
+A holder that the deadlock check ended never released its guard, as a deadlocked goroutine never
+unlocks its `sync.Mutex`. The check cuts the guards of every task it ends (`SchedCore::end_asleep`
+through `core::cut_all`; `Vm::cut_held_guards` for a task's own `held_guards`), and the release
+frees the box with the `CUT` bit of its lock word set (`UpdateGuard::mark_cut`). No task takes a
+`CUT` box again for the rest of the run, a waiter, a fresh acquire and a later `chezzi test` fn alike
+(Go blocks every `Lock` of a `Mutex` nobody unlocks, TICKET-298). That matters only in `chezzi test`,
+where the run goes on after a test's deadlock: a test fn that touches a box a deadlocked test left
+cut errors at its own `update`.
 
 The other contexts wait in place (`main`, the builder, an eager job, a fiber inside a nested native
 callback). Such a waiter waits for the guard to come FREE holding no width permit, then takes the
@@ -155,8 +118,7 @@ hook, an operator (`a + b`, `x[k]`, `-x`, `in`, `==`, `<`), an f-string part, `p
 HOF callback (`map`, `filter`, `fold`, `take_while`, `count`, `position`, `min_by`, the
 `sort_by_key` key pass), a sort comparator (`sort_by`, a struct key's `compare`, `sort()` and
 `min`/`max` over structs), a `T.from_iter(it)` drain, a `Shared`/`RwShared` closure or a generator
-body parks the fiber (Park) and is judged in `main` (OwnThread with `native_reentry == 0`), as in
-Go. The handler on the dispatch loop pushes the callee's frame with a `RetAction` (`CallFrame.ret`,
+body parks the fiber (Park), as in Go. The handler on the dispatch loop pushes the callee's frame with a `RetAction` (`CallFrame.ret`,
 `src/vm/ret_action.rs`, `Copy`, 2 bytes) and returns; `do_return` runs the rest of the op through
 `Vm::apply_ret`, and a frame that leaves without a return gives its state back through
 `Vm::drop_ret`. A loop keeps its state in stack slots below the callback frame (a HOF
@@ -175,12 +137,11 @@ holds a `sync.Mutex`.
 op reaches it there). A hook reached from a nested container walk (`==`/`hash`/`str`/`<` inside a list, tuple, map
 or set), a map/set probe, `unique`/`dedup`, set algebra, a tuple or list `sort_by_key` key,
 `drain_iterable` (`T.from_iter(x)` where `x` has an `iter` hook), a `json.decode` default thunk and
-an FFI callback keep `Vm::reentered`: the fiber demotes, and `main` there is unjudged (`gaps.md`
-W23-1). A `defer` drain runs on frames too (since 2026-11-07, `src/vm/defer_drain.rs`): it is a
+an FFI callback keep `Vm::reentered`: the fiber demotes and waits in place, awake in the run's
+count, so a deadlock there hangs (`gaps.md` W23-1). A `defer` drain runs on frames too (since 2026-11-07, `src/vm/defer_drain.rs`): it is a
 trampoline frame that calls each record through a real call op, so a wait in a `defer` body, or in a
-callback of a deferred native method (`defer xs.map(f)`), parks its task and is judged in `main`.
-Only the synchronous hard-halt drains (`--max-heap`, `--timeout`) run on the Rust stack; a wait in
-one is still judged in `main`, through the `deferring` exception of `BlockCtx::judged`. The grid is `tests/callback_park_grid.rs`: every
+callback of a deferred native method (`defer xs.map(f)`), parks its task. The `--max-heap`
+hard-halt drain's wait parks too (plan 2026-11-17), so its deadlock is reported. The grid is `tests/callback_park_grid.rs`: every
 callback kind × `main`, a helper, top level, `spawn:` and a `test fn`, with no sender (`deadlock`,
 the same text at T=1, 2, 4) and with a live sender (the golden output, no false deadlock).
 
@@ -203,7 +164,7 @@ closed+empty recv arm, which the re-check called **DEAD**; requeueing on one dea
 spun, so a dead arm was never READY, and an all-dead re-check requeued into the all-closed fault. The W7-13r(a) rule "`closed` is not a recv arm's wake condition" and the
 DEC-176 rule "judge an all-closed `wait:` as a whole" served that skip. D2 makes a closed arm a taken
 arm, so `closed` is a ready condition on every wake predicate (park re-check, demote poll, eager
-in-place wait, deadlock verdict), the re-run poll settles on it (no spin), and the fault is gone.
+in-place wait), the re-run poll settles on it (no spin), and the fault is gone.
 
 **Send-arm inside a native callback (TICKET-185).** A send-arm that cannot move its value, reached
 *inside a native callback* (a `Shared.update` closure, a list-HOF), DEMOTES and blocks on its offer,
@@ -396,19 +357,15 @@ gate of its own. Full tables: `docs/contributing/benchmarks.md` §TICKET-168.
 ## Blocking-table accounting
 
 **The counts come from one table.** `block::wait_steps(spec, ctx)` gives each wait the counts it
-registers for the two deadlock verdicts, and `Vm::wait_begin` takes them (`Vm::nursery_counts` for
-a nursery join); `Vm::wait_end` drops them before it takes the permit back (an in-place channel
-tick, after it, before its next pop). A wait that ends by
-itself (`will_return`: a deadline or an external completion) counts nothing, and a demoted one is
-`inflight` (it vetoes the sched verdict). Every other wait is a party of the process-wide verdict
-on a judged thread, marks the eager bodies of its thread blocked on it, and a demoted one registers
-a waiter in the ONE registry `SchedCore::waiters`; the verdict vetoes while any waiter can still be
-satisfied (`Waiter::satisfiable`: a cancel flag it would honour, or its `PartyWait`). A guard wait
-is never `inflight` (DEC-063). An Executor join is a waiter since TICKET-208 (a job is a fiber, so
-its sched can satisfy the join); DEC-181's "Executor join is `inflight`" no longer holds. A
-nursery join is a party on a thread with no sched under it and a blocked owner on a shell. A parked
-fiber counts through its park (`parked_n`, `join_parked`, a timer's `inflight`), not through the
-table. A new blocking shape adds a `PartyWait` arm or a table row, never a new list or veto.
+registers, and `Vm::wait_begin` takes them (`Vm::nursery_counts` for a nursery join); `Vm::wait_end`
+drops them before it takes the permit back (an in-place channel tick, after it, before its next
+pop). A wait that ends by itself (`will_return`: a deadline or an external completion) counts
+nothing, and a demoted one is `inflight`. A demoted wait that does not end by itself registers a
+waiter in the ONE registry `SchedCore::waiters`. A parked fiber counts through its park (`parked_n`,
+`join_parked`, a timer's `inflight`), not through the table. None of these decides a deadlock: the
+run's awake count does ([The deadlock check](#the-deadlock-check)). A guard wait is never
+`inflight` (DEC-063). An Executor join parks since TICKET-208 (a job is a fiber). A new blocking
+shape adds a table row, never a new list.
 
 **Cells TICKET-181 changed**, each red in the grid before the fix and judged against Go 1.27 at
 `GOMAXPROCS=1` (or CPython where Go has no twin):

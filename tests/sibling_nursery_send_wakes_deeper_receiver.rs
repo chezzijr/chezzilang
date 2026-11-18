@@ -96,9 +96,9 @@ fn sibling_send_wakes_receiver_in_a_deeper_nursery_at_eight_workers() {
 }
 
 /// Shape B — an ANCESTOR sends after a delay, to a receiver already parked in a DEEPER nursery.
-/// `MnSched::is_deadlocked_ignoring_jobs` reads only its own `SchedCore`, so the deeper sched
-/// quiesces and faults `deadlock` immediately, long before the sender's 300ms sleep elapses and the
-/// send exists. This is deterministic (not a race): the receiver is parked well before the send is
+/// A per-sched judge once faulted the deeper sched `deadlock` immediately, long before the
+/// sender's 300ms sleep elapsed; the run-wide awake count holds the sleeping ancestor (its pending
+/// timer), so no verdict fires. This is deterministic (not a race): the receiver is parked well before the send is
 /// even reachable. Measured on the release binary at `2be17751`: faults `deadlock:` at every worker
 /// count above one.
 #[test]

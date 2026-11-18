@@ -494,16 +494,19 @@ fn apply_env_sched_seed(cmd: &str) {
     }
 }
 
-/// Under `CHEZZI_SCHED_STATS=1`, print the run's worker count and demote count to stderr:
-/// `[sched-stats] workers=<n> demotes=<m>`. `workers` is [`vm::worker_count`], the one count the
-/// pool, every scheduler and the eager gate are sized by; `demotes` is [`vm::demote_count`], how
-/// many workers handed their slot to a replacement thread because a wait could not park.
+/// Under `CHEZZI_SCHED_STATS=1`, print the run's worker count, demote count and deadlock count to
+/// stderr: `[sched-stats] workers=<n> demotes=<m> deadlocks=<k>`. `workers` is
+/// [`vm::worker_count`], the one count the pool, every scheduler and the eager gate are sized by;
+/// `demotes` is [`vm::demote_count`], how many workers handed their slot to a replacement thread
+/// because a wait could not park; `deadlocks` is [`vm::deadlock_count`], how many times every
+/// task of a run was asleep.
 fn report_sched_stats(code: ExitCode) -> ExitCode {
     if std::env::var_os("CHEZZI_SCHED_STATS").is_some() {
         chezzi::errln!(
-            "[sched-stats] workers={} demotes={}",
+            "[sched-stats] workers={} demotes={} deadlocks={}",
             vm::worker_count(),
-            vm::demote_count()
+            vm::demote_count(),
+            vm::deadlock_count()
         );
     }
     code

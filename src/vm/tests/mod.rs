@@ -52,9 +52,7 @@ fn dl_err() -> RuntimeError {
         is_assert: false,
         is_over_memory: false,
         is_timed_out: false,
-        is_deadlock: false,
         is_panic: false,
-        blocked: None,
     }
 }
 
@@ -107,8 +105,8 @@ fn mk_fiber(task_index: usize) -> Fiber {
         fault_park: None,
         park_site: None,
         park_deadline: None,
+        timer_wait: None,
         job_cancel: None,
-        defer_cut: None,
         cut: None,
         cancel_unwind_faulted: false,
     }
@@ -136,18 +134,27 @@ fn mk_pending_fiber(task_index: usize) -> Fiber {
         fault_park: None,
         park_site: None,
         park_deadline: None,
+        timer_wait: None,
         job_cancel: None,
-        defer_cut: None,
         cut: None,
         cancel_unwind_faulted: false,
     }
 }
 
 fn mk_sched(total: usize) -> MnSched {
+    mk_sched_with(total, Arc::new(AtomicBool::new(false)))
+}
+
+/// [`mk_sched`] with the sched's own cancel flag.
+fn mk_sched_with(total: usize, cancel: Arc<AtomicBool>) -> MnSched {
     // 4 worker slots by default — enough for the multi-`wid` steal tests; single-worker tests
     // just use `wid` 0.
     // `mem_cap` 0 = the `--max-heap` cap off, which is what every fixture here wants.
-    MnSched::new(total, 4, Arc::new(AtomicBool::new(false)), dl_err(), 0)
+    let sched = MnSched::new(total, 4, cancel, dl_err(), 0);
+    // The test thread drives the fixture (its sends, wakes and takes) as a running task does: it
+    // is one awake task of the run's count, so a fiber it parks never reads as every task asleep.
+    sched.quiesce.awake.task_started(1);
+    sched
 }
 
 /// Run `src` from a temp entry file (a real graph resolve, so `import … from
@@ -172,18 +179,6 @@ fn ran_program(src: &str) -> Vm {
     vm
 }
 
-/// TICKET-181 — a demoted fiber's waiter on an empty `recv` of `core`, watching `cancel`.
-fn recv_waiter(core: &Arc<ChannelCore>, cancel: Vec<Arc<AtomicBool>>) -> Waiter {
-    Waiter {
-        wait: Arc::new(quiesce::PartyWait::Recv(Arc::clone(core), None)),
-        cancel,
-        fiber: true,
-        scope: None,
-        cut: false,
-        holds_guard: false,
-    }
-}
-
 /// Run a program to completion, returning its stdout (panics on runtime error).
 fn run(src: &str) -> String {
     run_capture(src).unwrap_or_else(|e| panic!("unexpected runtime error: {e}"))
@@ -199,14 +194,47 @@ fn run_err(src: &str) -> String {
 
 /// A fault as a driver prints it, minus paths and frames: the message, then for a deadlock each
 /// blocked task's `task k: <wait> at <site>` line.
-fn err_text(e: &RuntimeError) -> String {
-    let tasks = crate::vm::deadlock::listing(e, &[]);
+fn err_text(e: &RunError) -> String {
     let mut s = e.message.clone();
-    for line in crate::vm::deadlock::render(&tasks, &[]) {
+    for line in crate::vm::deadlock::render(&e.blocked, &[]) {
         s.push('\n');
         s.push_str(&line);
     }
     s
+}
+
+/// The one deadlock header (plan 2026-11-17): every task of the run is blocked.
+pub(super) const DEADLOCK_HEADER: &str = "deadlock: every task is blocked";
+
+/// A fault that may be a deadlock report: its message, its site, its listing and its text as a
+/// driver prints it. Every driver's [`RunError`] is.
+pub(super) trait Report {
+    fn parts(&self) -> (&str, Span, Vec<super::deadlock::BlockedTask>, String);
+}
+
+impl Report for RunError {
+    fn parts(&self) -> (&str, Span, Vec<super::deadlock::BlockedTask>, String) {
+        (
+            &self.message,
+            self.span,
+            self.blocked.clone(),
+            format_trace(self),
+        )
+    }
+}
+
+/// Assert `e` is the run's one deadlock report (plan 2026-11-17): the header, sited at task 1's
+/// wait, and every blocked task as `(wait, line)` in listing order (pre-order, a task before the
+/// tasks it spawned; main is task 1; `Executor` jobs after every run task; joins listed).
+pub(super) fn assert_deadlock(e: &impl Report, tasks: &[(&str, u32)]) {
+    let (message, span, listed, text) = e.parts();
+    let got: Vec<(String, u32)> = listed.into_iter().map(|t| (t.wait, t.span.line)).collect();
+    let want: Vec<(String, u32)> = tasks.iter().map(|&(w, l)| (w.to_string(), l)).collect();
+    assert!(
+        message == DEADLOCK_HEADER && got == want && want.first().map(|t| t.1) == Some(span.line),
+        "want `{DEADLOCK_HEADER}` at line {:?} listing {want:?}\ngot at {span:?}: {text}",
+        want.first().map(|t| t.1),
+    );
 }
 
 /// Run a program and return its stdout, for the caller to assert against a literal expected.

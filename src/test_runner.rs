@@ -151,6 +151,8 @@ enum Verdict {
     /// meaningful source line (the abort fires at a GC boundary, not a statement). Counts as failure.
     OverMemory {
         msg: String,
+        /// A deadlock in the abort's `defer`s: the blocked tasks' listing; else empty.
+        frames: Vec<String>,
     },
     /// `chezzi test --timeout` — the test ran longer than the wall-clock cap and was hard-aborted at a
     /// loop back-edge. No meaningful source line (the abort fires at a checkpoint, not a statement).
@@ -202,7 +204,7 @@ fn verdict_msg(v: &Verdict) -> Option<&str> {
         Verdict::Pass => None,
         Verdict::Fail { msg, .. }
         | Verdict::Error { msg, .. }
-        | Verdict::OverMemory { msg }
+        | Verdict::OverMemory { msg, .. }
         | Verdict::TimedOut { msg } => Some(msg),
     }
 }
@@ -274,11 +276,7 @@ fn traced_fault_site(
     let trace: Vec<crate::vm::TraceFrame> =
         trace.into_iter().filter(|f| f.span.file != 0).collect();
     let listed = vm.take_listing();
-    let tasks = if e.blocked.is_some() && !listed.is_empty() {
-        listed
-    } else {
-        crate::vm::deadlock::listing(e, &trace)
-    };
+    let tasks = if vm.deadlocked() { listed } else { Vec::new() };
     let tasks: Vec<crate::vm::deadlock::BlockedTask> = tasks
         .into_iter()
         .map(|mut t| {
@@ -316,7 +314,7 @@ fn traced_fault_site(
 /// `assert` failure → `Fail`, anything else → `Error`.
 fn verdict_from_fault(mut e: crate::vm::RuntimeError, site: FaultSite) -> Verdict {
     if !site.tasks.is_empty() {
-        e.message = crate::vm::deadlock::header(site.tasks.len());
+        e.message = crate::vm::deadlock::header();
     }
     // `is_timed_out` checked FIRST. It is mutually exclusive with `is_over_memory` in practice (a
     // timeout trips at a loop back-edge, over-memory at a GC boundary — a single abort carries one
@@ -324,7 +322,15 @@ fn verdict_from_fault(mut e: crate::vm::RuntimeError, site: FaultSite) -> Verdic
     if e.is_timed_out {
         Verdict::TimedOut { msg: e.message }
     } else if e.is_over_memory {
-        Verdict::OverMemory { msg: e.message }
+        let frames = if site.tasks.is_empty() {
+            Vec::new()
+        } else {
+            site.frames
+        };
+        Verdict::OverMemory {
+            msg: e.message,
+            frames,
+        }
     } else if e.is_assert {
         Verdict::Fail {
             site,
@@ -624,7 +630,7 @@ fn render_line(report: &mut Vec<u8>, o: &Outcome, opts: &RunOpts) {
             )
             .as_bytes(),
         ),
-        Verdict::OverMemory { msg } => report.extend_from_slice(
+        Verdict::OverMemory { msg, .. } => report.extend_from_slice(
             format!(
                 "{} {} ({}) {}",
                 paint("OVER-MEMORY", 33, c),
@@ -651,7 +657,8 @@ fn render_line(report: &mut Vec<u8>, o: &Outcome, opts: &RunOpts) {
     report.push(b'\n');
     let frames: &[String] = match &o.verdict {
         Verdict::Fail { site, .. } | Verdict::Error { site, .. } => &site.frames,
-        Verdict::Pass | Verdict::OverMemory { .. } | Verdict::TimedOut { .. } => &[],
+        Verdict::OverMemory { frames, .. } => frames,
+        Verdict::Pass | Verdict::TimedOut { .. } => &[],
     };
     for frame in frames {
         report.extend_from_slice(frame.as_bytes());

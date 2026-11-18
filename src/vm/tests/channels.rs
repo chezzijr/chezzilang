@@ -104,21 +104,19 @@ fn bounded_channel_try_send_full_returns_false() {
 }
 
 /// A `send` on a FULL bounded channel with NO possible consumer (top level, no nursery) is a
-/// deadlock fault with a byte-identical message — NOT a silent over-fill.
+/// deadlock fault — NOT a silent over-fill. Go twin: a full buffered send in main, fatal, all asleep.
 #[test]
 fn bounded_channel_full_send_top_level_deadlocks() {
     let src = "c := Channel[int](1)\nc.send(1)\nc.send(2)\nprint(\"unreached\")\n";
-    let e = run_err(src);
-    assert!(e.contains("send() on a full channel"), "serial: {e}");
-    let ep = err_text(&run_capture(src).expect_err("M:N should fault"));
-    assert_eq!(e, ep, "serial and M:N deadlock text must match");
+    let e = run_capture(src).expect_err("M:N should fault");
+    assert_deadlock(&e, &[("send() on a full channel", 3)]);
 }
 
 /// Bugs 3/4 — a bounded `send` that parks inside a nursery and then genuinely deadlocks must report a
 /// diagnostic that names the ACTUAL stall (a full `send()`), not the recv-only wording. The stuck task
 /// is a SENDER blocked on a FULL channel, not a receiver on an empty one; the generic nursery message
-/// must name `full send()` so a debugger is not misdirected toward a nonexistent receiver. Parity:
-/// this emits byte-identical text.
+/// must name `full send()` so a debugger is not misdirected toward a nonexistent receiver. The one
+/// report (plan 2026-11-17) lists main at its join first; Go twin: fatal, all asleep.
 #[test]
 fn bounded_channel_nursery_send_deadlock_names_full_send() {
     let src = "fn main():\n\
@@ -128,13 +126,14 @@ fn bounded_channel_nursery_send_deadlock_names_full_send() {
                \x20           c.send(1)\n\
                \x20           c.send(2)\n\
                main()\n";
-    let e = run_err(src);
-    assert!(
-        e.contains("task 1: send() on a full channel"),
-        "serial diagnostic must name the send stall: {e}"
+    let e = run_capture(src).expect_err("M:N should fault");
+    assert_deadlock(
+        &e,
+        &[
+            ("waiting for a nursery join", 3),
+            ("send() on a full channel", 6),
+        ],
     );
-    let ep = err_text(&run_capture(src).expect_err("M:N should fault"));
-    assert_eq!(e, ep, "serial and M:N deadlock text must match");
 }
 
 /// Bounded fan-out golden: a single producer sends 0..5 into a cap-2 channel while a consumer
@@ -240,9 +239,12 @@ fn wait_send_arm_in_callback_blocks_until_the_deadlock_verdict() {
                \x20           print([1].map(f))\n\
                main()\n";
     let e = run_capture(src).expect_err("a send nobody can take must end in the verdict");
-    assert!(
-        e.is_deadlock && e.message.starts_with("deadlock:"),
-        "expected the deadlock verdict, got: {e:?}"
+    assert_deadlock(
+        &e,
+        &[
+            ("waiting for a nursery join", 8),
+            ("wait: on channels none of which can proceed", 3),
+        ],
     );
 }
 

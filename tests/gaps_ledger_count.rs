@@ -80,7 +80,8 @@ fn a_row_that_says_closed_is_struck() {
 /// `docs/reference/concurrency/02-channel.md`'s deadlock-vs-Go's-`fatal error` bullet must say the Chezzi verdict is FATAL
 /// (TICKET-135, D1): a top-level `recover:` around a `parallel:` deadlock aborts at rc=1 like Go's
 /// `fatal error`. The bullet must name `recover` and state the verdict is fatal, next to the Go
-/// comparison.
+/// comparison. Since the one global check (plan 2026-11-17) it must also give the one header,
+/// say it fires only when every task is blocked, and say a partial deadlock hangs, as in Go.
 #[test]
 fn concurrency_doc_deadlock_bullet_states_the_verdict_is_fatal() {
     let doc = read("docs/reference/concurrency/02-channel.md");
@@ -105,6 +106,18 @@ fn concurrency_doc_deadlock_bullet_states_the_verdict_is_fatal() {
         bullet.contains("FATAL"),
         "docs/reference/concurrency/02-channel.md's deadlock-vs-Go bullet must state the Chezzi verdict is FATAL: {bullet}"
     );
+    for needle in [
+        "`deadlock: every task is blocked`",
+        "every task of the run is blocked",
+        "all goroutines are asleep",
+        "partial deadlock",
+        "hangs",
+    ] {
+        assert!(
+            bullet.contains(needle),
+            "docs/reference/concurrency/02-channel.md's deadlock-vs-Go bullet must contain {needle:?}: {bullet}"
+        );
+    }
 }
 
 /// The W8-19 row's `Option`/`Result`-methods sub-item: the `Option` half is DECLINED (TICKET-037,

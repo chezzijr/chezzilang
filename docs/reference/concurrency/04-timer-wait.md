@@ -17,7 +17,9 @@ print(t.recv())            # true — blocks ~500ms; recv gives `?true`, which p
 It is **level-triggered**: any `recv` at or after the deadline yields `?true` (the typical use recvs it
 once). Delivery is handled at `recv` time, in the receiver's own engine, so a `timer` created at the top
 level can be `recv`'d inside a spawned task. A fiber receiver parks and a background job (on the
-netpoller timer thread) `send`s `true` at the deadline, accounted so it can't trip a false deadlock. A
+netpoller timer thread) `send`s `true` at the deadline, accounted so it can't trip a false deadlock. A timer keeps the run
+awake only while a task waits on it, as in Go 1.23: after a `wait:` whose other arm won, the pending
+timer does not hide a later deadlock (`deadlock: every task is blocked` at once). A
 waiter that owns its OS thread — an `Executor` job, or the top-level `main` thread, **including inside
 a native callback** — does **not** park: it blocks with the timer as one more arm, so a sibling value
 that arrives first wins.
@@ -187,9 +189,9 @@ is **not** exhaustive (it's a runtime race, not a type match); ≥1 recv or send
 - A value that arrives before the deadline wins the wait; the deadline wins only if nothing else did.
 - A send-arm that cannot move its value inside a nested native callback demotes and blocks on its offer, as
   Go blocks — like a plain full `send` there.
-- `main` inside a native callback blocks in place for any `wait:`. Nothing judges that context for a
-  deadlock, so a `wait:` there that nothing can satisfy hangs (a deliberate difference from Go, see
-  [06-blocking.md](06-blocking.md#blocking-context-table)).
+- `main` inside a nested native callback blocks in place for any `wait:`. A wait in place stays
+  awake in the run's deadlock count, so a `wait:` there that nothing can satisfy hangs (a deliberate
+  difference from Go, see [06-blocking.md](06-blocking.md#blocking-context-table)).
 
 Implementation notes (`Op::WaitPoll`, the multi-channel park, the timer arm):
 [`concurrency-runtime.md`](../../design/concurrency-runtime.md#wait-implementation).

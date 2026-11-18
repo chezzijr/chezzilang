@@ -8,8 +8,13 @@
 //! controls for `child`, `join` and `cancel`, and `join` vs `child` is "delivered at the join vs
 //! delivered mid-wait". Judged against the ancestors: Go reports a child's `panic: boom` whatever
 //! its owner's `defer` does, and CPython lets an outside `ThreadPoolExecutor`'s job finish.
-//! A stuck cleanup on a cut owner meets the deadlock verdict and ends the run, as Go's does; one in
-//! a cancelled sibling stays swallowed (TICKET-223).
+//! A stuck cleanup meets the one global check (plan 2026-11-17): once it is the last task awake,
+//! every task is asleep and the run ends with `deadlock: every task is blocked`, whichever party it
+//! sits in, a cancelled sibling's included. The fault it cleans up after is not the report, no
+//! `recover:` catches the deadlock, and no other `defer` runs (Go twin: a deferred receive that
+//! blocks while panicking is fatal, all asleep). A stuck cleanup beside a task that is still awake
+//! waits until that task ends or blocks (the `Nested` party's 2 s sleeper). The fault stays the
+//! report when no cleanup gets stuck.
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -17,6 +22,9 @@ use std::process::{Command, Stdio};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
+
+/// The one deadlock header: every task of the run is blocked.
+const HEADER: &str = "deadlock: every task is blocked";
 
 /// One finished run: exit code, stdout, stderr, and whether the cell's marker file existed 500 ms
 /// after the process exited (`false` when the cell has no marker).
@@ -509,14 +517,14 @@ enum Expect {
     Own(Cleanup),
     /// a job party's fault is its Task's outcome: nothing reaches stderr and the run ends 0
     Held,
-    /// a job party whose Task holds the child's fault: `t.get()` prints `!boom`, the run ends 0
-    HeldGet,
+    /// every task asleep: the one fatal report (Go twin: fatal, all asleep)
     Deadlock,
+    /// `Deadlock`, and the owner's logging `defer` never runs (Go twin: fatal, no deferred call)
+    DeadlockNoCleanup,
     /// C1: the outside Executor's job finished
     ShutdownSurvives,
-    /// C1, a `child` cause with a stuck cleanup on the owner: the cleanup meets the deadlock
-    /// verdict, which is fatal (Go: `all goroutines are asleep`); the cause `boom` is the one report
-    /// (DEC-147) and no `recover:` catches it (TICKET-223)
+    /// C1 with a stuck cleanup: once the outside job ends, every task is asleep; the fatal report
+    /// ends the run before `print(r)` (Go twin: fatal, all asleep)
     ShutdownStuckFatal,
     /// test mode: the cell timed out
     TimedOut,
@@ -532,22 +540,8 @@ enum Expect {
     /// `own_body` with a stuck owner `defer`: the `defer`'s `deadlock` supersedes the body fault,
     /// as Go's `fatal error: all goroutines are asleep - deadlock!` does
     OwnStuck,
-    /// `own_body` with a logging owner `defer`: `cleanup` prints, then the body fault, as Go's
-    /// deferred call runs before `panic: index out of range [5]`
-    BodyFaultLogged,
-    /// `own_body` under `recover:`: the party catches the body fault and the run ends 0, as Go's
-    /// `recover()` does
-    Caught,
     /// a job party: its Task holds the body fault, and `t.get()` prints it (TICKET-289)
     HeldBodyFault,
-    /// `own_body` caught, then a live `recv`: the verdict that cut the stuck child judges the
-    /// later wait again, so the feeder's value arrives (Go: `caught`, then the receive)
-    LiveAfterRecover,
-    /// the same `recv` with no feeder: a genuine deadlock still faults (Go: `all goroutines are
-    /// asleep`)
-    DeadAfterRecover,
-    /// `sibling_fault` under `recover:`: the party catches the child's `boom`
-    CaughtBoom,
     /// a `deadlock` fault that supersedes the caught fault is fatal: no `recover:` binds it
     /// (DEC-135; Go: `fatal error: all goroutines are asleep - deadlock!`)
     FatalDeadlock,
@@ -576,7 +570,7 @@ fn ok(e: Expect, g: &Got) -> bool {
         Expect::Own(c) => {
             g.code != 0
                 && match c {
-                    Cleanup::Stuck => err.contains("deadlock"),
+                    Cleanup::Stuck => err.contains(HEADER),
                     Cleanup::Faulting => err.contains("cleanup failed"),
                     _ => err.contains("own"),
                 }
@@ -588,67 +582,32 @@ fn ok(e: Expect, g: &Got) -> bool {
                 && !err.contains("cleanup failed")
                 && !err.contains("deadlock")
         }
-        Expect::HeldGet => {
-            g.code == 0
-                && out.contains("!boom")
-                && !err.contains("boom")
-                && !err.contains("deadlock")
-        }
-        Expect::Deadlock => g.code != 0 && err.contains("deadlock"),
+        Expect::Deadlock => g.code == 1 && err.contains(HEADER),
+        Expect::DeadlockNoCleanup => ok(Expect::Deadlock, g) && !out.contains("cleanup"),
         Expect::ShutdownSurvives => {
             g.code == 0 && out.contains("!boom") && out.contains("job done? 1")
         }
         Expect::ShutdownStuckFatal => {
-            g.code != 0
-                && err.contains("boom")
-                && !err.contains("deadlock")
-                && !out.contains("!boom")
-                && !out.contains("job done?")
+            ok(Expect::Deadlock, g) && !out.contains("!boom") && !out.contains("job done?")
         }
         Expect::TimedOut => out.contains("TIMED-OUT cell") && out.contains("1 timed out"),
         Expect::TimedOutStopped => {
             out.contains("TIMED-OUT cell") && out.contains("1 timed out") && !g.marker
         }
         Expect::Control => g.marker,
-        Expect::VerdictDrain => {
-            g.code != 0 && err.contains("deadlock") && out.contains("job started")
-        }
-        Expect::OwnStuck => {
-            g.code != 0 && err.contains("deadlock") && !err.contains("index 5 out of bounds")
-        }
-        Expect::BodyFaultLogged => ok(Expect::BodyFault, g) && out.contains("cleanup"),
-        Expect::Caught => {
-            g.code == 0
-                && out.contains("caught !index 5 out of bounds")
-                && !err.contains("deadlock")
-        }
+        Expect::VerdictDrain => ok(Expect::Deadlock, g) && out.contains("job started"),
+        Expect::OwnStuck => ok(Expect::Deadlock, g) && !err.contains("index 5 out of bounds"),
         Expect::HeldBodyFault => {
             g.code == 0 && out.contains("!index 5 out of bounds") && !err.contains("deadlock")
         }
-        Expect::LiveAfterRecover => {
-            g.code == 0
-                && out.contains("caught !index 5 out of bounds")
-                && out.contains("got 7")
-                && !err.contains("deadlock")
-        }
-        Expect::DeadAfterRecover => {
-            g.code != 0
-                && out.contains("caught !index 5 out of bounds")
-                && err.contains("deadlock")
-                && !err.contains("index 5")
-        }
-        Expect::CaughtBoom => {
-            g.code == 0 && out.contains("caught !boom") && !err.contains("deadlock")
-        }
-        Expect::FatalDeadlock => g.code != 0 && err.contains("deadlock") && !out.contains("caught"),
+        Expect::FatalDeadlock => ok(Expect::Deadlock, g) && !out.contains("caught"),
         Expect::BodyFault => {
             g.code != 0 && err.contains("index 5 out of bounds") && !err.contains("deadlock")
         }
     }
 }
 
-/// A cut job party: every outcome stays in the job's Task. A cancelled sibling's stuck cleanup is
-/// cut alone, and the cause wins (DEC-147), as for every other party.
+/// A cut job party with no stuck cleanup: every outcome stays in the job's Task.
 fn job_party(cause: Cause, c: Cleanup) -> Expect {
     match (cause, c) {
         (Cause::Child | Cause::Cancel | Cause::Join, _) => Expect::Held,
@@ -687,6 +646,9 @@ fn cells() -> Vec<Cell> {
                     runs.extend(SEEDED);
                 }
                 let expect = match cause {
+                    // The stuck cleanup is the last task awake once `boomer` faults: all asleep,
+                    // in every party (Go twin: fatal, all asleep).
+                    K::Child | K::Cancel | K::Join if c == C::Stuck => Expect::Deadlock,
                     K::Child | K::Cancel | K::Join if party == P::Job => job_party(cause, c),
                     // A job's own stuck `defer` faults `deadlock`, which no `recover:` binds, the
                     // Task's included: it aborts at `shutdown()` (DEC-135).
@@ -708,8 +670,10 @@ fn cells() -> Vec<Cell> {
             }
         }
     }
-    // Run mode: the owner's own body fault × 7 parties × 5 cleanups. The cause wins (DEC-147): an
-    // owner whose child's cleanup is stuck resumes its unwind once the verdict cuts the child.
+    // Run mode: the owner's own body fault × 7 parties × 9 cleanups. With no stuck cleanup the body
+    // fault is the report (DEC-147). A child stuck in its `defer` keeps the owner at its join: once
+    // nothing else is awake (the `ChildStuckLive` feeder blocks at its send), every task is asleep
+    // and the deadlock is the report, under `recover:` too (Go twin: fatal, all asleep).
     let own_parties = [
         P::Main,
         P::Fn,
@@ -736,14 +700,18 @@ fn cells() -> Vec<Cell> {
                 runs.extend(SEEDED);
             }
             let expect = match (party, c) {
-                (_, C::ChildStuckCaught) => Expect::Caught,
-                (_, C::ChildStuckLive) => Expect::LiveAfterRecover,
-                (_, C::ChildStuckDead) => Expect::DeadAfterRecover,
-                (_, C::OwnerStuckCaught | C::OwnerStuckCaughtNoKid) => Expect::FatalDeadlock,
-                (P::Job, C::Stuck) => Expect::OwnStuck,
-                (P::Job, _) => Expect::HeldBodyFault,
+                (
+                    _,
+                    C::ChildStuckCaught
+                    | C::ChildStuckLive
+                    | C::ChildStuckDead
+                    | C::OwnerStuckCaught
+                    | C::OwnerStuckCaughtNoKid,
+                ) => Expect::FatalDeadlock,
+                (_, C::ChildStuck) => Expect::Deadlock,
+                (_, C::ChildStuckLogged) => Expect::DeadlockNoCleanup,
                 (_, C::Stuck) => Expect::OwnStuck,
-                (_, C::ChildStuckLogged) => Expect::BodyFaultLogged,
+                (P::Job, _) => Expect::HeldBodyFault,
                 _ => Expect::BodyFault,
             };
             let get = party == P::Job && matches!(expect, Expect::HeldBodyFault | Expect::OwnStuck);
@@ -765,17 +733,18 @@ fn cells() -> Vec<Cell> {
         }
     }
     // Run mode: a child's fault while its sibling's `defer` is stuck × 7 parties × {owner at its
-    // join, owner in its body, under `recover:`}: the child's fault is the report (DEC-147).
+    // join, owner in its body, under `recover:`}: once the child faults, the stuck sibling is the
+    // last task awake, so every task is asleep and the deadlock is the report, under `recover:`
+    // too (Go twin: fatal, all asleep). A job party's main waits at `t.get()`.
     for party in own_parties {
         for c in [C::None, C::InBody, C::ChildStuckCaught] {
             let mut runs = T3.to_vec();
             runs.extend(SEEDED);
-            let expect = match (party, c) {
-                (_, C::ChildStuckCaught) => Expect::CaughtBoom,
-                (P::Job, _) => Expect::HeldGet,
-                _ => Expect::Delivered,
+            let expect = match c {
+                C::ChildStuckCaught => Expect::FatalDeadlock,
+                _ => Expect::Deadlock,
             };
-            let get = matches!(expect, Expect::HeldGet);
+            let get = party == P::Job;
             v.push(Cell {
                 name: format!("run SiblingFault x {party:?} x {c:?}"),
                 src: Box::new(move |_| {
@@ -793,8 +762,9 @@ fn cells() -> Vec<Cell> {
             });
         }
     }
-    // Run mode: a job party whose stuck cleanup meets the verdict after a child fault; `t.get()`
-    // after `shutdown()` prints the fault the Task holds (TICKET-296).
+    // Run mode: a job party whose cleanup gets stuck after a child fault: main waits at
+    // `shutdown()`, so every task is asleep and the deadlock is the report; `t.get()` never runs
+    // (Go twin: fatal, all asleep).
     for cause in [K::Child, K::Join, K::Cancel] {
         let mut runs = T3.to_vec();
         runs.extend(SEEDED);
@@ -807,7 +777,7 @@ fn cells() -> Vec<Cell> {
             }),
             test_mode: false,
             runs,
-            expect: Expect::HeldGet,
+            expect: Expect::Deadlock,
         });
     }
     // Run mode: `shutdown` × {child, cancel} × 3 cleanups (C1).
@@ -822,7 +792,7 @@ fn cells() -> Vec<Cell> {
                 src: Box::new(move |_| shutdown_src(cause, c)),
                 test_mode: false,
                 runs,
-                expect: if cause == K::Child && c == C::Stuck {
+                expect: if c == C::Stuck {
                     Expect::ShutdownStuckFatal
                 } else {
                     Expect::ShutdownSurvives

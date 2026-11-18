@@ -953,9 +953,9 @@ fn cmp_int_f64_is_exact_at_the_i64_and_2_53_boundaries() {
     }
 }
 
-/// TICKET-016 / W8-3 arm 2 — `update` nested inside `update` on the SAME `Shared` box must FAULT
-/// (deadlock: self-held guard) instead of hanging undetected. Planning's decision: a same-box
-/// re-entry is the length-1 wait-for cycle, so it faults; only a genuine hang would time out.
+/// TICKET-016 / W8-3 arm 2 — `update` nested inside `update` on the SAME `Shared` box blocks (plan
+/// 2026-11-17: no re-entry check), so main is asleep at the inner `update` and the run ends in the
+/// one deadlock report instead of hanging. Go twin: `mu.Lock()` twice, fatal, all asleep.
 #[test]
 fn ticket_016_shared_update_nested_in_update_faults() {
     let src = "import Shared from std.concurrency\n\
@@ -979,15 +979,16 @@ print(s.get())
     let _ = std::fs::remove_file(&entry);
     let (_out, _err, res, _code) =
         result.expect("expected update-in-update to return within 5s (fault), not hang");
-    assert!(
-        res.is_err(),
-        "expected `update` nested in `update` on the same Shared box to fault (W8-3), got {res:?}"
+    assert_deadlock(
+        &res.expect_err("expected `update` nested in `update` to end in the deadlock report"),
+        &[("waiting for the Shared guard", 4)],
     );
 }
 
-/// TICKET-016 / W8-3 arm 1 — a `set` nested inside `update` on the SAME `Shared` box must FAULT
-/// (deadlock: self-held guard) instead of being silently overwritten by `update`'s post-closure
-/// write-back.
+/// TICKET-016 / W8-3 arm 1 — a `set` nested inside `update` on the SAME `Shared` box must not be
+/// silently overwritten by `update`'s post-closure write-back. A re-lock blocks (plan 2026-11-17:
+/// no re-entry check), so main is the one task, asleep at its `set`, and the run ends in the one
+/// deadlock report. Go twin: `mu.Lock()` inside `mu.Lock()`, fatal, all asleep.
 #[test]
 fn ticket_016_shared_update_nested_set_silently_lost() {
     let src = "import Shared from std.concurrency\n\
@@ -1002,11 +1003,7 @@ print(s.get())
     let (_out, _err, res, _code) = run_file_with(&entry, crate::native::HostConfig::default());
     let _ = std::fs::remove_file(&entry);
     let e = res.expect_err("expected a fault, got ok");
-    assert!(
-        e.message.contains("already holds the update guard"),
-        "expected the fault message to name the self-held guard, got: {}",
-        e.message
-    );
+    assert_deadlock(&e, &[("waiting for the Shared guard", 4)]);
 }
 
 /// TICKET-016 / W8-3 — a cross-task `set` racing an in-flight `update` on a DIFFERENT task must
@@ -1037,8 +1034,10 @@ print(\"s = {s.get()}\")
     );
 }
 
-/// TICKET-016 / W8-3 — an AB-BA wait-for CYCLE across two `Shared` boxes must fault, not hang
-/// undetected. A 200ms sleep before each nested `update` forces the cycle to form.
+/// TICKET-016 / W8-3 — an AB-BA wait-for CYCLE across two `Shared` boxes blocks both tasks (plan
+/// 2026-11-17: no lock-cycle check), so every task is asleep and the run ends in the one deadlock
+/// report, not a hang. A 200ms sleep before each nested `update` forces the cycle to form. Go twin:
+/// AB-BA `sync.Mutex`, fatal, all asleep.
 #[test]
 fn ticket_016_cross_box_update_cycle_faults() {
     let src = "\
@@ -1072,9 +1071,13 @@ print(\"done\")
     let _ = std::fs::remove_file(&entry);
     let (_out, _err, res, _code) =
         result.expect("expected the AB-BA cycle to fault within 15s, not hang");
-    assert!(
-        res.is_err(),
-        "expected an AB-BA wait-for cycle to fault, got {res:?}"
+    assert_deadlock(
+        &res.expect_err("expected the AB-BA cycle to end in the deadlock report"),
+        &[
+            ("waiting for a nursery join", 13),
+            ("waiting for the Shared guard", 7),
+            ("waiting for the Shared guard", 11),
+        ],
     );
 }
 
@@ -1108,18 +1111,26 @@ print(\"never\")
     let _ = std::fs::remove_file(&entry);
     let (_out, _err, res, _code) =
         result.expect("expected the guard waiter to fault within 15s, not hang");
-    let msg = res
-        .as_ref()
-        .err()
-        .map(|e| e.message.clone())
-        .unwrap_or_default();
-    assert!(msg.contains("deadlock"), "expected \"deadlock\" in {msg:?}");
+    // Go twin: fatal, all asleep. Which sibling takes the guard first is a race, so the setter is
+    // listed at its guard wait or has finished; main (at its join) and the holder (at its `recv`)
+    // are listed in every schedule.
+    let e = res.expect_err("expected the one deadlock report");
+    let listed = e.parts().2;
+    assert!(
+        e.message == DEADLOCK_HEADER
+            && listed.first().map(|t| (t.wait.as_str(), t.span.line))
+                == Some(("waiting for a nursery join", 4))
+            && listed
+                .iter()
+                .any(|t| t.wait == "recv() on an empty channel" && t.span.line == 6),
+        "got: {}",
+        e.parts().3
+    );
 }
 
 /// TICKET-063 — the same shape as `ticket_063_guard_waiter_behind_a_recv_faults_deadlock`, but the
-/// WAITER is the inline nursery body itself rather than a spawned sibling. Without
-/// the wait's counts marking the body blocked, `SchedCore::any_body_injecting` vetoes the
-/// deadlock predicate forever for this shape.
+/// WAITER is the inline nursery body itself rather than a spawned sibling: the run's one verdict
+/// must still fire, not hang.
 #[test]
 fn ticket_063_guard_waiter_in_the_nursery_body_faults_deadlock() {
     let src = "\
@@ -1145,7 +1156,21 @@ print(\"never\")
     let _ = std::fs::remove_file(&entry);
     let (_out, _err, res, _code) =
         result.expect("expected the guard waiter to fault within 15s, not hang");
-    assert!(res.is_err(), "expected a deadlock fault, got {res:?}");
+    // Go twin: fatal, all asleep. Main is task 1 at its `set` (line 7) or, when its `set` won the
+    // race, at its join (line 4); the holder is listed at its `recv` either way.
+    let e = res.expect_err("expected the one deadlock report");
+    let listed = e.parts().2;
+    let main_at = listed.first().map(|t| (t.wait.as_str(), t.span.line));
+    assert!(
+        e.message == DEADLOCK_HEADER
+            && (main_at == Some(("waiting for the Shared guard", 7))
+                || main_at == Some(("waiting for a nursery join", 4)))
+            && listed
+                .iter()
+                .any(|t| t.wait == "recv() on an empty channel" && t.span.line == 6),
+        "got: {}",
+        e.parts().3
+    );
 }
 
 /// TICKET-063 — the no-false-fault control: a guard waiter that COULD be fed by a live sibling must
@@ -1221,9 +1246,9 @@ print(\"done\")
 
 /// TICKET-016 / W8-3, reversed by TICKET-246 (owner answer Q2 (a), plan step 9; the name is kept
 /// per DEC-016). The state lives in the box, so no pre-update copy exists: `get` inside the box's
-/// own `update` takes the update guard and is a certain self-deadlock. TICKET-298 (owner decision
-/// F1): it is a FATAL `deadlock:`, as Go's `fatal error: all goroutines are asleep - deadlock!`, so
-/// `recover:` does not catch it and the run ends with the re-entry text.
+/// own `update` takes the update guard and is a certain self-deadlock. The re-lock blocks (plan
+/// 2026-11-17: no re-entry check), so the run ends in the one deadlock report with main at its
+/// `get`, as Go's `fatal error: all goroutines are asleep - deadlock!`; `recover:` does not catch it.
 #[test]
 fn ticket_016_get_inside_update_is_fatal() {
     let src = "\
@@ -1241,10 +1266,9 @@ print(s.get())
     let entry = write_temp_chz("ticket016_get_inside_update", src);
     let (out, _err, res, _code) = run_file_with(&entry, crate::native::HostConfig::default());
     let _ = std::fs::remove_file(&entry);
-    let shown = format!("{res:?}");
-    assert!(
-        res.is_err() && shown.contains("already holds the update guard"),
-        "expected a fatal re-entry deadlock, got {shown}"
+    assert_deadlock(
+        &res.expect_err("expected the one deadlock report"),
+        &[("waiting for the Shared guard", 4)],
     );
     assert!(
         !out.contains("no fault") && !out.contains("true"),
@@ -1252,10 +1276,10 @@ print(s.get())
     );
 }
 
-/// TICKET-246 — the `RwShared` twin of the test above: `get` (and `read`) inside the box's own
-/// `write` closure is a fatal deadlock with the guard text (TICKET-298). `read` nested in `read` is
-/// legal (Go's recursive `RLock`); M3.3 (Q2): `write` nested in `read` is fatal with the
-/// read-guard text (`ticket_016_rwshared_write_inside_read_is_fatal`).
+/// TICKET-246 — the `RwShared` twin of the test above: `get` inside the box's own `write` closure
+/// blocks, so the run ends in the one deadlock report at the first `get` (plan 2026-11-17; Go twin:
+/// `Lock(); RLock()`, fatal, all asleep). `read` nested in `read` is legal (Go's recursive
+/// `RLock`); `write` nested in `read` blocks too (`ticket_016_rwshared_write_inside_read_is_fatal`).
 #[test]
 fn ticket_246_rwshared_get_inside_its_own_write_is_fatal() {
     let src = "\
@@ -1284,10 +1308,9 @@ match r:
     let entry = write_temp_chz("ticket246_rwshared_get_inside_write", src);
     let (out, _err, res, _code) = run_file_with(&entry, crate::native::HostConfig::default());
     let _ = std::fs::remove_file(&entry);
-    let shown = format!("{res:?}");
-    assert!(
-        res.is_err() && shown.contains("already holds the update guard"),
-        "expected a fatal re-entry deadlock, got {shown}"
+    assert_deadlock(
+        &res.expect_err("expected the one deadlock report"),
+        &[("waiting for the RwShared guard", 4)],
     );
     assert!(
         !out.contains("no fault") && !out.contains("true"),
@@ -1297,8 +1320,8 @@ match r:
 
 /// TICKET-016 / W8-3 — M3.3 (Q2): `write` nested in the same task's `read` waits for that read, a
 /// certain deadlock (Go `RLock(); Lock()`: `fatal error: all goroutines are asleep - deadlock!`).
-/// TICKET-298 (owner decision F1): it is a FATAL `deadlock:` with the read-guard text, and
-/// `recover:` does not catch it.
+/// The `write` blocks (plan 2026-11-17: no re-entry check), so the run ends in the one deadlock
+/// report with main at its `write`, and `recover:` does not catch it.
 #[test]
 fn ticket_016_rwshared_write_inside_read_is_fatal() {
     let src = "\
@@ -1316,10 +1339,9 @@ print(r.read(fn(v: int) -> int: v))
     let entry = write_temp_chz("ticket016_rwshared_write_in_read", src);
     let (out, _err, res, _code) = run_file_with(&entry, crate::native::HostConfig::default());
     let _ = std::fs::remove_file(&entry);
-    let shown = format!("{res:?}");
-    assert!(
-        res.is_err() && shown.contains("already holds the read guard on this RwShared box"),
-        "expected a fatal re-entry deadlock, got {shown}"
+    assert_deadlock(
+        &res.expect_err("expected the one deadlock report"),
+        &[("waiting for the RwShared guard", 4)],
     );
     assert!(
         !out.contains("no fault") && !out.contains('5'),
@@ -1491,9 +1513,8 @@ fn test_lock() -> Arc<crate::vm::core::BoxLock> {
     ))
 }
 
-/// TICKET-016 — a bounded acquire returns `Ok(None)` on timeout instead of blocking, and hands the
-/// guard over once it is free. (M3.3: a same-task re-entry is the `Vm`'s check, `guard_reentry`;
-/// its rows are in `tests/chz/spec/shared_handle_test.chz`.)
+/// TICKET-016 — a bounded acquire returns `None` on timeout instead of blocking, and hands the
+/// guard over once it is free.
 #[test]
 fn ticket_016_bounded_update_guard_acquire_yields_instead_of_blocking() {
     let lock = test_lock();
@@ -1503,24 +1524,17 @@ fn ticket_016_bounded_update_guard_acquire_yields_instead_of_blocking() {
     };
     let budget = std::time::Duration::from_millis(5);
     let held = acquire_update_guard_within(key, u64::MAX - 1, budget)
-        .expect("a free box must not report a cycle")
         .expect("a free box must hand the guard over");
     assert_eq!(lock.writer(), u64::MAX - 1);
     let t0 = std::time::Instant::now();
-    assert!(matches!(
-        acquire_update_guard_within(key, u64::MAX - 2, budget),
-        Ok(None)
-    ));
+    assert!(acquire_update_guard_within(key, u64::MAX - 2, budget).is_none());
     assert!(t0.elapsed() < std::time::Duration::from_millis(500));
     assert!(
         !lock.writer_waits(),
         "a writer that gave up leaves the waiting count"
     );
     drop(held);
-    assert!(matches!(
-        acquire_update_guard_within(key, u64::MAX - 2, budget),
-        Ok(Some(_))
-    ));
+    assert!(acquire_update_guard_within(key, u64::MAX - 2, budget).is_some());
 }
 
 /// M3.3 — the two-mode lock (Go `sync.RWMutex`): readers share; a writer waits for readers and
@@ -1529,7 +1543,7 @@ fn ticket_016_bounded_update_guard_acquire_yields_instead_of_blocking() {
 #[test]
 fn m3_3_guard_modes_grid() {
     use crate::vm::core::{WaitTicket, try_update_guard};
-    let (lx, ly) = (test_lock(), test_lock());
+    let lx = test_lock();
     let rd = |l| GuardKey {
         lock: l,
         mode: GuardMode::Read,
@@ -1573,34 +1587,8 @@ fn m3_3_guard_modes_grid() {
         try_update_guard(rd(&lx), b).is_some(),
         "a writer that left lets readers in"
     );
-    // AB-BA through two write guards: `a` writes x and waits for y; `b` writes y and wants x.
-    let wa = try_update_guard(wr(&lx), a).expect("a free write");
-    let wb = try_update_guard(wr(&ly), b).expect("a free write");
-    let ly2 = Arc::clone(&ly);
-    let cyc = std::thread::spawn(move || {
-        let key = GuardKey {
-            lock: &ly2,
-            mode: GuardMode::Write,
-        };
-        acquire_update_guard_within(key, a, std::time::Duration::from_secs(5)).map(|g| g.is_some())
-    });
-    // A counted probe: poll until `a` waits; then `b`'s wait for x closes the cycle at once.
-    let tb = WaitTicket::new(wr(&lx));
-    let mut probes = 0u32;
-    loop {
-        match crate::vm::core::await_update_guard_free(&tb, b, Some(std::time::Duration::ZERO)) {
-            Err(GuardCycle::Cycle) => break,
-            Ok(false) => {}
-            other => panic!("b's wait for x: {other:?}"),
-        }
-        probes += 1;
-        assert!(probes < 50_000_000, "a never waited");
-        std::thread::yield_now();
-    }
-    drop(tb);
-    drop(wb);
-    assert_eq!(cyc.join().unwrap(), Ok(true));
-    drop(wa);
+    // A lock cycle blocks and the run's one deadlock report lists it (plan 2026-11-17);
+    // `tests/park_scale.rs` `ab_ba_guard_cycle_blocks_and_gets_the_global_report` covers the shape.
     // Fix round 2 (Go `rwmutex.go:214`): a write release admits the readers that waited during the
     // write, ahead of a writer that waits too; that writer then waits for those readers.
     let wc = try_update_guard(wr(&lx), c).expect("a free write");
@@ -1722,37 +1710,6 @@ fn s1_a_cut_box_refuses_every_later_acquire() {
     );
 }
 
-/// TICKET-063 — `guard_wait_satisfiable` answers whether an acquire issued now would not block.
-#[test]
-fn ticket_063_guard_wait_satisfiable_answers_the_acquire_outcome() {
-    let lock = test_lock();
-    let owned = crate::vm::core::GuardWait {
-        lock: Arc::clone(&lock),
-        mode: GuardMode::Write,
-        taking: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        admitted: None,
-    };
-    let (holder, other) = (u64::MAX - 11, u64::MAX - 12);
-    assert!(
-        crate::vm::core::guard_wait_satisfiable(&owned, other),
-        "an unowned box must be satisfiable"
-    );
-    let key = GuardKey {
-        lock: &lock,
-        mode: GuardMode::Write,
-    };
-    let held = crate::vm::core::try_update_guard(key, holder).expect("a free box");
-    assert!(
-        !crate::vm::core::guard_wait_satisfiable(&owned, other),
-        "another task must not be satisfiable while the holder holds it"
-    );
-    drop(held);
-    assert!(
-        crate::vm::core::guard_wait_satisfiable(&owned, other),
-        "once the held guard is dropped the other task must be satisfiable again"
-    );
-}
-
 /// TICKET-193 — `await_update_guard_free` reports a free guard without taking it and times out on
 /// a held one.
 #[test]
@@ -1763,16 +1720,16 @@ fn ticket_193_await_update_guard_free_never_takes_the_guard() {
         lock: &lock,
         mode: GuardMode::Write,
     };
-    let (waiter, holder) = (u64::MAX - 13, u64::MAX - 14);
+    let holder = u64::MAX - 14;
     let budget = Some(std::time::Duration::from_millis(5));
     let t = WaitTicket::new(key);
-    assert_eq!(await_update_guard_free(&t, waiter, budget), Ok(true));
+    assert!(await_update_guard_free(&t, budget));
     drop(t);
     let held = crate::vm::core::try_update_guard(key, holder).expect("await did not take it");
     let t = WaitTicket::new(key);
-    assert_eq!(await_update_guard_free(&t, waiter, budget), Ok(false));
+    assert!(!await_update_guard_free(&t, budget));
     drop(held);
-    assert_eq!(await_update_guard_free(&t, waiter, budget), Ok(true));
+    assert!(await_update_guard_free(&t, budget));
 }
 
 /// An error records where `!x` first made it (owner 2026-11-15, reversing W8-22's "a user `!` has
@@ -1863,7 +1820,7 @@ main()
 #[test]
 fn mnsched_drain_scan_reruns_after_a_cancel_generation_bump() {
     let cancel = Arc::new(AtomicBool::new(false));
-    let sched = MnSched::new(1, 4, Arc::clone(&cancel), dl_err(), 0);
+    let sched = mk_sched_with(1, Arc::clone(&cancel));
     let ancestor = Arc::new(AtomicBool::new(false));
     sched.lock().scopes[0].ancestors.push(Arc::clone(&ancestor));
     let core = empty_core();
@@ -2022,8 +1979,10 @@ print("lost={lost}")
     assert_eq!(out, "lost=0\n", "a returned job's result was cut by cancel");
 }
 
-/// TICKET-195 C2: a child's panic must be reported when the owner's `defer: ch.recv()` can never
-/// complete; today the owner's stuck defer reports `deadlock` and `boom` is lost.
+/// TICKET-195 C2, rewritten by plan 2026-11-17 (Decisions, from Task 2b): the owner's
+/// `defer: ch.recv()` can never complete after the child's panic, so every task is asleep and the
+/// run's one deadlock report stands; the fault text is not printed. Go twin: a panicking goroutine
+/// blocked in a deferred call → `all goroutines are asleep - deadlock!`.
 #[test]
 fn child_fault_survives_owner_stuck_defer() {
     let src = r#"import std.time
@@ -2045,6 +2004,8 @@ main()
     let entry = write_temp_chz("t195_c2", src);
     let (_out, _err, res, _code) = run_file(&entry);
     let _ = std::fs::remove_file(&entry);
-    let msg = res.expect_err("expected a fault").message;
-    assert!(msg.contains("boom"), "child fault lost, got: {msg}");
+    assert_deadlock(
+        &res.expect_err("expected a fault"),
+        &[("recv() on an empty channel", 4)],
+    );
 }

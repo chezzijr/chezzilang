@@ -562,9 +562,7 @@ mod tests {
             is_assert: false,
             is_over_memory: false,
             is_timed_out: false,
-            is_deadlock: false,
             is_panic: false,
-            blocked: None,
         }
     }
 
@@ -598,8 +596,8 @@ mod tests {
             fault_park: None,
             park_site: None,
             park_deadline: None,
+            timer_wait: None,
             job_cancel: None,
-            defer_cut: None,
             cut: None,
             cancel_unwind_faulted: false,
         }
@@ -674,9 +672,8 @@ mod tests {
     /// N4 (liveness) — the netpoller park is gated on the PARKING FIBER'S SCOPE cancel, not the
     /// outermost nursery's. A fiber whose INNER scope was cancelled (a sibling faulted, so `cancel_drain`
     /// and `drain_family` already swept) must be handed back so it resumes and unwinds its `defer`s; if it
-    /// were parked on the already-swept poller instead it would be stranded, its scope would never reach
-    /// `done == total`, and the cancel-teardown veto in `is_deadlocked` would become PERMANENT (deadlock
-    /// detection disabled sched-wide). `register` used to read the sched-level (outermost) flag, which is
+    /// were parked on the already-swept poller instead it would be stranded and its scope would never
+    /// reach `done == total`. `register` used to read the sched-level (outermost) flag, which is
     /// `false` here, so the park went through.
     #[test]
     fn poll_park_rejects_cancelled_inner_scope() {

@@ -1337,9 +1337,9 @@ fn timeout_reaches_a_job_blocked_on_a_channel_and_on_wait() {
     //
     // The SPINNING sibling job is load-bearing since W7-12: with the blocked job alone, the
     // deadlock verdict fires and the job faults instead of hanging, so the fixture would stop
-    // testing the deadline at all. A second, never-parked job is a LIVE party that never registers
-    // as blocked, so the process-wide verdict declines (`blocked < live` — see `vm::quiesce`),
-    // which restores the accepted hang this test exists for.
+    // testing the deadline at all. A second, never-parked job stays awake, so the run's awake count
+    // never reaches 0 (plan 2026-11-17: a partial deadlock hangs, as in Go), which restores the
+    // accepted hang this test exists for.
     //
     // Honest limit, verified by mutation (stub out the deadline read in `Vm::block_halt_check` and
     // this still passes): what it now pins is the END-TO-END guarantee — a test whose `shutdown()`
@@ -1478,8 +1478,8 @@ fn timeout_aborts_a_sleeping_test_everywhere() {
 /// W7-17 — the aborted task must also CLEAN UP, not merely stop promptly. This is W7-16's own
 /// lesson (its fix shipped green while silently skipping every `defer`, because "did it stop
 /// promptly" is satisfied just as well by a task that skipped its cleanup); the wake-and-re-check
-/// mechanism preserves it because the fiber faults from INSIDE the VM and unwinds normally, where a
-/// scheduler-level `flag_deadlock` would have dropped it without `unwind_deferred`.
+/// mechanism preserves it because the fiber faults from INSIDE the VM and unwinds normally, where
+/// the run's deadlock verdict ends a task without `unwind_deferred`.
 ///
 /// `show_output` because a timed-out test's buffered stdout is hidden by default like any other
 /// test's — the `defer` output is there, it just needs the flag (verified: the same fixture also
@@ -2286,9 +2286,8 @@ fn over_memory_defer_is_still_capped_during_unwind() {
 }
 
 /// A `--max-heap` abort drains its `defer`s synchronously, on the Rust stack. A wait in that drain
-/// that can never complete is still judged: `BlockCtx::judged` keeps the `deferring` exception for
-/// exactly these hard-halt drains (plan 2026-11-07-defer-drain-frames, Task 4). Measured on the
-/// branch with `judged = native_reentry == 0`: the run hung (rc=124) instead of this verdict.
+/// that can never complete is still a deadlock: the run's one verdict ends it like any other
+/// asleep task (plan 2026-11-07-defer-drain-frames, Task 4).
 #[test]
 fn a_wait_in_a_max_heap_defer_drain_is_judged() {
     let d = TmpDir::new();
@@ -2305,9 +2304,13 @@ fn a_wait_in_a_max_heap_defer_drain_is_judged() {
     );
     let (text, passed) = run_tests_halt_watchdog("heapdefer", &f, 0, 2_000_000);
     assert!(!passed, "report:\n{text}");
+    // One global report (plan 2026-11-17): the test's own task is the one blocked task, listed at
+    // the drain's `recv`. Go twin: a deferred `<-ch` while the program unwinds, fatal, all asleep.
     assert!(
         text.contains("OVER-MEMORY t (")
-            && text.contains("heapdefer_test.chz) deadlock: 1 task is blocked and cannot proceed"),
+            && text.contains("heapdefer_test.chz) deadlock: every task is blocked")
+            && text.contains("task 1: recv() on an empty channel at ")
+            && !text.contains("task 2:"),
         "a wait in a hard-halt defer drain that nobody can satisfy is a deadlock; report:\n{text}"
     );
 }
@@ -2576,7 +2579,10 @@ fn verdict_msg_covers_all_variants() {
         Some("kaboom")
     );
     assert_eq!(
-        verdict_msg(&Verdict::OverMemory { msg: "oom".into() }),
+        verdict_msg(&Verdict::OverMemory {
+            msg: "oom".into(),
+            frames: Vec::new(),
+        }),
         Some("oom")
     );
     assert_eq!(

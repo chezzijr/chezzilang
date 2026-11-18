@@ -121,10 +121,13 @@ ch.send(42)
     let got = rx
         .recv_timeout(std::time::Duration::from_secs(60))
         .expect("a job blocked on its own joiner must fault, not hang");
-    let fault = err_text(&got.expect_err("this program is a deadlock"));
-    assert!(
-        fault.contains("recv() on an empty channel"),
-        "fault was: {fault}"
+    // Go twin: fatal, all asleep; main is listed at its `shutdown()` join, the job at its `recv`.
+    assert_deadlock(
+        &got.expect_err("this program is a deadlock"),
+        &[
+            ("waiting for an Executor join", 6),
+            ("recv() on an empty channel", 5),
+        ],
     );
 }
 
@@ -161,10 +164,14 @@ ex.shutdown()
     let mn = rx
         .recv_timeout(std::time::Duration::from_secs(60))
         .expect("two jobs deadlocked in one executor must fault, not hang");
-    let msg = err_text(&mn.expect_err("both jobs wait on a channel nobody can fill — a deadlock"));
-    assert!(
-        msg.contains("recv() on an empty channel"),
-        "fault was: {msg}"
+    // Go twin: fatal, all asleep; main at its join, then both jobs in submit order.
+    assert_deadlock(
+        &mn.expect_err("both jobs wait on a channel nobody can fill — a deadlock"),
+        &[
+            ("waiting for an Executor join", 7),
+            ("recv() on an empty channel", 5),
+            ("recv() on an empty channel", 6),
+        ],
     );
 }
 
@@ -202,18 +209,23 @@ y.shutdown()
         "two mutually-deadlocked executors must fault, not hang — or this host has <2 free pool \
              threads (see the sibling test above)",
     );
-    let msg = err_text(&mn.expect_err("each executor's job waits for the other's — a deadlock"));
-    assert!(
-        msg.contains("recv() on an empty channel"),
-        "fault was: {msg}"
+    // Go twin: fatal, all asleep; main at `x.shutdown()`, then x's job and y's job.
+    assert_deadlock(
+        &mn.expect_err("each executor's job waits for the other's — a deadlock"),
+        &[
+            ("waiting for an Executor join", 9),
+            ("recv() on an empty channel", 7),
+            ("recv() on an empty channel", 8),
+        ],
     );
 }
 
-/// TICKET-208 — a deadlocked job is reported at its OWN blocking op, with the text the in-place
-/// path raises for that op: line 4 (the `recv`), not line 3 (the `Executor()`), and never the
-/// nursery text. Watchdogged like its neighbours.
+/// TICKET-208 — a deadlocked job is listed at its OWN blocking op: line 4 (the `recv`), not line 3
+/// (the `Executor()`). One global report (plan 2026-11-17): the report is sited at task 1, main at
+/// its `shutdown()` join (line 5), and the job follows. Go twin: fatal, all asleep, goroutine 1
+/// first. Watchdogged like its neighbours.
 #[test]
-fn a_deadlocked_job_is_reported_at_its_own_recv_not_at_the_executor() {
+fn a_deadlocked_job_is_listed_at_its_own_recv_after_main_at_its_join() {
     let src = "import Executor from std.concurrency\nch := Channel[int](1)\nex := Executor()\nex.submit(fn(): print(ch.recv()))\nex.shutdown()\n";
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
@@ -223,15 +235,12 @@ fn a_deadlocked_job_is_reported_at_its_own_recv_not_at_the_executor() {
         .recv_timeout(std::time::Duration::from_secs(60))
         .expect("a job parked on a channel nobody feeds must fault, not hang");
     let err = res.expect_err("the job waits on a channel nobody sends to — a deadlock");
-    assert!(
-        err_text(&err).contains("recv() on an empty channel"),
-        "fault was: {}",
-        err_text(&err)
-    );
-    assert_eq!(
-        err.span.line, 4,
-        "the report must name the job's `recv`, got {:?}",
-        err.span
+    assert_deadlock(
+        &err,
+        &[
+            ("waiting for an Executor join", 5),
+            ("recv() on an empty channel", 4),
+        ],
     );
 }
 
@@ -264,10 +273,18 @@ ex.submit(fn(): print("job got {ch.recv()}"))
     let mn = rx
         .recv_timeout(std::time::Duration::from_secs(60))
         .expect("the exit drain must fault on a deadlocked job, not hang");
-    let msg = err_text(&mn.expect_err("the job waits on a channel nobody can fill — a deadlock"));
+    // Go twin: none (Go abandons the goroutine at exit). One global report (plan 2026-11-17): the
+    // header, and the job listed at its `recv` (line 5) after main. Main's site at the exit drain
+    // (an implicit join) is open for Task 3, so only the job's entry is pinned.
+    let e = mn.expect_err("the job waits on a channel nobody can fill — a deadlock");
+    let listed = e.parts().2;
     assert!(
-        msg.contains("recv() on an empty channel"),
-        "fault was: {msg}"
+        e.message == DEADLOCK_HEADER
+            && listed.len() == 2
+            && listed[1].wait == "recv() on an empty channel"
+            && listed[1].span.line == 5,
+        "fault was: {}",
+        e.parts().3
     );
 }
 
@@ -313,8 +330,8 @@ ex.shutdown()
 /// D2 — a top-level `wait:` with a CLOSED arm takes that arm (it binds `!RecvError`), as Go's
 /// `select` picks `<-closed`; it neither faults nor hangs.
 ///
-/// History: before D2 the poll SKIPPED a closed+empty recv arm (W7-13r(a)), and folding it into
-/// `PartyWait` as "satisfiable" vetoed the deadlock verdict forever — this program HUNG (rc 124).
+/// History: before D2 the poll SKIPPED a closed+empty recv arm (W7-13r(a)), and this program HUNG
+/// (rc 124).
 /// Now closed IS ready, so the arm is taken. The deadlock half of that fence is
 /// [`a_top_level_wait_on_open_empty_arms_still_reports_the_deadlock`].
 #[test]
@@ -364,22 +381,17 @@ wait:
         .recv_timeout(std::time::Duration::from_secs(60))
         .expect("an all-open, unfeedable wait must reach the deadlock verdict, not hang")
         .expect_err("nothing can feed c1 or c2 — this is a deadlock");
-    let msg = err_text(&msg);
-    assert!(
-        msg.contains("wait: on channels that are all empty"),
-        "fault was: {msg}"
-    );
+    // Go twin: `select` on two empty channels with nothing else running: fatal, all asleep.
+    assert_deadlock(&msg, &[("wait: on channels that are all empty", 4)]);
 }
 
 /// The process-wide verdict's FALSE-FAULT regression, also caught by adversarial review: an
 /// already-drained `shutdown()` must not be read as a blocked joiner.
 ///
-/// `join_executor` registers its `PartyWait::Join` before it can take the executor lock, so a join
-/// with nothing outstanding — `Executor(); e.shutdown()`, and the whole window while the last job's
-/// `finish` wakes a real joiner — briefly puts a party in the registry for a thread that is about to
-/// return and keep running. While `Join` answered a flat "never satisfiable", a sibling sampling in
-/// that window faulted a LIVE program: measured 2/20 runs on this shape, where Go and CPython both
-/// print `got 1`. A join's wait condition is exactly `outstanding() == 0`, so that is what it answers.
+/// A join with nothing outstanding — `Executor(); e.shutdown()`, and the whole window while the
+/// last job's `finish` wakes a real joiner — is a thread about to return and keep running, never an
+/// asleep task. A past verdict faulted this LIVE program in 2/20 runs, where Go and CPython both
+/// print `got 1`.
 ///
 /// The loop is the amplifier — one drained shutdown is a nanosecond-wide window; 20 000 of them beside
 /// a genuinely blocked consumer hit it reliably enough to have shown 2/20, and the whole program still
@@ -585,9 +597,9 @@ ex.shutdown()
 /// is parked on must WORK, not be pre-emptively declared a deadlock.
 ///
 /// Measured pre-fix on the release binary: `child waiting`, then the nursery deadlock fault, rc=1, at
-/// **~7 ms — before `feeder`'s 50 ms sleep had even elapsed**. `MnSched::is_deadlocked`'s five gates
-/// model this sched's own fibers only, and an eager job has none: it runs on the shared pool, bumping
-/// neither `running`/`runnable` nor `inflight`. Go's equivalent (a goroutine feeding a channel a
+/// **~7 ms — before `feeder`'s 50 ms sleep had even elapsed**: the old per-sched judge counted this
+/// sched's own fibers only, and an eager job has none. The run's awake count holds the job (and
+/// its pending timer), so no verdict fires. Go's equivalent (a goroutine feeding a channel a
 /// WaitGroup'd goroutine reads) prints `job sending` / `child got 7` and exits 0.
 ///
 /// **Depends on EAGER dispatch, and no predicate change can or should alter that.** Under a lazy
@@ -739,10 +751,14 @@ parallel:
         .recv_timeout(std::time::Duration::from_secs(60))
         .expect("a job that ends without sending must let the deadlock fire — never hang");
     let _ = std::fs::remove_file(&entry);
-    let msg = res
-        .expect_err("nobody can ever feed `ch` once the job is done — a real deadlock")
-        .message;
-    assert!(msg.contains("deadlock"), "fault was: {msg}");
+    // Go twin: fatal, all asleep once the job ends; main at its `parallel:` join, the task at `recv`.
+    assert_deadlock(
+        &res.expect_err("nobody can ever feed `ch` once the job is done — a real deadlock"),
+        &[
+            ("waiting for a nursery join", 13),
+            ("recv() on an empty channel", 9),
+        ],
+    );
 }
 
 // ----- gaps.md W7-58 — a stuck job PLUS a stuck nursery owner is a deadlock, not a hang -----
@@ -752,20 +768,10 @@ parallel:
 /// a 20 s timeout, with `job blocking` and `child waiting` printed and nothing after. Post-fix it
 /// faults in ~7 ms. Go reports `all goroutines are asleep - deadlock!` for the same shape.
 ///
-/// The two vetoes were pointing at each other. `MnSched::is_deadlocked` declined because a job was
-/// outstanding (W7-56 — an outstanding job is an uncounted sender, which is RIGHT when the job is
-/// running), and the process-wide verdict declined because `live = 1 + outstanding = 2` while only
-/// the job had registered: `main`, the `1 +`, was sitting in `mn_worker_loop`, which registered
-/// nothing. So `parties.len() == 1 < 2` — "somebody is still running" — and that somebody was `main`,
-/// which was exactly the thread that was stuck. Fixed by registering the nursery OWNER
-/// (`PartyWait::Nursery`, satisfiable iff its nursery can still move) and by giving an idle worker of
-/// that nursery the job of ASKING the verdict (an owner never reaches `block_halt_check`).
-///
-/// **W7-56's veto is untouched** — this does not weaken it, it teaches the OTHER verdict to see the
-/// owner. `executor_job_feeds_a_parked_nursery_task_instead_of_a_false_deadlock` is the fence that it
-/// stayed untouched, and it is also this change's audit (a): it runs the healthy shape (a job that
-/// sleeps 50 ms and then feeds the parked task) with the owner now registered, and must still print
-/// `child got 7`, rc=0.
+/// The job, the task and `main` at its join are all asleep in the run's awake count, so its park
+/// to 0 fires the one verdict. `executor_job_feeds_a_parked_nursery_task_instead_of_a_false_deadlock`
+/// is the healthy twin (a job that sleeps 50 ms and then feeds the parked task) and must still
+/// print `child got 7`, rc=0.
 ///
 /// **Depends on EAGER dispatch.** Under the lazy queue-at-`submit` / drain-at-`shutdown` model
 /// (decision D3) `other.recv()` never runs before the join and the program is a DIFFERENT (also real)
@@ -803,12 +809,14 @@ print(\"after nursery\")
         .recv_timeout(std::time::Duration::from_secs(60))
         .expect("a stuck job beside a stuck nursery must FAULT — pre-fix this hung forever");
     let _ = std::fs::remove_file(&entry);
-    let msg = res
-        .expect_err("nothing in this run can ever move again")
-        .message;
-    assert!(
-        msg.contains("deadlock"),
-        "the nursery must report its deadlock; fault was: {msg}"
+    // Go twin: fatal, all asleep; main at its join, its task, then the job (jobs after run tasks).
+    assert_deadlock(
+        &res.expect_err("nothing in this run can ever move again"),
+        &[
+            ("waiting for a nursery join", 13),
+            ("recv() on an empty channel", 10),
+            ("recv() on an empty channel", 7),
+        ],
     );
     assert!(
         out.contains("child waiting"),
@@ -824,12 +832,10 @@ print(\"after nursery\")
 /// producer/consumer pipeline running across an eager `Executor` job and a `parallel:` nursery task
 /// must complete, every time.
 ///
-/// This is the shape the `parked-is-not-stuck` family keeps killing: at steady state the party list
-/// is `[Send(job), Nursery(owner)]` with `parties.len() == live`, so the COUNT does not save it and
-/// satisfiability has to. It holds because the window in which neither party's wait looks satisfiable
-/// (a value pushed, the parked consumer not yet requeued) is OCCUPIED by the sending thread, which is
-/// either a fiber (so `running >= 1` and the nursery arm answers satisfiable) or a counted party
-/// mid-`send` (so it is UNREGISTERED, `parties.len() < live`, and the count vetoes).
+/// This is the shape the `parked-is-not-stuck` family keeps killing. It holds because the window in
+/// which neither side's wait looks satisfiable (a value pushed, the parked consumer not yet
+/// requeued) is OCCUPIED by the sending task, which is awake until it parks, and its wake of the
+/// consumer adds the +1 before it can park, so the awake count never reaches 0.
 ///
 /// Both directions are exercised — the job producing into the nursery and the nursery producing into
 /// the job — because a cap-1 channel is only ever half of a handshake. 300 handoffs each, which is
@@ -957,27 +963,29 @@ print(\"after nursery\")
         .recv_timeout(std::time::Duration::from_secs(60))
         .expect("two stuck nurseries with no polling party must fault — pre-fix this hung");
     let _ = std::fs::remove_file(&entry);
-    let msg = res.expect_err("neither nursery can ever move").message;
-    assert!(msg.contains("deadlock"), "fault was: {msg}");
+    // Go twin: fatal, all asleep; main's tree, then the job at its own join and its child.
+    assert_deadlock(
+        &res.expect_err("neither nursery can ever move"),
+        &[
+            ("waiting for a nursery join", 14),
+            ("recv() on an empty channel", 11),
+            ("waiting for a nursery join", 8),
+            ("recv() on an empty channel", 6),
+        ],
+    );
     assert!(
         !out.contains("after nursery"),
         "the outer join must not complete: {out:?}"
     );
 }
 
-/// W7-58 — the judge must be LEVEL-triggered, not EDGE-triggered. A stuck sched that asked the
-/// process-wide verdict and was told "not yet" must ask again when the answer changes — and the
-/// answer changes with the PARTY SET, which lives outside this sched and notifies nothing here.
+/// W7-58 — a deadlock that becomes true only when `main` blocks later must still fire. The old
+/// per-sched judge asked once, was told "not yet", and slept forever (**5/5 permanent hangs, rc=124
+/// at 20 s**). Now `main`'s own park takes the run's awake count to 0 and runs the verdict itself
+/// ([`MnSched::on_deadlock`]): it faults at ~310 ms, the first moment the verdict is true.
 ///
-/// Measured with the judge's idle wait left untimed: **5/5 permanent hangs, rc=124 at 20 s**. The
-/// job's nursery quiesces immediately, judges (`parties.len() == 1 < live == 2` — `main` is awake and
-/// unregistered), and sleeps forever; `main`'s `Join` registration 300 ms later reaches nobody, and
-/// the run has no judge at all. The tell that isolated it: adding a third job that finishes later
-/// made the same program FAULT, because `finish` pokes every sched and the judge re-ran. Post-fix it
-/// faults at ~310 ms — the first moment the verdict is actually true.
-///
-/// The `sleep_ms` is load-bearing: without it `main` reaches `shutdown()` before the nursery
-/// quiesces, so the registration lands before the judge's first look and the bug is invisible.
+/// The `sleep_ms` is load-bearing: without it `main` reaches `shutdown()` before the job's nursery
+/// blocks, and the late-block order is not exercised.
 ///
 /// M:N-only + watchdogged for the reasons on the tests above.
 #[test]
@@ -1010,8 +1018,15 @@ print(\"done\")
         .recv_timeout(std::time::Duration::from_secs(60))
         .expect("a party registering AFTER the judge's last look must still be judged — this hung");
     let _ = std::fs::remove_file(&entry);
-    let msg = res.expect_err("the job's nursery can never move").message;
-    assert!(msg.contains("deadlock"), "fault was: {msg}");
+    // Go twin: fatal, all asleep; main at `shutdown()`, the job at its join, its child at `recv`.
+    assert_deadlock(
+        &res.expect_err("the job's nursery can never move"),
+        &[
+            ("waiting for an Executor join", 14),
+            ("waiting for a nursery join", 9),
+            ("recv() on an empty channel", 7),
+        ],
+    );
     assert!(!out.contains("done"), "the join must not return: {out:?}");
 }
 
@@ -1101,8 +1116,16 @@ print(\"after\")
         .expect("a cycle of executor joins must fault, not hang");
     let _ = std::fs::remove_file(&entry);
     let err = res.expect_err("every party is joining an executor that owes work");
-    let msg = err.message.clone();
-    assert!(msg.contains("deadlock"), "fault was: {msg}");
+    // A job's join of its own executor blocks (plan 2026-11-17: no re-entry check); Go twin: a
+    // `wg.Wait()` inside a goroutine the group counts, fatal, all asleep. Main, then both jobs.
+    assert_deadlock(
+        &err,
+        &[
+            ("waiting for an Executor join", 16),
+            ("waiting for an Executor join", 9),
+            ("waiting for an Executor join", 9),
+        ],
+    );
     assert!(!out.contains("after"), "the join must not return: {out:?}");
     assert_ne!(
         err.span.file, 0,
@@ -1341,10 +1364,9 @@ print(\"main done\")
 /// The counter used here is process-global too, and is immune to (2) for a reason worth stating: it
 /// counts only an event a healthy build CANNOT produce. A neighbour's honest 5 ms timer park is a
 /// wait that expired while genuinely not ready and never touches it; a neighbour could pollute this
-/// only by hitting the same defect, and then failing is the correct outcome. `BLOCK_WAITS` — total
-/// waits — is polluted by neighbours and so is used only as a `>=` COVERAGE floor: it asserts this
-/// program still reaches `block_wait_tick` at all, so a future refactor that stopped blocking there
-/// cannot leave the test passing vacuously.
+/// only by hitting the same defect, and then failing is the correct outcome. Since main is fiber 1
+/// (plan 2026-11-17) its waits park, so this program may reach `block_wait_tick` zero times; only
+/// the correctness half is kept (owner, 2026-11-17).
 #[test]
 fn eager_handshake_is_driven_by_wakeups_not_by_the_poll_timeout() {
     let src = "
@@ -1403,17 +1425,6 @@ ex.shutdown()
          that was ALREADY ready — a healthy handshake is driven by notifications, and W7-13's lost \
          wakeup is the only thing that produces this (measured: 0 fixed, 309 of 1014 waits with \
          `block_wait_tick` reverted to a bare `wait_timeout`, same 6 runs)"
-    );
-    // Coverage floor, not a measurement — a concurrent test's own blocking also lands in
-    // `BLOCK_WAITS`, so this can only ever be too GENEROUS. 30 runs × 200 handoffs at cap 1 cannot
-    // hand off without blocking; if this trips, the program stopped exercising `block_wait_tick` and
-    // the assertion above went vacuous. TICKET-208 — 30 runs, not 6: the producer is a parking
-    // fiber now, so `main` is the only party that blocks in place (measured alone: 45 to 304 waits
-    // per 6 runs, 193 to 968 per 30).
-    assert!(
-        waits >= 100,
-        "only {waits} blocking waits — this cap-1 pipeline no longer reaches `block_wait_tick`, so \
-         the stall assertion above is vacuous"
     );
 }
 
@@ -1820,9 +1831,9 @@ ex.shutdown()
 /// inline-sleep and gave the identical wrong answer while an eager job was about to send. Fixing only
 /// `the job's sched` parties would have left this live.
 ///
-/// Also fences the verdict: `main` registers as a blocked party for this wait, so a timer arm MUST
-/// veto the process-wide deadlock verdict (`quiesce::PartyWait::Wait` answers satisfiable for any
-/// `core.timer.is_some()` arm). If that ever stops holding, this test faults instead of printing.
+/// Also fences the verdict: a pending timer arm is a task of the run's awake count while main waits
+/// on it (`core::ChannelCore::timer_wait`), so no deadlock verdict fires. If that ever stops holding, this
+/// test faults instead of printing.
 #[test]
 fn a_top_level_wait_timer_arm_loses_to_an_eager_job() {
     let src = "
@@ -2561,35 +2572,7 @@ fn a_job_that_adopts_its_childs_exit_keeps_the_childs_output() {
     );
 }
 
-/// `RuntimeError::is_verdict` is THE reader of "a verdict decided this deadlock-marked fault"
-/// (TICKET-298). Each side of its line: a lock cycle or re-entry (`.deadlock()`, no cut, no latched
-/// verdict) reports itself; a cut (`blocked`) or a latched verdict makes it a verdict's. It fails if
-/// the `blocked` term or the `halt` term is dropped, or if `is_deadlock` is not required.
-#[test]
-fn is_verdict_splits_a_verdict_fault_from_a_self_reporting_one() {
-    use super::deadlock::Wait;
-    let plain = RuntimeError::default();
-    let self_reporting = RuntimeError::default().deadlock();
-    let cut = self_reporting.at_site(Wait::Nursery.phrase(), Span::RUNTIME);
-    for halt in [
-        RunHalt::Running,
-        RunHalt::Fault,
-        RunHalt::Exit,
-        RunHalt::Deadlock,
-    ] {
-        let latched = halt == RunHalt::Deadlock;
-        assert!(
-            !plain.is_verdict(halt),
-            "a plain fault is no verdict ({halt:?})"
-        );
-        assert_eq!(
-            self_reporting.is_verdict(halt),
-            latched,
-            "self-reporting ({halt:?})"
-        );
-        assert!(
-            cut.is_verdict(halt),
-            "a verdict's cut is a verdict ({halt:?})"
-        );
-    }
-}
+// A deadlock is the one global report (plan 2026-11-17), never a self-reporting lock cycle or
+// re-entry. Covered by `tests/cut_release_grid.rs`
+// `a_recovered_reentry_or_lock_cycle_is_fatal` and
+// `an_executor_job_reentry_is_fatal_whichever_way_it_is_joined`.

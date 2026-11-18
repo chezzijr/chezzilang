@@ -67,7 +67,7 @@ Live bug rows are in [`gaps.md`](gaps.md); the hunt strategy is in [`bug-discove
   vs another module, value vs call, first stage vs retry (wave 18;
   TICKET-196 exported the record as `ModuleSig::members`).
 - **A fact pushed for one cause and polled for another is two deciders** (TICKET-188). Derive both
-  from one wake set, including the deadlock verdict's registry.
+  from one wake set.
 - **A structural protocol's parameter names are part of its contract** (TICKET-187). Conformance
   checks names at every arity, and a protocol call never borrows an implementor's default. A table
   keyed by METHOD NAME across all structs never replaces the receiver's own declaration.
@@ -173,15 +173,16 @@ check-OK-then-broken program, and a JIT would trust the static type.
 
 - **A runtime verdict that declares user code broken is built from what is impossible, never from
   what looks idle.** Three deadlock predicates in a row faulted healthy programs (a cap-1 pipeline is
-  all-parked by design). Restrict the verdict to the shape you can prove and decline the rest. Derive
-  "can this waiter still be satisfied?" from the waiter itself (its arms, deadline, context) in one
-  registry of blocked waiters, not from a veto list. The same holds for "may I block here?": one
-  context, one `block_on` (wave 16, Family 2). Fence it with a looping
-  test, mutation-check that the test fails on the buggy predicate, and audit the party set for
-  self-reference. **A verdict that is right 85% of the time on one program is not a verdict.**
+  all-parked by design), and per-scope judges that walked the scheds kept missing a waker. The fix
+  was Go's `checkdead` (plan 2026-11-17): one count of the tasks that are not asleep, changed only at
+  start, park, wake and end, and a wake counts inside the lock hold that publishes it, before the
+  waker can park. "Every task is asleep" is then impossible to read while a wake is in flight. A
+  partial deadlock is not reported (it hangs, as in Go). The same holds for "may I block here?": one
+  context, one `block_on` (wave 16, Family 2). Fence it with a looping test and a grid of live and
+  dead cells, and mutation-check that the test fails on a missing wake. **A verdict that is right
+  85% of the time on one program is not a verdict.**
 - **A readiness question counts only the OTHER side's entries** (TICKET-185). Each readiness helper
-  takes `me` (`ChanState::recv_ready_for(me)`, `send_ready_for(cap, me)`), in the park gap checks and in
-  `PartyWait::satisfiable`. "Delivered" has one commit point: a CAS on the party's `Pending` under the
+  takes `me` (`ChanState::recv_ready_for(me)`, `send_ready_for(cap, me)`), in the park gap checks. "Delivered" has one commit point: a CAS on the party's `Pending` under the
   channel lock.
 - **The shared heap is memory-safe only through three rules; a race is the user's bug** (M2, M3.0;
   [`01-model.md`](../reference/concurrency/01-model.md) "Data races"). A buffer that grows, or that a

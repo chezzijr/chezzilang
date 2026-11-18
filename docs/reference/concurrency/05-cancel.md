@@ -130,7 +130,7 @@ Precisions:
   `Shared`/`RwShared` each/fold) is checked once per element. A container walk that calls a hook per
   element (a sort of `compare` structs, `xs == ys` over `eq` structs, a `Map` build by `hash`, `str`
   of a list) is one op and is not checked inside; the hook body's own loops still are.
-- **A run-wide halt also lands at every function entry.** An `os.exit` and a deadlock verdict end the run, so a task also receives them when it enters a
+- **A run-wide halt also lands at every function entry.** An `os.exit` and a deadlock end the run, so a task also receives them when it enters a
   Chezzi function. A loop-free recursion stops at its next call, as Go's `os.Exit` stops every
   goroutine. A cancel and a nursery child's fault are not delivered at a call.
 
@@ -201,7 +201,7 @@ Resource caps, measured:
 | `three_hundred_jobs_capture_a_megabyte_each` | 2.02-2.03 s | 2.02 s | 2.02 s |
 
 When the test fn trips the cap, a job that sleeps 5000 ms (or 2000 ms) sleeps out before the
-verdict lands. At T=1, `grow()` never parks, so the job never starts and the run ends at once;
+abort lands. At T=1, `grow()` never parks, so the job never starts and the run ends at once;
 the 400-list loop ends, `shutdown` lets the job run, and the job sleeps out.
 
 ```chezzi
@@ -279,21 +279,22 @@ task in a loop-free recursive computation (`fib(34)`) runs it to completion befo
 Trio's model; making a call a checkpoint would put a checkpoint *before the `defer` line* of any
 prologue that calls a function. Go's `context` cancel is cooperative and Python's `TaskGroup` cancels
 at an `await`, so neither stops a running recursion either. Bound a recursive computation yourself if
-a task must tear down promptly. A run-wide halt (`os.exit`, a deadlock
-verdict) does stop it, at its next function entry.
+a task must tear down promptly. A run-wide halt (`os.exit`, a deadlock) does
+stop it, at its next function entry.
 
 **Cancelling a scope cancels its nested scopes — at their CHECKPOINTS.** A `parallel:` entered from a
 task that is then cancelled dies with it: its children observe the enclosing cancel at their own
 checkpoints (a spinning grandchild cannot wedge the teardown). A nested nursery keeps its own cancel
 token for its own faults: an inner fault never cancels an *outer sibling*. One limit: a grandchild
 that is already **parked** (`recv`/`wait:`) when the *outer* scope is cancelled is not re-driven, so it
-is torn down by the deadlock reap **without running its `defer`s** (the deadlock exception below;
+ends with the run's deadlock **without running its `defer`s** (the deadlock exception below;
 `gaps.md` **N5**). A grandchild that is *running* (or parks *after* the cancel) unwinds normally.
 
-An inner deadlock faults only the innermost stuck nursery that a parked owner is joining: every task
-parked outside it stays parked until the program aborts. The verdict is fatal, so no `recover:`
-returns to feed them. A deadlock nested under a spawned task's implicit nursery faults `deadlock: …`
-at `--threads=1` too, byte-identically to every other worker count.
+A deadlock is one global check, so a nested nursery has none of its own: tasks stuck inside an
+inner nursery are reported only once every task of the run is blocked, and then every task is
+listed, the owners at their `parallel:` joins included. If a task outside it still runs, the run
+hangs, as in Go. The deadlock is fatal, so no `recover:` returns. The report is the same at every
+worker count, `--threads=1` included.
 
 ---
 
@@ -329,11 +330,11 @@ to completion (they are still cancellable by their *own* nursery's faults).
 nursery it aborted) that panics does not vanish: the nursery join, or `Executor.cancel()`, raises
 it (Go and asyncio surface it too). It ranks BELOW every ordinary fault and above a `deadlock` abort —
 the cancel's root cause is the more useful report (asyncio `TaskGroup` lists
-`['boom', 'cleanup failed']`, root cause first). When a sibling's real fault is the cause, a stuck
-cleanup's `deadlock` verdict is swallowed, unless the cleanup holds a `Shared` or `RwShared` guard
-(see below). The same ranking holds for a nursery OWNER cut by its
-child's fault: the owner reports the child's fault, and its own `defer` fault or stuck cleanup ranks
-below it (Go prints `panic: boom`), unless a `--timeout` / `--max-heap` halt lands in that cleanup. A
+`['boom', 'cleanup failed']`, root cause first). A cleanup that blocks forever is not a `defer` fault: once every task is
+asleep it is the run's deadlock (below), and the fault it was cleaning up after is not printed. The
+same ranking holds for a nursery OWNER cut by its child's fault: the owner reports the child's fault,
+and its own `defer` fault ranks below it (Go prints `panic: boom`), unless a `--timeout` /
+`--max-heap` halt lands in that cleanup. A
 party's own fault keeps Go's rule: a `defer` that faults while it unwinds supersedes it.
 
 **A `recover:` INSIDE a defer body catches — even while the task is being torn down.** A fault raised
@@ -356,32 +357,20 @@ function during a panic. A `recv` in a cleanup parks its task, as any other wait
 sibling's `send` reaches it, so the cleanup completes (since 2026-11-07; before, it demoted the
 worker).
 
-**Cleanup that can NEVER complete is REPORTED, never a silent hang.** A `defer` whose body waits for
-something that can never arrive (`ch.recv()` no one will ever answer) leaves the program quiesced, and
-the deadlock detector fires. If a sibling's fault cancelled the task, *that* fault is reported — the
-stuck cleanup's own error is swallowed with its cancelled task, and likewise when the stuck cleanup
-belongs to an owner whose child faulted. A stuck cleanup that holds a `Shared` or `RwShared` guard
-is a fatal deadlock, and the report lists it at its wait. Its guard is released cut, so no task
-takes that box again for the rest of the run (Go blocks every `Lock` of a `Mutex` nobody unlocks).
-A cleanup of a cancelled task that re-enters its own guard is a fatal deadlock too. The same holds for a `defer` that runs on the `main` thread —
-a `defer` in `main`, at module top level, or in a `parallel:` body (on fall-through it runs AFTER the join; on a cancel it runs BEFORE the cancelled children are joined): a
-cleanup that can never complete faults `deadlock` (fatal) instead of hanging. A pending `os.exit` from
-another party outranks that verdict (Go: the exit status). A cleanup a live task WILL feed is not
-judged. Nor is a wait on a socket: the other end may still write, so a cleanup that reads a socket
-nobody writes to waits for it (Go: a goroutine blocked in a network read is never a deadlock).
-
-**An owner that faults beside a stuck child reports its own fault.** When an owner faults on its
-own while a child's cleanup can never complete, the verdict tears down the stuck child and the
-owner's unwind goes on, in every context (`main`, a `spawn`, a callback, an `Executor` job): its
-`defer`s run, a `recover:` catches the fault, and the fault is the report (Go prints
-`panic: index out of range`). A job's fault stays in its Task. A stuck `defer` of the owner itself
-still faults `deadlock`, as Go's does. The verdict cuts only the stuck cleanups of the cancelled
-family, as that family's cancel, and latches nothing (a cleanup that holds a guard is the exception
-above): every other task stays where it is, and a
-later wait is judged again. The same holds when a child's fault cancels the family after its owner
-reached the join: the child's fault is the report, and a `recover:` around the owner catches it.
-So a `recv` after the `recover:` that a live task feeds gets its value, and one that nothing
-feeds faults `deadlock`.
+**Cleanup that can NEVER complete is REPORTED once every task is blocked.** A `defer` whose body
+waits for something that can never arrive (`ch.recv()` no one will ever answer) parks its task like
+any other wait. Once every task of the run is asleep, the run ends with `deadlock: every task is
+blocked` and lists every task, the stuck cleanup at its wait. This holds after a fault and after a
+cancel alike: the fault or cancel the cleanup ran under is not printed, as Go's `all goroutines are
+asleep` replaces a panic whose goroutine blocks in a deferred call. It holds in every context (a
+`defer` in `main`, at module top level, in a `parallel:` body, a `spawn`, a callback, an `Executor`
+job). An owner that faults beside a child whose cleanup can never complete ends the same way: the
+owner waits at its `parallel:` join, the child at its wait, and the report lists both. A stuck
+cleanup that holds a `Shared` or `RwShared` guard is listed at its wait the same way. A pending
+`os.exit` from another party outranks the deadlock (Go: the exit status). A cleanup a live task WILL
+feed waits for it. So does a wait on a socket: the other end may still write, so a cleanup that
+reads a socket nobody writes to waits for it (Go: a goroutine blocked in a network read is never a
+deadlock). If some task still runs while the cleanup is stuck, the run hangs, as in Go.
 
 **Which fault is reported.** At the end of a run (and of each test in `chezzi test`) one ranking
 picks the report:
@@ -394,53 +383,53 @@ picks the report:
 Go's first panic ends the process, so the earlier job fault is reported with the job's frames; an own
 fault that happened first stays the report. A job fault replacing a deadlock stays fatal, so
 `recover:` cannot catch it. This applies only to an executor no `shutdown()` has started on: a
-deadlock inside that executor's own join keeps its `deadlock` verdict. A job cut by the run's own
+deadlock inside that executor's own join stays the deadlock. A job cut by the run's own
 `--timeout` is that cause, not an earlier fault. A child's or a job's fault prints the faulting
-party's frames, never the frames of the owner that received it. A run that ends in a deadlock verdict
-still drains its executors, so a finished job's buffered output is not lost.
+party's frames, never the frames of the owner that received it. A run that ends in a deadlock still
+drains its executors, so a finished job's buffered output is not lost.
 
-**The deadlock report lists every blocked task (Go's `all goroutines are asleep`).** A verdict cuts
-every blocked task at once; each ends with its own wait at its own site, and none of them cancels a
-sibling, so the report does not depend on which task woke first. The report is a snapshot taken at
-the verdict: each task the verdict cut adds its own entry at its cut (its wait, its site, its
-frames), once, and the run reports them after every join and the executor drain, so no join or
-unwind can drop or repeat a task. The entries are in spawn-tree order: a task's place is its
-parent's place and the order in which its parent spawned it. A task blocked only in its
-`parallel:` join has no entry (its nursery's blocked tasks stand in its place); a task whose body
-is blocked in its own wait too (inside a callback such as `update` as well) comes after its
-nursery's tasks. The blocked jobs of every executor follow the run's own tasks, by the executor's
-place (where its creator made it), then in submission order. The jobs of an executor made inside a
-job come after every job of an executor a run task made, and among themselves by the creating
-job's place. Under `chezzi test` a task is reported once: a job one test leaves blocked that a
-later test's verdict cuts is listed, with its frames, in that test's report, and the end-of-file
-drain does not report it again as an `(executor job)` row. A task blocked inside a generator body
-lists the body's frames and the frames below it (the `for` or `next()` that resumed it), since
-2026-11-07 (plan `2026-11-07-frame-reentry`). The report is one header, then one
-entry per task with its frames:
+**The deadlock report lists every blocked task (Go's `all goroutines are asleep`).** The run keeps
+one count of the tasks that are not asleep; it changes only when a task starts, parks, is woken or
+ends. When it reaches 0 with tasks alive, every task is asleep and none can wake another, so the
+check that took it there ends the run: every task, at once, each at its own wait and its own site
+with its frames. None of them runs a `defer` or cancels a sibling, so the report does not depend on
+which task parked last. A task waiting at a join is listed too: `waiting for a nursery join` at the
+`parallel` keyword (an implicit join at a fn's or module's end is listed at main's innermost wait,
+with its frames), `waiting for an Executor join` at `shutdown()` or `t.get()`. The order is the
+spawn tree, pre-order: main is task 1, a task comes before the tasks it spawned, in the order its
+parent spawned them. The started jobs of every executor follow the run's own tasks, by the
+executor's place (where its creator made it), then in submission order; a job held behind the cap
+never started and is not listed. A task blocked inside a generator body lists the body's frames and
+the frames below it (the `for` or `next()` that resumed it), since 2026-11-07 (plan
+`2026-11-07-frame-reentry`). The report is one header, then one entry per task with its frames:
 
 ```
-deadlock: 2 tasks are blocked and none can proceed
-  task 1: recv() on an empty channel at g.chz:5:10
+deadlock: every task is blocked
+  task 1: waiting for a nursery join at g.chz:12:1
+  task 2: recv() on an empty channel at g.chz:5:10
     at take (called at g.chz:14:45)
     at <closure> (called at g.chz:14:13)
     at <spawned task> (called at g.chz:13:9)
-  task 2: waiting for the Shared guard at g.chz:17:13
+  task 3: waiting for the Shared guard at g.chz:17:13
     at <spawned task> (called at g.chz:15:9)
 ```
 
 The waits are `recv() on an empty channel`, `send() on a full channel`, `send() on a rendezvous
 channel`, `wait: on channels that are all empty`, `wait: on channels none of which can proceed`,
 `waiting for the Shared guard`, `waiting for the RwShared guard`, `waiting for an Executor join`,
-`waiting on a socket`, and `blocked in a parallel: block` for a report whose cut task named no wait
-and whose run listed none (owner `vm/deadlock.rs`, `Wait::phrase`; the listing is
-`deadlock::Listing`). One task reads `deadlock: 1 task is blocked and cannot
-proceed`. The error's position is the first task's site. `chezzi test --errors=json` gives the
-header as the test's `message` and the entries as `tasks`: `[{"wait", "file", "line", "col",
-"frames": [{"function", "file", "line", "col"}]}]`. A guard that a cut holder frees as it unwinds is
-not progress: a waiter the verdict cut reports its wait and does not take the guard. A wait that
-cannot block where it is (a native callback with no thread of its own) faults at once with
-`deadlock: <wait>: <why>`, e.g. `deadlock: recv() on an empty channel: no runnable task can send.`
-That fault is an ordinary fault, not a verdict, and lists no tasks.
+`waiting on a socket` and `waiting for a nursery join` (owner `vm/deadlock.rs`, `Wait::phrase`; the
+listing is `deadlock::Listing`). The error's position is task 1's site.
+
+`chezzi test` decides it per test: the test whose tasks are all asleep fails with the listing, its
+tasks are dropped (no `defer` runs), a `Shared`/`RwShared` guard one of them held is released `CUT`
+(every later acquire of that box blocks, and the check lists it at that call), and the rest of the file runs. `chezzi test
+--errors=json` gives the header as the test's `message` and the entries as `tasks`:
+`[{"wait", "file", "line", "col", "frames": [{"function", "file", "line", "col"}]}]`.
+
+A wait that cannot block where it is at all (the inline `parallel:` builder when the OS refused its
+thread) faults at once with `deadlock: <wait>: <why>`, e.g. `deadlock: recv() on an empty channel:
+no runnable task can send.` That fault is an ordinary fault, not the run's deadlock, and lists no
+tasks.
 
 **Cross-task output order is NOT part of the contract.** One `print` = one locked write = line-atomic;
 the *order* of prints from different tasks is nondeterministic (a cancelled task's already-printed
@@ -449,11 +438,9 @@ lines are kept, not retracted). Compare the **set of lines**, the **exit code** 
 
 **One deliberate exception: a genuine deadlock does not run `defer`s.** When every fiber is parked,
 nothing is cancelled and nothing can arrive, the parked fibers are torn down where they stand and
-their `defer`s do **not** run. This covers the task that REPORTS the verdict too, so a `defer` that
-closes a file does not run on a deadlock. An owner that was already unwinding its own fault is
-not torn down: the verdict cuts its stuck family alone, and the owner resumes and runs its
-`defer`s (see above). A deadlock is the runtime declaring the program cannot
-proceed, which is not a cancellation, and the ancestors draw the line in the same place: Go's
+their `defer`s do **not** run. This covers the task whose park took the count to 0 too, so a
+`defer` that closes a file does not run on a deadlock. A deadlock is the runtime declaring the
+program cannot proceed, which is not a cancellation, and the ancestors draw the line in the same place: Go's
 `fatal error: all goroutines are asleep - deadlock!` skips its `defer`s (its `panic` path runs them),
 and CPython does not reach the question — a `queue.Queue().get()` or an unset asyncio `Event` under a
 `TaskGroup` hangs until something external kills it, `finally` unrun. Chezzi detects and reports in

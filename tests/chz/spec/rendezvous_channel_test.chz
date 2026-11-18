@@ -171,7 +171,7 @@ test fn try_recv_sees_a_blocked_in_place_rendezvous_sender():
 
 # TICKET-185 — a send inside a native callback (`map`) demotes and blocks until a receiver takes
 # the value, as Go blocks it. Before, the in-callback send could not block and faulted
-# `send on a rendezvous channel: deadlock` (TICKET-136's message, still used where nothing can block).
+# `send on a rendezvous channel: deadlock`.
 fn send_one(rz: Channel[int], x: int) -> int:
     rz.send(x)
     return x

@@ -1,14 +1,14 @@
-# B3.5 — nursery-local deadlock detection under `--parallel`.
+# A genuine deadlock: every task of the run is blocked.
 #
-# Both tasks block on a `recv` from a channel that nobody ever sends to, so the whole nursery is
-# stuck: every live sibling is parked and none can produce. Under `--parallel` (real OS threads +
-# condvar `recv`) B3.5's per-nursery barrier-confirm
-# detector faults `deadlock` instead of hanging on the condvars.
+# Both tasks block on a `recv` from a channel that nobody ever sends to, and `main` waits at its
+# `parallel:` join, so every task is asleep. The run's awake count reaches 0 and the run ends with
+# one report (Go's `all goroutines are asleep - deadlock!`), listing every task at its wait:
 #
-#   chezzi run --parallel examples/parallel_deadlock.chz   # → runtime error: deadlock ...
+#   chezzi run examples/parallel_deadlock.chz   # → runtime error: deadlock: every task is blocked
 #
-# (A genuinely non-deadlocked nursery — see parallel_channel.chz — is untouched: a real `send`
-# aborts any in-progress all-blocked confirmation, so it never false-positives.)
+# (A run where some task is still awake — see parallel_channel.chz — is never reported: a real
+# `send` wakes its receiver first.)
+# A partial deadlock (some task still awake, the rest stuck) hangs, as in Go.
 
 fn waiter(c: Channel[int]):
     print("waiting")

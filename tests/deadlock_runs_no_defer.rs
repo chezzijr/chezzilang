@@ -25,6 +25,9 @@ fn run_at(name: &str, src: &[&str], threads: Option<&str>) -> (String, String, O
     )
 }
 
+/// The one deadlock header (plan 2026-11-17): every task of the run is blocked.
+const HEADER: &str = "deadlock: every task is blocked";
+
 const WORKER_COUNTS: [Option<&str>; 3] = [Some("1"), Some("2"), None];
 
 #[test]
@@ -41,8 +44,9 @@ fn fatal_deadlock_runs_no_defer() {
     for threads in WORKER_COUNTS {
         let (stdout, stderr, code) = run_at("w37.chz", &src, threads);
         assert_eq!(code, Some(1), "threads={threads:?} stderr: {stderr}");
+        // Go twin: fatal, all asleep; no deferred call runs.
         assert!(
-            stderr.contains("deadlock"),
+            stderr.contains(HEADER),
             "threads={threads:?} stderr: {stderr}"
         );
         assert!(
@@ -73,8 +77,13 @@ fn nursery_verdict_deadlock_runs_no_defer() {
     for threads in WORKER_COUNTS {
         let (stdout, stderr, code) = run_at("nursery_verdict.chz", &src, threads);
         assert_eq!(code, Some(1), "threads={threads:?} stderr: {stderr}");
+        // Main is listed at its `parallel:` join, then both workers (Go twin: fatal, all asleep).
         assert!(
-            stderr.contains("deadlock: 2 tasks are blocked and none can proceed"),
+            stderr.contains(HEADER)
+                && stderr.contains("task 1: waiting for a nursery join at ")
+                && stderr.contains("nursery_verdict.chz:9:5\n")
+                && stderr.contains("task 3: recv() on an empty channel at ")
+                && stderr.contains("nursery_verdict.chz:4:11\n"),
             "threads={threads:?} stderr: {stderr}"
         );
         assert_eq!(

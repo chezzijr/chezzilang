@@ -74,14 +74,15 @@ fn main():
 - **`Executor(n)` caps the jobs running at once at `n`** (`Executor()` has no cap; `n < 1` faults
   `Executor(n) needs n >= 1`). A job over the cap is held: it starts when a running job finishes, and a
   parked job still counts as running (CPython `ThreadPoolExecutor(n)`). `n` jobs that each wait for a
-  held job are a deadlock, reported at the parked job's blocking op (CPython hangs there).
+  held job are a deadlock: every task is blocked, and the report lists each started job at its
+  blocking op (a job held behind the cap never started, so it is not listed; CPython hangs there).
 - **A blocked job does not pin its pool thread.** A job blocking on a `Channel`, a `Shared`/`RwShared`
   guard, `time.sleep_ms`/a timer wait, a nested `Executor`'s `shutdown()` join, or a nursery join whose
   child is blocked hands its pool thread to a replacement worker, so the live pool count stays at
   `worker_count()` plus the number of jobs blocked right now. A job whose nursery is busy keeps its
   slot, so `CHEZZI_THREADS=1` still runs one CPU runner.
 - **A submit that returned without a fault and is under the cap always starts**, unless a run halt (an
-  exit, a deadlock verdict) drops it. `cancel()` marks the Executor shut before it
+  exit, a deadlock) drops it. `cancel()` marks the Executor shut before it
   trips the cancel, so a `submit` racing a job's `cancel()` either faults or starts its job.
   `cancel()` cancels held jobs only; a started job runs to its first cancellation point.
 - **A run end keeps what was printed.** A job that calls `os.exit` ends the run, and so does
@@ -100,7 +101,7 @@ halt and the Executor's cancel (its own `cancel` flag or its creator's):
 2. under a cancel (`ex.cancel()`, `t.cancel()` on a held job, or a creator cancel): drop every held
    job and settle each Task it drops or cuts with the error
    `task cancelled: cancel() stopped it before it finished` (CPython `shutdown(cancel_futures=True)`).
-3. after a deadlock verdict that ended a job: drop every held job.
+3. after the run's deadlock: drop every held job.
 4. else: release held jobs while fewer than `n` run.
 
 A job fault does not drop a held job. A started job that returns after a cancel keeps its value, and a
@@ -116,9 +117,10 @@ ready `recv` completes after a cancel. Grid: `tests/executor_stop_grid.rs`.
   `ThreadPoolExecutor`, Java's `ExecutorService`, Go's `errgroup`, none of which abort siblings by
   default). A non-terminating sibling therefore still blocks `shutdown()`.
 - **A hard abort is never a Task outcome.** A `--max-heap` abort ends the run, and a `--timeout` cut
-  leaves the Task unsettled; `os.exit` and a deadlock verdict are run halts as well. So is a job
-  that re-enters its own `Shared`/`RwShared` guard or closes a lock cycle: it is a fatal deadlock
-  that reports itself, however main joins it (`t.get()`, `recover:` around it, `shutdown()`).
+  leaves the Task unsettled; `os.exit` and a deadlock are run halts as well. A job that re-enters
+  its own `Shared`/`RwShared` guard or closes a lock cycle blocks there for good; once every task is
+  blocked the run ends with the deadlock report, however main joins it (`t.get()`, `recover:` around
+  it, `shutdown()`).
 
   ```chezzi
   ex := Executor(1)
@@ -185,16 +187,14 @@ ready `recv` completes after a cancel. Grid: `tests/executor_stop_grid.rs`.
   test did not create is absorbed by whichever later test is running when the exit fires.
   `tests/exit_status.rs` pins both halves.
 
-#### Blocking inside a job, and the deadlock verdict
+#### Blocking inside a job, and the deadlock
 
-A job and the top-level `main` thread have no scheduler to park a fiber into, so both BLOCK IN PLACE on
-an empty `recv` / full `send` / `wait:`. A `deadlock` fault is a **process-wide** verdict: every
-counted party (`main`, plus each outstanding job) is blocked AND none of their waits is already
-satisfiable — Go's `all goroutines are asleep` rule. So a stuck executor faults in milliseconds instead
-of hanging — two jobs deadlocked in one executor, two executors deadlocked on each other, and a blocked
-job with no `shutdown()` at all — while a job whose producer is still running keeps waiting, and
-`ex.submit(fn(): ch.send(42))` followed by `ch.recv()` in `main` works (Go and CPython both print the
-value). Under-reporting is deliberate wherever the verdict is unsure: an accepted hang is a missing
-answer, a false fault is a wrong one. Residuals — an all-joiner cycle, bounded-pool starvation, and
-PARTIAL deadlock (a subset stuck while the rest runs on, which Go cannot report either) — are in
+A job is a task like a `spawn`ed one: on an empty `recv` / full `send` / `wait:` it parks, and main
+does the same. A `deadlock` is one global check: every task of the run (main, each `spawn`ed task,
+each started job) is asleep, Go's `all goroutines are asleep` rule. So a stuck executor ends the run
+at once instead of hanging (two jobs deadlocked in one executor, two executors deadlocked on each
+other, a blocked job with main at `shutdown()` or `t.get()`, listed as `waiting for an Executor
+join`), while a job whose producer is still running keeps waiting, and `ex.submit(fn(): ch.send(42))`
+followed by `ch.recv()` in `main` works (Go and CPython both print the value). A PARTIAL deadlock (a
+subset stuck while the rest runs on) is not reported: it hangs, as in Go. Residuals are in
 [`gaps.md`](../../contributing/gaps.md).

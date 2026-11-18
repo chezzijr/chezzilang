@@ -1,7 +1,22 @@
 //! TICKET-298 (wave 24 F1) — a family cut re-labelled as a cancel must release a Shared guard
 //! `CUT`, so no waiter reads the half-done value, and the run ends in a fatal deadlock.
+//!
+//! Under the one global check (plan 2026-11-17) no family cut is left: a holder stuck in a `defer`
+//! keeps its guard, and the run ends once every task is asleep, with one report that lists each
+//! task at its wait. A lock cycle and a re-lock of a held guard just block, and the same report
+//! lists them at their guard wait. `CUT` stays for a holder that a per-test verdict drops in
+//! `chezzi test`. Go twin of every fatal cell: `all goroutines are asleep - deadlock!`.
 
 use std::process::Command;
+
+/// The one deadlock header: every task of the run is blocked.
+const HEADER: &str = "deadlock: every task is blocked";
+
+/// The listing line of a task blocked at a guard of either box kind.
+fn lists_a_guard_wait(stderr: &str) -> bool {
+    stderr.contains("waiting for the Shared guard at ")
+        || stderr.contains("waiting for the RwShared guard at ")
+}
 
 const SRC: &str = r#"import Shared from std.concurrency
 import sleep_ms from std.time
@@ -48,8 +63,8 @@ fn family_cut_with_stuck_update_in_defer_does_not_release_the_guard_normally() {
         "a waiter read the half-done value (stdout: {stdout:?})"
     );
     assert!(
-        !out.status.success() && stderr.contains("deadlock:"),
-        "expected a fatal `deadlock:` at nonzero rc, got {} (stderr: {stderr})",
+        out.status.code() == Some(1) && stderr.contains(HEADER),
+        "expected a fatal `{HEADER}` at rc 1, got {} (stderr: {stderr})",
         out.status
     );
 }
@@ -192,13 +207,15 @@ impl Cause {
             | Cause::FreshAfterFamily
             | Cause::ExecCancelDefer
             | Cause::ExecCancelDeferMain => Expect::FatalHolder,
-            Cause::SchedBody
-            | Cause::SchedDefer
-            | Cause::LockCycle
+            // A cycle or a re-lock blocks; the one report lists it at its guard wait (Go twin of a
+            // re-`Lock` or an AB-BA `Lock`: fatal, all asleep).
+            Cause::LockCycle
             | Cause::SelfReentry
             | Cause::ReentryInDefer
             | Cause::ChildReentryJoin
-            | Cause::CancelDeferReentry
+            | Cause::CancelDeferReentry => Expect::FatalGuard,
+            Cause::SchedBody
+            | Cause::SchedDefer
             | Cause::MainBody
             | Cause::MainDeferInUpdate
             | Cause::NurseryJoinInUpdate => Expect::Fatal,
@@ -214,6 +231,8 @@ enum Expect {
     FatalHolder,
     /// exit status 1, a `deadlock:` report, no torn read
     Fatal,
+    /// exit status 1, a `deadlock:` report that lists a task at its guard wait, no torn read
+    FatalGuard,
     /// Q4 (out of scope): a cancel of a holder outside a `defer` publishes its partial change
     Kept,
     /// `os.exit(3)` ends the run with its own status
@@ -450,8 +469,8 @@ print(\"r={r}\")
     .replace("@CALL@", call)
 }
 
-/// A cancelled task's `defer` re-enters its own guard: DEC-147 would swallow the fault, so the
-/// cut latches the run's verdict (`guard_cycle_err`, `Vm::is_cancelled`).
+/// A cancelled task's `defer` re-enters its own guard: the re-lock blocks, and once every task is
+/// asleep the one report lists it at its guard wait.
 fn cancel_defer_reentry(r: Res) -> String {
     let (imp, _, _) = int_box(r);
     let (inner, call) = match r {
@@ -488,10 +507,11 @@ print(\"end\")
 /// Does the run's exit status and output match `e`?
 fn check(e: Expect, rc: Option<i32>, stdout: &str, stderr: &str) -> bool {
     let torn = stdout.contains("C sees [0, 1]") || stdout.contains("after [0, 1]");
-    let fatal = rc == Some(1) && stderr.contains("deadlock:") && !torn;
+    let fatal = rc == Some(1) && stderr.contains(HEADER) && !torn;
     match e {
         Expect::FatalHolder => fatal && stderr.contains("recv() on an empty channel"),
         Expect::Fatal => fatal,
+        Expect::FatalGuard => fatal && lists_a_guard_wait(stderr),
         Expect::Kept => rc == Some(0) && stdout.contains("C sees [0, 1]"),
         Expect::Exit => rc == Some(3),
     }
@@ -613,8 +633,9 @@ test fn after():
     .replace("@FN@", h.closure())
 }
 
-/// A deadlock-marked fault that reaches a holder at its wait releases the guard cut, whichever
-/// frame drops it (`Vm::cut_if_fatal`), so a later test fn cannot take the box (owner answer 1(a)).
+/// A holder that `holds`'s per-test verdict drops releases its guard `CUT`, so a later test fn
+/// cannot take the box (owner answer 1(a)): `after` blocks at the box and gets its own per-test
+/// verdict (Go twin: a `Lock` of a `Mutex` nobody unlocks is fatal, all asleep).
 #[test]
 fn a_later_test_cannot_take_a_box_a_fatal_holder_left() {
     for (i, h) in Hold::ALL.iter().enumerate() {
@@ -643,6 +664,7 @@ fn a_later_test_cannot_take_a_box_a_fatal_holder_left() {
                 );
                 let ok = out.status.code() == Some(1)
                     && text.contains("2 test(s): 0 passed, 0 failed, 2 errored")
+                    && text.matches(HEADER).count() == 2
                     && !text.contains("after [");
                 if !ok {
                     bad.push(format!(
@@ -665,8 +687,9 @@ fn a_later_test_cannot_take_a_box_a_fatal_holder_left() {
 
 /// One row per `recover:` shape of the `.chz` test fns that used to pin a re-entry or a lock
 /// cycle as a recoverable fault: (row name, program, stderr fragment). Each program is that test
-/// fn's body with its helper fns, the `recover:` kept and every `assert` removed: the owner's F1
-/// decision makes the fault fatal, so `recover:` must not catch it.
+/// fn's body with its helper fns, the `recover:` kept and every `assert` removed. A re-lock or a
+/// cycle blocks (owner, 2026-11-16), so the fragment is the guard wait the report lists; the old
+/// `already holds` and `lock cycle` texts are gone.
 fn reentry_rows() -> Vec<(&'static str, String, &'static str)> {
     const SHARED: &str = "import Shared from std.concurrency
 fn inc(n: int) -> int:
@@ -717,8 +740,10 @@ fn writer_signal(r: RwShared[int], go: Channel[bool], wsig: Channel[bool]):
     wsig.send(true)
     r.write(fn(n): n * 10)
 ";
-    const USE: &str = "already holds the update guard";
-    const READ_GUARD: &str = "already holds the read guard on this RwShared box";
+    // The box kind the re-lock waits on: every `SHARED` row re-locks a `Shared`, every `RW` row an
+    // `RwShared` (a write inside a read and a nested read past a waiting writer included).
+    const USE: &str = "waiting for the Shared guard at ";
+    const RW_USE: &str = "waiting for the RwShared guard at ";
     let shared = |body: &str| format!("{SHARED}s := Shared(1)\n{body}print(\"r\", r)\n");
     let rw = |body: &str| format!("{RW}s := RwShared(1)\n{body}print(\"r\", r)\n");
     let nested_read = "go := Channel[bool](1)
@@ -739,12 +764,12 @@ r := recover:
         (
             "a_write_inside_a_read_of_the_same_box",
             rw("r := recover: s.read(fn(x): write_inside(s, x))\n"),
-            READ_GUARD,
+            RW_USE,
         ),
         (
             "a_nested_read_past_a_waiting_writer",
             rw(nested_read),
-            "a lock cycle",
+            RW_USE,
         ),
         // tests/chz/suites/box_grid_test.chz
         (
@@ -775,27 +800,27 @@ r := recover:
         (
             "rwshared_get_inside_its_own_write",
             rw("r := recover: s.write(fn(x): x + s.get())\n"),
-            USE,
+            RW_USE,
         ),
         (
             "rwshared_read_inside_its_own_write",
             rw("r := recover: s.write(fn(x): x + s.read(fn(y): y))\n"),
-            USE,
+            RW_USE,
         ),
         (
             "rwshared_set_inside_its_own_write",
             rw("r := recover: s.write(fn(x): rset_then(s, x))\n"),
-            USE,
+            RW_USE,
         ),
         (
             "rwshared_write_inside_its_own_write",
             rw("r := recover: s.write(fn(x): rwrite_then(s, x))\n"),
-            USE,
+            RW_USE,
         ),
         (
             "rwshared_write_nested_in_read",
             rw("r := recover: s.read(fn(x): rwrite_from_read(s, x))\n"),
-            READ_GUARD,
+            RW_USE,
         ),
         // tests/chz/suites/box_rules_test.chz
         (
@@ -806,13 +831,13 @@ r := recover:
         (
             "rwshared_ab_ba_cycle_in_one_task",
             rw("b := RwShared(2)\nr := recover: s.write(fn(x): ra_then_b_then_a(s, b, x))\n"),
-            USE,
+            RW_USE,
         ),
     ]
 }
 
-/// A re-entry, a write inside a read and a lock cycle are fatal deadlocks, not faults: no
-/// `recover:` catches them (owner decision F1; DEC-135's "Boundary" bullet is superseded).
+/// A re-entry, a write inside a read and a lock cycle block, and the run ends with the one fatal
+/// report: no `recover:` catches it (owner, 2026-11-16; Go twin: a re-`Lock` is fatal, all asleep).
 #[test]
 fn a_recovered_reentry_or_lock_cycle_is_fatal() {
     let dir = std::env::temp_dir().join(format!("chz-ticket298-reentry-{}", std::process::id()));
@@ -833,7 +858,7 @@ fn a_recovered_reentry_or_lock_cycle_is_fatal() {
             let stdout = String::from_utf8_lossy(&out.stdout);
             let stderr = String::from_utf8_lossy(&out.stderr);
             if out.status.code() != Some(1)
-                || !stderr.contains("deadlock:")
+                || !stderr.contains(HEADER)
                 || !stderr.contains(fragment)
                 || stdout.contains("r ")
             {
@@ -883,10 +908,9 @@ impl Join {
     }
 }
 
-/// An `Executor` job that re-enters its own guard is a fatal deadlock that reports itself, however
-/// main joins it (`MnSched::finish_with`): a deadlock-marked job fault that no verdict decided is
-/// no verdict's end, so it is published as the run's fault instead of sealing nothing and leaving
-/// `t.get()` to wait for a result that never comes.
+/// An `Executor` job that re-enters its own guard blocks; main blocks at its join (`t.get()` or
+/// `shutdown()`), so every task is asleep and the one fatal report lists main at its Executor join
+/// and the job at its guard wait, however main joins it (Go twin: fatal, all asleep).
 #[test]
 fn an_executor_job_reentry_is_fatal_whichever_way_it_is_joined() {
     for (i, j) in Join::ALL.iter().enumerate() {
@@ -921,7 +945,9 @@ fn an_executor_job_reentry_is_fatal_whichever_way_it_is_joined() {
                 let stdout = String::from_utf8_lossy(&out.stdout);
                 let stderr = String::from_utf8_lossy(&out.stderr);
                 if out.status.code() != Some(1)
-                    || !stderr.contains("deadlock:")
+                    || !stderr.contains(HEADER)
+                    || !stderr.contains("task 1: waiting for an Executor join at ")
+                    || !lists_a_guard_wait(&stderr)
                     || stderr.contains("recv() on an empty channel")
                     || stdout.contains("r ")
                 {

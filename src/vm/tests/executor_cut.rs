@@ -60,15 +60,14 @@ ex.shutdown()
     let entry = write_temp_chz("t195_c3", src);
     let (_out, _err, res, _code) = run_file(&entry);
     let _ = std::fs::remove_file(&entry);
-    let msg = res.expect_err("expected the deadlock verdict").message;
+    let e = res.expect_err("expected the deadlock verdict");
     assert!(
-        msg.contains("deadlock"),
-        "the unread job fault must not replace the verdict: {msg}"
+        !e.parts().3.contains("index 5 out of bounds"),
+        "the job fault must stay in its Task: {}",
+        e.parts().3
     );
-    assert!(
-        !msg.contains("index 5 out of bounds"),
-        "the job fault must stay in its Task: {msg}"
-    );
+    // Go twin: the goroutine's error stays in its channel/result; main's `<-ch` is fatal, all asleep.
+    assert_deadlock(&e, &[("recv() on an empty channel", 7)]);
 }
 
 /// TICKET-195 C4: a party cut by a child's fault reports that fault; its own `defer` fault ranks
@@ -156,12 +155,20 @@ ex.submit(job)
 time.sleep_ms(200)
 print(ch.recv())
 "#;
-    for (src, line) in [(finished, "job printed"), (parked, "job started")] {
+    // Go twin: fatal, all asleep; main at its `recv`, then a parked job (jobs after run tasks).
+    let finished_tasks: &[(&str, u32)] = &[("recv() on an empty channel", 9)];
+    let parked_tasks: &[(&str, u32)] = &[
+        ("recv() on an empty channel", 11),
+        ("recv() on an empty channel", 7),
+    ];
+    for (src, line, tasks) in [
+        (finished, "job printed", finished_tasks),
+        (parked, "job started", parked_tasks),
+    ] {
         let entry = write_temp_chz("t195_drain", src);
         let (out, _err, res, _code) = run_file(&entry);
         let _ = std::fs::remove_file(&entry);
-        let msg = res.expect_err("expected a verdict").message;
-        assert!(msg.contains("deadlock"), "got: {msg}");
+        assert_deadlock(&res.expect_err("expected a verdict"), tasks);
         assert!(out.contains(line), "job output lost: out={out:?}");
     }
 }
@@ -328,8 +335,14 @@ fn a_finished_executor_job_no_longer_vetoes_a_parked_nursery_task() {
     let (out, res) = rx
         .recv_timeout(std::time::Duration::from_secs(20))
         .expect("a finished job must not veto the deadlock verdict forever");
-    let msg = res.expect_err("expected a deadlock fault").message;
-    assert!(msg.contains("deadlock"), "got: {msg}");
+    // Go twin: fatal, all asleep; main at its `parallel:` join, the task at its `recv`.
+    assert_deadlock(
+        &res.expect_err("expected a deadlock fault"),
+        &[
+            ("waiting for a nursery join", 9),
+            ("recv() on an empty channel", 6),
+        ],
+    );
     assert!(!out.contains("after"), "the nursery returned: {out:?}");
 }
 
@@ -396,158 +409,13 @@ fn a_cut_job_handle_is_sealed_in_the_lock_hold_that_ends_the_job() {
     drop(c);
 }
 
-/// TICKET-236 — the bump-site grid: every way a waker leaves the counts a verdict reads moves the
-/// run's epoch, so a judge whose walk overlapped the leave declines. One row per call. A
-/// `SchedCore` row also fails if the core's epoch handle is not its sched's.
-#[test]
-fn every_way_out_of_the_counts_moves_the_epoch() {
-    use crate::vm::core::Pending;
-    type Row = (&'static str, fn(&MnSched, Fiber));
-    let rows: [Row; 13] = [
-        ("park", |s, f| {
-            let c = empty_core();
-            s.park(core_key(&c), c, f);
-        }),
-        ("park_send", |s, f| s.park_send(0, f)),
-        ("yield_fiber", |s, f| s.yield_fiber(f)),
-        ("finish", |s, f| {
-            s.finish(
-                f.task_index,
-                0,
-                TaskOutcome::Cancelled {
-                    out: Vec::new(),
-                    stderr: Vec::new(),
-                },
-            );
-        }),
-        ("owner_blocked", |s, _| s.lock().owner_blocked(false)),
-        ("close_body", |s, _| s.close_body(0)),
-        ("leave_inflight", |s, _| {
-            s.inflight.fetch_add(1, Ordering::Relaxed);
-            s.leave_inflight();
-        }),
-        ("builder_joined", |s, _| s.lock().builder_joined(0)),
-        ("block_shared", |s, _| {
-            let _party = s.quiesce.block_shared(
-                Arc::new(quiesce::PartyWait::Send(Pending::new())),
-                crate::vm::block::WakeSet::default(),
-                None,
-            );
-        }),
-        ("set_body_wait block", |s, _| {
-            s.set_body_wait(0, None, true, false)
-        }),
-        ("set_body_wait unblock", |s, _| {
-            s.set_body_wait(0, None, false, true)
-        }),
-        ("scope_retired", |s, _| s.lock().scope_retired(0)),
-        ("settle_job", |s, _| {
-            let mut c = s.lock();
-            c.job_settle.insert(
-                0,
-                JobSettle {
-                    ch: empty_core(),
-                    flag: Arc::new(AtomicBool::new(false)),
-                },
-            );
-            c.settle_job(0, JobSeal::Cancel, &mut JobStep::default());
-        }),
-    ];
-    for (name, leave) in rows {
-        let sched = mk_sched(1);
-        sched.seed(vec![mk_fiber(0)]);
-        let f0 = take_run(&sched);
-        let e0 = sched.quiesce.left();
-        leave(&sched, f0);
-        assert!(
-            sched.quiesce.left() > e0,
-            "{name} left the counts without moving the epoch"
-        );
-    }
-}
+// The run's epoch (`QuiesceState::left`) is gone with the judges that read it (plan 2026-11-17):
+// every way out of a wait is a `woken(n)` on the awake count. Covered by `tests/awake_count_grid.rs`
+// (every `live` cell must read `deadlocks=0`).
 
-/// TICKET-236 — a cut job's seal is its last channel effect, and the epoch moves AFTER it, inside
-/// the lock hold that ends the job. Moved before the seal, a judge could open its bracket after
-/// the bump, read the unsealed handle, then read the finished sched: a false verdict with an
-/// unmoved epoch. The test holds the handle's queue lock so `settle_job` stops at the seal.
-#[test]
-fn a_cut_job_seal_moves_the_epoch_after_the_seal() {
-    let sched = mk_sched(1);
-    let ch = empty_core();
-    let q = ch.q.lock().unwrap();
-    let e0 = sched.quiesce.left();
-    std::thread::scope(|sc| {
-        let cutter = sc.spawn(|| {
-            let mut c = sched.lock();
-            c.job_settle.insert(
-                0,
-                JobSettle {
-                    ch: Arc::clone(&ch),
-                    flag: Arc::new(AtomicBool::new(false)),
-                },
-            );
-            c.settle_job(0, JobSeal::Cancel, &mut JobStep::default());
-        });
-        // Until the cutter holds the sched lock; it then blocks at the seal, on `q`.
-        while sched.core.try_lock().is_ok() {
-            std::thread::yield_now();
-        }
-        // The sleep can only let a wrong order pass on a stalled box, never fail the right one.
-        std::thread::sleep(std::time::Duration::from_millis(50));
-        assert_eq!(
-            sched.quiesce.left(),
-            e0,
-            "the epoch moved before the handle was sealed"
-        );
-        drop(q);
-        cutter.join().unwrap();
-    });
-    assert!(ch.q.lock().unwrap().is_sealed());
-    assert!(sched.quiesce.left() > e0);
-}
-
-/// TICKET-232 — a sched that judges its own deadlock latches the verdict as a run halt BEFORE it
-/// flags a victim. A flagged leaf unwinds and frees what it holds; with no halt latched, a party
-/// waiting on that takes it (a ready wait outranks a halt, DEC-194) and runs on.
-#[test]
-fn the_sched_idle_judge_latches_the_verdict_before_it_flags_a_leaf() {
-    let sched = mk_sched(1);
-    let core = empty_core();
-    sched.seed(vec![mk_fiber(0)]);
-    let f0 = take_run(&sched);
-    sched.park(core_key(&core), Arc::clone(&core), f0);
-    let _party = sched.quiesce.block_shared(
-        Arc::new(quiesce::PartyWait::Send(crate::vm::core::Pending::new())),
-        crate::vm::block::WakeSet::default(),
-        Some(("x", Span::RUNTIME)),
-    );
-    assert!(matches!(
-        sched.take_runnable_unattached(0, 1, 0),
-        Take::Stop
-    ));
-    assert_eq!(sched.quiesce.run_halt(), RunHalt::Deadlock);
-}
-
-/// TICKET-236 — the latch is set only by a verdict its own licence accepts. A latch never
-/// un-latches (DEC-232), so a verdict latched before a licence that then declines the cut is
-/// irrevocable: the run halts on a deadlock no victim was faulted for.
-#[test]
-fn a_declined_licence_latches_nothing() {
-    let sched = mk_sched(1);
-    let core = empty_core();
-    sched.seed(vec![mk_fiber(0)]);
-    let f0 = take_run(&sched);
-    sched.park(core_key(&core), Arc::clone(&core), f0);
-    let _party = sched.quiesce.block_shared(
-        Arc::new(quiesce::PartyWait::Send(crate::vm::core::Pending::new())),
-        crate::vm::block::WakeSet::default(),
-        Some(("x", Span::RUNTIME)),
-    );
-    assert!(sched.latch_own_verdict(|_| false).is_none());
-    assert_eq!(sched.quiesce.run_halt(), RunHalt::Running);
-    assert!(sched.latch_own_verdict(|_| true).is_some());
-    assert_eq!(sched.quiesce.run_halt(), RunHalt::Deadlock);
-}
+// `on_deadlock` latches `RunHalt::Deadlock` once, when the awake count reaches 0 (plan
+// 2026-11-17). Covered by `tests/deadlock_is_fatal.rs`
+// `recover_does_not_catch_a_deadlock` and `tests/awake_count_grid.rs` cell `guard::task`.
 
 /// TICKET-228 — the `no match arm` fault names a carrier by the pattern that matches it.
 #[test]
@@ -630,11 +498,8 @@ fn spawn_call_operands_are_evaluated_in_the_parent() {
     );
     let e = run_capture("fn main():\n    a := Channel[int](1)\n    parallel:\n        spawn print(a.recv())\n        a.send(1)\nmain()\n")
         .expect_err("the parent's recv has no sender yet");
-    assert!(
-        err_text(&e).contains("recv() on an empty channel"),
-        "{}",
-        err_text(&e)
-    );
+    // Go twin: `go f(<-a)` receives in the parent before the `go`: fatal, all asleep.
+    assert_deadlock(&e, &[("recv() on an empty channel", 4)]);
 }
 
 /// TICKET-235 — a fault inside a one-line native spawn names the user's `spawn` line, in the

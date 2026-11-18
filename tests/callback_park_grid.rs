@@ -2,7 +2,9 @@
 //! HOF callback, a box closure, a generator body or a `defer` body, reached from every caller, at
 //! T=1, 2 and 4. With no sender it must report `deadlock` (exit 1, the same text at every T), as
 //! Go reports `fatal error: all goroutines are asleep - deadlock!` for every one of these shapes.
-//! With a live sender it must print the program's golden output (no false deadlock).
+//! With a live sender it must print the program's golden output (no false deadlock). The
+//! residual kinds wait in place, which counts as awake, so they hang in every caller (plan
+//! 2026-11-17).
 //!
 //! `LANDED` is the last plan task that has landed. A kind whose task is later still hangs in a
 //! non-`spawn` caller (the W23-1 residual before the fix); raising `LANDED` flips its cells.
@@ -19,6 +21,9 @@ use std::io::Read;
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
+
+/// The one deadlock header (plan 2026-11-17): every task of the run is blocked.
+const HEADER: &str = "deadlock: every task is blocked";
 
 /// The last plan task (2-7) whose kinds now park or are judged.
 const LANDED: u8 = 6;
@@ -39,16 +44,13 @@ enum Fix {
 }
 
 /// One callback kind: `prelude` declares what `act` needs, `act` (unindented) waits through `w()`
-/// and prints; `out` is its stdout with a live sender. `cut` is its stdout with no sender when the
-/// wait is a cancelled task's cleanup: the verdict cuts the stuck cleanup and the sibling's fault is
-/// the report (`docs/reference/concurrency/05-cancel.md`), so the run exits 0 instead of `deadlock`.
+/// and prints; `out` is its stdout with a live sender.
 struct Kind {
     name: &'static str,
     fix: Fix,
     prelude: &'static str,
     act: &'static str,
     out: &'static str,
-    cut: Option<&'static str>,
 }
 
 // Go oracle (run on go1.27, 2026-11-07, no sender on `ch`): `<-ch` inside a `slices.IndexFunc`
@@ -63,7 +65,6 @@ const KINDS: &[Kind] = &[
         prelude: "s := Shared[int](0)",
         act: "s.update(fn(v: int) -> int: v + w())\nprint(s.read(fn(v: int) -> int: v))",
         out: "7\n",
-        cut: None,
     },
     Kind {
         name: "rw_write",
@@ -71,7 +72,6 @@ const KINDS: &[Kind] = &[
         prelude: "r := RwShared[int](0)",
         act: "r.write(fn(v: int) -> int: v + w())\nprint(r.get())",
         out: "7\n",
-        cut: None,
     },
     Kind {
         name: "rw_read",
@@ -79,7 +79,6 @@ const KINDS: &[Kind] = &[
         prelude: "r := RwShared[int](0)",
         act: "print(r.read(fn(v: int) -> int: v + w()))",
         out: "7\n",
-        cut: None,
     },
     // a second task waits on the guard the caller holds while it is parked in its closure. Go: a
     // goroutine blocked on `mu.Lock()` behind a holder blocked on `<-ch` -> deadlock; with a
@@ -90,7 +89,6 @@ const KINDS: &[Kind] = &[
         prelude: "s := Shared[int](0)\nheld := Channel[int](1)\n\nfn hold(v: int) -> int:\n    held.send(1)\n    return v + w()",
         act: "parallel:\n    spawn:\n        _ := held.recv()\n        s.update(fn(v: int) -> int: v + 1)\n    s.update(hold)\nprint(s.get())",
         out: "8\n",
-        cut: None,
     },
     // ---- HOF callbacks (Task 3). Go: `slices.IndexFunc(xs, func(v int) bool { <-ch ... })`.
     Kind {
@@ -99,7 +97,6 @@ const KINDS: &[Kind] = &[
         prelude: "",
         act: "print([1].map(fn(v: int) -> int: v + w()))",
         out: "[8]\n",
-        cut: None,
     },
     Kind {
         name: "filter",
@@ -107,7 +104,6 @@ const KINDS: &[Kind] = &[
         prelude: "",
         act: "print([1].filter(fn(v: int) -> bool: w() > v))",
         out: "[1]\n",
-        cut: None,
     },
     Kind {
         name: "fold",
@@ -115,7 +111,6 @@ const KINDS: &[Kind] = &[
         prelude: "",
         act: "print([1].fold(0, fn(a: int, v: int) -> int: a + v + w()))",
         out: "8\n",
-        cut: None,
     },
     Kind {
         name: "take_while",
@@ -123,7 +118,6 @@ const KINDS: &[Kind] = &[
         prelude: "",
         act: "print([1].take_while(fn(v: int) -> bool: w() > v))",
         out: "[1]\n",
-        cut: None,
     },
     Kind {
         name: "count",
@@ -131,7 +125,6 @@ const KINDS: &[Kind] = &[
         prelude: "",
         act: "print([1].count(fn(v: int) -> bool: w() > v))",
         out: "1\n",
-        cut: None,
     },
     Kind {
         name: "min_by",
@@ -139,7 +132,6 @@ const KINDS: &[Kind] = &[
         prelude: "",
         act: "print([2, 1].min_by(fn(v: int) -> int: v + w() - 7))",
         out: "1\n",
-        cut: None,
     },
     // the key pass of `sort_by_key` (the key fn waits)
     Kind {
@@ -148,7 +140,6 @@ const KINDS: &[Kind] = &[
         prelude: "",
         act: "xs := [2, 1]\nxs.sort_by_key(fn(v: int) -> int: v + w() - 7)\nprint(xs)",
         out: "[1, 2]\n",
-        cut: None,
     },
     Kind {
         name: "from_iter",
@@ -156,7 +147,6 @@ const KINDS: &[Kind] = &[
         prelude: "struct It:\n    n: int\n    fn next(self) -> int?:\n        if self.n == 0:\n            return None\n        self.n -= 1\n        return self.n + w() - 7",
         act: "print(List.from_iter(It(1)))",
         out: "[0]\n",
-        cut: None,
     },
     // an f-string part whose `str` hook waits. Go: `fmt.Sprintf("%v", x)` with a blocking `String()`.
     Kind {
@@ -165,7 +155,6 @@ const KINDS: &[Kind] = &[
         prelude: "struct T:\n    n: int\n    fn str(self) -> str: return \"s{w()}\"",
         act: "print(\"v={T(1)}\")",
         out: "v=s7\n",
-        cut: None,
     },
     Kind {
         name: "fstr_fmt",
@@ -173,7 +162,6 @@ const KINDS: &[Kind] = &[
         prelude: "struct T:\n    n: int\n    fn str(self) -> str: return \"s{w()}\"",
         act: "print(\"v={T(1):>4}\")",
         out: "v=  s7\n",
-        cut: None,
     },
     // ---- sorts (Task 4). Go: `slices.SortFunc(xs, func(a, b int) int { <-ch ... })`.
     Kind {
@@ -182,7 +170,6 @@ const KINDS: &[Kind] = &[
         prelude: "",
         act: "xs := [2, 1]\nxs.sort_by(fn(a: int, b: int) -> int: a - b + w() - 7)\nprint(xs)",
         out: "[1, 2]\n",
-        cut: None,
     },
     // the compare pass of `sort_by_key` (the struct key's `compare` waits)
     Kind {
@@ -191,7 +178,6 @@ const KINDS: &[Kind] = &[
         prelude: "struct K:\n    n: int\n    fn eq(self, other: K) -> bool: return self.n == other.n\n    fn compare(self, other: K) -> int: return self.n - other.n + w() - 7",
         act: "xs := [2, 1]\nxs.sort_by_key(fn(v: int) -> K: K(v))\nprint(xs)",
         out: "[1, 2]\n",
-        cut: None,
     },
     Kind {
         name: "sort",
@@ -199,7 +185,6 @@ const KINDS: &[Kind] = &[
         prelude: "struct K:\n    n: int\n    fn eq(self, other: K) -> bool: return self.n == other.n\n    fn compare(self, other: K) -> int: return self.n - other.n + w() - 7",
         act: "ks := [K(2), K(1)]\nks.sort()\nprint(ks)",
         out: "[K(n=1), K(n=2)]\n",
-        cut: None,
     },
     // a stable `sort_by` over equal keys: the comparator waits on every call, so each merge step
     // is a frame; equal keys keep their input order.
@@ -209,7 +194,6 @@ const KINDS: &[Kind] = &[
         prelude: "struct P:\n    k: int\n    tag: str",
         act: "ps := [P(2, \"a\"), P(1, \"b\"), P(2, \"c\"), P(1, \"d\"), P(1, \"e\")]\nps.sort_by(fn(a: P, b: P) -> int: a.k - b.k + w() - 7)\nprint(ps.map(fn(p: P) -> str: p.tag))",
         out: "['b', 'd', 'e', 'a', 'c']\n",
-        cut: None,
     },
     // `xs.min()` over structs: the element's `compare` waits.
     Kind {
@@ -218,7 +202,6 @@ const KINDS: &[Kind] = &[
         prelude: "struct K:\n    n: int\n    fn eq(self, other: K) -> bool: return self.n == other.n\n    fn compare(self, other: K) -> int: return self.n - other.n + w() - 7",
         act: "print([K(2), K(1)].min())",
         out: "K(n=1)\n",
-        cut: None,
     },
     // ---- shallow operator hooks (Task 2). Go has no operator overloading; the hook is a method
     // call, so the Go answer is the plain-call answer: deadlock.
@@ -228,7 +211,6 @@ const KINDS: &[Kind] = &[
         prelude: "struct A:\n    n: int\n    fn add(self, other: A) -> A: return A(self.n + other.n + w())",
         act: "print((A(1) + A(2)).n)",
         out: "10\n",
-        cut: None,
     },
     Kind {
         name: "neg",
@@ -236,7 +218,6 @@ const KINDS: &[Kind] = &[
         prelude: "struct A:\n    n: int\n    fn neg(self) -> A: return A(w() - self.n)",
         act: "print((-A(1)).n)",
         out: "6\n",
-        cut: None,
     },
     Kind {
         name: "index",
@@ -244,7 +225,6 @@ const KINDS: &[Kind] = &[
         prelude: "struct I:\n    n: int\n    fn index(self, k: int) -> int: return k + w()",
         act: "print(I(1)[2])",
         out: "9\n",
-        cut: None,
     },
     Kind {
         name: "set_index",
@@ -252,7 +232,6 @@ const KINDS: &[Kind] = &[
         prelude: "struct I:\n    n: int\n    fn index(self, k: int) -> int: return k\n    fn set_index(self, k: int, v: int) -> None:\n        self.n = k + v + w()",
         act: "x := I(1)\nx[2] = 3\nprint(x.n)",
         out: "12\n",
-        cut: None,
     },
     Kind {
         name: "slice",
@@ -260,7 +239,6 @@ const KINDS: &[Kind] = &[
         prelude: "struct I:\n    n: int\n    fn slice(self, r: Range) -> int: return w()",
         act: "print(I(1)[0..2])",
         out: "7\n",
-        cut: None,
     },
     Kind {
         name: "contains",
@@ -268,7 +246,6 @@ const KINDS: &[Kind] = &[
         prelude: "struct I:\n    n: int\n    fn contains(self, item: int) -> bool: return item == w()",
         act: "print(7 in I(1))",
         out: "true\n",
-        cut: None,
     },
     Kind {
         name: "lt",
@@ -276,7 +253,6 @@ const KINDS: &[Kind] = &[
         prelude: "struct K:\n    n: int\n    fn eq(self, other: K) -> bool: return self.n == other.n\n    fn compare(self, other: K) -> int: return self.n - other.n + w() - 7",
         act: "print(K(1) < K(2))",
         out: "true\n",
-        cut: None,
     },
     Kind {
         name: "eq",
@@ -284,7 +260,6 @@ const KINDS: &[Kind] = &[
         prelude: "struct E:\n    n: int\n    fn eq(self, other: E) -> bool: return self.n == other.n + w() - 7",
         act: "print(E(1) == E(1))",
         out: "true\n",
-        cut: None,
     },
     Kind {
         name: "str_hook",
@@ -292,7 +267,6 @@ const KINDS: &[Kind] = &[
         prelude: "struct T:\n    n: int\n    fn str(self) -> str: return \"s{w()}\"",
         act: "print(T(1))",
         out: "s7\n",
-        cut: None,
     },
     // every `print` arg with a `str` hook, any argc, a runtime `sep`
     Kind {
@@ -301,7 +275,6 @@ const KINDS: &[Kind] = &[
         prelude: "struct T:\n    n: int\n    fn str(self) -> str: return \"s{w()}\"",
         act: "print(1, T(1), sep=\"-\")",
         out: "1-s7\n",
-        cut: None,
     },
     Kind {
         name: "iter_hook",
@@ -309,7 +282,6 @@ const KINDS: &[Kind] = &[
         prelude: "struct IT:\n    n: int\n    fn iter(self) -> Iterator[int]: return [self.n + w()].iter()",
         act: "for v in IT(1):\n    print(v)",
         out: "8\n",
-        cut: None,
     },
     // ---- generator body (Task 6). Go: a range-over-func iterator whose body does `<-ch`.
     Kind {
@@ -318,7 +290,6 @@ const KINDS: &[Kind] = &[
         prelude: "fn gen() -> Iterator[int]:\n    yield w()",
         act: "for v in gen():\n    print(v)",
         out: "7\n",
-        cut: None,
     },
     // a generator that yields across a park, twice
     Kind {
@@ -327,7 +298,6 @@ const KINDS: &[Kind] = &[
         prelude: "fn gen() -> Iterator[int]:\n    yield w()\n    yield w() + 1",
         act: "for v in gen():\n    print(v)",
         out: "7\n8\n",
-        cut: None,
     },
     // a generator whose body iterates an inner generator that waits
     Kind {
@@ -336,7 +306,6 @@ const KINDS: &[Kind] = &[
         prelude: "fn inner() -> Iterator[int]:\n    yield w()\nfn outer() -> Iterator[int]:\n    for v in inner():\n        yield v + 1",
         act: "for v in outer():\n    print(v)",
         out: "8\n",
-        cut: None,
     },
     Kind {
         name: "gen_from_iter",
@@ -344,7 +313,6 @@ const KINDS: &[Kind] = &[
         prelude: "fn gen() -> Iterator[int]:\n    yield w()\n    yield 2",
         act: "print(List.from_iter(gen()))",
         out: "[7, 2]\n",
-        cut: None,
     },
     Kind {
         name: "gen_next",
@@ -352,7 +320,6 @@ const KINDS: &[Kind] = &[
         prelude: "fn gen() -> Iterator[int]:\n    yield w()",
         act: "g := gen()\nprint(g.next())\nprint(g.next())",
         out: "7\nNone\n",
-        cut: None,
     },
     // ---- defer body (plan 2026-11-07-defer-drain-frames: Task 2 drains a return, Task 3 a fault,
     // a catch and a cancel on frames, so the wait parks instead of demoting).
@@ -363,7 +330,6 @@ const KINDS: &[Kind] = &[
         prelude: "fn viadefer():\n    defer:\n        print(w())\n    pass",
         act: "viadefer()",
         out: "7\n",
-        cut: None,
     },
     // a defer that waits while its frame returns a value
     Kind {
@@ -372,7 +338,6 @@ const KINDS: &[Kind] = &[
         prelude: "fn viadefer() -> int:\n    defer:\n        print(w())\n    return 5",
         act: "print(viadefer())",
         out: "7\n5\n",
-        cut: None,
     },
     // a defer that waits while a fault unwinds its frame; the fault is still caught after it
     Kind {
@@ -381,7 +346,6 @@ const KINDS: &[Kind] = &[
         prelude: "fn boom():\n    defer:\n        print(w())\n    x := 0\n    print(1 / x)",
         act: "r := recover:\n    boom()\nmatch r:\n    ?_: print(\"none\")\n    !e: print(\"caught: {e}\")",
         out: "7\ncaught: division by zero\n",
-        cut: None,
     },
     // a defer inside the `recover:` block that catches the fault; the catch still runs after it
     Kind {
@@ -390,7 +354,6 @@ const KINDS: &[Kind] = &[
         prelude: "",
         act: "r := recover:\n    defer:\n        print(w())\n    x := 0\n    print(1 / x)\nmatch r:\n    ?_: print(\"none\")\n    !e: print(\"caught: {e}\")",
         out: "7\ncaught: division by zero\n",
-        cut: None,
     },
     // a deferred struct method call that waits
     Kind {
@@ -399,7 +362,6 @@ const KINDS: &[Kind] = &[
         prelude: "struct C:\n    n: int\n    fn close(self):\n        print(self.n + w())\n\nfn viadefer():\n    c := C(1)\n    defer c.close()\n    pass",
         act: "viadefer()",
         out: "8\n",
-        cut: None,
     },
     // a deferred native call that waits
     Kind {
@@ -408,26 +370,27 @@ const KINDS: &[Kind] = &[
         prelude: "fn viadefer():\n    defer ch.recv()\n    print(1)",
         act: "viadefer()",
         out: "1\n",
-        cut: None,
     },
-    // a task cancelled by a sibling's fault runs its defer, which waits; the fault is caught after
+    // a task cancelled by a sibling's fault runs its defer, which waits; the fault is caught after.
+    // With no sender the stuck cleanup leaves every task asleep (the body at its join, the task in
+    // its defer), so the run ends in the deadlock and `recover:` never sees the fault (Go twin: a
+    // deferred `<-ch` that blocks while the program unwinds is fatal, all asleep)
     Kind {
         name: "defer_cancel",
         fix: Fix::Drain(3),
         prelude: "ready := Channel[int](0)\ngate := Channel[int](0)",
         act: "r := recover:\n    parallel:\n        spawn:\n            defer:\n                print(w())\n            ready.send(1)\n            _ := gate.recv()\n        spawn:\n            _ := ready.recv()\n            x := 0\n            print(1 / x)\nmatch r:\n    ?_: print(\"none\")\n    !e: print(\"caught: {e}\")",
         out: "7\ncaught: division by zero\n",
-        cut: Some("caught: division by zero\n"),
     },
     // a task's return-path defer waits, and a sibling's fault then cancels its scope: the parked
-    // cleanup is not requeued by the cancel (a `defer` is never cancelled); the fault is caught after
+    // cleanup is not requeued by the cancel (a `defer` is never cancelled); the fault is caught after.
+    // With no sender: every task asleep, the deadlock, as `defer_cancel`
     Kind {
         name: "defer_return_cancel",
         fix: Fix::Drain(2),
         prelude: "ready := Channel[int](0)",
         act: "r := recover:\n    parallel:\n        spawn:\n            defer:\n                print(w())\n            ready.send(1)\n        spawn:\n            _ := ready.recv()\n            x := 0\n            print(1 / x)\nmatch r:\n    ?_: print(\"none\")\n    !e: print(\"caught: {e}\")",
         out: "7\ncaught: division by zero\n",
-        cut: Some("caught: division by zero\n"),
     },
     // ---- residuals: a hook reached from a nested container walk keeps the nested loop.
     Kind {
@@ -436,7 +399,6 @@ const KINDS: &[Kind] = &[
         prelude: "struct E:\n    n: int\n    fn eq(self, other: E) -> bool: return self.n == other.n + w() - 7",
         act: "print([E(1)] == [E(1)])",
         out: "true\n",
-        cut: None,
     },
     Kind {
         name: "nested_str",
@@ -444,7 +406,6 @@ const KINDS: &[Kind] = &[
         prelude: "struct T:\n    n: int\n    fn str(self) -> str: return \"s{w()}\"",
         act: "print([T(1)])",
         out: "[s7]\n",
-        cut: None,
     },
     Kind {
         name: "map_key_hash",
@@ -452,7 +413,6 @@ const KINDS: &[Kind] = &[
         prelude: "struct H:\n    n: int\n    fn eq(self, other: H) -> bool: return self.n == other.n\n    fn hash(self) -> int: return self.n + w() - 7",
         act: "m := {H(1): 2}\nprint(m[H(1)])",
         out: "2\n",
-        cut: None,
     },
 ];
 
@@ -538,11 +498,9 @@ fn program(kind: &Kind, caller: Caller, live: bool) -> String {
 enum Expect {
     /// exit 0; stdout is the golden (`chezzi run`) or holds `1 passed` (`chezzi test`)
     Out,
-    /// exit 1 with `deadlock`, the same text at every T
+    /// exit 1 with the one deadlock header, the same text at every T
     Deadlock,
-    /// exit 0; stdout is the kind's `cut` golden (`chezzi run`) or holds `1 passed` (`chezzi test`)
-    Cut,
-    /// still running at the probe: the W23-1 hang (pinned until its task lands)
+    /// still running at the probe: an in-place wait, which counts as awake (plan 2026-11-17)
     Hang,
 }
 
@@ -550,10 +508,14 @@ fn expect(kind: &Kind, caller: Caller, live: bool) -> Expect {
     if live {
         return Expect::Out;
     }
-    if kind.cut.is_some() {
-        return Expect::Cut;
+    // A residual hook runs its wait in place on the worker (a nested container walk or a map-key
+    // probe), and an in-place wait is awake (plan 2026-11-17), so every caller hangs, `spawn:`
+    // included: the one global check never sees every task asleep. Go has no such wait (its twin is
+    // fatal, all asleep); `chezzi test --timeout` is the backstop.
+    if kind.fix == Fix::Residual {
+        return Expect::Hang;
     }
-    // A `spawn:` task demotes today and parks after the plan: both are judged.
+    // A `spawn:` task parks: every task is asleep.
     if caller == Caller::Spawn {
         return Expect::Deadlock;
     }
@@ -676,7 +638,7 @@ fn check_cell(kind: &Kind, caller: Caller, live: bool) -> Vec<String> {
     );
     let limit = match want {
         Expect::Hang => Duration::from_secs(2),
-        Expect::Out | Expect::Cut | Expect::Deadlock => Duration::from_secs(10),
+        Expect::Out | Expect::Deadlock => Duration::from_secs(10),
     };
     let tag = name.replace('/', "-");
     let mut misses = Vec::new();
@@ -701,18 +663,11 @@ fn check_cell(kind: &Kind, caller: Caller, live: bool) -> Vec<String> {
                     out == kind.out
                 }
             }
-            (Some((0, out, _)), Expect::Cut) => {
-                if test_fn {
-                    out.contains("1 passed")
-                } else {
-                    Some(out.as_str()) == kind.cut
-                }
-            }
             (Some((1, out, err)), Expect::Deadlock) => {
                 // `chezzi test` reports the verdict on stdout, `chezzi run` on stderr.
                 let text = if test_fn { out } else { err };
                 verdicts.push((t, text.clone()));
-                text.contains("deadlock")
+                text.contains(HEADER)
             }
             _ => false,
         };
@@ -831,6 +786,7 @@ test fn b_uses_gen():
         };
         assert!(
             out.contains("PASS b_uses_gen")
+                && out.contains(HEADER)
                 && out.contains("2 test(s): 1 passed, 0 failed, 1 errored"),
             "T={t}: {out}"
         );
@@ -838,11 +794,13 @@ test fn b_uses_gen():
 }
 
 /// A sibling's fault cancels the scope of a task parked in its return-path `defer` that nothing
-/// can finish: the verdict cuts that wait as the cancel, and the sibling's fault is the report at
-/// every scheduler seed, as the base binary (`fb8edf37`) prints. Seeds 2 and 4 give the task a
-/// reduction budget it spends mid-drain, so the cut must travel with the task across its yield.
+/// can finish. Seeds 2 and 4 give the task a reduction budget it spends mid-drain, so the task
+/// yields inside its cleanup. One global check (plan 2026-11-17): the stuck cleanup and main at its
+/// `parallel:` join leave every task asleep, so the deadlock is the one report at every seed, at
+/// main's join (task 1), and the fault it cleans up after is not reported. Go twin: a deferred
+/// `<-ch` that blocks while the program unwinds is fatal, all asleep.
 #[test]
-fn defer_cut_keeps_the_cancel_across_a_yield() {
+fn a_stuck_defer_after_a_fault_is_the_deadlock_across_a_yield() {
     const SRC: &str = r#"import std.time
 stuck := Channel[int](0)
 fn boomer():
@@ -874,7 +832,11 @@ sib_nursery()
             .output()
             .expect("run chezzi");
         let err = String::from_utf8_lossy(&out.stderr);
-        if !err.starts_with("runtime error (main.chz:6:5): boom\n") {
+        if !err.starts_with(
+            "runtime error (main.chz:14:5): deadlock: every task is blocked\n  \
+             task 1: waiting for a nursery join at main.chz:14:5\n",
+        ) || err.contains("boom")
+        {
             misses.push(format!("seed={seed}: {err}"));
         }
     }
@@ -882,37 +844,39 @@ sib_nursery()
     assert!(misses.is_empty(), "{}", misses.join("\n"));
 }
 
-/// The verdict cuts a cleanup that can never finish as the cause's victim: the cause is the
-/// report (05-cancel.md "Cleanup that can NEVER complete"), as the base binary (`fb8edf37`)
-/// prints, through every verdict path that meets a fiber parked in a `defer` (the aborting-family
-/// cut, the sched-wide verdict, a joined leaf, a join-parked owner, a sleep before the wait).
+/// A cleanup that can never finish, after a fault, through every shape the old verdict paths met
+/// (the aborting-family cut, the sched-wide verdict, a joined leaf, a join-parked owner, a sleep
+/// before the wait). One global check (plan 2026-11-17): the stuck cleanup is the last task awake,
+/// so each shape ends with every task asleep and the deadlock is the one report, at main's
+/// `parallel:` join (task 1); the fault it cleans up after is not reported and `recover:` never
+/// runs. Go twin: a deferred `<-ch` that blocks while the program unwinds is fatal, all asleep.
 /// `stderr` is compared on its first line only.
 #[test]
-fn stuck_cleanup_reports_the_cause_on_every_verdict_path() {
+fn stuck_cleanup_is_the_deadlock_on_every_former_verdict_path() {
     let cells: &[(&str, &str, i32, &str, &str)] = &[
         // a cancelled task's defer sleeps, then waits forever
         (
             "sleep",
             "import std.time\nstuck := Channel[int](0)\nready := Channel[int](0)\nfn kid():\n    defer:\n        time.sleep_ms(30)\n        print(\"slept\")\n        print(stuck.recv())\n    ready.send(1)\n    _ := stuck.recv()\nfn boomer():\n    _ := ready.recv()\n    panic(\"boom\")\nfn main():\n    r := recover:\n        parallel:\n            spawn kid()\n            spawn boomer()\n    print(\"caught {r}\")\nmain()\n",
-            0,
-            "slept\ncaught !boom\n",
-            "",
+            1,
+            "slept\n",
+            "runtime error (main.chz:16:9): deadlock: every task is blocked\n",
         ),
         // a cancelled task's defer joins a nursery whose child waits forever
         (
             "join",
             "stuck := Channel[int](0)\nready := Channel[int](0)\nfn waiter():\n    print(stuck.recv())\nfn kid():\n    defer:\n        parallel:\n            spawn waiter()\n    ready.send(1)\n    _ := stuck.recv()\nfn boomer():\n    _ := ready.recv()\n    panic(\"boom\")\nfn main():\n    r := recover:\n        parallel:\n            spawn kid()\n            spawn boomer()\n    print(\"caught {r}\")\nmain()\n",
-            0,
-            "caught !boom\n",
+            1,
             "",
+            "runtime error (main.chz:16:9): deadlock: every task is blocked\n",
         ),
         // a cancelled leaf nursery, its child's return-path defer waits forever
         (
             "leaf",
             "stuck := Channel[int](0)\nready := Channel[int](0)\nfn kid():\n    defer:\n        print(stuck.recv())\n    ready.send(1)\nfn boomer():\n    _ := ready.recv()\n    panic(\"boom\")\nfn inner():\n    parallel:\n        spawn kid()\n        spawn boomer()\nfn main():\n    r := recover:\n        parallel:\n            spawn inner()\n    print(\"caught {r}\")\nmain()\n",
-            0,
-            "caught !boom\n",
+            1,
             "",
+            "runtime error (main.chz:16:9): deadlock: every task is blocked\n",
         ),
         // an owner cut by its child's fault joins, inside its defer, a child that waits forever
         (
@@ -920,7 +884,7 @@ fn stuck_cleanup_reports_the_cause_on_every_verdict_path() {
             "stuck := Channel[int](0)\nfn waiter():\n    print(stuck.recv())\nfn faulty():\n    panic(\"boom\")\nfn owner():\n    defer:\n        parallel:\n            spawn waiter()\n    parallel:\n        spawn faulty()\nfn main():\n    parallel:\n        spawn owner()\nmain()\n",
             1,
             "",
-            "runtime error (main.chz:5:5): boom\n",
+            "runtime error (main.chz:13:5): deadlock: every task is blocked\n",
         ),
         // an owner in a joined leaf, cut by its child's fault, whose defer waits forever
         (
@@ -928,7 +892,7 @@ fn stuck_cleanup_reports_the_cause_on_every_verdict_path() {
             "stuck := Channel[int](0)\nfn faulty():\n    panic(\"boom\")\nfn owner():\n    defer:\n        print(stuck.recv())\n    parallel:\n        spawn faulty()\nfn inner():\n    parallel:\n        spawn owner()\nfn main():\n    parallel:\n        spawn inner()\nmain()\n",
             1,
             "",
-            "runtime error (main.chz:3:5): boom\n",
+            "runtime error (main.chz:13:5): deadlock: every task is blocked\n",
         ),
     ];
     let mut misses = Vec::new();
@@ -952,13 +916,17 @@ fn stuck_cleanup_reports_the_cause_on_every_verdict_path() {
 }
 
 /// A genuine deadlock's stuck cleanup (a task's return-path `defer` waits on a channel nothing
-/// sends to, no fault anywhere) is listed with its OWN wait and site, as the base binary
-/// (`fb8edf37`) prints: the verdict's cut of the parked `defer` adds the fiber's park site to the
-/// run's listing. `--errors=json` adds only the checker's `[]` line, so this one golden owns both.
+/// sends to, no fault anywhere) is listed with its OWN wait and site, after main at its
+/// `parallel:` join (task 1, plan 2026-11-17; Go twin: fatal, all asleep, goroutine 1 first).
+/// `--errors=json` adds only the checker's `[]` line, so this one golden owns both.
 #[test]
 fn a_stuck_defer_is_listed_with_its_own_wait() {
     let src = "fn worker(ch: Channel[int]):\n    defer ch.recv()\n    print(\"body\")\n\nfn main():\n    ch := Channel[int](0)\n    parallel:\n        spawn worker(ch)\n\nmain()\n";
-    let err = "runtime error (main.chz:2:11): deadlock: 1 task is blocked and cannot proceed\n  task 1: recv() on an empty channel at main.chz:2:11\n    at worker (called at main.chz:8:15)\n";
+    let err = "runtime error (main.chz:7:5): deadlock: every task is blocked\n  \
+               task 1: waiting for a nursery join at main.chz:7:5\n    \
+               at main (called at main.chz:10:1)\n  \
+               task 2: recv() on an empty channel at main.chz:2:11\n    \
+               at worker (called at main.chz:8:15)\n";
     let mut misses = Vec::new();
     for t in ["1", "2", "4"] {
         let got = run("stuckdefer", src, false, t, Duration::from_secs(10));

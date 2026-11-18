@@ -271,7 +271,7 @@ impl Vm {
         let latch = self.halt_latch();
         let mut r = Ok(());
         while p.is_queued() {
-            let on = Blocked::at(quiesce::PartyWait::Send(Arc::clone(&p)), msg, span);
+            let on = Blocked::at(msg, span);
             r = self.block_wait_tick(WaitSpec::Send, on, h, core, span, |_| !p.is_queued());
             if r.is_err() {
                 break;
@@ -486,15 +486,25 @@ impl Vm {
                     // `inflight` add/sub, no re-arming.
                     let fire_at = self.deadline.map_or(deadline, |rd| deadline.min(rd));
                     let gap_cancel = self.cancel.clone();
+                    // The timer is a task of the run's count while this fiber waits on it, so the
+                    // parking fiber's sleep never reads as every task asleep.
+                    self.timer_wait = Some(core.timer_wait(&sched.quiesce.awake));
                     timer::submit_at(
                         fire_at,
                         Box::new(move || {
-                            if std::time::Instant::now() >= deadline {
+                            // Only the timer's own deadline fires it. An early wake (the run's
+                            // `--timeout` came first) leaves it pending: the woken task's resume
+                            // ends its wait, and a later wait on this timer counts it again.
+                            let fired = std::time::Instant::now() >= deadline;
+                            if fired {
                                 sched_job.send_wake(key, &core_job, Value::bool(true));
                             } else {
                                 deadline_gap_wake(&sched_job, key, &core_job, &gap_cancel);
                             }
                             sched_job.leave_inflight();
+                            if fired && core_job.timer_fired(&sched_job.quiesce.awake) {
+                                sched_job.on_deadlock();
+                            }
                         }),
                     );
                     self.park_recv(h, span);
@@ -588,6 +598,13 @@ impl Vm {
         self.push(Value::obj(h));
         self.rewind_op();
         self.suspend = Some(h);
-        self.park_site = Some((Wait::Recv.phrase(), span));
+        let handle =
+            matches!(self.heap.get(h), Obj::Channel(c) if c.handle.load(Ordering::Relaxed));
+        let wait = if handle {
+            Wait::ExecutorJoin
+        } else {
+            Wait::Recv
+        };
+        self.park_site = Some((wait.phrase(), span));
     }
 }

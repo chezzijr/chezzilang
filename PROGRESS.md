@@ -32,19 +32,23 @@ the netpoller and `std.net`. There is one engine: the bytecode VM on its M:N sch
 one heap and get values by handle, as in Go
 ([`01-model.md`](docs/reference/concurrency/01-model.md)).
 
-A wait inside a callback parks (a fiber) or is judged (`main`), as in Go. A hook, an operator, an
-f-string part, `print`'s `str`, a HOF callback, a sort comparator, a `from_iter` drain, a
-`Shared`/`RwShared` closure and a generator body run as frames with a `RetAction`
-(`src/vm/ret_action.rs`). A `defer` drain is a trampoline frame (`src/vm/defer_drain.rs`). Only the
-synchronous hard-halt drains (`--max-heap`, `--timeout`) keep the `deferring` exception in
-`BlockCtx::judged`. The nested container walks, map/set probes, `json.decode` defaults and FFI
-callbacks still re-enter (`gaps.md` W23-1, narrowed). Grid: `tests/callback_park_grid.rs`.
-A guard wait and `Executor.shutdown()` park too, and a guard holder is preempted: every op of
-`tests/blocking_context_grid.rs` but `stdin` runs with `demotes=0`.
-A guard holder a deadlock cut (a family cut, `Executor.cancel`, a lock cycle, a re-entry) releases
-its `Shared`/`RwShared` guard `CUT`, and a `CUT` box refuses every later acquire for the rest of
-the run (Go's never-unlocked `Mutex`). A guard re-entry and a lock cycle are a fatal `deadlock`
-that `recover:` does not catch. Grid: `tests/cut_release_grid.rs`.
+A deadlock is decided once, as Go's `checkdead` decides it (2026-11-18): a run-wide count of the
+tasks that are not asleep (`quiesce::Awake`) reaches 0 while tasks are alive, and the run ends with
+`deadlock: every task is blocked`, every task listed at its wait, joins included. It is always
+fatal; `recover:` does not catch it. A lock cycle or a re-lock blocks and is reported by it. A
+partial deadlock hangs, as in Go (`chezzi test --timeout` is the backstop). `chezzi test` decides it
+per test: the test fails, its tasks are dropped, a guard one held is released `CUT`, and the rest
+of the file runs. Main runs as fiber 1, and an Executor's jobs run on the root sched's workers.
+Grids: `tests/awake_count_grid.rs`, `tests/wait_counts_grid.rs`, `tests/cut_release_grid.rs`.
+
+A wait inside a callback parks, as in Go. A hook, an operator, an f-string part, `print`'s `str`, a
+HOF callback, a sort comparator, a `from_iter` drain, a `Shared`/`RwShared` closure and a generator
+body run as frames with a `RetAction` (`src/vm/ret_action.rs`). A `defer` drain is a trampoline
+frame (`src/vm/defer_drain.rs`). The nested container walks, map/set probes, `json.decode` defaults
+and FFI callbacks still re-enter and wait in place, which counts awake, so a deadlock there hangs
+(`gaps.md` W23-1). Grid: `tests/callback_park_grid.rs`. A guard wait and `Executor.shutdown()` park
+too, and a guard holder is preempted: every op of `tests/blocking_context_grid.rs` but `stdin` runs
+with `demotes=0`.
 
 The checker has a non-fatal warning channel (`Severity::Warning`, `"severity"` in `--errors=json`,
 `DiagnosticSeverity::WARNING` in the LSP). It has five rules:
@@ -70,20 +74,22 @@ duplicate or adds a single source. See [`docs/contributing/lessons.md`](docs/con
 The owner index is [`docs/contributing/owners.md`](docs/contributing/owners.md): it names the one
 owner of each fact and lists each remaining copy as DUPLICATE. Done: the owner index, one topic per
 file (`tests/source_layout.rs`), facts 1-9, builtin dispatch by id, one redeclaration rule, the
-workspace crates, the blocking-point table (`block::wait_steps`) and the boundary-block table
-(`boundary::RULES`).
+workspace crates, the blocking-point table (`block::wait_steps`), the boundary-block table
+(`boundary::RULES`) and one deadlock check (2026-11-18, phase 3 of the Go runtime model, pulled
+first: the per-scope, per-sched and family judges, the lock-cycle and re-entry checks and the
+`is_deadlock` error field are gone). Next in that model: phase 1 (operator walks as frames,
+hard-halt drains), resumed from its paused plan.
 
 ## What is next
 
 0. **Bug hunt wave 24 (2026-11-09): file one ticket per family.** 8 families, each with a P0 cell
-   (F1 a cancelled cleanup's guard gives a waiter a half-done value, landed as TICKET-298 except
-   its open questions Q3/Q4; F2 `parallel:` defer order (landed, TICKET-299); F3 a name's meaning
+   (F1 a cancelled cleanup's guard gives a waiter a half-done value, landed as TICKET-298, its
+   Q3/Q4 closed by the one deadlock check (2026-11-18); F2 `parallel:` defer order (landed, TICKET-299); F3 a name's meaning
    has one decider (landed, TICKET-300, except its open question Q4: `Self` is a keyword, the
    compiler's temps are private `$` names, a binder hides a full module path in the checker alone,
    and a bracketed call always has a recorded reading); F4 to F8 design inconsistencies). Owner
    decisions: `docs/contributing/special-cases.md` "Owner design decisions (2026-11-09)". Report,
-   order and repros: `~/.claude/plans/2026-11-09-bug-hunt-w24/report.md`. Open: F1 Q3 (which tasks a report lists at a join), F1 Q4 (a
-   cancel of a holder outside a `defer` publishes its partial change) and F3 Q4. F8 waits on three
+   order and repros: `~/.claude/plans/2026-11-09-bug-hunt-w24/report.md`. Open: F3 Q4. F8 waits on three
    owner answers.
    F7 landed (2026-11-14): each native seam fact has one owner (`docs/contributing/owners.md`): the
    `native::MODULES` registry, native struct layouts and `Json` variants generated from `std/*.chz`,
@@ -131,8 +137,8 @@ workspace crates, the blocking-point table (`block::wait_steps`) and the boundar
    slot and type keys depend on the importing program.
 5. **A job parked in a stuck `defer` after a nursery child fault**, with a cut sleeping body, is not
    reported as a deadlock (base too).
-6. **A cancelled task whose `defer` waits on a socket that never fires hangs**: a poll park is
-   `inflight` and never judged (Go never reports a netpoll waiter as deadlocked either).
+6. **A cancelled task whose `defer` waits on a socket that never fires hangs**: a socket wait is
+   awake in the deadlock count (Go never reports a netpoll waiter as deadlocked either).
 7. **Branch-join seed questions.** `infer_match` hides the `None` sibling slot under a seed:
    `b: bool = (match ...: 5 / None) == o` rejects `branches have incompatible types: int and None`.
    Reading the slot makes `fn f(o: int?) -> int?: return o ?? None` accept (cell `coalesce_none_arm`

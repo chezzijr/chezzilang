@@ -1162,8 +1162,8 @@ fn a_provider_frame_in_a_trace_is_readable() {
 /// TICKET-048 (W8-14 residual) — a nursery-deadlock fault's headline must name a real file and
 /// position, not the placeholder `Span::RUNTIME` used at `run_mn_nursery_outermost`'s
 /// nursery deadlock sites. It rendered `line 1, col 1` with no file, unlike an ordinary in-task
-/// fault one line away. Since the deadlock listing, the headline is the first blocked task's own
-/// wait (this test and the two below).
+/// fault one line away. One global report (plan 2026-11-17): the headline is task 1's own wait,
+/// here main at its `parallel:` join (3:5), and the sender follows (Go twin: fatal, all asleep).
 #[test]
 fn nursery_deadlock_headline_has_a_real_position() {
     let dir = std::env::temp_dir().join(format!("chezzi_t048_deadlock_{}", std::process::id()));
@@ -1183,13 +1183,22 @@ fn nursery_deadlock_headline_has_a_real_position() {
         "expected a real file/position on the deadlock headline, got:\n{trace}"
     );
     assert!(
-        trace.contains("main.chz:5:28): deadlock: 1 task is blocked"),
-        "expected the headline to name the first blocked task's own wait, got:\n{trace}"
+        trace.contains("main.chz:3:5): deadlock: every task is blocked"),
+        "expected the headline to name task 1's own wait, got:\n{trace}"
+    );
+    assert_deadlock(
+        &e,
+        &[
+            ("waiting for a nursery join", 3),
+            ("send() on a full channel", 5),
+        ],
     );
 }
 
 /// TICKET-048 — a bare `spawn` inside a fn body opens an IMPLICIT nursery with no keyword of its
-/// own; its deadlock headline must name the fn body's first statement, not `line 1, col 1`.
+/// own; its deadlock headline must name a real position, not `line 1, col 1`. The listed site of
+/// main at an implicit join (no keyword) is open for Task 3 of plan 2026-11-17, so only the header
+/// and the two tasks' `recv`s are pinned.
 #[test]
 fn implicit_fn_nursery_deadlock_headline_names_the_body_start() {
     let dir = std::env::temp_dir().join(format!("chezzi_t048_implicit_fn_{}", std::process::id()));
@@ -1209,13 +1218,22 @@ fn implicit_fn_nursery_deadlock_headline_names_the_body_start() {
         "expected a real file/position on the deadlock headline, got:\n{trace}"
     );
     assert!(
-        trace.contains("main.chz:3:12): deadlock: 2 tasks are blocked"),
-        "expected the headline to name the first blocked task's own wait, got:\n{trace}"
+        trace.contains("main.chz:") && trace.contains("): deadlock: every task is blocked"),
+        "expected a sited one-report headline, got:\n{trace}"
     );
+    let recvs: Vec<u32> = e
+        .parts()
+        .2
+        .iter()
+        .filter(|t| t.wait == "recv() on an empty channel")
+        .map(|t| t.span.line)
+        .collect();
+    assert_eq!(recvs, [3, 4], "both tasks listed at their `recv`:\n{trace}");
 }
 
 /// TICKET-048 — a bare `spawn` at module top level opens an IMPLICIT nursery with no keyword of
-/// its own; its deadlock headline must name the module's first statement, not `line 1, col 1`.
+/// its own; its deadlock headline must name a real position, not `line 1, col 1`. As above, main's
+/// site at the implicit join is open for Task 3 of plan 2026-11-17.
 #[test]
 fn implicit_module_nursery_deadlock_headline_names_the_first_statement() {
     let dir = std::env::temp_dir().join(format!("chezzi_t048_implicit_mod_{}", std::process::id()));
@@ -1235,9 +1253,17 @@ fn implicit_module_nursery_deadlock_headline_names_the_first_statement() {
         "expected a real file/position on the deadlock headline, got:\n{trace}"
     );
     assert!(
-        trace.contains("main.chz:4:8): deadlock: 2 tasks are blocked"),
-        "expected the headline to name the first blocked task's own wait, got:\n{trace}"
+        trace.contains("main.chz:") && trace.contains("): deadlock: every task is blocked"),
+        "expected a sited one-report headline, got:\n{trace}"
     );
+    let recvs: Vec<u32> = e
+        .parts()
+        .2
+        .iter()
+        .filter(|t| t.wait == "recv() on an empty channel")
+        .map(|t| t.span.line)
+        .collect();
+    assert_eq!(recvs, [4, 5], "both tasks listed at their `recv`:\n{trace}");
 }
 
 /// W7-51 — a cross-module default is still evaluated PER CALL (Chezzi's documented divergence from

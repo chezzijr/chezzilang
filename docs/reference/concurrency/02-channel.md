@@ -34,8 +34,8 @@ c := bch.cap()             # capacity: 2 here; 0 for a rendezvous Channel[T](0);
   `cap` messages are queued and resumes when a `recv` frees a slot (Go's buffered channel).
   Backpressure changes *which* task runs *when*, never the value sequence a consumer sees, so a
   bounded or rendezvous channel gives the same value sequence at every worker count. A
-  full/rendezvous `send` with no possible consumer (top level, no nursery, or inside a native
-  callback) is a **deadlock fault**, not a silent over-fill or hang. Under multi-sender contention,
+  full/rendezvous `send` that no task can ever take blocks, and once every task is blocked the run
+  ends with the **deadlock** report (below), not a silent over-fill. Under multi-sender contention,
   `try_send`'s full-vs-not decision is nondeterministic, the same class as `try_recv`'s
   `None`-vs-`?v` under contention.
 - **One hand-off protocol (Go's `hchan` model).** A value is delivered at exactly one commit point,
@@ -54,12 +54,13 @@ c := bch.cap()             # capacity: 2 here; 0 for a rendezvous Channel[T](0);
   deliberate. A Go programmer porting `make(chan T)` should write `Channel[T](0)`, not
   `Channel[T]()`. Reach for `Channel[T](cap)` or `Channel[T](0)` by default: an unbounded channel lets
   a producer outrun a consumer with no backpressure at all.
-- **`recv` on an empty channel BLOCKS** until a sibling sends. It faults `deadlock` (the task listed as
-  `recv() on an empty channel`, see `05-cancel.md`) only when the run is provably stuck — every counted party blocked with no satisfiable
-  wait — which is Go's own detector (`fatal error: all goroutines are asleep - deadlock!`). A
-  `spawn`ed producer is already running when the body reaches its `recv`, so Go's plainest channel
-  idiom works verbatim. This holds for a nested `parallel:` whose outer body is itself parked on a
-  rendezvous `recv`.
+- **`recv` on an empty channel BLOCKS** until a sibling sends. The run faults `deadlock` only when
+  every task of the run is blocked: one global check, Go's own detector (`fatal error: all
+  goroutines are asleep - deadlock!`). A run-wide count of the tasks that are not asleep drops to 0
+  while tasks are still alive, and the run ends with `deadlock: every task is blocked`, then every
+  task listed at its wait (`05-cancel.md`, the deadlock report). A task running, runnable, asleep
+  on a timer, or waiting on IO, stdin or a C call is awake. A `spawn`ed producer is already running
+  when the body reaches its `recv`, so Go's plainest channel idiom works verbatim.
 
   ```chezzi
   ch := Channel[int]()
@@ -69,8 +70,8 @@ c := bch.cap()             # capacity: 2 here; 0 for a rendezvous Channel[T](0);
   ```
 
   **The deadlock fault is FATAL, like Go.** Go's `fatal error: all goroutines are asleep -
-  deadlock!` cannot be recovered, and neither can Chezzi's: `recover:` is transparent to the
-  verdict, and the program aborts at rc=1 with the `deadlock` message:
+  deadlock!` cannot be recovered, and neither can Chezzi's: `recover:` does not catch it, and the
+  program aborts at rc=1 with the report:
 
   ```chezzi
   ch := Channel[int]()
@@ -80,39 +81,48 @@ c := bch.cap()             # capacity: 2 here; 0 for a rendezvous Channel[T](0);
               v := ch.recv()
           spawn:
               v := ch.recv()
-  print("unreachable")   # the `recover:` never binds `r`; `runtime error (<file>:3:5): deadlock: ...`, rc=1
+  print("unreachable")   # the `recover:` never binds `r`; rc=1
+  ```
+
+  ```text
+  runtime error (<file>:3:5): deadlock: every task is blocked
+    task 1: waiting for a nursery join at <file>:3:5
+    task 2: recv() on an empty channel at <file>:5:18
+      at <spawned task> (called at <file>:4:9)
+    task 3: recv() on an empty channel at <file>:7:18
+      at <spawned task> (called at <file>:6:9)
   ```
 
   | fault | recoverable? |
   |---|---|
   | value and operation faults (index, overflow, `panic`, IO, call depth) | yes |
-  | scheduler and whole-program faults (deadlock, a `Shared`/`RwShared` guard re-entry and a lock cycle included; `os.exit`, `--max-heap`/`--timeout`) | no |
+  | scheduler and whole-program faults (deadlock; `os.exit`, `--max-heap`/`--timeout`) | no |
 
-  A `deadlock` that a `defer` meets while a fault unwinds supersedes that fault, and it stays fatal
-  in every context (`main`, a `spawn`, a callback, an `Executor` job): no `recover:` binds it.
+  A lock cycle (two tasks that take two `Shared` guards in opposite order) and a re-lock (`s.update`
+  inside its own `s.update`) are not faults of their own: the tasks block, as Go's `sync.Mutex`
+  does, and once every task is blocked the one check reports them at their `update` lines
+  (`waiting for the Shared guard`).
 
-  An `Executor` job's deadlock aborts at `shutdown()`, and `chezzi test` reports a deadlocking test as
-  ERROR and runs the rest of the suite. No task runs its `defer`s on a fatal deadlock — not the parked
-  siblings, and not the task that reports it: the frames are dropped where they stand, as Go's
+  **A partial deadlock is not reported.** If some tasks are stuck while another still runs (a loop,
+  a ticker, a server), the run hangs, as in Go. `chezzi test --timeout` is the backstop.
+
+  No task runs its `defer`s on a fatal deadlock: the frames are dropped where they stand, as Go's
   `fatal error` does ([05-cancel.md](05-cancel.md#6e-stdcancel--cooperative-cancellation--timeouts),
-  "a genuine deadlock does not run `defer`s").
+  "a genuine deadlock does not run `defer`s"). A cleanup that blocks forever after a fault or a
+  cancel, with every task asleep, is the deadlock, and the fault text is not printed (Go: a
+  panicking goroutine blocked in a deferred call ends `all goroutines are asleep`).
 
-  **What the deadlock report names.** One verdict ends the run, and no party runs past it. The
-  report lists every blocked task with its own wait and frames (`05-cancel.md`, the deadlock
-  report). Main locking a `Shared` guard that a stuck job holds is listed as `waiting for the Shared
-  guard` at its own `update`, as Go lists `goroutine 1 [sync.Mutex.Lock]`. A `parallel:` body that
-  waits at `s.update` is listed at that line. Main at a join (`shutdown()`, the end of a
-  `parallel:` block) is not listed: the tasks it waits for are. A cleanup of a task nobody
-  cancelled that meets the verdict is fatal: no further `defer` runs, and no `recover:` catches the
-  unwind it ran in (a `?` inside `recover:` included). A stuck cleanup of a cancelled task is cut as
-  its family's cancel, and the cause it was cleaning up after keeps the report.
-  A stuck cleanup that holds a `Shared` or `RwShared` guard is a fatal deadlock, and the report
-  lists it at its wait. How the verdict is judged without false faults:
-  [`concurrency-runtime.md`](../../design/concurrency-runtime.md#the-deadlock-verdict).
+  **What the deadlock report names.** Every task of the run, each at its own wait with its frames,
+  joins included: main at a `parallel:` block's end is `waiting for a nursery join`, main at
+  `shutdown()` or `t.get()` is `waiting for an Executor join`. Order: main is task 1, a task before
+  the tasks it spawned, Executor jobs after every run task. The error's position is task 1's site.
+  `chezzi test` decides it per test: the deadlocked test fails with the listing, its tasks are
+  dropped, and the rest of the file runs; a `Shared` guard one of those tasks held is released
+  `CUT`. How the count is kept without false faults:
+  [`concurrency-runtime.md`](../../design/concurrency-runtime.md#the-deadlock-check).
 
-  A deadlock message raised inside a native callback that cannot park at all is an ordinary
-  recoverable fault and still runs `defer`s. A `defer` that blocks forever is not that case: it is a
-  counted party, so it reaches the verdict itself, and that verdict is fatal like any other.
+  A wait that cannot block where it is at all (the inline `parallel:` builder when the OS refused its
+  thread) faults at once with `deadlock: <wait>: <why>`, an ordinary recoverable fault.
 - **A send shares, as Go's does** (M3.2). A sender that keeps using the value it sent is legal: both
   sides hold the one object, and a write by either is seen by the other. Measured: `ch.send(xs)`
   then `xs.push(3)` hands the receiver `[1, 2, 3]` (Go: a map sent, then written, is received with

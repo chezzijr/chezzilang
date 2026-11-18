@@ -101,7 +101,17 @@ fn nested_deadlock_is_fatal_through_an_outer_recover() {
                fn b(go: Channel[int]):\n    go.recv()\n    d := Channel[int]()\n    parallel:\n        spawn dead(d)\n\
                fn main():\n    ch := Channel[int]()\n    go := Channel[int]()\n    s := Shared(0)\n    r := recover:\n        parallel:\n            spawn a(ch, go, s)\n            spawn b(go)\n        0\n    print(s.get())\nmain()\n";
     let err = run_capture(src).expect_err("the nested deadlock is fatal");
-    assert!(err.message.contains("deadlock"), "got: {}", err.message);
+    // Go twin: fatal, all asleep. Pre-order: main at its join, `a` at its `recv`, `b` at its own
+    // join, `dead` at its `recv`.
+    super::tests::assert_deadlock(
+        &err,
+        &[
+            ("waiting for a nursery join", 20),
+            ("recv() on an empty channel", 7),
+            ("waiting for a nursery join", 13),
+            ("recv() on an empty channel", 9),
+        ],
+    );
 }
 
 /// A GENUINE deadlock (every task parked, nothing cancelled) is still DETECTED — not hung — and is
@@ -112,7 +122,15 @@ fn genuine_deadlock_is_detected_and_fatal() {
     let src = "fn waiter(ch: Channel[int]):\n    ch.recv()\n\
                fn main():\n    ch := Channel[int]()\n    r := recover:\n        parallel:\n            spawn waiter(ch)\n            spawn waiter(ch)\n        0\n    print(\"caught\")\nmain()\n";
     let err = run_capture(src).expect_err("the deadlock is fatal");
-    assert!(err.message.contains("deadlock"), "got: {}", err.message);
+    // Go twin: fatal, all asleep; main at its join, both waiters in spawn order.
+    super::tests::assert_deadlock(
+        &err,
+        &[
+            ("waiting for a nursery join", 6),
+            ("recv() on an empty channel", 2),
+            ("recv() on an empty channel", 2),
+        ],
+    );
 }
 
 /// A `defer` is the cleanup the cancel exists to RUN — so no cancellation checkpoint fires INSIDE a
@@ -187,8 +205,8 @@ fn blocking_native_is_an_entry_cancellation_checkpoint() {
 /// process).
 #[cfg(test)]
 fn run_with_deadline(
-    f: impl FnOnce() -> (String, Result<(), RuntimeError>) + Send + 'static,
-) -> (String, Result<(), RuntimeError>) {
+    f: impl FnOnce() -> (String, Result<(), RunError>) + Send + 'static,
+) -> (String, Result<(), RunError>) {
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::Builder::new()
         .stack_size(VM_STACK_BYTES)
@@ -204,11 +222,11 @@ fn run_with_deadline(
 
 /// A `defer` that can NEVER complete (its body `recv`s on a channel nobody will ever send to) inside
 /// a CANCELLED task is REPORTED as a deadlock — never a silent hang. A defer is not itself cancellable
-/// (`halt_requested`'s `in_defer` term), so that cleanup parks in its frame drain. The N4
-/// cancel-teardown veto (`any_cancelled_scope_awaiting_drain`, mod.rs) is bounded to the
-/// trip→`cancel_drain` window (an UNDRAINED PARKED fiber), so the quiesce is detected, the verdict
-/// cuts the stuck cleanup (`SchedCore::verdict_victim`), and — the task being already cancelled —
-/// its error is swallowed and the SIBLING'S real fault is what propagates.
+/// (`halt_requested`'s `in_defer` term), so that cleanup parks in its frame drain.
+///
+/// Plan 2026-11-17 (Decisions, from Task 2b): the stuck cleanup leaves every task asleep, so the
+/// run's one deadlock report stands and the sibling's fault text is not printed. Go twin: a
+/// goroutine blocked in a deferred call while the program unwinds → `all goroutines are asleep`.
 #[test]
 fn a_defer_that_can_never_complete_is_reported_not_hung() {
     let src = "fn cleanup(dead: Channel[int]):\n    print(\"CLEANUP-ENTER\")\n    dead.recv()\n    print(\"CLEANUP-DONE\")\n\
@@ -226,10 +244,12 @@ fn a_defer_that_can_never_complete_is_reported_not_hung() {
         "it can never finish — its recv has no sender: {out:?}"
     );
     let err = res.expect_err("the program must FAIL, not hang");
-    assert!(
-        err.message.contains("index 9 out of bounds"),
-        "the sibling's real fault is what is reported (the stuck cleanup's own error \
-         is swallowed with its cancelled task): {err:?}"
+    super::tests::assert_deadlock(
+        &err,
+        &[
+            ("waiting for a nursery join", 17),
+            ("recv() on an empty channel", 3),
+        ],
     );
 }
 
@@ -277,12 +297,9 @@ fn a_nursery_inside_a_cancelled_tasks_defer_runs_to_completion() {
 }
 
 /// N4 (demoted half), at the PROGRAM level: a DEMOTED fiber (a `recv` inside a native HOF callback —
-/// a registered waiter, not `parked`) whose cancel flag is tripped is about to resume and unwind, which is
-/// live progress `is_deadlocked`'s counters cannot see. Without the waiter veto
-/// the quiesce between the faulting sibling's `finish` and that fiber's next `DEMOTE_POLL_BACKOFF` poll
-/// reads as a deadlock, and `flag_deadlock` then drops EVERY parked fiber in the sched — including the
-/// INNOCENT outer-scope sibling `b`, which is waiting for the value the cleanup is about to send. Fails
-/// 7/8 runs with the veto removed (`B-GOT` replaced by a bogus nursery deadlock error).
+/// a registered waiter, not `parked`) whose cancel flag is tripped is about to resume and unwind. A
+/// task waiting in place stays counted awake (`quiesce::Awake`), so no deadlock verdict fires before
+/// it does, and the INNOCENT outer-scope sibling `b` gets the value the cleanup sends.
 #[test]
 fn a_cancel_wakeable_demoted_fiber_is_not_a_deadlock() {
     let src = "fn b(ch2: Channel[int]):\n    v := ch2.recv()\n    print(\"B-GOT=\" + \"{v}\")\n\

@@ -70,7 +70,10 @@ fn parallel_return_escape_cancels_pending_silently() {
     let expected = "5\n".to_string();
     let (vm_out, depth) = run_capture_nursery_len(src);
     assert_eq!(
-        vm_out.as_deref().map(str::to_string),
+        vm_out
+            .as_deref()
+            .map(str::to_string)
+            .map_err(|e| e.to_string()),
         Ok(expected.clone()),
         "VM"
     );
@@ -102,7 +105,10 @@ fn parallel_break_escape_cancels_pending_silently() {
     let expected = "done\n".to_string();
     let (vm_out, depth) = run_capture_nursery_len(src);
     assert_eq!(
-        vm_out.as_deref().map(str::to_string),
+        vm_out
+            .as_deref()
+            .map(str::to_string)
+            .map_err(|e| e.to_string()),
         Ok(expected.clone()),
         "VM (net-new break site)"
     );
@@ -175,9 +181,9 @@ fn parallel_cpu_sibling_aborts_on_sibling_fault() {
 /// scheduler-side and AFTER the fault: the cancel trip and its `cancel_drain` sit two core-lock
 /// acquisitions apart, and an idle worker's deadlock check landing in that gap used to reap the
 /// still-parked consumer as `Deadlocked`, dropping it WITHOUT `unwind_deferred` — so this printed
-/// `0` roughly 35/200 runs under CPU contention. That is closed by the cancel-teardown veto in
-/// `is_deadlocked` (see `SchedCore::any_incomplete_scope_cancelled`, src/vm/mod.rs). This test is
-/// the REGRESSION guard for it: a failure here means the veto is gone, not that the token is flaky.
+/// `0` roughly 35/200 runs under CPU contention. This test is the REGRESSION guard for that race
+/// under the run's one verdict ([`MnSched::on_deadlock`]): a failure here is a scheduler bug, not a
+/// flaky token.
 #[test]
 fn parallel_defer_runs_on_cancelled_sibling() {
     let src = "import Shared from std.concurrency\nfn cleanup(s: Shared[int]):\n    s.set(42)\n\
@@ -215,14 +221,11 @@ fn parallel_spinning_sibling_does_not_hang_the_nursery_under_cancel() {
 /// N4 (second seam — `abort_enlisted_scope`): a cancelled task's `defer` must run when the cancel
 /// comes from an EARLY-ENLISTED outer nursery whose body ESCAPES past its join (here: a nested
 /// `parallel:` inside the outer body → `early_enlist_outer` seeds the outer scope's tasks as live
-/// fibers and marks it `awaiting_builder`; the `return` then escapes → `drain_escaped_nursery` →
-/// `abort_enlisted_scope`). That seam used to CLEAR the `awaiting_builder` deadlock veto before it
-/// tripped the scope cancel (which arms the cancel-teardown veto), leaving a window with NEITHER: an
-/// idle worker's `take_runnable` in that window saw the quiesce (the inline builder is not counted in
-/// `running`), declared a spurious DEADLOCK, and `flag_deadlock` DROPPED the parked `task` fiber
-/// without `unwind_deferred` — its `defer` never ran, invisibly (`abort_enlisted_scope` discards the
-/// reduce, so not even the bogus `Deadlocked` surfaced). Fixed by tripping the cancel FIRST (a gapless
-/// veto handoff — `MnSched::trip_scope_cancel`, under the core lock).
+/// fibers; the `return` then escapes → `drain_escaped_nursery` → `abort_enlisted_scope`). That seam
+/// once left a window where a spurious DEADLOCK dropped the parked `task` fiber without
+/// `unwind_deferred` — its `defer` never ran, invisibly (`abort_enlisted_scope` discards the reduce,
+/// so not even the bogus `Deadlocked` surfaced). It trips the cancel FIRST
+/// (`MnSched::trip_scope_cancel`, under the core lock).
 ///
 /// `gate` (the nested nursery's task) consumes the token `task` sends only AFTER registering its
 /// `defer`, so the inner join — and therefore the escape — happens-after the defer is registered.
@@ -245,9 +248,8 @@ fn parallel_defer_runs_when_enlisted_nursery_escapes() {
 /// N4 (panic-fault seam): a worker-VM PANIC (a VM bug, a panicking native/FFI callback) becomes a task
 /// `Fault` via `run_one_fiber`'s `catch_unwind` fallback. Without a trip of its scope cancel the scope
 /// aborts with `cancel == false`: `cancel_drain` requeues the parked siblings, they re-run `recv`,
-/// `park`'s gap re-check sees no cancel and PARKS THEM AGAIN, the scope quiesces uncancelled,
-/// `is_deadlocked` fires (by its own rules — nothing is cancelled), and `flag_deadlock` drops them
-/// without `unwind_deferred` — their `defer`s silently skipped, hidden behind the panic-fault
+/// `park`'s gap re-check sees no cancel and PARKS THEM AGAIN, and the run's deadlock verdict ends
+/// them without `unwind_deferred` — their `defer`s silently skipped, hidden behind the panic-fault
 /// (`reduce_task_slots` ranks Fault > Deadlocked). `MnSched::finish_with` is the one trip of a task's
 /// aborting end, so the grid holds every outcome kind: a `Fault` (a panic's included) and an `Exit`
 /// trip the flag the fiber ran under, under the core lock with the slot; the others trip nothing.
@@ -313,6 +315,7 @@ fn an_aborting_outcome_trips_the_fibers_cancel_at_finish() {
                 err: dl_err(),
                 out: Vec::new(),
                 stderr: Vec::new(),
+                verdict: 1,
             },
             false,
         ),
@@ -670,8 +673,9 @@ fn parallel_cross_nursery_contended_never_panics() {
     match rx.recv_timeout(std::time::Duration::from_secs(30)) {
         // Delivery order is concurrent-divergent by design: accept Ok OR a clean deadlock fault.
         Ok(Ok(_)) => {}
+        // A deadlock here is every task asleep: the one global report (plan 2026-11-17).
         Ok(Err(e)) => assert!(
-            e.message.contains("deadlock"),
+            e.message == DEADLOCK_HEADER,
             "contended case must succeed or deadlock-fault, got: {}",
             e.message
         ),
@@ -683,8 +687,8 @@ fn parallel_cross_nursery_contended_never_panics() {
 
 /// Cross-nursery flat scheduler — late-spawn-into-middle with a PARKED outer receiver. Guards the
 /// `register_scope_seeded` atomicity: a non-atomic register→seed of the late trailing scope opened a
-/// window where a SENTINEL helper could read (scope incomplete, awaiting_builder=false, runnable==0,
-/// outer recv parked) as a false quiesce and spuriously fault the parked receiver. Single sender /
+/// window (scope incomplete, its fibers not yet queued, outer recv parked) that read as a false
+/// quiesce and spuriously faulted the parked receiver. Single sender /
 /// single receiver → no contention → deterministic, so every run MUST match `.expected`. Run
 /// 12 more times on purpose to shake the race. (Hardening for the auto-task panel's blocker.)
 #[test]
@@ -710,11 +714,10 @@ fn parallel_cross_nursery_late_spawn_parked_never_hangs() {
     }
 }
 
-/// Cross-nursery flat scheduler — the `awaiting_builder` deadlock veto must be SURGICAL: a genuine
-/// deadlock inside a NESTED nursery (`inner` spawns a no-sender `recv`) must STILL fault even while an
-/// outer sibling is early-enlisted (`awaiting_builder`). The nested scope stays incomplete and is NOT
-/// `awaiting_builder`, so `all_incomplete_awaiting_builder` is false → the predicate fires. Guards
-/// against the veto hanging a real deadlock. M:N-only, 30s watchdog. (charges #1/#2 risk.)
+/// Cross-nursery flat scheduler — a genuine deadlock inside a NESTED nursery (`inner` spawns a
+/// no-sender `recv`) must STILL fault while an outer sibling is early-enlisted: every task is
+/// asleep, so the run's awake count reaches 0. Guards against a real deadlock hanging. M:N-only,
+/// 30s watchdog. (charges #1/#2 risk.)
 #[test]
 fn parallel_cross_nursery_genuine_nested_deadlock_still_faults() {
     let src = "fn inner(dead: Channel[int]):\n    spawn:\n        v := dead.recv()\n        print(\"never {v}\")\nfn main():\n    dead := Channel[int]()\n    parallel:\n        spawn:\n            print(\"O ran\")\n        inner(dead)\n    print(\"done\")\nmain()\n";
@@ -725,10 +728,14 @@ fn parallel_cross_nursery_genuine_nested_deadlock_still_faults() {
     match rx.recv_timeout(std::time::Duration::from_secs(30)) {
         Ok(r) => {
             let err = r.expect_err("a genuine nested no-sender recv must still fault deadlock");
-            assert!(
-                err.message.contains("deadlock"),
-                "expected deadlock, got: {}",
-                err.message
+            // Go twin: fatal, all asleep; main at its innermost real wait, `inner`'s implicit join
+            // (the `spawn` at line 2, owner 2026-11-17), then the task `inner` spawned at its `recv`.
+            assert_deadlock(
+                &err,
+                &[
+                    ("waiting for a nursery join", 2),
+                    ("recv() on an empty channel", 3),
+                ],
             );
         }
         Err(_) => {
@@ -785,10 +792,14 @@ fn parallel_cross_nursery_nested_no_send_still_deadlocks() {
         Ok(r) => {
             let err =
                 r.expect_err("a genuine no-sender cross-nursery recv must still fault deadlock");
-            assert!(
-                err.message.contains("deadlock"),
-                "expected deadlock, got: {}",
-                err.message
+            // Go twin: fatal, all asleep once the grandchild's nursery joined; main, then the
+            // receiver.
+            assert_deadlock(
+                &err,
+                &[
+                    ("waiting for a nursery join", 4),
+                    ("recv() on an empty channel", 10),
+                ],
             );
         }
         Err(_) => {
@@ -906,10 +917,14 @@ fn golden_parallel_deadlock_still_faults() {
     match rx.recv_timeout(std::time::Duration::from_secs(30)) {
         Ok(r) => {
             let err = r.expect_err("a genuine no-sender nursery must still fault deadlock");
-            assert!(
-                err.message.contains("deadlock"),
-                "expected a deadlock fault, got: {}",
-                err.message
+            // Go twin: fatal, all asleep; main at its join, both waiters in spawn order.
+            assert_deadlock(
+                &err,
+                &[
+                    ("waiting for a nursery join", 21),
+                    ("recv() on an empty channel", 15),
+                    ("recv() on an empty channel", 15),
+                ],
             );
         }
         Err(_) => panic!(
@@ -953,7 +968,16 @@ fn fibers_ping_pong_interleaves() {
 #[test]
 fn fibers_all_blocked_is_deadlock() {
     let src = "fn waiter(c: Channel[int]):\n    c.recv()\nfn main():\n    a := Channel[int]()\n    b := Channel[int]()\n    parallel:\n        spawn waiter(a)\n        spawn waiter(b)\nmain()\n";
-    assert!(run_err(src).contains("deadlock"), "expected deadlock");
+    let e = run_capture(src).expect_err("expected deadlock");
+    // Go twin: fatal, all asleep; main at its join, both waiters in spawn order.
+    assert_deadlock(
+        &e,
+        &[
+            ("waiting for a nursery join", 6),
+            ("recv() on an empty channel", 2),
+            ("recv() on an empty channel", 2),
+        ],
+    );
 }
 
 /// Native-reentry guard, M:N: a blocking `recv` reached inside a list-HOF callback (the HOF's loop
@@ -1193,8 +1217,10 @@ fn channel_send_moves_the_handle() {
 
 #[test]
 fn channel_recv_on_empty_is_deadlock_error() {
-    let err = run_err("fn main():\n    ch := Channel[int]()\n    print(ch.recv())\nmain()\n");
-    assert!(err.contains("deadlock"), "got: {err}");
+    let e = run_capture("fn main():\n    ch := Channel[int]()\n    print(ch.recv())\nmain()\n")
+        .expect_err("expected deadlock");
+    // Go twin: `<-ch` in main with no other goroutine: fatal, all asleep.
+    assert_deadlock(&e, &[("recv() on an empty channel", 3)]);
 }
 
 /// A1: `try_recv` on an empty channel returns `None` (never the `recv` deadlock fault).

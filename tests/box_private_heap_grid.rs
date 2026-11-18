@@ -12,6 +12,9 @@ use std::io::Read;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
+/// The one deadlock header (plan 2026-11-17): every task of the run is blocked.
+const HEADER: &str = "deadlock: every task is blocked";
+
 const GRIDS: [&str; 4] = [
     "tests/chz/suites/box_grid_test.chz",
     "tests/chz/suites/box_nested_grid_test.chz",
@@ -122,7 +125,8 @@ fn os_exit_inside_a_box_closure_exits_with_its_status() {
 
 /// A CHILD task of a nursery inside a box closure that reads the same box can never be served:
 /// the closure holds the box until the nursery joins, and the nursery waits for the child. The
-/// run reports a deadlock and exits 1; it never hangs. On the base binary (encoded store) the
+/// run reports a deadlock and exits 1; it never hangs. Every task is asleep: main is task 1 at its
+/// `parallel:` join, the child task 2 at the guard (Go twin: fatal, all asleep). On the base binary (encoded store) the
 /// child read the pre-update value and the program printed `ok 21`. The compiler cannot see this
 /// shape (the box reaches the child through a parameter), so it is pinned and documented.
 #[test]
@@ -136,8 +140,11 @@ fn a_child_task_reading_the_box_inside_its_own_closure_is_a_deadlock_fault_not_a
             let r = chezzi(&["run", path.to_str().unwrap()], threads, 30);
             assert_eq!(r.code, Some(1), "{kind} at {threads:?}: {}", r.stderr);
             assert!(
-                r.stderr
-                    .contains(&format!("task 1: waiting for the {kind} guard at "))
+                r.stderr.contains(HEADER)
+                    && r.stderr.contains("task 1: waiting for a nursery join at ")
+                    && r.stderr.contains("main.chz:8:5\n")
+                    && r.stderr
+                        .contains(&format!("task 2: waiting for the {kind} guard at "))
                     && r.stderr.contains("main.chz:4:")
                     && r.stdout.is_empty(),
                 "{kind} at {threads:?}: stdout {:?} stderr {}",
@@ -201,7 +208,8 @@ fn a_child_fault_cuts_its_owner_inside_a_box_closure() {
 ///   enclosing sched (M3.3: the closure runs in the caller's context, so it is the caller's own).
 /// - `direct`: the closure waits on the channel itself. Base hangs (its verdict declined a body
 ///   blocked inside a callback); no task can ever send on `ch` or `ch2`, so this is a deadlock as
-///   Go reports it, and the nursery verdict now ends it: `deadlock`, exit 1, at every worker count.
+///   Go reports it, and the one global check ends it: `deadlock: every task is blocked`, exit 1, at
+///   every worker count (Go twin: fatal, all asleep).
 #[test]
 fn a_deadlock_inside_a_box_closure_is_judged_as_on_the_caller() {
     let waits = [
@@ -230,7 +238,7 @@ fn a_deadlock_inside_a_box_closure_is_judged_as_on_the_caller() {
                     r.code, r.stdout, r.stderr
                 );
                 assert!(r.stdout.is_empty(), "{cell}");
-                assert!(r.code == Some(1) && r.stderr.contains("deadlock"), "{cell}");
+                assert!(r.code == Some(1) && r.stderr.contains(HEADER), "{cell}");
             }
         }
     }
@@ -298,7 +306,7 @@ fn a_guard_and_channel_cycle_gets_the_deadlock_verdict() {
         let r = chezzi(&["run", path.to_str().unwrap()], threads, 30);
         assert_eq!(r.code, Some(1), "at {threads:?}: stderr {}", r.stderr);
         assert!(
-            r.stdout.is_empty() && r.stderr.contains("deadlock"),
+            r.stdout.is_empty() && r.stderr.contains(HEADER),
             "at {threads:?}: stdout {:?} stderr {}",
             r.stdout,
             r.stderr

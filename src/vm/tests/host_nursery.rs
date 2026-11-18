@@ -214,7 +214,8 @@ fn parallel_faulting_task_flushes_partial_output_3engine() {
 
 /// Deadlock-abort output-flush: when a `parallel:` nursery is aborted by the scheduler's deadlock
 /// detector, a still-PARKED task's ALREADY-BUFFERED stdout must be preserved at its task-order
-/// slot: `flag_deadlock` writes each parked fiber's `Fault` slot WITH its buffer, never an empty one.
+/// slot: `SchedCore::record_deadlocked` writes each parked fiber's `Deadlocked` slot WITH its
+/// buffer, never an empty one.
 ///
 /// This repro is order-DETERMINISTIC: the consumer is the SOLE printer. The producer's buffered
 /// `send(1)` deterministically satisfies the consumer's first `recv()` (→ `1`), so the consumer

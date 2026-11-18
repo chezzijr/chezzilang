@@ -14,6 +14,10 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+/// The one deadlock header: every task of the run is blocked (Go's `fatal error: all goroutines
+/// are asleep - deadlock!`). Each blocked task follows at its wait, joins included.
+const HEADER: &str = "deadlock: every task is blocked";
+
 static COUNTER: AtomicUsize = AtomicUsize::new(0);
 
 /// A unique temp directory, removed on drop.
@@ -299,9 +303,9 @@ match net.listen("127.0.0.1:0"):
 }
 
 /// W7-47, the channel variant — the socket is only the *reachable* example, not the trigger. Here
-/// `main` registers as a `PartyWait::Recv`, so pre-fix the run did not hang: the quiescence verdict
-/// fired first and it reported `recv on an empty channel: deadlock` with rc=1. Wrong answer rather
-/// than no answer, and Go says 3 — which is why the exit rung sits ABOVE `quiesced()`.
+/// `main` waits on a `recv`, so pre-fix the run did not hang: the deadlock verdict fired first and it
+/// reported `recv on an empty channel: deadlock` with rc=1. Wrong answer rather than no answer, and
+/// Go says 3 — the exit outranks the deadlock verdict.
 #[test]
 fn eager_job_os_exit_terminates_a_recv_blocked_main() {
     let t = TmpDir::new();
@@ -415,6 +419,9 @@ test fn d_loops_and_sleeps_in_a_nursery():
 /// (The ~11 ms fire this comment used to describe — the predicate faulting before `bail` had even run,
 /// because a live eager job that WILL `send` was invisible to it — is FIXED, by W7-56. It is covered
 /// by `vm::tests::executor_job_feeds_a_parked_nursery_task_instead_of_a_false_deadlock`.)
+///
+/// One global check (plan 2026-11-17): `bail` and `sleeper` sleep, and a pending sleep is awake,
+/// so the run never has every task asleep before the exit. Go twin: exit 3, no deadlock.
 #[test]
 fn eager_job_os_exit_beats_a_blocked_nurserys_deadlock_verdict() {
     let t = TmpDir::new();
@@ -1406,10 +1413,8 @@ fn timeout_reaches_a_guard_waiter_parked_behind_a_recv() {
         out.contains("ERROR guard_waiter_hangs"),
         "expected the deadlock fault to be reported as an ERROR, not TIMED-OUT: {out:?}"
     );
-    assert!(
-        out.contains("deadlock:"),
-        "expected a deadlock fault: {out:?}"
-    );
+    // Go twin: fatal, all goroutines asleep.
+    assert!(out.contains(HEADER), "expected a deadlock fault: {out:?}");
     assert!(
         out.contains("1 test(s): 0 passed, 0 failed, 1 errored"),
         "expected the suite summary to record one errored test: {out:?}"
@@ -1482,13 +1487,16 @@ fn concurrent_test_runs(
 fn a_guard_waiter_deadlock_lists_both_tasks_the_same_every_run() {
     let t = TmpDir::new();
     let entry = t.write("guard_waiter_test.chz", GUARD_WAITER_HELD);
-    let want = "ERROR guard_waiter_hangs (<dir>/guard_waiter_test.chz:5:10) deadlock: 2 tasks are \
-                blocked and none can proceed\n  \
-                task 1: recv() on an empty channel at <dir>/guard_waiter_test.chz:5:10\n    \
+    // The test's own task is listed first, at its `parallel:` join (Go twin: fatal, all asleep,
+    // goroutine 1 first).
+    let want = "ERROR guard_waiter_hangs (<dir>/guard_waiter_test.chz:12:5) deadlock: every task is \
+                blocked\n  \
+                task 1: waiting for a nursery join at <dir>/guard_waiter_test.chz:12:5\n  \
+                task 2: recv() on an empty channel at <dir>/guard_waiter_test.chz:5:10\n    \
                 at take (called at <dir>/guard_waiter_test.chz:14:45)\n    \
                 at <closure> (called at <dir>/guard_waiter_test.chz:14:13)\n    \
                 at <spawned task> (called at <dir>/guard_waiter_test.chz:13:9)\n  \
-                task 2: waiting for the Shared guard at <dir>/guard_waiter_test.chz:17:13\n    \
+                task 3: waiting for the Shared guard at <dir>/guard_waiter_test.chz:17:13\n    \
                 at <spawned task> (called at <dir>/guard_waiter_test.chz:15:9)\n\n\
                 1 test(s): 0 passed, 0 failed, 1 errored\n";
     for threads in ["1", "2", "4"] {
@@ -1525,13 +1533,13 @@ fn a_body_waiting_for_a_blocked_guard_holder_lists_the_holder_too() {
     let t = TmpDir::new();
     let dir = t.0.display().to_string();
     let entry = t.write("holder.chz", &format!("{head}{GUARD_HOLDER_BODY}"));
-    let want = "runtime error (<dir>/holder.chz:5:10): deadlock: 2 tasks are blocked and none can \
-                proceed\n  \
-                task 1: recv() on an empty channel at <dir>/holder.chz:5:10\n    \
+    // Main is task 1, at its own wait (Go twin: fatal, all asleep, goroutine 1 first).
+    let want = "runtime error (<dir>/holder.chz:15:5): deadlock: every task is blocked\n  \
+                task 1: waiting for the Shared guard at <dir>/holder.chz:15:5\n  \
+                task 2: recv() on an empty channel at <dir>/holder.chz:5:10\n    \
                 at take (called at <dir>/holder.chz:13:41)\n    \
                 at <closure> (called at <dir>/holder.chz:13:9)\n    \
-                at <spawned task> (called at <dir>/holder.chz:12:5)\n  \
-                task 2: waiting for the Shared guard at <dir>/holder.chz:15:5\n";
+                at <spawned task> (called at <dir>/holder.chz:12:5)\n";
     for threads in ["1", "2", "4"] {
         let runs: Vec<_> = std::thread::scope(|s| {
             let hs: Vec<_> = (0..24)
@@ -1557,13 +1565,12 @@ fn a_body_waiting_for_a_blocked_guard_holder_lists_the_holder_too() {
         "holder_test.chz",
         &format!("{head}test fn holder():\n{body}"),
     );
-    let want = "ERROR holder (<dir>/holder_test.chz:5:10) deadlock: 2 tasks are blocked and none \
-                can proceed\n  \
-                task 1: recv() on an empty channel at <dir>/holder_test.chz:5:10\n    \
+    let want = "ERROR holder (<dir>/holder_test.chz:16:9) deadlock: every task is blocked\n  \
+                task 1: waiting for the Shared guard at <dir>/holder_test.chz:16:9\n  \
+                task 2: recv() on an empty channel at <dir>/holder_test.chz:5:10\n    \
                 at take (called at <dir>/holder_test.chz:14:45)\n    \
                 at <closure> (called at <dir>/holder_test.chz:14:13)\n    \
-                at <spawned task> (called at <dir>/holder_test.chz:13:9)\n  \
-                task 2: waiting for the Shared guard at <dir>/holder_test.chz:16:9\n\n\
+                at <spawned task> (called at <dir>/holder_test.chz:13:9)\n\n\
                 1 test(s): 0 passed, 0 failed, 1 errored\n";
     for threads in ["1", "2", "4"] {
         for (i, out) in concurrent_test_runs(&entry, &["--timeout=2000"], threads, 24)
@@ -1596,13 +1603,13 @@ fn a_guard_holder_body_blocked_in_update_lists_its_waiter_too() {
     let t = TmpDir::new();
     let dir = t.0.display().to_string();
     let entry = t.write("mirror.chz", &format!("{head}{GUARD_MIRROR_BODY}"));
-    let want = "runtime error (<dir>/mirror.chz:14:9): deadlock: 2 tasks are blocked and none can \
-                proceed\n  \
-                task 1: waiting for the Shared guard at <dir>/mirror.chz:14:9\n    \
-                at <spawned task> (called at <dir>/mirror.chz:12:5)\n  \
-                task 2: recv() on an empty channel at <dir>/mirror.chz:5:10\n    \
+    // Main is task 1, at its own wait (Go twin: fatal, all asleep, goroutine 1 first).
+    let want = "runtime error (<dir>/mirror.chz:5:10): deadlock: every task is blocked\n  \
+                task 1: recv() on an empty channel at <dir>/mirror.chz:5:10\n    \
                 at take (called at <dir>/mirror.chz:15:37)\n    \
-                at <closure> (called at <dir>/mirror.chz:15:5)\n";
+                at <closure> (called at <dir>/mirror.chz:15:5)\n  \
+                task 2: waiting for the Shared guard at <dir>/mirror.chz:14:9\n    \
+                at <spawned task> (called at <dir>/mirror.chz:12:5)\n";
     for threads in ["1", "2", "4"] {
         let runs: Vec<_> = std::thread::scope(|s| {
             let hs: Vec<_> = (0..24)
@@ -1628,13 +1635,12 @@ fn a_guard_holder_body_blocked_in_update_lists_its_waiter_too() {
         "mirror_test.chz",
         &format!("{head}test fn mirror():\n{body}"),
     );
-    let want = "ERROR mirror (<dir>/mirror_test.chz:15:13) deadlock: 2 tasks are blocked and none \
-                can proceed\n  \
-                task 1: waiting for the Shared guard at <dir>/mirror_test.chz:15:13\n    \
-                at <spawned task> (called at <dir>/mirror_test.chz:13:9)\n  \
-                task 2: recv() on an empty channel at <dir>/mirror_test.chz:5:10\n    \
+    let want = "ERROR mirror (<dir>/mirror_test.chz:5:10) deadlock: every task is blocked\n  \
+                task 1: recv() on an empty channel at <dir>/mirror_test.chz:5:10\n    \
                 at take (called at <dir>/mirror_test.chz:16:41)\n    \
-                at <closure> (called at <dir>/mirror_test.chz:16:9)\n\n\
+                at <closure> (called at <dir>/mirror_test.chz:16:9)\n  \
+                task 2: waiting for the Shared guard at <dir>/mirror_test.chz:15:13\n    \
+                at <spawned task> (called at <dir>/mirror_test.chz:13:9)\n\n\
                 1 test(s): 0 passed, 0 failed, 1 errored\n";
     for threads in ["1", "2", "4"] {
         for (i, out) in concurrent_test_runs(&entry, &["--timeout=2000"], threads, 24)
@@ -1648,7 +1654,9 @@ fn a_guard_holder_body_blocked_in_update_lists_its_waiter_too() {
 
 // A deadlock across two nurseries: an outer task waits on `a`, and the inner nursery of its
 // sibling holds a sender on a full channel and a second receiver on `a`. Every blocked task of
-// both nurseries is listed, in spawn-tree order (the outer task, then the inner nursery's tasks).
+// both nurseries is listed, in spawn-tree order: a task before its children, so the test's task
+// at its join, the outer task, the sibling at its inner join, then the inner nursery's tasks
+// (Go twin: fatal, all asleep).
 #[test]
 fn a_deadlock_across_two_nurseries_lists_the_tasks_of_both() {
     let t = TmpDir::new();
@@ -1669,13 +1677,15 @@ fn a_deadlock_across_two_nurseries_lists_the_tasks_of_both() {
                     _ := a.recv() else: panic("a closed")
 "#,
     );
-    let want = "ERROR cross_nursery (<dir>/cross_test.chz:6:18) deadlock: 3 tasks are blocked and \
-                none can proceed\n  \
-                task 1: recv() on an empty channel at <dir>/cross_test.chz:6:18\n    \
+    let want = "ERROR cross_nursery (<dir>/cross_test.chz:4:5) deadlock: every task is blocked\n  \
+                task 1: waiting for a nursery join at <dir>/cross_test.chz:4:5\n  \
+                task 2: recv() on an empty channel at <dir>/cross_test.chz:6:18\n    \
                 at <spawned task> (called at <dir>/cross_test.chz:5:9)\n  \
-                task 2: send() on a full channel at <dir>/cross_test.chz:11:21\n    \
+                task 3: waiting for a nursery join at <dir>/cross_test.chz:8:13\n    \
+                at <spawned task> (called at <dir>/cross_test.chz:7:9)\n  \
+                task 4: send() on a full channel at <dir>/cross_test.chz:11:21\n    \
                 at <spawned task> (called at <dir>/cross_test.chz:9:17)\n  \
-                task 3: recv() on an empty channel at <dir>/cross_test.chz:13:26\n    \
+                task 5: recv() on an empty channel at <dir>/cross_test.chz:13:26\n    \
                 at <spawned task> (called at <dir>/cross_test.chz:12:17)\n\n\
                 1 test(s): 0 passed, 0 failed, 1 errored\n";
     for threads in ["1", "2", "4"] {
@@ -1698,8 +1708,9 @@ fn a_deadlock_listing_is_a_tasks_array_in_errors_json() {
     let out = mask_durations(out);
     let f = "\"file\":\"<dir>/guard_waiter_test.chz\"";
     let want = format!(
-        "{{\"tests\":[{{\"name\":\"guard_waiter_hangs\",{f},\"line\":5,\"status\":\"error\",\
-         \"message\":\"deadlock: 2 tasks are blocked and none can proceed\",\"tasks\":[\
+        "{{\"tests\":[{{\"name\":\"guard_waiter_hangs\",{f},\"line\":12,\"status\":\"error\",\
+         \"message\":\"deadlock: every task is blocked\",\"tasks\":[\
+         {{\"wait\":\"waiting for a nursery join\",{f},\"line\":12,\"col\":5,\"frames\":[]}},\
          {{\"wait\":\"recv() on an empty channel\",{f},\"line\":5,\"col\":10,\"frames\":[\
          {{\"function\":\"take\",{f},\"line\":14,\"col\":45}},\
          {{\"function\":\"<closure>\",{f},\"line\":14,\"col\":13}},\
@@ -1729,7 +1740,8 @@ fn mask_durations(out: &str) -> String {
 
 // A deadlock whose blocked tasks sit in two Executors and a nursery: the reap drains every
 // Executor, so each one's blocked job is listed, in Executor creation order after the test's own
-// task. Before, the drain stopped at the first Executor's deadlock and the second one's job was
+// tasks (the test's task at its `parallel:` join, then its child; Go twin: fatal, all asleep).
+// Before, the drain stopped at the first Executor's deadlock and the second one's job was
 // reported apart, as an `(executor job)` error.
 #[test]
 fn a_deadlock_lists_the_blocked_jobs_of_every_executor() {
@@ -1758,13 +1770,13 @@ test fn two_executors():
              at <closure> (called at <native:std.concurrency>:127:19)\n    \
              at _run_outcome (called at <native:std.concurrency>:106:36)\n    \
              at <closure> (called at <native:std.concurrency>:106:9)\n",
-            if line == 9 { 2 } else { 3 }
+            if line == 9 { 3 } else { 4 }
         )
     };
     let want = format!(
-        "ERROR two_executors (<dir>/exec_test.chz:4:10) deadlock: 3 tasks are blocked and none \
-         can proceed\n  \
-         task 1: recv() on an empty channel at <dir>/exec_test.chz:4:10\n    \
+        "ERROR two_executors (<dir>/exec_test.chz:12:5) deadlock: every task is blocked\n  \
+         task 1: waiting for a nursery join at <dir>/exec_test.chz:12:5\n  \
+         task 2: recv() on an empty channel at <dir>/exec_test.chz:4:10\n    \
          at w (called at <dir>/exec_test.chz:13:15)\n{}{}\n\
          1 test(s): 0 passed, 0 failed, 1 errored\n",
         job(9),
@@ -1785,7 +1797,8 @@ test fn two_executors():
 // Executor job wait on `b`. After the nursery's verdict, `main`'s exit drain joins its own
 // Executor first. Before, its idle runner declined the standing verdict for as long as the cut
 // joiner's Executor sat finished and unjoined, which the drain reaches only after: a hang in some
-// runs at two or more workers. Each run must report the same four tasks.
+// runs at two or more workers. Each run must report the same five tasks: `main` at its
+// `parallel:` join first (Go twin: fatal, all asleep).
 #[test]
 fn a_deadlock_with_an_unjoined_finished_executor_reports_every_run() {
     let t = TmpDir::new();
@@ -1825,13 +1838,15 @@ main()
         )
     };
     let want = format!(
-        "runtime error (<dir>/d7.chz:9:5): deadlock: 4 tasks are blocked and none can proceed\n  \
-         task 1: waiting for an Executor join at <dir>/d7.chz:9:5\n    \
+        "runtime error (<dir>/d7.chz:16:5): deadlock: every task is blocked\n  \
+         task 1: waiting for a nursery join at <dir>/d7.chz:16:5\n    \
+         at main (called at <dir>/d7.chz:21:1)\n  \
+         task 2: waiting for an Executor join at <dir>/d7.chz:9:5\n    \
          at joiner (called at <dir>/d7.chz:17:15)\n  \
-         task 2: recv() on an empty channel at <dir>/d7.chz:4:10\n    \
+         task 3: recv() on an empty channel at <dir>/d7.chz:4:10\n    \
          at w (called at <dir>/d7.chz:18:15)\n{}{}",
-        job(3, 15),
-        job(4, 8)
+        job(4, 15),
+        job(5, 8)
     );
     for threads in ["2", "4"] {
         for batch in 0..4 {
@@ -1860,8 +1875,9 @@ main()
 
 // THE listing grid: every deadlock shape so far, each with its exact listing, in `chezzi run` and
 // `chezzi test`, concurrently at 1, 2 and 4 workers. The listing is the verdict's snapshot: each
-// task the verdict cut is one entry, in spawn-tree order (a nursery's tasks in place of the task
-// that opened it, then that task's own wait; an Executor's jobs after the run's tasks). Each shape
+// blocked task is one entry at its own wait, joins included, in spawn-tree order (a task before
+// the tasks it spawned, so `main` is task 1; an Executor's jobs after the run's tasks). Go twin of
+// every shape: fatal `all goroutines are asleep`, goroutine 1 first. Each shape
 // is a `fn main()` after [`LISTING_HEAD`] (11 lines); the run calls `main()` on the next line, the
 // test calls it from `test fn t()`, so `{main}` is the call site of `main` and `<f>` the file.
 // Before the snapshot, a listing folded through joins and unwinds dropped or duplicated the tasks
@@ -1909,6 +1925,8 @@ fn listing_shapes() -> Vec<ListingShape> {
     };
     let guard =
         |at: &str, task: &str| format!("waiting for the Shared guard at <f>:{at}\n    at {task}");
+    let join =
+        |at: &str, task: &str| format!("waiting for a nursery join at <f>:{at}\n    at {task}");
     let main = "main (called at {main})";
     vec![
         ListingShape {
@@ -1916,6 +1934,7 @@ fn listing_shapes() -> Vec<ListingShape> {
             own_head: false,
             src: "fn main():\n    s := Shared(0)\n    ch := Channel[int]()\n    held := Channel[int](1)\n    parallel:\n        spawn:\n            s.update(fn(x: int) -> int: x + take(ch, held))\n        spawn:\n            _ := held.recv() else: panic(\"held closed\")\n            s.set(5)\n",
             entries: vec![
+                join("16:5", main),
                 take(18, 13, "<spawned task> (called at <f>:17:9)"),
                 guard("21:13", "<spawned task> (called at <f>:19:9)"),
             ],
@@ -1925,7 +1944,9 @@ fn listing_shapes() -> Vec<ListingShape> {
             own_head: false,
             src: "fn main():\n    a := Channel[int]()\n    b := Channel[int](1)\n    parallel:\n        spawn:\n            _ := a.recv() else: panic(\"a closed\")\n        spawn:\n            parallel:\n                spawn:\n                    b.send(1)\n                    b.send(2)\n                spawn w(a)\n",
             entries: vec![
+                join("15:5", main),
                 "recv() on an empty channel at <f>:17:18\n    at <spawned task> (called at <f>:16:9)".to_string(),
+                join("19:13", "<spawned task> (called at <f>:18:9)"),
                 "send() on a full channel at <f>:22:21\n    at <spawned task> (called at <f>:20:17)".to_string(),
                 w("23:23"),
             ],
@@ -1934,13 +1955,14 @@ fn listing_shapes() -> Vec<ListingShape> {
             name: "d10",
             own_head: false,
             src: "fn main():\n    a := Channel[int]()\n    ex1 := concurrency.Executor()\n    _ := ex1.submit(fn(): w(a))\n    ex2 := concurrency.Executor()\n    _ := ex2.submit(fn(): w(a))\n    parallel:\n        spawn w(a)\n",
-            entries: vec![w("19:15"), job("15:27"), job("17:27")],
+            entries: vec![join("18:5", main), w("19:15"), job("15:27"), job("17:27")],
         },
         ListingShape {
             name: "d7",
             own_head: false,
             src: "fn joiner(a: Channel[int]):\n    ex := concurrency.Executor()\n    _ := ex.submit(fn(): w(a))\n    ex.shutdown()\n\nfn main():\n    a := Channel[int]()\n    b := Channel[int]()\n    ex := concurrency.Executor()\n    _ := ex.submit(fn(): w(b))\n    parallel:\n        spawn joiner(a)\n        spawn w(b)\n",
             entries: vec![
+                join("22:5", main),
                 "waiting for an Executor join at <f>:15:5\n    at joiner (called at <f>:23:15)".to_string(),
                 w("24:15"),
                 job("21:26"),
@@ -1952,8 +1974,8 @@ fn listing_shapes() -> Vec<ListingShape> {
             own_head: false,
             src: "fn main():\n    s := Shared(0)\n    ch := Channel[int]()\n    held := Channel[int](1)\n    parallel:\n        spawn:\n            s.update(fn(x: int) -> int: x + take(ch, held))\n        _ := held.recv() else: panic(\"held closed\")\n        s.set(5)\n",
             entries: vec![
-                take(18, 13, "<spawned task> (called at <f>:17:9)"),
                 guard("20:9", main),
+                take(18, 13, "<spawned task> (called at <f>:17:9)"),
             ],
         },
         ListingShape {
@@ -1961,8 +1983,8 @@ fn listing_shapes() -> Vec<ListingShape> {
             own_head: false,
             src: "fn main():\n    s := Shared(0)\n    ch := Channel[int]()\n    held := Channel[int](1)\n    parallel:\n        spawn:\n            _ := held.recv() else: panic(\"held closed\")\n            s.set(5)\n        s.update(fn(x: int) -> int: x + take(ch, held))\n",
             entries: vec![
-                guard("19:13", "<spawned task> (called at <f>:17:9)"),
                 take(20, 9, main),
+                guard("19:13", "<spawned task> (called at <f>:17:9)"),
             ],
         },
         ListingShape {
@@ -1970,10 +1992,10 @@ fn listing_shapes() -> Vec<ListingShape> {
             own_head: false,
             src: "fn main():\n    s := Shared(0)\n    ch := Channel[int]()\n    held := Channel[int](1)\n    z := Channel[int]()\n    parallel:\n        spawn w(z)\n        spawn:\n            s.update(fn(x: int) -> int: x + take(ch, held))\n        _ := held.recv() else: panic(\"held closed\")\n        parallel:\n            spawn w(z)\n            s.set(5)\n",
             entries: vec![
+                guard("24:13", main),
                 w("18:15"),
                 take(20, 13, "<spawned task> (called at <f>:19:9)"),
                 w("23:19"),
-                guard("24:13", main),
             ],
         },
         ListingShape {
@@ -1981,8 +2003,8 @@ fn listing_shapes() -> Vec<ListingShape> {
             own_head: false,
             src: "fn main():\n    s := Shared(0)\n    ch := Channel[int]()\n    held := Channel[int](1)\n    parallel:\n        spawn:\n            s.update(fn(x: int) -> int: x + take(ch, held))\n        _ := held.recv() else: panic(\"held closed\")\n        parallel:\n            s.set(5)\n",
             entries: vec![
-                take(18, 13, "<spawned task> (called at <f>:17:9)"),
                 guard("21:13", main),
+                take(18, 13, "<spawned task> (called at <f>:17:9)"),
             ],
         },
         ListingShape {
@@ -1990,8 +2012,9 @@ fn listing_shapes() -> Vec<ListingShape> {
             own_head: false,
             src: "fn main():\n    s := Shared(0)\n    ch := Channel[int]()\n    held := Channel[int](1)\n    parallel:\n        spawn:\n            parallel:\n                spawn:\n                    s.update(fn(x: int) -> int: x + take(ch, held))\n        _ := held.recv() else: panic(\"held closed\")\n        s.set(5)\n",
             entries: vec![
-                take(20, 21, "<spawned task> (called at <f>:19:17)"),
                 guard("22:9", main),
+                join("18:13", "<spawned task> (called at <f>:17:9)"),
+                take(20, 21, "<spawned task> (called at <f>:19:17)"),
             ],
         },
         ListingShape {
@@ -1999,11 +2022,11 @@ fn listing_shapes() -> Vec<ListingShape> {
             own_head: true,
             src: "import std.concurrency\n\nfn park(ch: Channel[int], x: int) -> int:\n    _ := ch.recv()\n    return x\n\nfn main():\n    ch := Channel[int](0)\n    ch2 := Channel[int](0)\n    w := concurrency.Shared(0)\n    parallel:\n        spawn:\n            _ := ch2.recv()\n        w.update(fn(x: int) -> int: park(ch, x))\n",
             entries: vec![
-                "recv() on an empty channel at <f>:13:18\n    at <spawned task> (called at <f>:12:9)".to_string(),
                 format!(
                     "recv() on an empty channel at <f>:4:10\n    at park (called at <f>:14:37)\n    \
                      at <closure> (called at <f>:14:9)\n    at {main}"
                 ),
+                "recv() on an empty channel at <f>:13:18\n    at <spawned task> (called at <f>:12:9)".to_string(),
             ],
         },
         ListingShape {
@@ -2011,11 +2034,12 @@ fn listing_shapes() -> Vec<ListingShape> {
             own_head: false,
             src: "fn main():\n    a := Channel[int]()\n    parallel:\n        spawn w(a)\n        spawn:\n            parallel:\n                spawn w(a)\n                spawn:\n                    parallel:\n                        spawn w(a)\n                w(a)\n        _ := a.recv() else: panic(\"closed\")\n",
             entries: vec![
-                w("15:15"),
-                w("18:23"),
-                w("21:31"),
-                format!("{}\n    at <spawned task> (called at <f>:16:9)", w("22:17")),
                 format!("recv() on an empty channel at <f>:23:14\n    at {main}"),
+                w("15:15"),
+                format!("{}\n    at <spawned task> (called at <f>:16:9)", w("22:17")),
+                w("18:23"),
+                join("20:21", "<spawned task> (called at <f>:19:17)"),
+                w("21:31"),
             ],
         },
         ListingShape {
@@ -2039,7 +2063,7 @@ fn listing_shapes() -> Vec<ListingShape> {
 }
 
 #[test]
-fn every_deadlock_shape_lists_each_cut_task_once_in_spawn_tree_order() {
+fn every_deadlock_shape_lists_each_blocked_task_once_in_spawn_tree_order() {
     let t = TmpDir::new();
     let dir = t.0.display().to_string();
     let mut failures = Vec::new();
@@ -2051,12 +2075,7 @@ fn every_deadlock_shape_lists_each_cut_task_once_in_spawn_tree_order() {
         };
         let main_line = src.lines().count() + 1;
         let listing = |file: &str, main: &str| {
-            let n = shape.entries.len();
-            let header = if n == 1 {
-                "deadlock: 1 task is blocked and cannot proceed".to_string()
-            } else {
-                format!("deadlock: {n} tasks are blocked and none can proceed")
-            };
+            let header = HEADER;
             let first = shape.entries[0].split('\n').next().unwrap();
             let pos = first.rsplit(" at ").next().unwrap().replace("<f>", file);
             let mut body = String::new();
@@ -2114,7 +2133,7 @@ fn every_deadlock_shape_lists_each_cut_task_once_in_spawn_tree_order() {
 
 /// A job a test submits to a module-level Executor and leaves blocked is cut by a later test's
 /// verdict: that test lists it once, with its frames, and the end-of-file drain does not report it
-/// again as an `(executor job)` row.
+/// again as an `(executor job)` row. Each test's verdict is its own (Go twin: fatal, all asleep).
 #[test]
 fn a_job_a_test_lists_is_not_reported_again_by_the_end_of_file_drain() {
     let t = TmpDir::new();
@@ -2129,14 +2148,14 @@ fn a_job_a_test_lists_is_not_reported_again_by_the_end_of_file_drain() {
     let f = "<dir>/glob_test.chz";
     let want = format!(
         "PASS a_submit_passes ({f})\n\
-         ERROR b_deadlock ({f}:4:10) deadlock: 2 tasks are blocked and none can proceed\n  \
+         ERROR b_deadlock ({f}:4:10) deadlock: every task is blocked\n  \
          task 1: recv() on an empty channel at {f}:4:10\n    at w (called at {f}:15:5)\n  \
          task 2: recv() on an empty channel at {f}:4:10\n    at w (called at {f}:10:26)\n    \
          at <closure> (called at <native:std.concurrency>:127:19)\n    \
          at _run_outcome (called at <native:std.concurrency>:106:36)\n    \
          at <closure> (called at <native:std.concurrency>:106:9)\n\
          PASS c_passes ({f})\n\
-         ERROR d_deadlock ({f}:4:10) deadlock: 1 task is blocked and cannot proceed\n  \
+         ERROR d_deadlock ({f}:4:10) deadlock: every task is blocked\n  \
          task 1: recv() on an empty channel at {f}:4:10\n    at w (called at {f}:22:5)\n\n\
          4 test(s): 2 passed, 0 failed, 2 errored\n"
     );
