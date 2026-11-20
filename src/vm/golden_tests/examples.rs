@@ -992,8 +992,8 @@ fn a_generator_fault_caught_by_the_driver_leaves_no_frames_behind() {
 
 /// W13-20 guard: a generator fault raised by a DEFERRED `.next()` call, during an unwind a
 /// `recover:` catches, must not leave its trace latched for a later, unrelated fault to pick up.
-/// `unwind_deferred` runs the deferred `.next()` in its own nested loop, which captures the inner
-/// fault's trace; it must be cleared when the OUTER fault is caught instead.
+/// The unwind's `defer` drain (`Vm::drain_then`) runs the deferred `.next()`, whose fault captures
+/// its own trace; it must be cleared when the OUTER fault is caught instead.
 #[test]
 fn a_deferred_generator_fault_does_not_leak_its_prefix_to_a_later_fault() {
     let src = "fn h() -> int:\n    xs: List[int] = []\n    return xs[3]\nfn g() -> Iterator[int]:\n    yield h()\nfn f():\n    it := g()\n    defer it.next()\n    ys: List[int] = []\n    print(ys[5])\nfn main():\n    r := recover:\n        f()\n    print(\"caught\")\n    zs: List[int] = []\n    print(zs[9])\nmain()\n";

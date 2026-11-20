@@ -1,12 +1,10 @@
-//! VM: pool and width slots, seed perturbation, the joiner, the worker loop, `run_one_fiber`,
+//! VM: width slots, seed perturbation, the joiner, the worker loop, `run_one_fiber`,
 //! outcome classification, wakes, the sched registry.
 //! Split out of `src/vm/sched.rs`. `super::*` is the parent module.
 
 use super::sched::GatedReg;
-use super::sched::JoinCover;
 #[cfg(test)]
 use super::sched::RunnerCount;
-use super::sched::eager_joiner_runs_fibers;
 use super::sched::spawn_worker_thread;
 use super::*;
 
@@ -27,26 +25,6 @@ pub(crate) const FINISH_DRAIN_WINDOW_ENV: &str = "CHEZZI_TEST_FINISH_DRAIN_WINDO
 pub(crate) const PRE_FINISH_WINDOW_ENV: &str = "CHEZZI_TEST_PRE_FINISH_WINDOW";
 
 impl Vm {
-    /// TICKET-016 (W8-3) generalisation of the demote bracket: "I am about to block in place" for any
-    /// in-callback blocking op, not just a socket op. `what` names the op in the OS-thread-limit fault
-    /// message. A no-op when `self.mn` is `None` (a top-level `Shared.set`/`update` with no nursery),
-    /// so a guard wait outside any nursery neither starves a pool nor panics on the `.expect` the
-    /// socket-only version used to carry.
-    /// TICKET-052 — hand this thread's pool slot to a replacement worker before blocking in place.
-    /// A no-op on an M:N worker shell (`self.mn.is_some()`): those already compensate through
-    /// [`Vm::block_enter`], and yielding here too would spawn two replacements for one block. This
-    /// is the POOL-side half only: which bracket a wait takes is `block::mode`'s decision.
-    /// TICKET-118 (W13-7) — a job's top-level `Vm` joining a nursery hands its slot over in
-    /// `MnSched::joiner_wait` and `MnSched::take_runnable` instead, marked by
-    /// `MnSched::pool_joiner_guard` and only while that sched has no running or runnable fiber; an
-    /// M:N shell still never yields.
-    pub(super) fn yield_pool_slot(&self, budget: Option<std::time::Duration>) {
-        if self.mn.is_some() {
-            return;
-        }
-        crate::vm::pool::yield_slot(budget);
-    }
-
     /// TICKET-141 (W14-14) — give this thread's width permit back. A no-op unless it holds one.
     pub(super) fn width_release(&mut self) {
         width::release();
@@ -81,14 +59,6 @@ impl Vm {
         GatedReg {
             cores: cores.iter().map(|c| Arc::clone(c)).collect(),
             me,
-        }
-    }
-
-    /// TICKET-205 — a pool thread about to keep its slot past a slice end makes room for a queued
-    /// job: it starts one pool thread for the queue (gated like every runner, TICKET-230).
-    pub(super) fn offer_pool_slot(&self) {
-        if crate::vm::pool::job_waits_for_my_slot() {
-            crate::vm::pool::yield_slot(None);
         }
     }
 
@@ -154,9 +124,8 @@ impl Vm {
             .mn
             .as_ref()
             .is_some_and(|s| s.runnable.load(Ordering::Relaxed) > 0);
-        let job_waits = crate::vm::pool::job_waits_for_my_slot();
         let due = width::handover_due(true);
-        if !fiber_waits && !job_waits && !due {
+        if !fiber_waits && !due {
             return;
         }
         // A refused replacement thread returns without handing off: the thread keeps running.
@@ -165,7 +134,6 @@ impl Vm {
         {
             return;
         }
-        self.offer_pool_slot();
         // TICKET-206 — the thread queues its own next turn while it still holds the permit: the
         // release wakes the queue head, which could otherwise queue a third thread first.
         // TICKET-230 — with no thread queued this round trip took the thread's own ticket back at
@@ -203,8 +171,7 @@ impl Vm {
     /// TICKET-063 — the second stage of a `Shared`/`RwShared` update-guard wait: its demote
     /// ([`Vm::wait_demote`]). A guard wait has no promised external progress — it returns only
     /// when the owner releases — so it registers a waiter, never `inflight` (DEC-063), and a lock
-    /// cycle is reported by the run's one deadlock verdict. With `self.mn` `None` the bracket
-    /// keeps DEC-052's immediate `yield_pool_slot(None)`.
+    /// cycle is reported by the run's one deadlock verdict.
     pub(super) fn guard_wait_enter(
         &mut self,
         reg: &mut WaitReg,
@@ -232,24 +199,16 @@ impl Vm {
 
     /// TICKET-245 — THE shell an inline nursery joiner runs fibers on, or `None` when the joiner
     /// only waits. Every join and abort site calls this and decides nothing itself. The decision is
-    /// [`Vm::joiner_hands_over`] (the `Nursery` row of `block::wait_steps`). A joiner that may not help and
-    /// has no cover hands its runner slot over ([`Vm::hand_joiner_slot`]); it keeps the inline
+    /// [`Vm::joiner_hands_over`] (the `Nursery` row of `block::wait_steps`). A joiner that may not help hands
+    /// its runner slot over ([`Vm::hand_joiner_slot`]); it keeps the inline
     /// loop only when the OS refused that thread. Call it after the site's guards.
     pub(super) fn joiner_shell(
         &mut self,
         sched: &Arc<MnSched>,
         cancel: &Arc<AtomicBool>,
         wid: usize,
-        cover: JoinCover,
     ) -> Option<Vm> {
-        let helps = !self.joiner_hands_over();
-        let runs = match cover {
-            JoinCover::Runners => {
-                helps && eager_joiner_runs_fibers(worker_count()) && sched.claim_joiner()
-            }
-            JoinCover::RunnersAbort => false,
-            JoinCover::None => helps || !self.hand_joiner_slot(sched, cancel, wid),
-        };
+        let runs = !self.joiner_hands_over() || !self.hand_joiner_slot(sched, cancel, wid);
         runs.then(|| self.spawn_shell(sched, cancel))
     }
 
@@ -283,10 +242,8 @@ impl Vm {
     }
 
     /// D5 owe #3 (Path C) — spawn a fresh OS thread running a replacement M:N worker shell over the
-    /// same scheduler, reusing the demoting worker's `wid`. A RAW thread ([`VM_STACK_BYTES`] stack,
-    /// like the pool), NOT a `pool::submit` job: the bounded pool is fixed-size, so a blocked-in-callback
-    /// pool thread would shrink it — the demoted thread is "off the pool" (Go grows `m` under
-    /// cgo/syscalls). The replacement drains the shared run queue until `terminate` (`Take::Stop`), then
+    /// same scheduler, reusing the demoting worker's `wid`. A RAW thread ([`VM_STACK_BYTES`] stack):
+    /// the demoted thread is off the run's worker count (Go grows `m` under cgo/syscalls). The replacement drains the shared run queue until `terminate` (`Take::Stop`), then
     /// exits — detached + reaped at nursery/process end (it holds only `Arc`s, so the joining thread can
     /// return without any use-after-free). Panic-guarded like the farmed shells. Returns `false` iff the
     /// OS refused the thread (caller faults the fiber rather than blocking with no coverage); the
@@ -368,10 +325,11 @@ impl Vm {
     /// D2b — a worker shell's lifetime: pull a runnable fiber, run it to its next park/finish, settle,
     /// repeat until the scheduler terminates, over a shared run queue + park set across threads.
     /// Cross-nursery flat scheduler — `owner_scope` is the scope this worker is the INLINE OWNER of
-    /// (it returns at the first fiber boundary after that scope's family completes, even with other work runnable — scope-scoped owner stop, TICKET-287), or [`SENTINEL_SCOPE`] for a
-    /// FARMED helper / drainer (which never self-stops, only on global terminate). The fiber it runs may
-    /// belong to ANY scope (the queue is global): `finish`/`cancel_drain` use the FIBER's `scope_id`,
-    /// while `take_runnable`'s stop check uses `owner_scope`.
+    /// (it returns at the first fiber boundary after that scope's family completes, even with other
+    /// work runnable — scope-scoped owner stop, TICKET-287), or [`SENTINEL_SCOPE`] for a spawned
+    /// runner thread (which never self-stops, only on global terminate). The fiber it runs may
+    /// belong to ANY scope (the queue is global): `finish`/`cancel_drain` use the FIBER's
+    /// `scope_id`, while `take_runnable`'s stop check uses `owner_scope`.
     ///
     /// TICKET-230 — the loop releases the permit before it returns, so a caller that held one (main
     /// as joiner, a fiber's inline nested-nursery owner) takes it back here before its own Chezzi
@@ -380,10 +338,10 @@ impl Vm {
         self.worker_loop_held(sched, wid, owner_scope, true);
     }
 
-    /// TICKET-287 — the loop of a spawned runner thread ([`spawn_worker_thread`]; the eager drainer
-    /// passes its scope). No owner waits under it on this stack, so it stops on its scope only when
-    /// it is idle (`take_runnable`'s `Take::Stop`), never at a fiber boundary: it can be the last
-    /// runner of a cancelled family in another scope.
+    /// TICKET-287 — the loop of a spawned runner thread ([`spawn_worker_thread`]; every caller
+    /// passes [`SENTINEL_SCOPE`]). No owner waits under it on this stack, so it stops on its scope
+    /// only when it is idle (`take_runnable`'s `Take::Stop`), never at a fiber boundary: it can be
+    /// the last runner of a cancelled family in another scope.
     pub(super) fn mn_thread_loop(&mut self, sched: &Arc<MnSched>, wid: usize, owner_scope: usize) {
         self.worker_loop_held(sched, wid, owner_scope, false);
     }
@@ -485,7 +443,6 @@ impl Vm {
             let scope_id = fiber.scope_id;
             let span = fiber.span;
             let disp = self.run_one_fiber(&mut fiber, span, slice);
-            self.offer_pool_slot();
             // TICKET-230 — a worker keeps its permit across fibers while no thread queues for one.
             // Releasing and re-taking it per fiber was a gate round trip per park (measured: the
             // head-of-line wait made `send_one_channel` T=0 29.2x base). When a thread queues, the
@@ -652,8 +609,7 @@ impl Vm {
             //   (c) a panic is NOT an exit: `run_one_fiber` wraps its whole body in `catch_unwind` and
             //       converts a panic into `Disp::Finish(panic_outcome(..))`, so the loop continues. The
             //       outer `catch_unwind`s in the shells only see a panic from `take_runnable`/`park`/
-            //       `finish` themselves, which is a pre-existing scheduler-bug path (see
-            //       `eager_joiner_runs_fibers`' own hazard note).
+            //       `finish` themselves, which is a pre-existing scheduler-bug path.
             //   (d) the owner-stop return at the top of the loop (TICKET-287). It requeues a kept
             //       fiber through `yield_fiber` and calls `notify_waiters` before returning, so the
             //       requeued fiber has a woken consumer.
@@ -716,7 +672,7 @@ impl Vm {
         self.exec_join_suspend = None; // set by an Executor join's park (→ `Disp::ExecJoinPark`)
         self.offload = None;
         self.poll_park = None;
-        // TICKET-096 review fix — a delivered cut's floor indexes THIS fiber's `nurseries` (swapped
+        // TICKET-096 review fix — a delivered cut's floor indexes THIS fiber's `eager_scheds` (swapped
         // by `swap_ctx`, not carried in `FiberCtx`), so a cut left by the fiber that just parked/died
         // on this shell must not survive into the next fiber scheduled in here, or an unrelated
         // `recover:` in that fiber is wrongly bypassed (`run_until`'s `owner_bypass`). The cut and
@@ -788,25 +744,21 @@ impl Vm {
                         // re-stamping the hard-halt markers a mid-unwind `defer` fault would strip, so
                         // `--timeout`/`--max-heap` stay un-catchable. A native PANIC keeps its
                         // documented no-defer behavior: it sets neither the cancel latch nor a marker.
-                        // A hard halt unwinds on the Rust stack (its `defer`s run synchronously);
-                        // a cancelled task's fault takes `run_until`'s own fault arm, whose cancel
-                        // funnel runs its `defer`s on frames, so a wait in one parks.
-                        if self.is_cancelled() && !rte.is_over_memory && !rte.is_timed_out {
+                        // A hard halt and a cancelled task's fault both run their `defer`s on
+                        // frames, so a wait in one parks: the hard halt through its own unwind, the
+                        // fault through `run_until`'s fault arm and its cancel funnel.
+                        if executor_hard_halt(&rte) {
+                            // TICKET-135 (W14-39): as in `run_until`'s cancel bypass, abort
+                            // the escaped nurseries of a task whose offloaded sleep a cancel
+                            // ended.
+                            if let Err(e) = self.unwind_halt(0, self.is_cancelled(), rte) {
+                                return Disp::Finish(self.classify_mn_outcome(Err(e)));
+                            }
+                        } else if self.is_cancelled() {
                             if let Err(e) = self.on_step_fault(0, rte) {
                                 return Disp::Finish(self.classify_mn_outcome(Err(e)));
                             }
                         } else {
-                            let rte = if rte.is_over_memory || rte.is_timed_out {
-                                let (over_mem, timed) = (rte.is_over_memory, rte.is_timed_out);
-                                // TICKET-135 (W14-39): as in `run_until`'s cancel bypass, abort
-                                // the escaped nurseries of a task whose offloaded sleep a cancel
-                                // ended.
-                                let r = self.unwind_cancelled(0, self.is_cancelled(), rte);
-                                let r = if over_mem { r.over_memory() } else { r };
-                                if timed { r.timed_out() } else { r }
-                            } else {
-                                rte
-                            };
                             return Disp::Finish(self.classify_mn_outcome(Err(rte)));
                         }
                     }
@@ -829,16 +781,16 @@ impl Vm {
                 // (it reports on `SO_ERROR` alone; the blocking arm's `attempt` closure additionally
                 // checks `peer_addr`). The unwind + re-stamp is the `resume_native` arm's, verbatim: without
                 // it the aborted task skips every `defer` (W7-16's bug, W7-17 lesson 2).
-                if std::mem::take(&mut self.poll_timed_out) {
-                    let rte = super::exec::timed_out_err(self.timeout_ms, cip.span);
-                    let d = self.unwind_deferred(0, false);
-                    let rte = self.unwind_result(rte, d, false).timed_out();
-                    return Disp::Finish(self.classify_mn_outcome(Err(rte)));
-                }
                 // TICKET-188 — a halt that woke the connect park (a cancel, or a child fault of a
                 // nursery this fiber owns) is delivered like the offload resume's, before
                 // `finish_pending_connect` could report `Ok` for a handshake still in flight.
-                if let Err(e) = self.resume_halts(cip.span) {
+                if std::mem::take(&mut self.poll_timed_out) {
+                    let rte = super::exec::timed_out_err(self.timeout_ms, cip.span);
+                    drop(cip);
+                    if let Err(e) = self.unwind_halt(0, false, rte) {
+                        return Disp::Finish(self.classify_mn_outcome(Err(e)));
+                    }
+                } else if let Err(e) = self.resume_halts(cip.span) {
                     drop(cip);
                     if let Err(e) = self.on_step_fault(0, e) {
                         return Disp::Finish(self.classify_mn_outcome(Err(e)));
@@ -950,7 +902,7 @@ impl Vm {
     /// fiber's outcome. It is a `Fault`, so [`MnSched::finish_with`] trips the fiber's cancel for it
     /// as for any fault — and it MUST: `mn_worker_loop` treats a `Fault` as an abort and calls
     /// `cancel_drain`, but a requeued sibling with `cancel == false` just re-runs `recv` and PARKS
-    /// AGAIN; the run's deadlock verdict then ends those siblings without `unwind_deferred` — their
+    /// AGAIN; the run's deadlock verdict then ends those siblings without a `defer` drain — their
     /// `defer`s never run, hidden behind the panic-fault (`reduce_task_slots` ranks Fault >
     /// Deadlocked).
     pub(super) fn panic_outcome(
@@ -1033,8 +985,9 @@ impl Vm {
     }
 
     /// B3.3-threads / D2b — reduce a nursery's per-task outcome slots (task order) into the join's
-    /// result, flushing output and applying `Exit`-over-`Fault` precedence. Called from the M:N
-    /// nursery join paths ([`run_mn_nursery`] and friends).
+    /// result, flushing output and applying `Exit`-over-`Fault` precedence. Called by a nursery join
+    /// ([`Vm::reduce_task_slots`]), an escaped child's fault (`Vm::escape_child_fault`) and the
+    /// run's end (`Vm::run_root`).
     ///
     /// Every slot flushes its buffered output at its task-order slot, unconditionally, regardless of
     /// outcome kind: `Done`, `Exit` (decision F), `Fault` (W7-5c — EVERY faulting task's output flushes,
@@ -1314,9 +1267,9 @@ impl Vm {
     /// `Arc<ChannelCore>`, never a `GcRef`, still needs this registry walk).
     pub(super) fn wake_on_send_key(&mut self, key: usize) {
         // W7-56 — this VM has no sched in scope (that is the only branch that calls here), but the
-        // RUN may: an eager `Executor` job's `Vm` gets neither `mn` nor `mn_enlist_sched` from
-        // `spawn_worker`, so its `send`/`close` notified the channel condvar and nothing else, while
-        // the fiber it just fed sat in some nursery's `SchedCore::parked` — which only that sched's
+        // RUN may: a `Vm` from `spawn_worker` gets no `mn`, so its `send`/`close` notified the
+        // channel condvar and nothing else, while the fiber it just fed sat in some nursery's
+        // `SchedCore::parked` — which only that sched's
         // `wake_bucket` can drain, and whose idle workers `cv.wait` untimed. Wake every live sched's
         // bucket for this key; `wake_bucket` drains the whole bucket, so this serves `send` and
         // `close` alike, and an over-wake (woken fiber finds the queue empty and re-parks) is the
@@ -1392,8 +1345,8 @@ impl Vm {
             .push(Arc::downgrade(sched));
     }
 
-    /// TICKET-095 — `self` is a fiber running ON `sched` itself (the `(Some(sched), _)` arm of
-    /// `run_mn_nursery`), not the top-level late-spawn builder (the `(None, Some(held))` arm).
+    /// TICKET-095 — `self` is a fiber running ON `sched` itself, not on another sched (an
+    /// `Executor`'s).
     pub(super) fn owns_nested_sched(&self, sched: &Arc<MnSched>) -> bool {
         self.mn.as_ref().is_some_and(|m| Arc::ptr_eq(m, sched))
     }
@@ -1434,7 +1387,7 @@ impl Vm {
     /// boundary would see, minus frame slots that do not exist yet. That is why the contract above
     /// is "operands on the stack".
     ///
-    /// No `unwind_deferred`: at this point no frame is pushed and no `defer` is registered. The
+    /// No `defer` drain: at this point no frame is pushed and no `defer` is registered. The
     /// `is_over_memory` marker alone is what buckets the verdict `OverMemory` and makes it
     /// uncatchable by `recover:`.
     pub(super) fn sample_mem_cap(&mut self, span: Span) -> Result<(), RuntimeError> {

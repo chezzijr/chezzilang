@@ -3,6 +3,58 @@
 
 use super::call::DecodeFail;
 use super::*;
+use crate::base::json_desc::{DefaultThunk, TypeDescriptor as D};
+use crate::native::std_embed::JsonVariant as J;
+
+/// A decode target's descriptor, its field defaults compiled to thunks.
+type Desc = D<DefaultThunk>;
+
+/// The slots a decode level keeps on the operand stack before its children: `[src, prev]`, the
+/// parsed array or object and the slot of the level below (`-1` under the outermost).
+const LEVEL: usize = 2;
+
+/// A decode level as the walk reads it: its slot, its container's descriptor (every `T?`
+/// peeled) and the `Some` wrappers its value takes. Rebuilt from the slots when a default's
+/// frame returns ([`Vm::json_default_resume`]).
+struct Level<'d> {
+    at: usize,
+    desc: &'d Desc,
+    wraps: usize,
+}
+
+/// Why a node does not decode; the decode's `Err` text once its path is known
+/// ([`Vm::decode_bad`]).
+enum Bad {
+    NotJson,
+    /// expected this, found the variant's kind
+    Want(String, J),
+    NotInteger(f64),
+    OutOfRange(f64),
+    /// a tuple of this arity, an array of that length
+    Arity(usize, usize),
+}
+
+/// `d` under every `T?`, and how many there were.
+fn peel(mut d: &Desc) -> (&Desc, usize) {
+    let mut n = 0;
+    while let D::Option(inner) = d {
+        d = inner;
+        n += 1;
+    }
+    (d, n)
+}
+
+/// The descriptor of container `d`'s child `i`.
+fn child_desc(d: &Desc, i: usize) -> &Desc {
+    match d {
+        D::List(inner) | D::Map(inner) => inner,
+        D::Tuple(elems) => &elems[i],
+        D::Struct { fields, .. } => &fields[i].desc,
+        D::Int | D::Float | D::Bool | D::Str | D::Option(_) => {
+            unreachable!("a decode level is a container")
+        }
+    }
+}
 
 impl Vm {
     /// Build a NATIVE `Result`/`Option` enum instance (the native / std construction path: `Ok`/`Err`/
@@ -33,14 +85,12 @@ impl Vm {
     }
 
     /// `Op::JsonDecode`: pop the `Result[Json]` from `parse`, coerce its `Ok` payload against the
-    /// descriptor (passing through an `Err`), push the resulting `Result[T]`.
-    pub(super) fn json_decode(
-        &mut self,
-        desc: &crate::base::json_desc::TypeDescriptor<crate::base::json_desc::DefaultThunk>,
-        span: Span,
-    ) -> Result<(), RuntimeError> {
-        // `res` stays on the operand stack while the coercion runs: a field default re-enters the
-        // VM, which collects, and the parsed tree must survive it. `base - 1` is `res`'s slot.
+    /// descriptor (passing through an `Err`), push the resulting `Result[T]`. A field default runs
+    /// as a frame at its field ([`Vm::coerce_json`]); its return resumes the decode
+    /// ([`Vm::json_default_resume`]).
+    pub(super) fn json_decode(&mut self, desc: &Desc, span: Span) -> Result<(), RuntimeError> {
+        // `res` stays on the operand stack while the coercion runs: a field default's frame can
+        // park, and the parsed tree must survive a collection. `base - 1` is `res`'s slot.
         let res = self.stack[self.stack.len() - 1];
         let base = self.stack.len();
         let bad = "decode: parse did not return a `T!E` value".to_string();
@@ -56,28 +106,73 @@ impl Vm {
             // a Result Err(str) is already a valid Result[T]; it stays where it is
             "Err" => Ok(()),
             "Ok" if payload.len() == 1 => {
-                let jv = payload[0];
-                let r = self.coerce_json(jv, desc, "$", span);
-                self.stack.truncate(base - 1);
-                match r {
-                    Ok(v) => {
-                        let r = self.alloc_enum("Result", "Ok", &[v]);
-                        self.push(r);
-                    }
-                    Err(DecodeFail::Msg(msg)) => {
-                        let s = self.alloc_str(msg);
-                        let r = self.alloc_enum("Result", "Err", &[s]);
-                        self.push(r);
-                    }
-                    Err(DecodeFail::Fault(e)) => return Err(e),
-                }
-                Ok(())
+                let mut levels = Vec::new();
+                let r = match self.decode_enter(payload[0], desc, &mut levels) {
+                    Ok(None) => self.coerce_json(&mut levels, None, span),
+                    r @ (Ok(Some(_)) | Err(_)) => r,
+                };
+                self.decode_end(r, base)
             }
             _ => {
                 self.stack.truncate(base - 1);
                 Err(self.err(bad, span))
             }
         }
+    }
+
+    /// The end of a decode whose levels start at `base` (`res` at `base - 1`): push its
+    /// `Result[T]` in `res`'s place, or leave a parked decode (`Ok(None)`) as it is.
+    fn decode_end(
+        &mut self,
+        r: Result<Option<Value>, DecodeFail>,
+        base: usize,
+    ) -> Result<(), RuntimeError> {
+        let out = match r {
+            Ok(None) => return Ok(()),
+            Ok(Some(v)) => self.alloc_enum("Result", "Ok", &[v]),
+            Err(DecodeFail::Msg(msg)) => {
+                let s = self.alloc_str(msg);
+                self.alloc_enum("Result", "Err", &[s])
+            }
+            Err(DecodeFail::Fault(e)) => {
+                self.stack.truncate(base - 1);
+                return Err(e);
+            }
+        };
+        self.stack.truncate(base - 1);
+        self.push(out);
+        Ok(())
+    }
+
+    /// A field default's frame returned ([`RetAction::JsonDefault`]): its value on the stack top,
+    /// over the slot of the decode's top level. Rebuild the levels from their slots and the
+    /// descriptor of the caller's `Op::JsonDecode`, and run the decode on from that field.
+    pub(super) fn json_default_resume(&mut self, span: Span) -> Result<(), RuntimeError> {
+        let v = self.pop();
+        let top = self.pop().as_int() as usize;
+        let program = Arc::clone(&self.program);
+        let caller = self.frames.last().expect("a default returns to its decode");
+        let Op::JsonDecode(root) = &program.protos[caller.proto].code[caller.ip - 1] else {
+            unreachable!("a default frame is pushed only by Op::JsonDecode")
+        };
+        let mut ats = Vec::new();
+        let mut at = top as i64;
+        while at >= 0 {
+            ats.push(at as usize);
+            at = self.stack[at as usize + 1].as_int();
+        }
+        let mut levels: Vec<Level> = Vec::with_capacity(ats.len());
+        for &at in ats.iter().rev() {
+            let child = match levels.last() {
+                Some(p) => child_desc(p.desc, at - p.at - LEVEL),
+                None => root,
+            };
+            let (desc, wraps) = peel(child);
+            levels.push(Level { at, desc, wraps });
+        }
+        let base = levels[0].at;
+        let r = self.coerce_json(&mut levels, Some(v), span);
+        self.decode_end(r, base)
     }
 
     /// The enum type, variant name, and (copied) payload of an enum value; `None` if not an enum.
@@ -89,13 +184,33 @@ impl Vm {
         Some((ty.to_string(), variant.to_string(), payload.to_vec()))
     }
 
-    /// Run a missing field's default thunk, as `S(...)` runs it for an omitted field: afresh each
-    /// time, homed in the declaring module. A fault inside it is a fault, never a decode `Err`.
-    fn run_decode_default(
+    /// The `Json` variant of a parsed value and its payload's first value; `None` if it is not
+    /// a `Json` value.
+    fn json_parts(&self, jv: Value) -> Option<(J, Value)> {
+        let (variant_id, payload) = self.heap.get(jv.as_obj()?).as_enum()?;
+        let variant = J::from_name(self.enum_names(variant_id).1)?;
+        let p0 = match payload.len() {
+            0 => Value::nil(),
+            _ => payload.get(0),
+        };
+        Some((variant, p0))
+    }
+
+    /// The child count of a parsed array (a list) or object (a map) payload, else `None`.
+    fn json_len(&self, p0: Value) -> Option<usize> {
+        let o = self.heap.get(p0.as_obj()?);
+        (o.as_list().map(|items| items.len())).or_else(|| o.as_map().map(|m| m.entries.len()))
+    }
+
+    /// Run a missing field's default, as `S(...)` runs it for an omitted field: afresh each time,
+    /// homed in the declaring module, as a frame over the slot of the top level `top`, so a wait
+    /// in it parks (`Ok(None)`). A fault inside it is a fault, never a decode `Err`.
+    fn decode_default(
         &mut self,
-        t: crate::base::json_desc::DefaultThunk,
+        t: DefaultThunk,
+        top: usize,
         span: Span,
-    ) -> Result<Value, DecodeFail> {
+    ) -> Result<Option<Value>, DecodeFail> {
         let Some(home) = self.module_objs.get(t.module) else {
             return Err(DecodeFail::Fault(self.err(
                 "json.decode: the module that declares this default has not been initialized yet"
@@ -103,55 +218,295 @@ impl Vm {
                 span,
             )));
         };
-        let proto = t.proto;
-        let f = self.fn_value(FnKey::Proto(proto), || Obj::Func { proto, home });
-        self.guarded(|vm| vm.invoke_value(f, Vec::new(), span))
-            .map_err(DecodeFail::Fault)
+        // The per-default cancel point: the decode loop's back-edge.
+        self.guarded_checkpoint().map_err(DecodeFail::Fault)?;
+        self.frame_depth_guard(true, span)
+            .map_err(DecodeFail::Fault)?;
+        self.push(Value::int(top as i64));
+        let base = self.stack.len();
+        self.finish_frame(
+            t.proto,
+            home,
+            None,
+            base,
+            true,
+            false,
+            span,
+            RetAction::JsonDefault,
+        );
+        Ok(None)
     }
 
-    /// Coerce a parsed `Json` value into a concrete value of the descriptor's type. `path` is a
-    /// JSON-pointer-ish breadcrumb for error messages.
-    pub(super) fn coerce_json(
+    /// The decode of `jv` against `desc`, under `levels` (empty at the root): its value, or
+    /// `Ok(None)` when `jv` is a container, whose level is now on top.
+    fn decode_enter<'d>(
         &mut self,
         jv: Value,
-        desc: &crate::base::json_desc::TypeDescriptor<crate::base::json_desc::DefaultThunk>,
-        path: &str,
+        desc: &'d Desc,
+        levels: &mut Vec<Level<'d>>,
+    ) -> Result<Option<Value>, DecodeFail> {
+        let Some((variant, p0)) = self.json_parts(jv) else {
+            return Err(self.decode_bad(levels, Bad::NotJson));
+        };
+        // `T?`: `null` is None; anything else decodes as `T`, wrapped in `Some`.
+        if variant == J::Null && matches!(desc, D::Option(_)) {
+            return Ok(Some(self.alloc_enum("Option", "None", &[])));
+        }
+        let (desc, wraps) = peel(desc);
+        // What the node must be, when it is not.
+        let want = match desc {
+            D::Int | D::Float | D::Bool | D::Str => {
+                let v = match self.json_scalar(variant, p0, desc) {
+                    Ok(v) => v,
+                    Err(b) => return Err(self.decode_bad(levels, b)),
+                };
+                return Ok(Some(self.wrap_some(v, wraps)));
+            }
+            D::List(_) => match (variant, self.json_len(p0)) {
+                (J::Arr, Some(_)) => None,
+                _ => Some("array".to_string()),
+            },
+            D::Tuple(elems) => match (variant, self.json_len(p0)) {
+                (J::Arr, Some(n)) if n != elems.len() => {
+                    return Err(self.decode_bad(levels, Bad::Arity(elems.len(), n)));
+                }
+                (J::Arr, Some(_)) => None,
+                _ => Some("array".to_string()),
+            },
+            D::Map(_) => match (variant, self.json_len(p0)) {
+                (J::Obj, Some(_)) => None,
+                _ => Some("object".to_string()),
+            },
+            // ROOT REDESIGN — error text shows the BARE display name, never the identity key.
+            D::Struct { display, .. } if variant != J::Obj => Some(format!("object for {display}")),
+            D::Struct { .. } => match self.json_len(p0) {
+                Some(_) => None,
+                None => Some("object".to_string()),
+            },
+            D::Option(_) => unreachable!("peel removes every Option"),
+        };
+        if let Some(want) = want {
+            return Err(self.decode_bad(levels, Bad::Want(want, variant)));
+        }
+        let prev = levels.last().map_or(-1, |l| l.at as i64);
+        let at = self.stack.len();
+        self.stack.extend([p0, Value::int(prev)]);
+        levels.push(Level { at, desc, wraps });
+        Ok(None)
+    }
+
+    /// Coerce a parsed `Json` value into a concrete value of the descriptor's type: the decode
+    /// walk over `levels`, on the operand stack, from `done`, the value of the top level's next
+    /// child (`None` to pick it). Each level is `[src, prev]` and then its decoded children,
+    /// rooted until their container owns them. `Ok(None)`: a field default's frame was pushed
+    /// ([`Vm::decode_default`]); its return resumes the walk at that field.
+    fn coerce_json<'d>(
+        &mut self,
+        levels: &mut Vec<Level<'d>>,
+        mut done: Option<Value>,
         span: Span,
-    ) -> Result<Value, DecodeFail> {
-        use crate::base::json_desc::TypeDescriptor as D;
-        use crate::native::std_embed::JsonVariant as J;
-        let (_jty, variant, payload) = self
-            .enum_parts(jv)
-            .ok_or_else(|| format!("decode: expected a JSON value at {path}"))?;
-        let variant = J::from_name(&variant)
-            .ok_or_else(|| format!("decode: expected a JSON value at {path}"))?;
-        let mismatch = |want: &str| {
-            format!(
+    ) -> Result<Option<Value>, DecodeFail> {
+        loop {
+            let Some(top) = levels.last() else {
+                return Ok(done);
+            };
+            let (at, desc) = (top.at, top.desc);
+            if let Some(v) = done.take() {
+                self.push(v);
+            }
+            let i = self.stack.len() - at - LEVEL;
+            let src = self.stack[at].as_gcref();
+            let child = match desc {
+                D::List(_) | D::Tuple(_) => match self.heap.get(src).as_list() {
+                    Some(items) if i < items.len() => Some(items.get(i)),
+                    Some(_) | None => None,
+                },
+                D::Map(_) => match self.heap.get(src).as_map() {
+                    Some(m) if i < m.entries.len() => Some(m.entries.get(i).2),
+                    Some(_) | None => None,
+                },
+                D::Struct { fields, .. } => match fields.get(i) {
+                    None => None,
+                    Some(field) => match self.json_field(src, &field.name) {
+                        Some(jv) => Some(jv),
+                        // A missing key takes the field's default, as `S(...)` does; with no
+                        // default an `Option` field is None and anything else is an error.
+                        None => {
+                            done = match (&field.default, &field.desc) {
+                                (Some(t), _) => match self.decode_default(*t, at, span)? {
+                                    Some(v) => Some(v),
+                                    None => return Ok(None),
+                                },
+                                (None, D::Option(_)) => {
+                                    Some(self.alloc_enum("Option", "None", &[]))
+                                }
+                                (None, _) => {
+                                    let path = self.decode_path(levels, false);
+                                    return Err(format!(
+                                        "decode: missing key '{}' at {path}",
+                                        field.name
+                                    )
+                                    .into());
+                                }
+                            };
+                            continue;
+                        }
+                    },
+                },
+                D::Int | D::Float | D::Bool | D::Str | D::Option(_) => {
+                    unreachable!("a decode level is a container")
+                }
+            };
+            done = match child {
+                Some(jv) => self.decode_enter(jv, child_desc(desc, i), levels)?,
+                None => Some(self.decode_finish(levels)?),
+            };
+        }
+    }
+
+    /// The top level's container, from its children; the level goes.
+    fn decode_finish(&mut self, levels: &mut Vec<Level<'_>>) -> Result<Value, DecodeFail> {
+        let top = levels.last().expect("a level to finish");
+        let (at, desc, wraps) = (top.at, top.desc, top.wraps);
+        let src = self.stack[at].as_gcref();
+        let v = match desc {
+            D::List(_) => {
+                let out = self.stack.split_off(at + LEVEL);
+                Value::obj(self.heap.alloc(Obj::List(out.into())))
+            }
+            D::Tuple(_) => {
+                let out = self.stack.split_off(at + LEVEL);
+                Value::obj(self.heap.alloc(Obj::Tuple(out)))
+            }
+            D::Map(_) => {
+                let vals = self.stack.split_off(at + LEVEL);
+                // str keys unchanged → reuse the cached hash; the keys belong to the parsed
+                // tree, which `json_decode` keeps rooted.
+                let out: Vec<MapEntry> = match self.heap.get(src).as_map() {
+                    Some(m) => (m.entries.iter())
+                        .zip(vals)
+                        .map(|((hk, k, _), coerced)| (hk, k, coerced))
+                        .collect(),
+                    None => unreachable!("a map level's source is an object"),
+                };
+                Value::obj(self.heap.alloc(Obj::Map(MapData::from_entries(out))))
+            }
+            D::Struct { key, fields, .. } => {
+                // ROOT REDESIGN — tag the value with the qualified IDENTITY KEY (so downstream
+                // field/method lookups + `struct_tid` hit the right layout); display renders bare.
+                let tid = self.struct_tid(key);
+                // TICKET-262: a JSON number outside a width field is the decode's `Err`, as Go's
+                // `json.Unmarshal` returns for `int8`; the text is the C boundary's.
+                for (i, field) in fields.iter().enumerate() {
+                    if let Err(m) = self.field_fits(tid, i, self.stack[at + LEVEL + i]) {
+                        let path = self.decode_path(levels, false);
+                        return Err(format!("decode: {m} at {path}.{}", field.name).into());
+                    }
+                }
+                // Positional layout: `fields` is in the struct's declaration order (see
+                // `json_decode::struct_descriptor`), and so are the values.
+                let field_vals = self.stack.split_off(at + LEVEL);
+                let h = self.heap.alloc(Obj::Struct {
+                    tid,
+                    fields: Fields::from_vec(field_vals),
+                });
+                Value::obj(h)
+            }
+            D::Int | D::Float | D::Bool | D::Str | D::Option(_) => {
+                unreachable!("a decode level is a container")
+            }
+        };
+        self.stack.truncate(at);
+        levels.pop();
+        Ok(self.wrap_some(v, wraps))
+    }
+
+    /// `v` in `n` `Some` wrappers, innermost first.
+    fn wrap_some(&mut self, mut v: Value, n: usize) -> Value {
+        for _ in 0..n {
+            v = self.alloc_enum("Option", "Some", &[v]);
+        }
+        v
+    }
+
+    /// The value of the parsed object `src`'s key `name`, if it has one.
+    fn json_field(&self, src: GcRef, name: &str) -> Option<Value> {
+        let m = self.heap.get(src).as_map()?;
+        m.entries
+            .iter()
+            .find(|(_, k, _)| self.val_str(*k).as_deref() == Some(name))
+            .map(|(_, _, v)| v)
+    }
+
+    /// The JSON-pointer-ish breadcrumb of the top level's node (`child`: of its next child) for
+    /// error messages: `$`, then `[i]` per array element and `.key` per object key.
+    fn decode_path(&self, levels: &[Level<'_>], child: bool) -> String {
+        use std::fmt::Write as _;
+        let mut path = String::from("$");
+        let n = levels.len() - usize::from(!child);
+        for (k, l) in levels[..n].iter().enumerate() {
+            let end = levels.get(k + 1).map_or(self.stack.len(), |x| x.at);
+            let i = end - l.at - LEVEL;
+            let _ = match l.desc {
+                D::List(_) | D::Tuple(_) => write!(path, "[{i}]"),
+                D::Map(_) => {
+                    let key = match self.heap.get(self.stack[l.at].as_gcref()).as_map() {
+                        Some(m) => self.val_str(m.entries.get(i).1).unwrap_or_default(),
+                        None => String::new(),
+                    };
+                    write!(path, ".{key}")
+                }
+                D::Struct { fields, .. } => write!(path, ".{}", fields[i].name),
+                D::Int | D::Float | D::Bool | D::Str | D::Option(_) => {
+                    unreachable!("a decode level is a container")
+                }
+            };
+        }
+        path
+    }
+
+    /// The decode's `Err` for the node being entered under `levels`.
+    fn decode_bad(&self, levels: &[Level<'_>], bad: Bad) -> DecodeFail {
+        let path = self.decode_path(levels, true);
+        DecodeFail::Msg(match bad {
+            Bad::NotJson => format!("decode: expected a JSON value at {path}"),
+            Bad::Want(want, variant) => format!(
                 "decode: expected {want} at {path}, found {}",
                 crate::base::json_desc::json_kind(variant)
-            )
-        };
+            ),
+            Bad::NotInteger(f) => format!("decode: expected an integer at {path}, found {f}"),
+            Bad::OutOfRange(f) => {
+                format!("decode: integer {f} at {path} is out of range for int")
+            }
+            Bad::Arity(want, n) => {
+                format!("decode: expected an array of {want} elements at {path}, found {n}")
+            }
+        })
+    }
+
+    /// A scalar's decode: `variant` and its payload `p0` as `desc`'s type.
+    fn json_scalar(&mut self, variant: J, p0: Value, desc: &Desc) -> Result<Value, Bad> {
+        let mismatch = |want: &str| Bad::Want(want.to_string(), variant);
+        let payload = [p0];
         match desc {
             D::Int => {
                 // `Json.Int` carries its exact i64 payload (TICKET-013, W8-35) — take it directly,
                 // never through f64, so a 19-digit id decodes byte-exact.
                 if variant == J::Int {
-                    let n = self.int_val(payload[0]).ok_or_else(|| mismatch("int"))?;
+                    let n = self.int_val(p0).ok_or_else(|| mismatch("int"))?;
                     return Ok(self.make_int(n));
                 }
                 let f = self
                     .json_num(variant, &payload)
                     .ok_or_else(|| mismatch("int"))?;
                 if f.fract() != 0.0 || !f.is_finite() {
-                    return Err(format!("decode: expected an integer at {path}, found {f}").into());
+                    return Err(Bad::NotInteger(f));
                 }
                 // `f as i64` saturates, so range-check first. Use a strict `> 2^63` upper bound so
                 // i64::MAX (which f64-rounds to exactly 2^63) still round-trips via the saturating
                 // cast, while everything strictly above 2^63 / below -2^63 is rejected.
                 if f < i64::MIN as f64 || f > 9_223_372_036_854_775_808.0 {
-                    return Err(
-                        format!("decode: integer {f} at {path} is out of range for int").into(),
-                    );
+                    return Err(Bad::OutOfRange(f));
                 }
                 Ok(self.make_int(f as i64))
             }
@@ -161,152 +516,20 @@ impl Vm {
                     .ok_or_else(|| mismatch("float"))?;
                 Ok(self.box_float(f))
             }
-            D::Bool => match (variant, payload.first().and_then(|v| v.as_bool())) {
+            D::Bool => match (variant, p0.as_bool()) {
                 (J::Bool, Some(b)) => Ok(Value::bool(b)),
-                _ => Err(mismatch("bool").into()),
+                _ => Err(mismatch("bool")),
             },
             D::Str => {
                 if variant == J::Str {
-                    let s = self.val_str(payload[0]).unwrap_or_default();
+                    let s = self.val_str(p0).unwrap_or_default();
                     Ok(self.alloc_str(s))
                 } else {
-                    Err(mismatch("str").into())
+                    Err(mismatch("str"))
                 }
             }
-            D::Option(inner) => {
-                if variant == J::Null {
-                    Ok(self.alloc_enum("Option", "None", &[]))
-                } else {
-                    let v = self.coerce_json(jv, inner, path, span)?;
-                    Ok(self.alloc_enum("Option", "Some", &[v]))
-                }
-            }
-            D::List(inner) => {
-                if variant != J::Arr {
-                    return Err(mismatch("array").into());
-                }
-                let items = match self.heap.get(self.as_obj(payload[0])).as_list() {
-                    Some(items) => items.clone(),
-                    None => return Err(mismatch("array").into()),
-                };
-                // Each decoded element is rooted on the operand stack until the list owns it: a
-                // later element's field default can collect (`json_decode` truncates on a failure).
-                let child_base = self.stack.len();
-                for (i, it) in items.into_iter().enumerate() {
-                    let v = self.coerce_json(it, inner, &format!("{path}[{i}]"), span)?;
-                    self.push(v);
-                }
-                let out = self.stack.split_off(child_base);
-                Ok(Value::obj(self.heap.alloc(Obj::List(out.into()))))
-            }
-            D::Tuple(elems) => {
-                if variant != J::Arr {
-                    return Err(mismatch("array").into());
-                }
-                let items = match self.heap.get(self.as_obj(payload[0])).as_list() {
-                    Some(items) => items.clone(),
-                    None => return Err(mismatch("array").into()),
-                };
-                if items.len() != elems.len() {
-                    return Err(format!(
-                        "decode: expected an array of {} elements at {path}, found {}",
-                        elems.len(),
-                        items.len()
-                    )
-                    .into());
-                }
-                // Rooted on the operand stack, as in the list arm.
-                let child_base = self.stack.len();
-                for (i, (it, d)) in items.into_iter().zip(elems).enumerate() {
-                    let v = self.coerce_json(it, d, &format!("{path}[{i}]"), span)?;
-                    self.push(v);
-                }
-                let out = self.stack.split_off(child_base);
-                Ok(Value::obj(self.heap.alloc(Obj::Tuple(out))))
-            }
-            D::Map(inner) => {
-                if variant != J::Obj {
-                    return Err(mismatch("object").into());
-                }
-                let entries = match self.heap.get(self.as_obj(payload[0])).as_map() {
-                    Some(m) => m.entries.to_vec(),
-                    None => return Err(mismatch("object").into()),
-                };
-                // Values are rooted on the operand stack, as in the list arm; the keys belong to
-                // the parsed tree, which `json_decode` keeps rooted.
-                let child_base = self.stack.len();
-                let mut keys = Vec::with_capacity(entries.len());
-                for (hk, k, v) in entries {
-                    let key = self.val_str(k).unwrap_or_default();
-                    let coerced = self.coerce_json(v, inner, &format!("{path}.{key}"), span)?;
-                    self.push(coerced);
-                    keys.push((hk, k));
-                }
-                // str keys unchanged → reuse the cached hash
-                let out: Vec<MapEntry> = (keys.into_iter())
-                    .zip(self.stack.split_off(child_base))
-                    .map(|((hk, k), coerced)| (hk, k, coerced))
-                    .collect();
-                Ok(Value::obj(
-                    self.heap.alloc(Obj::Map(MapData::from_entries(out))),
-                ))
-            }
-            D::Struct {
-                key,
-                display,
-                fields,
-            } => {
-                if variant != J::Obj {
-                    // ROOT REDESIGN — error text shows the BARE display name, never the identity key.
-                    return Err(mismatch(&format!("object for {display}")).into());
-                }
-                let entries = match self.heap.get(self.as_obj(payload[0])).as_map() {
-                    Some(m) => m.entries.to_vec(),
-                    None => return Err(mismatch("object").into()),
-                };
-                // Positional layout: `fields` (the type descriptor) is already in the struct's
-                // declaration order (see `json_decode::struct_descriptor`), so push values in order.
-                // Each value is rooted on the operand stack, as in the list arm: a later field's
-                // default can collect.
-                let child_base = self.stack.len();
-                for field in fields {
-                    let found = entries
-                        .iter()
-                        .find(|(_, k, _)| self.val_str(*k).as_deref() == Some(field.name.as_str()));
-                    let fpath = format!("{path}.{}", field.name);
-                    let v = match found {
-                        Some((_, _, jval)) => self.coerce_json(*jval, &field.desc, &fpath, span)?,
-                        // A missing key takes the field's default, as `S(...)` does; with no
-                        // default an `Option` field is None and anything else is an error.
-                        None => match (&field.default, &field.desc) {
-                            (Some(t), _) => self.run_decode_default(*t, span)?,
-                            (None, D::Option(_)) => self.alloc_enum("Option", "None", &[]),
-                            (None, _) => {
-                                return Err(format!(
-                                    "decode: missing key '{}' at {path}",
-                                    field.name
-                                )
-                                .into());
-                            }
-                        },
-                    };
-                    self.push(v);
-                }
-                let field_vals = self.stack.split_off(child_base);
-                // ROOT REDESIGN — tag the value with the qualified IDENTITY KEY (so downstream
-                // field/method lookups + `struct_tid` hit the right layout); display renders bare.
-                let tid = self.struct_tid(key);
-                // TICKET-262: a JSON number outside a width field is the decode's `Err`, as Go's
-                // `json.Unmarshal` returns for `int8`; the text is the C boundary's.
-                for (i, (v, field)) in field_vals.iter().zip(fields).enumerate() {
-                    self.field_fits(tid, i, *v)
-                        .map_err(|m| format!("decode: {m} at {path}.{}", field.name))?;
-                }
-                let h = self.heap.alloc(Obj::Struct {
-                    tid,
-                    fields: Fields::from_vec(field_vals),
-                });
-                Ok(Value::obj(h))
+            D::List(_) | D::Tuple(_) | D::Map(_) | D::Struct { .. } | D::Option(_) => {
+                unreachable!("a scalar descriptor")
             }
         }
     }
@@ -554,10 +777,5 @@ impl Vm {
             | Obj::Reader(_)
             | Obj::Generator(_) => None,
         }
-    }
-
-    /// The heap handle of an `Obj` value (caller guarantees it is one).
-    pub(super) fn as_obj(&self, v: Value) -> GcRef {
-        v.as_obj().expect("as_obj on non-object")
     }
 }

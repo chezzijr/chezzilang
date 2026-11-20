@@ -7,21 +7,19 @@ scheduler, the deadlock check, the width gate or `wait:`. Each rule names its ti
 
 ## Runner claims
 
-TICKET-211 (W1): one claim decides how many runners serve a scheduler, in every nesting shape
-(flat, nested in a spawned task, two deep, inside an `Executor` job; outer body open or closed).
-`MnSched::claim_runners` runs under the core lock wherever runnable work grows: at
-`inject_or_extend` (every spawn), at `Executor.submit`, and when a body blocks. It claims runners
-while fewer than `worker_count()` run and fewer fiber runners run than tasks are undone; the
-body's own thread counts toward `worker_count()` but not toward fiber runners, so `--threads=1`
-stays one runner. `Vm::start_runners` starts what it claimed. The claim is demand only: how many
-runners run at once process-wide is the one `width::RUNNERS` budget of N, main included
-(TICKET-230, see "One runner budget" below). A non-Executor runner is a RAW
-`chezzi-eager-helper` thread from the `NestedDrainerSlot` thread cap — never the bounded pool,
-because a body may be waiting on an `Executor` job queued behind a pool helper that runs to
-global terminate (DEC-103, DEC-159). Runner threads are reused: one that finishes a nursery parks
-in `src/vm/runner_cache.rs` for up to one second and serves the next nursery's runner, so 20 000
-nursery rounds do not start 20 000 x `n - 1` OS threads. The inline joiner runs fibers only if
-the claim has a slot left (`claim_joiner`), so the runner count stays `worker_count()`.
+One run has one scheduler, the root sched (`Vm::run_root`). Its runners are fixed at build, as Go
+starts one M per P: the run's own thread is worker 0, and one `chezzi-mn` thread runs each other wid
+up to `worker_count()`, all born before main's fiber is seeded (`MnSched::mark_all_runners_claimed`).
+Every `parallel:` nursery and every spawned task is a fiber of that sched, so a nursery starts no
+thread, and an `Executor`'s jobs run on the same workers (`QuiesceState::host`). A worker thread the
+OS refuses to start gives its wid back and is not retried: the run goes on with one worker fewer
+(2026-11-20). `MnSched::claim_runners` (TICKET-211) is the demand of an `Executor` sched with no host:
+it claims runners while fewer than `worker_count()` run and fewer than its tasks are undone, and
+`Vm::start_runners` starts them as `chezzi-exec` threads. How many runners run at once
+process-wide is the one `width::RUNNERS` budget of N, main included (TICKET-230, see "One runner
+budget" below). A worker whose wait demotes starts one `chezzi-mn-repl` replacement
+(`Vm::demote_once`), and so does a nursery joiner that may not run fibers on its own stack
+(`Vm::joiner_shell`).
 
 ## The deadlock check
 
@@ -104,21 +102,23 @@ frees the box with the `CUT` bit of its lock word set (`UpdateGuard::mark_cut`).
 where the run goes on after a test's deadlock: a test fn that touches a box a deadlocked test left
 cut errors at its own `update`.
 
-The other contexts wait in place (`main`, the builder, an eager job, a fiber inside a nested native
-callback). Such a waiter waits for the guard to come FREE holding no width permit, then takes the
-permit, then the guard. Taking the guard first made 6 tasks x 2000 `update`s take 16-22 s at
-`--threads=2`, one 5 ms timeout per handoff (TICKET-193). A fiber in a Demote context first waits in
-place for up to 5 ms (`GUARD_DEMOTE_BUDGET`, `src/vm/core.rs`), then demotes its worker: demoting on
-every acquire made 50 000 one-`update` fibers exhaust a 32 768-task ceiling (TICKET-016).
+A fiber under a host frame (the Reentered context: an FFI callback, a map/set probe hook) waits in
+place. It waits for the guard to come FREE holding no width permit, then takes the permit, then the
+guard. Taking the guard first made 6 tasks x 2000 `update`s take 16-22 s at `--threads=2`, one 5 ms
+timeout per handoff (TICKET-193). It first waits in place for up to 5 ms (`GUARD_DEMOTE_BUDGET`,
+`src/vm/core.rs`), then demotes its worker: demoting on every acquire made 50 000 one-`update`
+fibers exhaust a 32 768-task ceiling (TICKET-016).
 
 ## A wait inside a callback
 
-**A callback runs as a frame, so its wait parks (plan `2026-11-07-frame-reentry`).** A wait in a
-hook, an operator (`a + b`, `x[k]`, `-x`, `in`, `==`, `<`), an f-string part, `print`'s `str`, a list
-HOF callback (`map`, `filter`, `fold`, `take_while`, `count`, `position`, `min_by`, the
-`sort_by_key` key pass), a sort comparator (`sort_by`, a struct key's `compare`, `sort()` and
-`min`/`max` over structs), a `T.from_iter(it)` drain, a `Shared`/`RwShared` closure or a generator
-body parks the fiber (Park), as in Go. The handler on the dispatch loop pushes the callee's frame with a `RetAction` (`CallFrame.ret`,
+**Every wait in user code parks its fiber, as every Go goroutine wait goes through `gopark` (plans
+`2026-11-07-frame-reentry`, `2026-11-18-every-wait-parks`).** A wait in a hook, an operator (`a + b`,
+`x[k]`, `-x`, `in`, `==`, `<`), an f-string part, `print`'s `str`, a list HOF callback (`map`,
+`filter`, `fold`, `take_while`, `count`, `position`, `min_by`, the `sort_by_key` key pass), a sort
+comparator (`sort_by`, a struct key's `compare`, `sort()` and `min`/`max` over structs), a nested
+container walk, a `T.from_iter(it)` or `ch.iter()` drain, a `json.decode` `default` thunk, a
+`Shared`/`RwShared` closure, a generator body or a `defer` drain parks the fiber (Park), as in Go.
+The handler on the dispatch loop pushes the callee's frame with a `RetAction` (`CallFrame.ret`,
 `src/vm/ret_action.rs`, `Copy`, 2 bytes) and returns; `do_return` runs the rest of the op through
 `Vm::apply_ret`, and a frame that leaves without a return gives its state back through
 `Vm::drop_ret`. A loop keeps its state in stack slots below the callback frame (a HOF
@@ -126,24 +126,45 @@ body parks the fiber (Park), as in Go. The handler on the dispatch loop pushes t
 generator its handle), so it needs no extra GC root and no unwind change. A sort is an iterative
 merge (the same top-down split, walked with an explicit stack, so the comparator call order is
 unchanged). A generator resume copies the body's one saved frame onto the caller's stacks and
-copies it back at `yield`.
+copies it back at `yield`. A native callee that can wait (`xs.map(time.sleep_ms)`) runs as the step
+of a VM-owned trampoline frame (`STEP_PROTO`, `src/vm/call.rs`), so its wait parks too.
+
+**Nested walks.** A nested `==`/`!=`/`in` (`contains`, `index_of`, `unique`, `dedup`, `x.eq(y)`;
+`src/vm/walk.rs`), a nested `str` (`print`, an f-string, a format spec, `x.str()`, a failed
+`assert`'s operand text, a key-not-found text; `src/vm/display.rs`) and a nested `<` (`sort`,
+`sort_by_key`, `min`/`max`, `x.compare(y)`; `src/vm/compare.rs`) keep their levels in operand-stack
+slots, one slot group per container level. With no hooked value the walk is a tight loop that
+pushes no frame. At the first hooked value it pushes the hook's frame (`RetAction::EqWalk`,
+`StringifyWalk`, `CmpWalk`), and the hook's return resumes the walk. A parked nested `str` keeps
+its text in one growable heap buffer, appended in place. A `json.decode` keeps its container stack
+the same way and runs a `default` thunk at its field (`RetAction::JsonDefault`), as Rust serde runs
+a `default`, so the output order is unchanged. The structural depth limit (`MAX_STRUCTURAL_DEPTH`,
+`src/base/words.rs`) counts from `walk_base`, which is per-fiber state (`FiberCtx`, swapped by
+`swap_ctx`) shared across hook nesting (W8-43); a nested `<` checks it with `==`'s text.
 
 A box guard belongs to the task, not the worker: the task's `held_guards` and guard token travel in
 its `FiberCtx` across a park. A task that holds a guard is preempted at the D3 safepoint like any
 other (since 2026-11-08): a fiber that waits for its guard parks, as Go preempts a goroutine that
 holds a `sync.Mutex`.
 
-**What still re-enters.** A push is legal only from the dispatch loop (`flat`: every method call
-op reaches it there). A hook reached from a nested container walk (`==`/`hash`/`str`/`<` inside a list, tuple, map
-or set), a map/set probe, `unique`/`dedup`, set algebra, a tuple or list `sort_by_key` key,
-`drain_iterable` (`T.from_iter(x)` where `x` has an `iter` hook), a `json.decode` default thunk and
-an FFI callback keep `Vm::reentered`: the fiber demotes and waits in place, awake in the run's
-count, so a deadlock there hangs (`gaps.md` W23-1). A `defer` drain runs on frames too (since 2026-11-07, `src/vm/defer_drain.rs`): it is a
-trampoline frame that calls each record through a real call op, so a wait in a `defer` body, or in a
-callback of a deferred native method (`defer xs.map(f)`), parks its task. The `--max-heap`
-hard-halt drain's wait parks too (plan 2026-11-17), so its deadlock is reported. The grid is `tests/callback_park_grid.rs`: every
-callback kind × `main`, a helper, top level, `spawn:` and a `test fn`, with no sender (`deadlock`,
-the same text at T=1, 2, 4) and with a live sender (the golden output, no false deadlock).
+**What still runs on the Rust stack.** A push is legal only from the dispatch loop. A host frame
+stays under three kinds of code (`Vm::reentered`, the Reentered context of `block::mode`): an FFI
+callback (a C frame is under it, as under Go's cgo callback), a map/set probe hook (`hash`, or a
+key's `eq` during a lookup or a set algebra op), and the Rust-stack `defer` drain under one of
+them. A wait there demotes and waits in place, awake in the run's count, so a deadlock there hangs
+(`gaps.md` W23-1). An `Inline` native or a builtin callee of a HOF or box closure (`xs.map(math.abs)`,
+`ord`, `chr`, `panic`) also runs nested, because none can wait or call user code; a step frame
+for it cost +63% on `xs.map(math.abs)`. `tests/owner_guards.rs`
+`a_host_frame_is_counted_in_one_place` keeps the callers of `Vm::reentered`, `Vm::guarded` and
+`Vm::guarded_walk` to those files. A `defer` drain runs on frames (`src/vm/defer_drain.rs`): it is a
+trampoline frame that calls each record through a real call op, so a wait in a `defer` body, or in
+a callback of a deferred native method (`defer xs.map(f)`), parks its task. Every hard-halt unwind
+(`--timeout`, `--max-heap`, a cancel) drains through the same trampoline (`Vm::drain_then`,
+`DrainCont::Unwind`), so its wait parks and its deadlock is reported. The `--timeout` deadline
+still cuts every wait inside such a `defer` (TICKET-286): a `defer` that waits past it does not
+finish, and no deadlock is reported. The grid is `tests/callback_park_grid.rs`: every callback kind
+× `main`, a helper, top level, `spawn:` and a `test fn`, with no sender (`deadlock`, the same text
+at T=1, 2, 4) and with a live sender (the golden output, `demotes=0`, no false deadlock).
 
 ## Wait implementation
 
@@ -166,32 +187,21 @@ DEC-176 rule "judge an all-closed `wait:` as a whole" served that skip. D2 makes
 arm, so `closed` is a ready condition on every wake predicate (park re-check, demote poll, eager
 in-place wait), the re-run poll settles on it (no spin), and the fault is gone.
 
-**Send-arm inside a native callback (TICKET-185).** A send-arm that cannot move its value, reached
-*inside a native callback* (a `Shared.update` closure, a list-HOF), DEMOTES and blocks on its offer,
-as Go blocks — like a plain full `send` there.
+**Send-arm under a host frame (TICKET-185).** A send-arm that cannot move its value under a host
+frame (the Reentered context: an FFI callback, a map/set probe hook) DEMOTES and blocks on its
+offer, as Go blocks — like a plain full `send` there.
 
-**Timer arm — timed-park, not inline-sleep.** A live `timer(ms)` arm is handled differently per
-*waiter*. A waiter with no worker loop under it — the INLINE body of an outermost `parallel:` builder
-— has no thread of its own, so it **inline-sleeps** to the soonest deadline then takes the timer arm.
-**Known-limit (`docs/contributing/gaps.md` N10):** the inline-sleep fires
-*before* the park, so if a **runnable sibling** could satisfy a non-timer arm, that waiter strands it
-and takes the timer where a party parked on a real worker thread would take the sibling's `send`
-instead (the worker-thread behavior is correct). A party with
-its own worker thread must **not** inline-sleep: that would
-pin the OS worker and strand a sibling `send` that lands mid-window. Instead it arms **one** background
+**Timer arm — timed-park.** A fiber's live `timer(ms)` arm arms **one** background
 `timer::submit_at(deadline, send_wake(true))` on the soonest timer arm's own channel (guarded by an
 arm-once `ChannelCore.timer_armed` CAS so a re-park can't re-arm) and falls through to the normal
-snapshot-park, so the timer is just another bucket. A waiter that OWNS ITS OS THREAD — an eager
-`Executor` job, or the top-level `main` thread (with or without a native-callback frame under it) —
-needs no injected wake at all: it
-blocks in place with the timer as one more arm and simply **clamps** its wait to the deadline, so a
-sibling value that lands first wins and the timer is taken on the re-poll otherwise
-(`docs/contributing/gaps.md` **W7-14**: `timer(300)` must not beat a value that arrives at 50 ms, as
-Go's `select` takes the value). The `WaitPark` claimed-CAS sweep then picks **exactly
-one** of {a sibling `send`/`close` on any arm, the timer's own deadline `send_wake`} — a value arriving
-before the deadline wins the wait (the value is **not** stranded), the deadline wins only if nothing else
-did. The `native_reentry > 0` demote path threads the deadline into its bounded poll (channel scan first,
-so a real send still beats the timer).
+snapshot-park, so the timer is just another bucket. It must not sleep inline: that would pin the
+OS worker and strand a sibling `send` that lands mid-window (`docs/contributing/gaps.md` **W7-14**:
+`timer(300)` must not beat a value that arrives at 50 ms, as Go's `select` takes the value). The
+`WaitPark` claimed-CAS sweep then picks **exactly one** of {a sibling `send`/`close` on any arm, the
+timer's own deadline `send_wake`} — a value arriving before the deadline wins the wait (the value is
+**not** stranded), the deadline wins only if nothing else did. Under a host frame the demote path
+threads the deadline into its bounded poll (channel scan first, so a real send still beats the
+timer).
 - *Non-blocking* (`else` present) and the *poll* step reuse the existing `try_recv` path (a timer arm's
   `try_recv` is already deadline-aware) — straightforward in the VM. **(Done.)**
 - *Blocking* (no `else`) needs a **multi-channel park** — **done in both schedulers.** A fiber parks in one
@@ -217,59 +227,43 @@ so a real send still beats the timer).
   while the fiber heap is live (mirrors `Disp::Park`). The single-channel `recv` park stays the **1-key
   `ParkedEntry::Recv` special case** (alloc-free, provably unchanged — regression test
   `vm_wait_single_arm_recv_park_unchanged_under_parallel`).
-- *A waiter with no worker loop* (the inline outermost-`parallel:` body): poll arms once in source order; first ready wins; else if `else`,
-  run it; else if any arm is timer-backed **and the waiter has no worker loop to drive a park**
-  (the `InlineSleep` cell of `block::mode` for `BlockCtx::Builder { job: false }` — a party that owns
-  its OS thread blocks in place with the timer clamped instead, W7-14),
-  inline-sleep to the soonest deadline and take that arm; else
-  fault (the existing deadlock fault; a closed recv arm is ready, D2). Deterministic → matches a worker-thread party's
-  behavior **except** when a timer arm races a runnable sibling (`docs/contributing/gaps.md` N10): the inline-sleep runs before the park,
-  so this no-worker-loop waiter takes the timer where a worker-thread waiter takes the sibling — a
-  known limit (the worker-thread behavior is correct). Proper fix = park first, inline-sleep the timer
-  only when the quiesce path would idle-deadlock.
-- *`native_reentry > 0`* (inside a native callback): snapshot-park is impossible — mirror
-  `demote_recv_block` with a **multi-channel demote-poll** (`demote_wait_block`: register the wait as
-  one `Waiter` in `SchedCore::waiters`, poll all N queues source-order under the core lock on a bounded
-  `DEMOTE_POLL_BACKOFF`). **v1 limitation (sound, lower-throughput):** there are N channel condvars and no
-  single one to block on, so the demote loop polls on a backoff timer rather than waiting on a targeted
-  condvar — same shape as a timer wait inside a callback. The snapshot-park (reentry == 0) is the fast
-  path; the demote is only reached when a `wait` is run from inside a host-stack native callback.
+- *Under a host frame* (`native_reentry > 0`, the Reentered context): snapshot-park is impossible —
+  mirror `demote_recv_block` with a **multi-channel demote-poll** (`demote_wait_block`: register the
+  wait as one `Waiter` in `SchedCore::waiters`, poll all N queues source-order under the core lock on
+  a bounded `DEMOTE_POLL_BACKOFF`). **Limitation (sound, lower-throughput):** there are N channel
+  condvars and no single one to block on, so the demote loop polls on a backoff timer rather than
+  waiting on a targeted condvar — same shape as a timer wait there. The snapshot-park is the path of
+  every other wait; the demote is reached only from an FFI callback or a map/set probe hook.
 
 ## One runner budget
 
-**The budget also preempts a CPU loop inside a native callback** (`List.map`/`sort`/`Shared.update`
-closures; `docs/contributing/gaps.md` **W14-14**, TICKET-141). That fiber cannot leave its thread — the callback's
-loop state is on the host stack — so the THREAD hands its runner slot to one replacement worker and
-takes a slot back in FIFO order (`src/vm/width.rs`). `--threads=N` stays N
-runners, like Go's `GOMAXPROCS=1`: a callback spin no longer starves a sibling, a sleeper or a
-cancelling fault. It fires only when a sibling is runnable or queued, so a lone spin costs nothing.
+**The budget also preempts a CPU loop under a host frame** (an FFI callback, a map/set probe hook;
+`docs/contributing/gaps.md` **W14-14**, TICKET-141). That fiber cannot leave its thread — the
+callback's state is on the host stack — so the THREAD hands its runner slot to one replacement worker
+and takes a slot back in FIFO order (`src/vm/width.rs`, `Vm::slice_end_in_place`). `--threads=N`
+stays N runners, like Go's `GOMAXPROCS=1`: a callback spin does not starve a sibling, a sleeper or
+a cancelling fault. It fires only when a sibling is runnable or queued, so a lone spin costs
+nothing. Every other callback runs as a frame, so its fiber yields at the slice end as any fiber
+does.
 
-**The budget also preempts an `Executor` job and a job's nursery (TICKET-205).** A job runs to its
-end on a pool thread and cannot leave it either, so it is one more party of the same gate. Before
-this fix a job's `Vm` skipped the safepoint: at `CHEZZI_THREADS=1` a job in a CPU loop starved every
-other job, of its own executor or another, until the loop ended (`os.exit` from a second executor's
-job landed after 23 s; Go at `GOMAXPROCS=1` exits at ~100 ms). The rules, one mechanism for every
-kind of party:
+**An `Executor` job is a fiber (TICKET-205, TICKET-208).** It runs on the root sched's workers and
+yields at a slice end like any fiber. Before TICKET-205 a job's `Vm` skipped the safepoint: at
+`CHEZZI_THREADS=1` a job in a CPU loop starved every other job, of its own executor or another,
+until the loop ended (`os.exit` from a second executor's job landed after 23 s; Go at
+`GOMAXPROCS=1` exits at ~100 ms). The rules, one mechanism for every kind of party:
 
 - **One runner budget of N per process, main included: `width::RUNNERS` (TICKET-230).**
   `--threads=N` caps the threads that run Chezzi code at once at N process-wide, like Go's
   `GOMAXPROCS`, at every N. The gate holds `worker_count()` permits, read at every acquire, and it
   is the only width budget. Every thread that runs Chezzi code holds a permit while it runs: main
-  takes one in `Vm::run` (`width::RunPermit`), and drainers, helpers, pool threads, demote
-  replacements and `Executor` runners take one in `take_runnable_inner` before they pick. Before
+  takes one in `Vm::run` (`width::RunPermit`), and the root sched's workers, demote replacements and
+  `Executor` runners take one in `take_runnable_inner` before they pick. Before
   TICKET-230 the gate counted runners only at `--threads=1`, so each `Executor` and each sched got
   its own N: two Executors with 4 CPU jobs each used 4.01 cores at `--threads=2`, now 1.98.
-  `claim_runners` stays per-sched DEMAND (how many runners a sched wants), not width. Thread counts
-  have separate caps: `NestedDrainerSlot` caps drainer and helper THREADS at `worker_count().max(2)`,
-  the pool keeps `worker_count()` threads plus one replacement per blocked job, and `Executor`
-  runners stay outside the thread cap (a denied start would cancel the job). The gate's state is
-  per OS thread, not per `Vm` or per scheduler. A party that cannot leave its thread at a slice end
-  (a native callback, an `Executor` job, a nursery body on main) hands its permit over through
-  `Vm::slice_end_in_place`; main does so only once it has started another runner, so a
-  single-threaded program pays nothing per op. A fiber that can leave its thread yields as before.
-- **A job hands its slot over only when a job waits and no pool thread is idle**
-  (`pool::job_waits_for_my_slot`). K CPU jobs at `--threads=1` then run on up to K pool threads that
-  share one permit: threads grow with the parties that cannot leave their thread, runners do not.
+  `claim_runners` stays per-sched DEMAND (how many runners a sched wants), not width. Threads grow
+  only with demotes: each demoted worker starts one replacement. The gate's state is per OS thread,
+  not per `Vm` or per scheduler. A fiber under a host frame hands its permit over at a slice end
+  through `Vm::slice_end_in_place`; every other fiber yields.
 - **A gated thread picks a fiber, and draws from the seeded RNG, only while it holds the permit.**
   `take_runnable_inner` takes the permit before the pick and releases it before every wait.
   An idle unseeded worker also takes a FREE permit (`width::try_acquire`) to look for work, and
@@ -324,8 +318,6 @@ kind of party:
   one `DEMOTE_POLL_BACKOFF` tick. A worker is listed only when fewer than two permits are free
   besides its own (`width::tight()`, TICKET-230; always true at `--threads=1`). An unlisted worker
   can receive no ticket, so it sleeps untimed on `idle_cv`.
-- **A runner thread parks in `runner_cache` holding no permit and no ticket**, so gated threads are
-  reused across nurseries like ungated ones were (TICKET-230).
 - **Cost.** A hand-over has no CPU cost of its own, but a serialized `--threads=1` run of two CPU
   jobs costs more wall time than one sequential run when the kernel's `schedutil` governor ramps
   each thread separately: 0.90 s serial, 1.52 s with hand-overs, 0.91 s pinned to one core with
@@ -335,31 +327,32 @@ kind of party:
 
 Grid: `tests/runner_handover_grid.rs` (spinner kind x victim kind x action x worker count, 672
 cells; 36 were red before the fix, all job-versus-job at one worker).
-A gated thread releases its slot around every wait in place (demotes, guard waits, inline nursery
-joins and aborts, inline sleeps, `Executor.shutdown()`, blocking natives). Since 2026-11-08 an
-`Executor.shutdown()` in a fiber PARKS for the join (item 3 below; TICKET-181 had it demote), so it
-holds no runner slot and the slot promise holds at T=1 too. A `Kind::HostWait` native
+A gated thread releases its slot around every wait in place (demotes, guard waits, in-place
+nursery joins and aborts, blocking natives). Since 2026-11-08 an `Executor.shutdown()` in a fiber
+PARKS for the join (item 3 below; TICKET-181 had it demote), so it holds no runner slot and the
+slot promise holds at T=1 too. A `Kind::HostWait` native
 (the `std.io` stdin readers) demotes the worker and gives its slot back for the read, direct or
 inside a callback, so a runnable sibling runs while stdin is withheld, as under Go's `sysmon`.
 
 **At `--threads=1`, a top-level `parallel:` body ALSO counts as a CPU runner (TICKET-168, W15-2,
 fixed 2026-09-23).** Before this fix, a top-level body doing CPU work raced its own `chezzi-eager`
 drainer — the two ran at once (196% measured), even though W8-8 had already made every OTHER T=1
-shape correctly serial. The body and the drainer now share one width permit (`src/vm/width.rs`,
-TICKET-141), so `--threads=1` runs at most one CPU runner including the main-thread body: fixed
-measured 96% on the same shape, matching Go `GOMAXPROCS=1`'s 100%. `docs/contributing/gaps.md` **W15-9** (a
-body that blocks once then burns ran n+1 runners at T>=2) is closed by TICKET-230: the body's
-thread and every runner now hold one permit of the same N-wide gate at every worker count, so the
-runners that outlive the unblock wait for a permit instead of adding a core. Since TICKET-205
-the gate is one per process and an `Executor` job is a party of it too (see above); the body has no
-gate of its own. Full tables: `docs/contributing/benchmarks.md` §TICKET-168.
+shape correctly serial. The fix made the body and the drainer share one width permit
+(`src/vm/width.rs`, TICKET-141), so `--threads=1` runs at most one CPU runner including the
+main-thread body: fixed measured 96% on the same shape, matching Go `GOMAXPROCS=1`'s 100%. Since
+main runs as fiber 1 (2026-11-18) the body is a fiber of the root sched and there is no drainer.
+`docs/contributing/gaps.md` **W15-9** (a body that blocks once then burns ran n+1 runners at T>=2)
+is closed by TICKET-230: the body's thread and every runner now hold one permit of the same N-wide
+gate at every worker count, so the runners that outlive the unblock wait for a permit instead of
+adding a core. Since TICKET-205 the gate is one per process and an `Executor` job is a party of it
+too (see above); the body has no gate of its own. Full tables: `docs/contributing/benchmarks.md`
+§TICKET-168.
 
 ## Blocking-table accounting
 
 **The counts come from one table.** `block::wait_steps(spec, ctx)` gives each wait the counts it
-registers, and `Vm::wait_begin` takes them (`Vm::nursery_counts` for a nursery join); `Vm::wait_end`
-drops them before it takes the permit back (an in-place channel tick, after it, before its next
-pop). A wait that ends by itself (`will_return`: a deadline or an external completion) counts
+registers, and `Vm::wait_begin` takes them; `Vm::wait_end` drops them before it takes the permit
+back (an in-place channel tick, after it, before its next pop). A wait that ends by itself (`will_return`: a deadline or an external completion) counts
 nothing, and a demoted one is `inflight`. A demoted wait that does not end by itself registers a
 waiter in the ONE registry `SchedCore::waiters`. A parked fiber counts through its park (`parked_n`,
 `join_parked`, a timer's `inflight`), not through the table. None of these decides a deadlock: the
@@ -385,3 +378,7 @@ shape adds a table row, never a new list.
    then sent to never ran (`send on a rendezvous channel: deadlock`); Go prints the value.
 6. A blocking native (`request.get`, `fs`, `process`) in a Demote context demotes (F1). It held the
    runner, so `request.get` to a sibling-served socket timed out at T=1; Go prints `[200]`.
+
+The table had six contexts then. Since plan `2026-11-18-every-wait-parks` (2026-11-20) it has two,
+Park and Reentered (the "Demote" context above), and every cell of the shapes in 2 and 4 parks:
+`main`, a `defer:` and an `Executor` job are fibers.

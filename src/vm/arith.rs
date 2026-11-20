@@ -184,28 +184,25 @@ impl Vm {
     /// The `==` / `!=` OPERATOR entry (`negate` flips it to `!=`). Pops `[l, r]`, pushes a `Bool`.
     ///
     /// `Eq` protocol (M23): two operands of the SAME struct/enum type whose type defines
-    /// `eq(self, o: Self) -> bool` dispatch to that method; everything else keeps the structural
-    /// worker. The dispatch itself lives in [`Self::values_equal_guarded`] — the ONE place every
-    /// consumer (this operator, `in`, map/set probing, the recursive container arms) routes through.
+    /// `eq(self, o: Self) -> bool` dispatch to that method; everything else takes the structural
+    /// walk ([`Self::eq_run`]), the ONE place every consumer (this operator, `in`, the list scans,
+    /// map/set probing) routes through.
     ///
-    /// The popped operands are rooted across the call: a user `eq` allocates, and `l`/`r` are off the
-    /// operand stack from here on.
+    /// A hook the walk reaches, at the top or nested in a container, runs as a frame: the operands
+    /// are its locals, or sit in the walk's level slots.
     #[inline(never)]
     pub(super) fn eq_operator(&mut self, negate: bool, span: Span) -> Result<(), RuntimeError> {
         let r = self.pop();
         let l = self.pop();
-        // A top-level hooked `==` runs its `eq` as a frame (the operands are its locals); a nested
-        // container walk keeps the synchronous hook call in `values_equal_guarded`.
         if !self.eq_hook_off
             && self.eq_hook_applies(l, r)
             && self.push_hook_frame(Hook::Eq, l, &[r], RetAction::EqBool { negate }, span)?
         {
             return Ok(());
         }
-        let held = [l, r];
-        let roots: &[Value] = if self.eq_may_reenter() { &held } else { &[] };
-        let eq = self.with_roots(roots, |vm| vm.values_equal_guarded(l, r, 0, span))?;
-        self.push(Value::bool(eq ^ negate));
+        if let Some(eq) = self.eq_run(l, r, 0, Some(EqThen::Op { negate }), span)? {
+            self.push(Value::bool(eq ^ negate));
+        }
         Ok(())
     }
 

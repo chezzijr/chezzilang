@@ -936,8 +936,8 @@ fn poly_ic_site_latches_sticky_on_5th_type() {
     let module = parser::parse(tokens).unwrap();
     let program = crate::compiler::compile_module_standalone(&module).unwrap();
     let mut vm = Vm::new(Arc::new(program));
-    // In place: the IC under test is this `Vm`'s, and `main` as fiber 1 runs on a worker shell.
-    vm.run_in_place().expect("run");
+    // One worker: `main` runs on this thread's shell, whose IC comes back to this `Vm`.
+    vm.run_one_worker().expect("run");
     assert_eq!(vm.out, b"15\n");
     // Exactly one method-call site (the `x.id()` in `sum`), and it must have gone sticky with all
     // 4 ways filled by the first four distinct tids.

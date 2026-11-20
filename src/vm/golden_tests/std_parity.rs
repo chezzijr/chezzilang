@@ -199,7 +199,7 @@ fn std_os_getcwd_ok() {
     assert_eq!(golden_entry(src), "ok\n");
 }
 
-/// TICKET-198 — a missing defaulted field runs its default re-entrantly while `coerce_json` holds
+/// TICKET-198 — a missing defaulted field runs its default as a frame while the decode walk holds
 /// decoded siblings, list elements and map values. Under GC stress (collect before every
 /// instruction) they must stay rooted: before the operand-stack rooting this frees `xs[0]`.
 #[test]

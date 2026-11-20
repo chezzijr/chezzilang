@@ -221,7 +221,6 @@ impl MnSched {
                 parked: std::collections::HashMap::new(),
                 slots: (0..total).map(|_| None).collect(),
                 running: 0,
-                pool_joiner: None,
                 drain_scan_gen: 0,
                 parked_n: 0,
                 join_parked: Vec::new(),
@@ -267,7 +266,7 @@ impl MnSched {
             // TICKET-099 — empty by default; both `MnSched` construction sites assign the run's
             // registry. An empty one is today's behaviour (no peers to wake or veto against).
             sched_registry: Default::default(),
-            // TICKET-112 — false by default; `activate_eager_nursery` sets it for a nested sched.
+            // TICKET-112 — `None` by default; an Executor's sched sets it (`Vm::new_detached_sched`).
             detached: None,
             // gaps.md W7-56 — empty by default; both `MnSched` construction sites assign the run's
             // registry. An empty one is today's behaviour (no veto).
@@ -277,8 +276,6 @@ impl MnSched {
             idle_sleepers: AtomicUsize::new(0),
             spinning: AtomicUsize::new(0),
             visitors: AtomicUsize::new(0),
-            helpers_live: Mutex::new(0),
-            helpers_gone: Condvar::new(),
             #[cfg(test)]
             picks: AtomicUsize::new(0),
             #[cfg(test)]
@@ -301,85 +298,14 @@ impl MnSched {
         self.inflight.fetch_sub(1, Ordering::Relaxed);
     }
 
-    /// TICKET-118 (W13-7) — mark this OS thread as the one thread of THIS sched allowed to hand its
-    /// bounded-pool slot over while it waits idle on a nursery join. Restores the previous marker
-    /// (DEC-052: only ever installed by the top-level `Vm`, `mn.is_none()`) when the guard drops.
-    pub(super) fn pool_joiner_guard(self: &Arc<Self>) -> PoolJoinerGuard {
-        let prev = self.lock().pool_joiner.replace(std::thread::current().id());
-        PoolJoinerGuard {
-            sched: Arc::clone(self),
-            prev,
-        }
-    }
-
-    /// TICKET-118 (W13-7) — what the marked joiner (if this thread is one) should do on its next
-    /// wait/park pass. `idle_since` tracks how long `running`/`runnable` have both read zero;
-    /// resets to `None` the moment either is nonzero.
-    ///
-    /// TICKET-126 (W13-24) — the id compare goes first and `me` is computed once per `take_runnable`
-    /// call outside the lock, because every helper worker is a pool job, so the old order paid two
-    /// TLS reads and a `thread::current()` under the core lock on every idle pass (measured +15% at
-    /// 28 workers, W13-24). The conjunction is logically identical: `c.pool_joiner != Some(me)` is
-    /// true whenever `c.pool_joiner.is_none()` was.
-    pub(super) fn joiner_step(
-        &self,
-        c: &SchedCore,
-        me: std::thread::ThreadId,
-        idle_since: &mut Option<std::time::Instant>,
-    ) -> JoinerStep {
-        if c.pool_joiner != Some(me) || !crate::vm::pool::may_yield_slot() {
-            return JoinerStep::Untimed;
-        }
-        if crate::vm::pool::job_waits_for_my_slot() {
-            return JoinerStep::Yield;
-        }
-        if c.running != 0 || self.runnable.load(Ordering::Relaxed) != 0 {
-            *idle_since = None;
-            return JoinerStep::Timed;
-        }
-        let now = std::time::Instant::now();
-        match *idle_since {
-            Some(t) if now.duration_since(t) >= DEMOTE_POLL_BACKOFF => JoinerStep::Yield,
-            Some(_) => JoinerStep::Timed,
-            None => {
-                *idle_since = Some(now);
-                JoinerStep::Timed
-            }
-        }
-    }
-
-    /// TICKET-118 (W13-7) — wait according to `step`: `Untimed` parks on `cv` with no deadline,
-    /// `Timed` parks for one `DEMOTE_POLL_BACKOFF` tick, `Yield` hands the pool slot to a
-    /// replacement (dropping the core lock first — `pool::yield_slot` must never run while holding
-    /// it) and re-locks.
-    pub(super) fn joiner_wait<'a>(
-        &'a self,
-        c: std::sync::MutexGuard<'a, SchedCore>,
-        idle_since: &mut Option<std::time::Instant>,
-    ) -> std::sync::MutexGuard<'a, SchedCore> {
-        match self.joiner_step(&c, std::thread::current().id(), idle_since) {
-            JoinerStep::Untimed => self.cv.wait(c).unwrap_or_else(|e| e.into_inner()),
-            JoinerStep::Timed => {
-                self.cv
-                    .wait_timeout(c, DEMOTE_POLL_BACKOFF)
-                    .unwrap_or_else(|e| e.into_inner())
-                    .0
-            }
-            JoinerStep::Yield => {
-                drop(c);
-                crate::vm::pool::yield_slot(None);
-                self.lock()
-            }
-        }
-    }
-
-    /// Cross-nursery flat scheduler — a NESTED nursery (nested `run_mn_nursery` / eager nursery) enlists
-    /// into THIS one global sched. Opens a `JoinScope` whose `base_index` is the current flat
+    /// A scope of `total` slots for a test fixture (the engine registers its scopes seeded,
+    /// [`MnSched::register_scope_seeded`]). Opens a `JoinScope` whose `base_index` is the current flat
     /// `slots.len()`, extends `slots` by `total` `None`s (its contiguous sub-range), and returns the new
     /// `scope_id`, issued by [`ScopeTable::open`] (never a reissued id). Existing scopes' `base_index`
     /// never shifts, so live fibers' `task_index` stays valid. Holds the core lock so the grow is
     /// atomic against the deadlock predicate. `total` may be 0 for an eager nursery (it grows via
     /// `inject`).
+    #[cfg(test)]
     pub(super) fn register_scope(
         &self,
         total: usize,
@@ -400,13 +326,14 @@ impl MnSched {
             deadlock_err: None,
             parent_scope: None,
         });
-        // Cross-nursery flat scheduler — a late `spawn:` into a non-outermost nursery registers a fresh
-        // TRAILING scope on the HELD sched (`run_mn_nursery` held-nested branch) AFTER every prior scope
-        // finished, which may already have latched global `terminate` (`finish`'s `all_scopes_done`). A
-        // newly-registered scope has unfinished work (`done=0 < total`), so the sched is by definition no
-        // longer "all done": un-latch `terminate` so the inline owner that will run this scope is not
-        // stopped on the stale flag (`take_runnable` checks `terminate` first → `Stop` → the scope would
-        // never run and `wait_for_scope` would hang). Harmless on the never-terminated nested path.
+        // Cross-nursery flat scheduler — a late `spawn:` into a non-outermost nursery registers a
+        // fresh TRAILING scope on the fiber's own sched (`Vm::activate_fiber_owned_nursery`) AFTER
+        // every prior scope finished, which may already have latched global `terminate` (`finish`'s
+        // `all_scopes_done`). A newly-registered scope has unfinished work (`done=0 < total`), so
+        // the sched is by definition no longer "all done": un-latch `terminate` so the inline owner
+        // that will run this scope is not stopped on the stale flag (`take_runnable` checks
+        // `terminate` first → `Stop` → the scope would never run and `wait_for_scope` would hang).
+        // Harmless on the never-terminated nested path.
         c.terminate = false;
         c.verdict_cut = false;
         scope_id
@@ -464,11 +391,6 @@ impl MnSched {
         self.core.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// TICKET-128 (W13-25) — a run-wide wake. Broadcasts `cv` (the joiner and every timed waiter
-    /// still listen there) and, only when a worker is actually asleep on `idle_cv`, broadcasts that
-    /// too. Every site that used to broadcast `cv` alone for a wake reachable by an idle worker now
-    /// calls this instead, so narrowing the idle sleep to its own condvar never strands a sleeper
-    /// that the old broadcast would have reached.
     /// TICKET-205 — list a worker's slot as idle (once).
     pub(super) fn idle_register(&self, slot: &Arc<width::Slot>) {
         if slot.is_listed() {
@@ -775,59 +697,25 @@ impl MnSched {
     }
 
     /// TICKET-211 — THE runner-count decision: the wids the caller must start now (`Vm::start_runners`).
-    /// Claims free wids while fewer than `n` (the worker count) are set and fewer fiber runners than
-    /// undone tasks run. The body's own thread (bit 0 while scope 0's body is open) counts toward `n`
-    /// but runs no fiber. For an Executor (bit 0 never set) this is `min(n, undone)`. Called in the
-    /// lock hold that made the work runnable, so a runner leaving (it clears its bit under this
-    /// lock) is never counted.
+    /// Claims free wids while fewer than `n` (the worker count) are set and fewer runners than
+    /// undone tasks run: for an Executor this is `min(n, undone)`. Called in the lock hold that made
+    /// the work runnable, so a runner leaving (it clears its bit under this lock) is never counted.
     pub(super) fn claim_runners(&self, c: &mut SchedCore) -> Vec<usize> {
         let budget = c.runner_wids.len() - 1;
         let undone = c.undone_tasks();
         let mut claimed = c.runner_wids.iter().filter(|b| **b).count();
-        let body = c.runner_wids[0] && c.scopes.get(0).is_some_and(|s| s.body_open);
-        let mut fiber_runners = claimed - usize::from(body);
         let mut out = Vec::new();
         for wid in 1..c.runner_wids.len() {
-            if claimed >= budget || fiber_runners >= undone {
+            if claimed >= budget || claimed >= undone {
                 break;
             }
             if !c.runner_wids[wid] {
                 c.runner_wids[wid] = true;
                 claimed += 1;
-                fiber_runners += 1;
                 out.push(wid);
             }
         }
         out
-    }
-
-    /// TICKET-211 — the body's own thread stops (`blocked`) or resumes running: it gives bit 0 back
-    /// or takes it again, in one lock hold. A blocked body returns the runners its freed slot
-    /// claims; the caller starts them. A no-op for an Executor, which has no body thread.
-    pub(super) fn body_runner(&self, blocked: bool) -> Vec<usize> {
-        if self.detached.is_some() {
-            return Vec::new();
-        }
-        let mut c = self.lock();
-        c.runner_wids[0] = !blocked;
-        if blocked {
-            self.claim_runners(&mut c)
-        } else {
-            Vec::new()
-        }
-    }
-
-    /// TICKET-211 — may the closed body's thread run fibers as the inline joiner? Only under the
-    /// cap: it claims bit 0 when fewer than `n` bits are set.
-    pub(super) fn claim_joiner(&self) -> bool {
-        let mut c = self.lock();
-        let claimed = c.runner_wids.iter().filter(|b| **b).count();
-        if claimed < c.runner_wids.len() - 1 {
-            c.runner_wids[0] = true;
-            true
-        } else {
-            false
-        }
     }
 
     /// TICKET-211 — the lazy sched's runners are fixed at build -- the owner on wid 0 and pool
@@ -920,18 +808,11 @@ impl MnSched {
         }
     }
 
-    /// Per-connection spawn — mark `scope_id`'s (eager) body as still producing tasks: a transient
-    /// `done == total` will not terminate it, so farmed workers park waiting for the next `inject`
-    /// instead of exiting. Called at `EnterNursery`.
-    pub(super) fn open_body(&self, scope_id: usize) {
-        self.lock().scopes[scope_id].body_open = true;
-    }
-
     /// Per-connection spawn — `scope_id`'s eager body reached `JoinNursery`: no more injections. Clear
     /// the flag and wake every worker so the run-out-of-work path can terminate (all scopes done) or
     /// fire a genuine deadlock now that the body is no longer live work.
     /// TICKET-211 — closing scope 0 also gives the body's runner bit back: the thread is no longer
-    /// the body, and runs fibers only if [`MnSched::claim_joiner`] lets it.
+    /// the body.
     pub(super) fn close_body(&self, scope_id: usize) {
         {
             let mut c = self.lock();
@@ -963,29 +844,6 @@ impl MnSched {
         c.scope_retired(scope_id);
         let end = c.scopes.slot_end();
         c.slots.truncate(end);
-    }
-
-    /// TICKET-211 — one more runner lease serves this sched.
-    pub(super) fn helper_started(&self) {
-        *self.helpers_live.lock().unwrap_or_else(|e| e.into_inner()) += 1;
-    }
-
-    /// TICKET-211 — a runner lease stopped serving this sched.
-    pub(super) fn helper_done(&self) {
-        *self.helpers_live.lock().unwrap_or_else(|e| e.into_inner()) -= 1;
-        self.helpers_gone.notify_all();
-    }
-
-    pub(super) fn has_helpers(&self) -> bool {
-        *self.helpers_live.lock().unwrap_or_else(|e| e.into_inner()) > 0
-    }
-
-    /// TICKET-211 — wait until every runner lease of this sched is done.
-    pub(super) fn wait_helpers(&self) {
-        let mut n = self.helpers_live.lock().unwrap_or_else(|e| e.into_inner());
-        while *n > 0 {
-            n = self.helpers_gone.wait(n).unwrap_or_else(|e| e.into_inner());
-        }
     }
 
     /// TICKET-159 — `finish`'s completion latch, for a caller that observed the completion itself:

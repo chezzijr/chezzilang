@@ -37,32 +37,6 @@ pub(super) fn cancel_fiber_owned_family(scope: &EagerScope) {
     scope.sched.drain_family(scope.scope);
 }
 
-/// TICKET-159/211 — wait for every runner lease `Vm::start_runners` handed to `runner_cache` for
-/// `sched` (the sched's live-helper count, not `JoinHandle`s: a lease's thread parks for the next
-/// sched instead of exiting). Called after `wait_for_completion`, so every scope is done and the
-/// body is closed. A SENTINEL helper stops only on `terminate`, and `finish` latches that only for a
-/// task that completes while no body is open — when every task finished BEFORE `close_body` nothing
-/// else would, so latch it here first.
-pub(super) fn join_helpers(sched: &Arc<MnSched>) {
-    if !sched.has_helpers() {
-        return;
-    }
-    sched.latch_terminate_if_done();
-    sched.wait_helpers();
-}
-
-/// TICKET-073 — the one process-wide cap on EXTRA eager runner THREADS a NESTED eager nursery may
-/// spend: a per-nursery `chezzi-eager` drainer (`activate_eager_nursery`) and the runner leases
-/// `Vm::start_runners` hands to `runner_cache` both draw from it. A lease holds its share until its
-/// raw `chezzi-eager-helper` thread parks, and the cache starts a thread only when no parked thread
-/// is unpromised, so the cap also bounds the cached runner threads, parked or running. Sized
-/// `worker_count().max(2)` so the bound stays linear in `--threads` and independent of nesting depth
-/// and fan-out (see `src/vm/pool.rs`).
-///
-/// TICKET-230 — this caps drainer and helper THREADS only. How many threads RUN Chezzi code at once
-/// (the CPU width, main included) is `width::RUNNERS`, alone.
-static NESTED_EAGER_DRAINERS: AtomicUsize = AtomicUsize::new(0);
-
 /// TICKET-205 — THE spawn of a raw worker thread of `sched` (the drainer, an eager helper, the
 /// replacement of a demoted worker).
 pub(super) fn spawn_worker_thread(
@@ -78,8 +52,7 @@ pub(super) fn spawn_worker_thread(
     })
 }
 
-/// TICKET-211 — THE birth of a runner OS thread, shared by [`spawn_worker_thread`] and
-/// `runner_cache::start`: width registration (adopted slot), the VM stack size, the thread name and
+/// TICKET-211 — THE birth of a runner OS thread, behind [`spawn_worker_thread`]: width registration (adopted slot), the VM stack size, the thread name and
 /// the `catch_unwind` around `body`. Every runner is gated from birth (TICKET-230), and its SPAWNER
 /// lists its slot with the sched, so a wake queues it for the runner permit in the waker's order
 /// instead of on the child's own start time. A refused thread withdraws the slot.
@@ -88,6 +61,8 @@ pub(super) fn spawn_runner_thread(
     name: &str,
     body: impl FnOnce() + Send + 'static,
 ) -> std::io::Result<std::thread::JoinHandle<()>> {
+    #[cfg(test)]
+    sched.quiesce.runner_spawns.fetch_add(1, Ordering::SeqCst);
     let child_slot = width::new_slot();
     sched.idle_register_child(&child_slot);
     let adopted = Arc::clone(&child_slot);
@@ -159,69 +134,6 @@ impl Drop for GatedReg {
         }
         width::cancel(&self.me);
     }
-}
-
-/// A held share of [`NESTED_EAGER_DRAINERS`]: one drainer or helper THREAD (TICKET-230: never a
-/// runner permit). Released by `Drop`, never by hand: an `EagerScope` moves across `Vm::swap_ctx`
-/// and is consumed by `join_eager_nursery` OR `abort_eager_nursery`, and a hand-written release in
-/// only those two consumers would leak a slot on every other drop path.
-pub(super) struct NestedDrainerSlot;
-
-impl NestedDrainerSlot {
-    pub(super) fn acquire() -> Option<Self> {
-        NESTED_EAGER_DRAINERS
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |c| {
-                (c < worker_count().max(2)).then_some(c + 1)
-            })
-            .ok()
-            .map(|_| NestedDrainerSlot)
-    }
-}
-
-impl Drop for NestedDrainerSlot {
-    fn drop(&mut self) {
-        NESTED_EAGER_DRAINERS.fetch_sub(1, Ordering::AcqRel);
-    }
-}
-
-/// TICKET-245 — who else is guaranteed to run a joined sched's fibers while its joiner waits;
-/// [`Vm::joiner_shell`]'s input.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(super) enum JoinCover {
-    /// nobody is guaranteed to: a lazy join and a fiber-owned join
-    None,
-    /// the sched's drainer and its started runners: an eager join
-    Runners,
-    /// the same runners, at an eager ABORT (TICKET-287): the joiner never helps. Its cancelled
-    /// family needs no throughput, and a fiber outside it (one blocked in place in a callback)
-    /// would hold the joiner's fault on its stack.
-    RunnersAbort,
-}
-
-/// W8-8 — the inline joiner runs fibers only when the budget has a slot left after the drainer.
-/// At `n == 1` the drainer already holds the only slot, so the joiner just waits for completion —
-/// otherwise `--threads=1` runs two CPU runners and does not serialize.
-///
-/// T1-fix — a hazard this gate introduces, not fixed here: at `n == 1` the joiner no longer runs any
-/// fiber loop of its own, so it is now purely a spectator waiting on the drainer thread. A panic
-/// inside `take_runnable`/`park`/`finish` itself (outside `run_one_fiber`'s own inner
-/// `catch_unwind`) is swallowed by the drainer thread's OUTER `catch_unwind`
-/// (`activate_eager_nursery`'s `spawn(move || { catch_unwind(...) })`); the thread then exits with
-/// its scope's slots unfilled, and at `n == 1` there is nothing else left to fill them, so the
-/// joiner's `wait_for_completion`/`wait_for_scope` blocks forever. Pre-W8-8 the joiner's own fiber
-/// loop covered that. At `n >= 2` a multi-task nursery also has the runners `Vm::start_runners`
-/// started on its claim (TICKET-211, raw `chezzi-eager-helper` threads from `runner_cache`, each
-/// lease holding a `NestedDrainerSlot`, never the pool), so a dead drainer still leaves runners behind whenever the budget has a
-/// slot; only when the budget is empty does the joiner's own loop become the sole cover, closing the
-/// window at `n >= 2` purely because the gate lets that loop run. Requires a pre-existing scheduler bug
-/// to reach, so no code change here — recorded so the next reader sees the trade.
-///
-/// The pre-W8-8 joiner loop did not rescue the lost fiber either: its slot is gone. The real fix
-/// is not a joiner loop — it is deciding what the scheduler should do when a worker thread panics
-/// at all, which every `catch_unwind` in this file swallows today and which is a design question
-/// wider than this gate.
-pub(super) fn eager_joiner_runs_fibers(n: usize) -> bool {
-    n >= 2
 }
 
 /// A cancel of `flag` (`Executor.cancel()`, `Task.cancel()`) drains the parked fibers under it

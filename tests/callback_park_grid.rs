@@ -2,9 +2,11 @@
 //! HOF callback, a box closure, a generator body or a `defer` body, reached from every caller, at
 //! T=1, 2 and 4. With no sender it must report `deadlock` (exit 1, the same text at every T), as
 //! Go reports `fatal error: all goroutines are asleep - deadlock!` for every one of these shapes.
-//! With a live sender it must print the program's golden output (no false deadlock). The
-//! residual kinds wait in place, which counts as awake, so they hang in every caller (plan
-//! 2026-11-17).
+//! With a live sender it must print the program's golden output (no false deadlock). Plan
+//! 2026-11-18-every-wait-parks runs the rest as frames too: a nested container walk (`==`, `str`,
+//! `<`), a native-fn callback, an iterable drain, a generator step and a json `default` thunk
+//! (`Fix::Walk`). The one residual kind is a map-key probe hook: its wait demotes on the Rust
+//! stack, which counts as awake, so it hangs in every caller (plan 2026-11-17).
 //!
 //! `LANDED` is the last plan task that has landed. A kind whose task is later still hangs in a
 //! non-`spawn` caller (the W23-1 residual before the fix); raising `LANDED` flips its cells.
@@ -39,18 +41,25 @@ enum Fix {
     /// judged at this plan task, as `Task`, and its guard wait parks: every cell must report
     /// `demotes=0` (plan 2026-11-08-park-guard-and-join; Go parks a goroutine on `mu.Lock()`)
     Parks(u8),
-    /// never: a nested container walk keeps the nested loop (narrowed W23-1, out of scope)
+    /// a wait that runs as a frame (plan 2026-11-18-every-wait-parks: the nested walks of Tasks 1a,
+    /// 1b and 2, the native callbacks, drains and generator steps of Task 3, the json defaults of
+    /// Task 4): it parks, so every caller reports `deadlock` and every cell `demotes=0`
+    Walk,
+    /// never: a map-key probe hook runs on the Rust stack and its wait demotes (W23-1 narrowed to
+    /// probe hooks, out of scope)
     Residual,
 }
 
 /// One callback kind: `prelude` declares what `act` needs, `act` (unindented) waits through `w()`
-/// and prints; `out` is its stdout with a live sender.
+/// and prints; `out` is its stdout with a live sender. `fault` is the message the live run ends
+/// with (exit 1), if it faults: an error text whose render waits.
 struct Kind {
     name: &'static str,
     fix: Fix,
     prelude: &'static str,
     act: &'static str,
     out: &'static str,
+    fault: Option<&'static str>,
 }
 
 // Go oracle (run on go1.27, 2026-11-07, no sender on `ch`): `<-ch` inside a `slices.IndexFunc`
@@ -65,6 +74,7 @@ const KINDS: &[Kind] = &[
         prelude: "s := Shared[int](0)",
         act: "s.update(fn(v: int) -> int: v + w())\nprint(s.read(fn(v: int) -> int: v))",
         out: "7\n",
+        fault: None,
     },
     Kind {
         name: "rw_write",
@@ -72,6 +82,7 @@ const KINDS: &[Kind] = &[
         prelude: "r := RwShared[int](0)",
         act: "r.write(fn(v: int) -> int: v + w())\nprint(r.get())",
         out: "7\n",
+        fault: None,
     },
     Kind {
         name: "rw_read",
@@ -79,6 +90,7 @@ const KINDS: &[Kind] = &[
         prelude: "r := RwShared[int](0)",
         act: "print(r.read(fn(v: int) -> int: v + w()))",
         out: "7\n",
+        fault: None,
     },
     // a second task waits on the guard the caller holds while it is parked in its closure. Go: a
     // goroutine blocked on `mu.Lock()` behind a holder blocked on `<-ch` -> deadlock; with a
@@ -89,6 +101,7 @@ const KINDS: &[Kind] = &[
         prelude: "s := Shared[int](0)\nheld := Channel[int](1)\n\nfn hold(v: int) -> int:\n    held.send(1)\n    return v + w()",
         act: "parallel:\n    spawn:\n        _ := held.recv()\n        s.update(fn(v: int) -> int: v + 1)\n    s.update(hold)\nprint(s.get())",
         out: "8\n",
+        fault: None,
     },
     // ---- HOF callbacks (Task 3). Go: `slices.IndexFunc(xs, func(v int) bool { <-ch ... })`.
     Kind {
@@ -97,6 +110,7 @@ const KINDS: &[Kind] = &[
         prelude: "",
         act: "print([1].map(fn(v: int) -> int: v + w()))",
         out: "[8]\n",
+        fault: None,
     },
     Kind {
         name: "filter",
@@ -104,6 +118,7 @@ const KINDS: &[Kind] = &[
         prelude: "",
         act: "print([1].filter(fn(v: int) -> bool: w() > v))",
         out: "[1]\n",
+        fault: None,
     },
     Kind {
         name: "fold",
@@ -111,6 +126,7 @@ const KINDS: &[Kind] = &[
         prelude: "",
         act: "print([1].fold(0, fn(a: int, v: int) -> int: a + v + w()))",
         out: "8\n",
+        fault: None,
     },
     Kind {
         name: "take_while",
@@ -118,6 +134,7 @@ const KINDS: &[Kind] = &[
         prelude: "",
         act: "print([1].take_while(fn(v: int) -> bool: w() > v))",
         out: "[1]\n",
+        fault: None,
     },
     Kind {
         name: "count",
@@ -125,6 +142,7 @@ const KINDS: &[Kind] = &[
         prelude: "",
         act: "print([1].count(fn(v: int) -> bool: w() > v))",
         out: "1\n",
+        fault: None,
     },
     Kind {
         name: "min_by",
@@ -132,6 +150,7 @@ const KINDS: &[Kind] = &[
         prelude: "",
         act: "print([2, 1].min_by(fn(v: int) -> int: v + w() - 7))",
         out: "1\n",
+        fault: None,
     },
     // the key pass of `sort_by_key` (the key fn waits)
     Kind {
@@ -140,6 +159,7 @@ const KINDS: &[Kind] = &[
         prelude: "",
         act: "xs := [2, 1]\nxs.sort_by_key(fn(v: int) -> int: v + w() - 7)\nprint(xs)",
         out: "[1, 2]\n",
+        fault: None,
     },
     Kind {
         name: "from_iter",
@@ -147,6 +167,7 @@ const KINDS: &[Kind] = &[
         prelude: "struct It:\n    n: int\n    fn next(self) -> int?:\n        if self.n == 0:\n            return None\n        self.n -= 1\n        return self.n + w() - 7",
         act: "print(List.from_iter(It(1)))",
         out: "[0]\n",
+        fault: None,
     },
     // an f-string part whose `str` hook waits. Go: `fmt.Sprintf("%v", x)` with a blocking `String()`.
     Kind {
@@ -155,6 +176,7 @@ const KINDS: &[Kind] = &[
         prelude: "struct T:\n    n: int\n    fn str(self) -> str: return \"s{w()}\"",
         act: "print(\"v={T(1)}\")",
         out: "v=s7\n",
+        fault: None,
     },
     Kind {
         name: "fstr_fmt",
@@ -162,6 +184,7 @@ const KINDS: &[Kind] = &[
         prelude: "struct T:\n    n: int\n    fn str(self) -> str: return \"s{w()}\"",
         act: "print(\"v={T(1):>4}\")",
         out: "v=  s7\n",
+        fault: None,
     },
     // ---- sorts (Task 4). Go: `slices.SortFunc(xs, func(a, b int) int { <-ch ... })`.
     Kind {
@@ -170,6 +193,7 @@ const KINDS: &[Kind] = &[
         prelude: "",
         act: "xs := [2, 1]\nxs.sort_by(fn(a: int, b: int) -> int: a - b + w() - 7)\nprint(xs)",
         out: "[1, 2]\n",
+        fault: None,
     },
     // the compare pass of `sort_by_key` (the struct key's `compare` waits)
     Kind {
@@ -178,6 +202,7 @@ const KINDS: &[Kind] = &[
         prelude: "struct K:\n    n: int\n    fn eq(self, other: K) -> bool: return self.n == other.n\n    fn compare(self, other: K) -> int: return self.n - other.n + w() - 7",
         act: "xs := [2, 1]\nxs.sort_by_key(fn(v: int) -> K: K(v))\nprint(xs)",
         out: "[1, 2]\n",
+        fault: None,
     },
     Kind {
         name: "sort",
@@ -185,6 +210,7 @@ const KINDS: &[Kind] = &[
         prelude: "struct K:\n    n: int\n    fn eq(self, other: K) -> bool: return self.n == other.n\n    fn compare(self, other: K) -> int: return self.n - other.n + w() - 7",
         act: "ks := [K(2), K(1)]\nks.sort()\nprint(ks)",
         out: "[K(n=1), K(n=2)]\n",
+        fault: None,
     },
     // a stable `sort_by` over equal keys: the comparator waits on every call, so each merge step
     // is a frame; equal keys keep their input order.
@@ -194,6 +220,7 @@ const KINDS: &[Kind] = &[
         prelude: "struct P:\n    k: int\n    tag: str",
         act: "ps := [P(2, \"a\"), P(1, \"b\"), P(2, \"c\"), P(1, \"d\"), P(1, \"e\")]\nps.sort_by(fn(a: P, b: P) -> int: a.k - b.k + w() - 7)\nprint(ps.map(fn(p: P) -> str: p.tag))",
         out: "['b', 'd', 'e', 'a', 'c']\n",
+        fault: None,
     },
     // `xs.min()` over structs: the element's `compare` waits.
     Kind {
@@ -202,6 +229,7 @@ const KINDS: &[Kind] = &[
         prelude: "struct K:\n    n: int\n    fn eq(self, other: K) -> bool: return self.n == other.n\n    fn compare(self, other: K) -> int: return self.n - other.n + w() - 7",
         act: "print([K(2), K(1)].min())",
         out: "K(n=1)\n",
+        fault: None,
     },
     // ---- shallow operator hooks (Task 2). Go has no operator overloading; the hook is a method
     // call, so the Go answer is the plain-call answer: deadlock.
@@ -211,6 +239,7 @@ const KINDS: &[Kind] = &[
         prelude: "struct A:\n    n: int\n    fn add(self, other: A) -> A: return A(self.n + other.n + w())",
         act: "print((A(1) + A(2)).n)",
         out: "10\n",
+        fault: None,
     },
     Kind {
         name: "neg",
@@ -218,6 +247,7 @@ const KINDS: &[Kind] = &[
         prelude: "struct A:\n    n: int\n    fn neg(self) -> A: return A(w() - self.n)",
         act: "print((-A(1)).n)",
         out: "6\n",
+        fault: None,
     },
     Kind {
         name: "index",
@@ -225,6 +255,7 @@ const KINDS: &[Kind] = &[
         prelude: "struct I:\n    n: int\n    fn index(self, k: int) -> int: return k + w()",
         act: "print(I(1)[2])",
         out: "9\n",
+        fault: None,
     },
     Kind {
         name: "set_index",
@@ -232,6 +263,7 @@ const KINDS: &[Kind] = &[
         prelude: "struct I:\n    n: int\n    fn index(self, k: int) -> int: return k\n    fn set_index(self, k: int, v: int) -> None:\n        self.n = k + v + w()",
         act: "x := I(1)\nx[2] = 3\nprint(x.n)",
         out: "12\n",
+        fault: None,
     },
     Kind {
         name: "slice",
@@ -239,6 +271,7 @@ const KINDS: &[Kind] = &[
         prelude: "struct I:\n    n: int\n    fn slice(self, r: Range) -> int: return w()",
         act: "print(I(1)[0..2])",
         out: "7\n",
+        fault: None,
     },
     Kind {
         name: "contains",
@@ -246,6 +279,7 @@ const KINDS: &[Kind] = &[
         prelude: "struct I:\n    n: int\n    fn contains(self, item: int) -> bool: return item == w()",
         act: "print(7 in I(1))",
         out: "true\n",
+        fault: None,
     },
     Kind {
         name: "lt",
@@ -253,6 +287,7 @@ const KINDS: &[Kind] = &[
         prelude: "struct K:\n    n: int\n    fn eq(self, other: K) -> bool: return self.n == other.n\n    fn compare(self, other: K) -> int: return self.n - other.n + w() - 7",
         act: "print(K(1) < K(2))",
         out: "true\n",
+        fault: None,
     },
     Kind {
         name: "eq",
@@ -260,6 +295,7 @@ const KINDS: &[Kind] = &[
         prelude: "struct E:\n    n: int\n    fn eq(self, other: E) -> bool: return self.n == other.n + w() - 7",
         act: "print(E(1) == E(1))",
         out: "true\n",
+        fault: None,
     },
     Kind {
         name: "str_hook",
@@ -267,6 +303,7 @@ const KINDS: &[Kind] = &[
         prelude: "struct T:\n    n: int\n    fn str(self) -> str: return \"s{w()}\"",
         act: "print(T(1))",
         out: "s7\n",
+        fault: None,
     },
     // every `print` arg with a `str` hook, any argc, a runtime `sep`
     Kind {
@@ -275,6 +312,7 @@ const KINDS: &[Kind] = &[
         prelude: "struct T:\n    n: int\n    fn str(self) -> str: return \"s{w()}\"",
         act: "print(1, T(1), sep=\"-\")",
         out: "1-s7\n",
+        fault: None,
     },
     Kind {
         name: "iter_hook",
@@ -282,6 +320,7 @@ const KINDS: &[Kind] = &[
         prelude: "struct IT:\n    n: int\n    fn iter(self) -> Iterator[int]: return [self.n + w()].iter()",
         act: "for v in IT(1):\n    print(v)",
         out: "8\n",
+        fault: None,
     },
     // ---- generator body (Task 6). Go: a range-over-func iterator whose body does `<-ch`.
     Kind {
@@ -290,6 +329,7 @@ const KINDS: &[Kind] = &[
         prelude: "fn gen() -> Iterator[int]:\n    yield w()",
         act: "for v in gen():\n    print(v)",
         out: "7\n",
+        fault: None,
     },
     // a generator that yields across a park, twice
     Kind {
@@ -298,6 +338,7 @@ const KINDS: &[Kind] = &[
         prelude: "fn gen() -> Iterator[int]:\n    yield w()\n    yield w() + 1",
         act: "for v in gen():\n    print(v)",
         out: "7\n8\n",
+        fault: None,
     },
     // a generator whose body iterates an inner generator that waits
     Kind {
@@ -306,6 +347,7 @@ const KINDS: &[Kind] = &[
         prelude: "fn inner() -> Iterator[int]:\n    yield w()\nfn outer() -> Iterator[int]:\n    for v in inner():\n        yield v + 1",
         act: "for v in outer():\n    print(v)",
         out: "8\n",
+        fault: None,
     },
     Kind {
         name: "gen_from_iter",
@@ -313,6 +355,7 @@ const KINDS: &[Kind] = &[
         prelude: "fn gen() -> Iterator[int]:\n    yield w()\n    yield 2",
         act: "print(List.from_iter(gen()))",
         out: "[7, 2]\n",
+        fault: None,
     },
     Kind {
         name: "gen_next",
@@ -320,6 +363,7 @@ const KINDS: &[Kind] = &[
         prelude: "fn gen() -> Iterator[int]:\n    yield w()",
         act: "g := gen()\nprint(g.next())\nprint(g.next())",
         out: "7\nNone\n",
+        fault: None,
     },
     // ---- defer body (plan 2026-11-07-defer-drain-frames: Task 2 drains a return, Task 3 a fault,
     // a catch and a cancel on frames, so the wait parks instead of demoting).
@@ -330,6 +374,7 @@ const KINDS: &[Kind] = &[
         prelude: "fn viadefer():\n    defer:\n        print(w())\n    pass",
         act: "viadefer()",
         out: "7\n",
+        fault: None,
     },
     // a defer that waits while its frame returns a value
     Kind {
@@ -338,6 +383,7 @@ const KINDS: &[Kind] = &[
         prelude: "fn viadefer() -> int:\n    defer:\n        print(w())\n    return 5",
         act: "print(viadefer())",
         out: "7\n5\n",
+        fault: None,
     },
     // a defer that waits while a fault unwinds its frame; the fault is still caught after it
     Kind {
@@ -346,6 +392,7 @@ const KINDS: &[Kind] = &[
         prelude: "fn boom():\n    defer:\n        print(w())\n    x := 0\n    print(1 / x)",
         act: "r := recover:\n    boom()\nmatch r:\n    ?_: print(\"none\")\n    !e: print(\"caught: {e}\")",
         out: "7\ncaught: division by zero\n",
+        fault: None,
     },
     // a defer inside the `recover:` block that catches the fault; the catch still runs after it
     Kind {
@@ -354,6 +401,7 @@ const KINDS: &[Kind] = &[
         prelude: "",
         act: "r := recover:\n    defer:\n        print(w())\n    x := 0\n    print(1 / x)\nmatch r:\n    ?_: print(\"none\")\n    !e: print(\"caught: {e}\")",
         out: "7\ncaught: division by zero\n",
+        fault: None,
     },
     // a deferred struct method call that waits
     Kind {
@@ -362,6 +410,7 @@ const KINDS: &[Kind] = &[
         prelude: "struct C:\n    n: int\n    fn close(self):\n        print(self.n + w())\n\nfn viadefer():\n    c := C(1)\n    defer c.close()\n    pass",
         act: "viadefer()",
         out: "8\n",
+        fault: None,
     },
     // a deferred native call that waits
     Kind {
@@ -370,6 +419,7 @@ const KINDS: &[Kind] = &[
         prelude: "fn viadefer():\n    defer ch.recv()\n    print(1)",
         act: "viadefer()",
         out: "1\n",
+        fault: None,
     },
     // a task cancelled by a sibling's fault runs its defer, which waits; the fault is caught after.
     // With no sender the stuck cleanup leaves every task asleep (the body at its join, the task in
@@ -381,6 +431,7 @@ const KINDS: &[Kind] = &[
         prelude: "ready := Channel[int](0)\ngate := Channel[int](0)",
         act: "r := recover:\n    parallel:\n        spawn:\n            defer:\n                print(w())\n            ready.send(1)\n            _ := gate.recv()\n        spawn:\n            _ := ready.recv()\n            x := 0\n            print(1 / x)\nmatch r:\n    ?_: print(\"none\")\n    !e: print(\"caught: {e}\")",
         out: "7\ncaught: division by zero\n",
+        fault: None,
     },
     // a task's return-path defer waits, and a sibling's fault then cancels its scope: the parked
     // cleanup is not requeued by the cancel (a `defer` is never cancelled); the fault is caught after.
@@ -391,28 +442,207 @@ const KINDS: &[Kind] = &[
         prelude: "ready := Channel[int](0)",
         act: "r := recover:\n    parallel:\n        spawn:\n            defer:\n                print(w())\n            ready.send(1)\n        spawn:\n            _ := ready.recv()\n            x := 0\n            print(1 / x)\nmatch r:\n    ?_: print(\"none\")\n    !e: print(\"caught: {e}\")",
         out: "7\ncaught: division by zero\n",
+        fault: None,
     },
-    // ---- residuals: a hook reached from a nested container walk keeps the nested loop.
+    // ---- nested `==` walks (plan 2026-11-18-every-wait-parks Task 1a): an element `eq` hook
+    // reached from a container walk or a list scan. Go: `slices.EqualFunc` / `slices.IndexFunc`
+    // whose func does `<-ch` -> deadlock.
     Kind {
         name: "nested_eq",
-        fix: Fix::Residual,
+        fix: Fix::Walk,
         prelude: "struct E:\n    n: int\n    fn eq(self, other: E) -> bool: return self.n == other.n + w() - 7",
         act: "print([E(1)] == [E(1)])",
         out: "true\n",
+        fault: None,
     },
     Kind {
+        name: "unique",
+        fix: Fix::Walk,
+        prelude: "struct E:\n    n: int\n    fn eq(self, other: E) -> bool: return self.n == other.n + w() - 7",
+        act: "print([E(1), E(1)].unique().len())",
+        out: "1\n",
+        fault: None,
+    },
+    // the `in` operator and `.contains` over a list
+    Kind {
+        name: "list_contains",
+        fix: Fix::Walk,
+        prelude: "struct E:\n    n: int\n    fn eq(self, other: E) -> bool: return self.n == other.n + w() - 7",
+        act: "print(E(1) in [E(1)])\nprint([E(1)].contains(E(1)))",
+        out: "true\ntrue\n",
+        fault: None,
+    },
+    Kind {
+        name: "index_of",
+        fix: Fix::Walk,
+        prelude: "struct E:\n    n: int\n    fn eq(self, other: E) -> bool: return self.n == other.n + w() - 7",
+        act: "print([E(2), E(1)].index_of(E(1)))",
+        out: "1\n",
+        fault: None,
+    },
+    // ---- nested `str` walks (plan 2026-11-18-every-wait-parks Task 1b): an element `str` hook
+    // reached from a container render: `print`, an f-string, a format spec, `.str()`. Go: a
+    // `String()` method that does `<-ch`, reached by `fmt.Println([]T{...})` -> deadlock.
+    Kind {
         name: "nested_str",
-        fix: Fix::Residual,
+        fix: Fix::Walk,
         prelude: "struct T:\n    n: int\n    fn str(self) -> str: return \"s{w()}\"",
         act: "print([T(1)])",
         out: "[s7]\n",
+        fault: None,
     },
+    Kind {
+        name: "nested_fstr",
+        fix: Fix::Walk,
+        prelude: "struct T:\n    n: int\n    fn str(self) -> str: return \"s{w()}\"",
+        act: "print(\"{[T(1)]}\")",
+        out: "[s7]\n",
+        fault: None,
+    },
+    Kind {
+        name: "nested_fstr_fmt",
+        fix: Fix::Walk,
+        prelude: "struct T:\n    n: int\n    fn str(self) -> str: return \"s{w()}\"",
+        act: "print(\"{[T(1)]:>8}\")",
+        out: "    [s7]\n",
+        fault: None,
+    },
+    Kind {
+        name: "nested_str_method",
+        fix: Fix::Walk,
+        prelude: "struct T:\n    n: int\n    fn str(self) -> str: return \"s{w()}\"",
+        act: "print([T(1)].str())",
+        out: "[s7]\n",
+        fault: None,
+    },
+    // an error text renders its value (plan 2026-11-18-every-wait-parks Task 6c): a failed
+    // `assert`'s operands, a missing map key. The base binary (`9c0f8f68`) prints the same text.
+    Kind {
+        name: "assert_text",
+        fix: Fix::Walk,
+        prelude: "struct T:\n    n: int\n    fn str(self) -> str: return \"s{w()}\"",
+        act: "assert [T(1)] == [T(2)]",
+        out: "",
+        fault: Some("assertion failed: [s7] == [s7]"),
+    },
+    Kind {
+        name: "key_text",
+        fix: Fix::Walk,
+        prelude: "struct K:\n    n: int\n    fn eq(self, other: K) -> bool: return self.n == other.n\n    fn hash(self) -> int: return self.n\n    fn str(self) -> str: return \"k{w()}\"",
+        act: "m := {K(1): 2}\nprint(m[K(2)])",
+        out: "",
+        fault: Some("key not found: k7"),
+    },
+    // ---- nested `<` walks (plan 2026-11-18-every-wait-parks Task 2): an element `compare` hook
+    // reached from a sequence ordering: the operator, a `sort_by_key` merge, a `min`. Go:
+    // `slices.CompareFunc` / `slices.SortFunc` whose func does `<-ch` -> deadlock.
+    Kind {
+        name: "nested_lt",
+        fix: Fix::Walk,
+        prelude: "struct K:\n    n: int\n    fn eq(self, other: K) -> bool: return self.n == other.n\n    fn compare(self, other: K) -> int: return self.n - other.n + w() - 7",
+        act: "print([K(1)] < [K(2)])",
+        out: "true\n",
+        fault: None,
+    },
+    Kind {
+        name: "sort_key",
+        fix: Fix::Walk,
+        prelude: "struct K:\n    n: int\n    fn eq(self, other: K) -> bool: return self.n == other.n\n    fn compare(self, other: K) -> int: return self.n - other.n + w() - 7",
+        act: "xs := [K(2), K(1)]\nxs.sort_by_key(fn(k: K) -> List[K]: [k])\nprint(xs)",
+        out: "[K(n=1), K(n=2)]\n",
+        fault: None,
+    },
+    Kind {
+        name: "nested_min",
+        fix: Fix::Walk,
+        prelude: "struct K:\n    n: int\n    fn eq(self, other: K) -> bool: return self.n == other.n\n    fn compare(self, other: K) -> int: return self.n - other.n + w() - 7",
+        act: "print([[K(2)], [K(1)]].min())",
+        out: "[K(n=1)]\n",
+        fault: None,
+    },
+    // the `compare` intrinsic method on a list (`x.compare(y)`, the total order)
+    Kind {
+        name: "nested_compare_method",
+        fix: Fix::Walk,
+        prelude: "struct S:\n    n: int\n    fn compare(self, other: S) -> int: return self.n - other.n + w() - 7",
+        act: "print([S(1)].compare([S(2)]))",
+        out: "-1\n",
+        fault: None,
+    },
+    // ---- a native callee and a drain on frames (Task 3). A sleep has no "no sender" case, so a
+    // native kind takes `w()` after its call: `nothing` is the deadlock at that `w()`, and the
+    // sleep must park (`demotes=0`) in every cell. Go: `time.Sleep` parks the goroutine.
+    Kind {
+        name: "native_fn_hof",
+        fix: Fix::Walk,
+        prelude: "import std.time",
+        act: "print([5, 5].map(time.sleep_ms))\nprint(w())",
+        out: "[None, None]\n7\n",
+        fault: None,
+    },
+    // a box closure that is a native: it sleeps holding the guard
+    Kind {
+        name: "native_fn_box",
+        fix: Fix::Walk,
+        prelude: "import std.time\ns := Shared[int](5)",
+        act: "s.read(time.sleep_ms)\nprint(w())",
+        out: "7\n",
+        fault: None,
+    },
+    // a `T.from_iter(ch)` drain receives until the channel is closed (Rust `rx.iter().collect()`)
+    Kind {
+        name: "drain_channel",
+        fix: Fix::Walk,
+        prelude: "",
+        act: "print(List.from_iter(ch))",
+        out: "[7]\n",
+        fault: None,
+    },
+    // a channel's `.iter()` drains it into a cursor
+    Kind {
+        name: "drain_chan_iter",
+        fix: Fix::Walk,
+        prelude: "",
+        act: "c := ch.iter()\nprint(c.next())",
+        out: "7\n",
+        fault: None,
+    },
+    // a drain over a struct whose `iter` hook waits (`iter` wins over `next`)
+    Kind {
+        name: "drain_iter_hook",
+        fix: Fix::Walk,
+        prelude: "struct IT:\n    n: int\n    fn iter(self) -> Iterator[int]: return [self.n + w()].iter()",
+        act: "print(List.from_iter(IT(1)))",
+        out: "[8]\n",
+        fault: None,
+    },
+    // a drain over an `iter` hook's generator, whose body waits
+    Kind {
+        name: "gen_next_off_loop",
+        fix: Fix::Walk,
+        prelude: "fn gen() -> Iterator[int]:\n    yield w()\n    yield 2\nstruct G:\n    n: int\n    fn iter(self) -> Iterator[int]: return gen()",
+        act: "print(Set.from_iter(G(0)))",
+        out: "{7, 2}\n",
+        fault: None,
+    },
+    // ---- a json `default` thunk runs as a frame at its field (Task 4), as Rust serde runs a
+    // `default` during the decode; live out is the base binary's (`9c0f8f68`), byte for byte.
+    Kind {
+        name: "json_default",
+        fix: Fix::Walk,
+        prelude: "import std.json\nfn mk() -> int:\n    n := w()\n    print(\"mk {n}\")\n    return n\nstruct Cfg:\n    name: str\n    v: int = mk()",
+        act: "match json.decode[Cfg](r'{\"name\":\"x\"}'):\n    ?c: print(c)\n    !e: print(e)",
+        out: "mk 7\nCfg(name='x', v=7)\n",
+        fault: None,
+    },
+    // ---- residuals: a hook reached from a map-key probe keeps the nested loop.
     Kind {
         name: "map_key_hash",
         fix: Fix::Residual,
         prelude: "struct H:\n    n: int\n    fn eq(self, other: H) -> bool: return self.n == other.n\n    fn hash(self) -> int: return self.n + w() - 7",
         act: "m := {H(1): 2}\nprint(m[H(1)])",
         out: "2\n",
+        fault: None,
     },
 ];
 
@@ -498,6 +728,9 @@ fn program(kind: &Kind, caller: Caller, live: bool) -> String {
 enum Expect {
     /// exit 0; stdout is the golden (`chezzi run`) or holds `1 passed` (`chezzi test`)
     Out,
+    /// exit 1 with the kind's `fault`: stdout is the golden and the first stderr line its fault
+    /// (`chezzi run`), or stdout reports the test failed (an assert) or errored with it
+    Fault(&'static str),
     /// exit 1 with the one deadlock header, the same text at every T
     Deadlock,
     /// still running at the probe: an in-place wait, which counts as awake (plan 2026-11-17)
@@ -506,14 +739,17 @@ enum Expect {
 
 fn expect(kind: &Kind, caller: Caller, live: bool) -> Expect {
     if live {
-        return Expect::Out;
+        return kind.fault.map_or(Expect::Out, Expect::Fault);
     }
-    // A residual hook runs its wait in place on the worker (a nested container walk or a map-key
-    // probe), and an in-place wait is awake (plan 2026-11-17), so every caller hangs, `spawn:`
-    // included: the one global check never sees every task asleep. Go has no such wait (its twin is
-    // fatal, all asleep); `chezzi test --timeout` is the backstop.
+    // A residual hook runs its wait in place on the worker (a map-key probe), and an in-place wait
+    // is awake (plan 2026-11-17), so every caller hangs, `spawn:` included: the one global check
+    // never sees every task asleep. Go has no such wait (its twin is fatal, all asleep);
+    // `chezzi test --timeout` is the backstop.
     if kind.fix == Fix::Residual {
         return Expect::Hang;
+    }
+    if kind.fix == Fix::Walk {
+        return Expect::Deadlock;
     }
     // A `spawn:` task parks: every task is asleep.
     if caller == Caller::Spawn {
@@ -522,7 +758,7 @@ fn expect(kind: &Kind, caller: Caller, live: bool) -> Expect {
     match kind.fix {
         Fix::Drain(_) => Expect::Deadlock,
         Fix::Task(t) | Fix::Parks(t) if t <= LANDED => Expect::Deadlock,
-        Fix::Task(_) | Fix::Parks(_) | Fix::Residual => Expect::Hang,
+        Fix::Task(_) | Fix::Parks(_) | Fix::Walk | Fix::Residual => Expect::Hang,
     }
 }
 
@@ -638,7 +874,7 @@ fn check_cell(kind: &Kind, caller: Caller, live: bool) -> Vec<String> {
     );
     let limit = match want {
         Expect::Hang => Duration::from_secs(2),
-        Expect::Out | Expect::Deadlock => Duration::from_secs(10),
+        Expect::Out | Expect::Fault(_) | Expect::Deadlock => Duration::from_secs(10),
     };
     let tag = name.replace('/', "-");
     let mut misses = Vec::new();
@@ -646,7 +882,7 @@ fn check_cell(kind: &Kind, caller: Caller, live: bool) -> Vec<String> {
     for t in ["1", "2", "4"] {
         let counted = run_counted(&tag, &src, test_fn, t, limit);
         if let Some((_, demotes)) = &counted
-            && matches!(kind.fix, Fix::Drain(_) | Fix::Parks(_))
+            && matches!(kind.fix, Fix::Drain(_) | Fix::Parks(_) | Fix::Walk)
             && *demotes != Some(0)
         {
             misses.push(format!(
@@ -661,6 +897,26 @@ fn check_cell(kind: &Kind, caller: Caller, live: bool) -> Vec<String> {
                     out.contains("1 passed")
                 } else {
                     out == kind.out
+                }
+            }
+            (Some((1, out, err)), Expect::Fault(fault)) => {
+                // An assert fails its test; any other fault errors it.
+                if test_fn {
+                    let verdict = if fault.starts_with("assertion failed") {
+                        "FAIL t ("
+                    } else {
+                        "ERROR t ("
+                    };
+                    let at = format!(") {fault}");
+                    out.lines()
+                        .any(|l| l.starts_with(verdict) && l.ends_with(&at))
+                } else {
+                    let at = format!("): {fault}");
+                    out == kind.out
+                        && err
+                            .lines()
+                            .next()
+                            .is_some_and(|l| l.starts_with("runtime error (") && l.ends_with(&at))
                 }
             }
             (Some((1, out, err)), Expect::Deadlock) => {
@@ -702,7 +958,10 @@ grid_tests!(KIND_ROWS x CALLER_ROWS: [
     generator, gen_park_twice, gen_nested, gen_from_iter, gen_next, defer,
     defer_return, defer_fault, defer_recover, defer_method, defer_native, defer_cancel,
     defer_return_cancel,
-    nested_eq, nested_str, map_key_hash,
+    nested_eq, unique, list_contains, index_of, nested_str, nested_fstr, nested_fstr_fmt,
+    nested_str_method, assert_text, key_text, nested_lt, sort_key, nested_min,
+    nested_compare_method, native_fn_hof, native_fn_box, drain_channel, drain_chan_iter,
+    drain_iter_hook, gen_next_off_loop, json_default, map_key_hash,
 ] x [main, helper, toplevel, spawn, test_fn] => crate::run_cell);
 
 /// A fault inside a generator body after the body parked: `recover:` catches it (the generator

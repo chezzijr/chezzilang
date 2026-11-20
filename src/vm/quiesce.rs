@@ -196,10 +196,7 @@ pub(super) struct QuiesceState {
     /// TICKET-211 — the high-water mark of `runner_threads`. Test-only.
     #[cfg(test)]
     pub(super) peak_runner_threads: std::sync::atomic::AtomicUsize,
-    /// TICKET-211 — runner starts refused by the `NestedDrainerSlot` budget. Test-only.
-    #[cfg(test)]
-    pub(super) runner_slot_denials: std::sync::atomic::AtomicUsize,
-    /// TICKET-211 — OS threads started for this run's non-Executor runner leases. Test-only.
+    /// TICKET-211 — runner OS threads this run started (`sched::spawn_runner_thread`). Test-only.
     #[cfg(test)]
     pub(super) runner_spawns: std::sync::atomic::AtomicUsize,
     /// TICKET-230 — this run's runner permit holders, now and at peak (`width::WidthProbe`).

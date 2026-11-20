@@ -281,8 +281,8 @@ check-OK-then-broken program, and a JIT would trust the static type.
   in-process capture splices task output in spawn-slot order; the CLI streams line-atomically. CPU
   contention looks like flakiness: check `uptime` and `pgrep cargo` first, and do not relax an
   assertion until the flake stops.
-- **A test that needs ≥2 free pool threads or a wall-clock assertion is its own binary in `tests/`.**
-  The lib suite shares one process-wide `OnceLock` pool.
+- **A test that needs ≥2 free workers or a wall-clock assertion is its own binary in `tests/`.**
+  The lib suite shares one process-wide worker count and runner budget (`width::RUNNERS`).
 - **Each test that touches process-global native state takes the module's `#[cfg(test)]` mutex.** One
   unlocked participant defeats the lock for all.
 - **A wall-clock perf repro must be red on the release binary the gate builds.** Size inputs at 100k+,

@@ -69,18 +69,16 @@ fn main():
   inherits its creator's cancel chain, and parks like any fiber. **Captures are shared** (M3.4, Go): the
   job holds the submitter's captured values by handle, so its write lands on them and it sees the
   submitter's later writes; order the two with a `Channel`, a box or `shutdown()`, or they race.
-- **The pool** is the Executor's own runner threads, started on demand up to the worker count; an idle
-  runner waits 5 ms for a next job, then leaves, so an idle Executor holds no thread.
+- **The pool** is the run's own workers: a job runs on the same worker threads as every other task
+  (Go: one set of Ms), so an Executor starts no thread of its own and an idle one holds none.
 - **`Executor(n)` caps the jobs running at once at `n`** (`Executor()` has no cap; `n < 1` faults
   `Executor(n) needs n >= 1`). A job over the cap is held: it starts when a running job finishes, and a
   parked job still counts as running (CPython `ThreadPoolExecutor(n)`). `n` jobs that each wait for a
   held job are a deadlock: every task is blocked, and the report lists each started job at its
   blocking op (a job held behind the cap never started, so it is not listed; CPython hangs there).
-- **A blocked job does not pin its pool thread.** A job blocking on a `Channel`, a `Shared`/`RwShared`
-  guard, `time.sleep_ms`/a timer wait, a nested `Executor`'s `shutdown()` join, or a nursery join whose
-  child is blocked hands its pool thread to a replacement worker, so the live pool count stays at
-  `worker_count()` plus the number of jobs blocked right now. A job whose nursery is busy keeps its
-  slot, so `CHEZZI_THREADS=1` still runs one CPU runner.
+- **A blocked job parks.** A job blocking on a `Channel`, a `Shared`/`RwShared` guard,
+  `time.sleep_ms`/a timer wait, a socket op, a nested `Executor`'s `shutdown()` join or a nursery join
+  parks like any fiber and holds no thread, so `CHEZZI_THREADS=1` still runs one CPU runner.
 - **A submit that returned without a fault and is under the cap always starts**, unless a run halt (an
   exit, a deadlock) drops it. `cancel()` marks the Executor shut before it
   trips the cancel, so a `submit` racing a job's `cancel()` either faults or starts its job.

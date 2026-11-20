@@ -1,0 +1,80 @@
+# A `str` hook reached from inside a container render (plan 2026-11-18-every-wait-parks Task 1b):
+# the render runs on levels and the hook as a frame, so every rule of the default render holds
+# around it: the snapshot it walks, the back edges it marks, the depth it is at. Python's
+# `repr(list)` with a user `__repr__` element is the ancestor.
+
+import Shared from std.concurrency
+
+gate := Channel[int](0)
+
+struct T:
+    n: int
+    fn str(self) -> str: return "t{self.n}"
+
+struct Waits:
+    n: int
+    fn str(self) -> str:
+        _ := gate.recv()
+        return "w{self.n}"
+
+struct Grows:
+    n: int
+    fn str(self) -> str:
+        grown.push(Grows(9))
+        return "g{self.n}"
+
+grown: List[Grows] = []
+
+struct Div:
+    n: int
+    fn str(self) -> str: return "d{10 / self.n}"
+
+struct Cell:
+    kids: List[Cell]
+    d: Div
+
+struct Holder:
+    items: List[Holder]
+    fn str(self) -> str: return "H{self.items}"
+
+test fn hooked_elements_render_in_place_in_every_container():
+    assert "{[T(1), T(2)]}" == "[t1, t2]"
+    assert "{(T(1), "a")}" == "(t1, 'a')"
+    m := {"k": T(3)}
+    assert "{m}" == "{{'k': t3}}"
+    assert [[T(4)]].str() == "[[t4]]"
+    assert "{[T(5)]:>6}|" == "  [t5]|"
+
+test fn a_hook_that_grows_the_list_renders_the_snapshot():
+    grown.push(Grows(1))
+    grown.push(Grows(2))
+    assert "{grown}" == "[g1, g2]"
+    assert grown.len() == 4
+
+test fn a_hook_that_renders_its_own_list_meets_a_back_edge():
+    h := Holder([])
+    h.items.push(h)
+    assert "{[h]}" == "[H[H[...]]]"
+
+test fn a_hook_fault_mid_render_leaves_no_open_container_behind():
+    c := Cell([], Div(0))
+    c.kids.push(c)
+    r := recover: "{[c]}"
+    match r:
+        ?s: assert false, "a zero divisor rendered: " + s
+        !e: assert e.error() == "division by zero", e.error()
+    c.d = Div(5)
+    assert "{[c]}" == "[Cell(kids=[...], d=d2)]"
+
+test fn two_tasks_parked_mid_render_each_render_their_list_in_full():
+    xs := [Waits(1)]
+    a := Shared([""])
+    b := Shared([""])
+    parallel:
+        spawn: a.set(["{[xs, xs]}"])
+        spawn: b.set(["{[xs]}"])
+        spawn:
+            for i in 0..3:
+                gate.send(i)
+    assert a.get() == ["[[w1], [w1]]"]
+    assert b.get() == ["[[w1]]"]

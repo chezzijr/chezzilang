@@ -750,8 +750,8 @@ main()";
 /// `drain_escaped_nursery(handler.nursery_len)`. Without the resume-time rebase that stale `0` would
 /// truncate the LIVE parallel nursery to `0`, cancelling the sibling `spawn` (`out.send(77)`), and
 /// `out.recv()` would then deadlock. A generator provably cannot open a nursery (spawn/parallel are
-/// checker-banned inside one), so its handler's escape-drain must be a no-op — `generator_next`
-/// rebases every parked frame/handler `nursery_len` to the resuming driver's floor. The sibling may
+/// checker-banned inside one), so its handler's escape-drain must be a no-op — the resume
+/// (`Vm::gen_resume`) rebases every parked frame/handler `nursery_len` to the resuming driver's floor. The sibling may
 /// already be running on another worker, so a regression is not deterministically reachable here.
 #[test]
 fn generator_crossed_recover_fault_leaves_siblings_intact() {

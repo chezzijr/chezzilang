@@ -394,70 +394,23 @@ impl Vm {
     }
 
     /// **Block a would-block socket op IN PLACE when the fiber cannot park.** [`Vm::park_on_fd`] parks on
-    /// the netpoller only when this Vm is an M:N worker shell AND `native_reentry == 0`. Callers do NOT
-    /// route every other context here — the precondition is exactly the `Demote`/`InPlace` cells of the
-    /// `WaitSpec::Socket` row of `block::mode`, i.e. the two contexts whose thread runs nothing else:
+    /// the netpoller only with no host frame under the fiber. Callers route here exactly the
+    /// `Reentered` cells of the `Socket` (`Demote`) and `Connect` (`InPlace`) rows of `block::mode`:
+    /// a fiber under a host frame (`native_reentry > 0` — e.g. a probe hook's Rust-stack loop, which
+    /// cannot be snapshot), the original D5 owe #3 Path C case. A `Socket` wait DEMOTES like
+    /// [`Vm::demote_block_until`] — spins a replacement worker once so the pool keeps its width — and
+    /// a `Connect` wait keeps its slot (its steps, `block::wait_steps`); both then backoff-poll in
+    /// place.
     ///
-    /// - **In a native callback on an M:N worker** (`native_reentry > 0` — the callback's `for`-loop state
-    ///   lives on the un-snapshottable Rust host stack). This is the original D5 owe #3 Path C case:
-    ///   DEMOTE like [`Vm::demote_block_until`] — spin a replacement worker once so the pool keeps its
-    ///   width, then backoff-poll in place.
-    /// - **Top-level `main` on the DEFAULT engine** (`parallel`, `mn == None`, no `the job's sched`, no
-    ///   scheduler, `native_reentry == 0`). There is no pool to demote FROM, so the scheduler bookkeeping
-    ///   is skipped entirely — hence the `Option` sched — and only the wait loop runs. Until 2026-08-10
-    ///   the four callers returned `Err("… requires the --parallel engine")` here too, on the DEFAULT
-    ///   engine, because `mn.is_some()` means "worker shell", not "parallel is on" (`Vm::parallel`) —
-    ///   which made the hello-world TCP server unwritable. `connect` had had a fallback all along — its
-    ///   own private sleep-spin, deleted by `W7-59`, which now routes it here like the other four; they
-    ///   were simply left behind (the repo's recurring fixed-some-arms-of-an-N-way-set finding, W7-22).
+    /// **`connect` is deliberately admitted** (`W7-59`): a `connect` handshake is completed by the
+    /// KERNEL, so no chezzi party is starved by waiting for it — and both ancestors block (measured:
+    /// CPython `socket.connect` 0.1 ms, Go `net.Dial` 314 µs, each from the sole/main thread).
+    /// `connect` therefore has its own `WaitSpec::Connect` row in `block::mode`, not the `Socket` row.
     ///
-    /// **Not, deliberately: an eager `Executor` job.** TICKET-052 gave a blocked eager job's pool
-    /// thread to a replacement worker, so the STARVATION argument above no longer holds — but the
-    /// carve-out survives regardless, because widening `accept`/`read`/`write` to block in place would
-    /// change what those ops RETURN on a would-block fd (a hang instead of the loud `Err` this arm
-    /// keeps), which is a separate behaviour change TICKET-052 does not make.
-    ///
-    /// **`connect` is deliberately admitted even though it is a wait a non-thread-owning party can
-    /// reach** (`W7-59`): the starvation argument above is about waiting on a CHEZZI peer fiber,
-    /// which only `accept`/`read`/`write` do. A `connect` handshake is completed by the KERNEL, so no
-    /// chezzi party is starved by waiting for it — and both ancestors block (measured: CPython
-    /// `socket.connect` 0.1 ms, Go `net.Dial` 314 µs, each from the sole/main thread). `connect`
-    /// therefore has its own `WaitSpec::Connect` row in `block::mode`, not the `Socket` row.
-    ///
-    /// **Consequence, deliberate: an fd that never becomes ready is now a HANG, not an immediate `Err`.**
-    /// That is Go-identical (`ln.Accept()` on the main goroutine with nobody dialing blocks forever) and
-    /// it is the ancestor's contract, not an oversight. Three escapes are checked at the top of every
-    /// loop iteration — the op's own `timeout_ms` (`deadline`, below), the run's `--timeout` via
-    /// [`Vm::deadline_halt`], and cancellation — but **which of them EXIST depends on the context**, and
-    /// for top-level `main` under `chezzi run` two of the three do not:
-    ///
-    /// - `--timeout` is a **`chezzi test` flag only**; `chezzi run --timeout=500 f.chz` is rejected by
-    ///   the CLI with `chezzi run: unknown flag '--timeout=500'` (`src/main.rs:243`), so `self.deadline`
-    ///   is `None` and [`Vm::deadline_halt`] is a no-op on this path.
-    /// - `main` has no scope — no `cancel`, no `cancel_outer` — so `halt_requested()` reads an EMPTY
-    ///   flag set and nothing can ever trip it.
-    ///
-    /// So an `accept`/`read`/`write` reached on `main` with **no explicit `timeout_ms`** has no escape at
-    /// all short of SIGINT. Pass a `timeout_ms` if you need one. (The in-callback M:N demote — the other
-    /// context routed here — does have all three: it runs under `chezzi test` where `--timeout` is legal,
-    /// and its fiber has a scope cancel.)
-    ///
-    /// **Second-order, also deliberate: a socket-blocked `main` is NOT a quiescence party.** It cannot
-    /// register as one — there is no scheduler here to register with — which matches the precedent on
-    /// both sides: `time.sleep_ms` deliberately stays out of the predicate as "a false-deadlock
-    /// generator" (`netio.rs`), and the M:N socket demote is accounted `inflight` specifically to VETO
-    /// the predicate (Go-identical). It therefore never FABRICATES a verdict — the safe direction
-    /// (`parked-is-not-stuck`: a wrong verdict is worse than a late one).
-    ///
-    /// It does, however, **SUPPRESS** the process-wide verdict for as long as the op is outstanding —
-    /// which for an fd that never becomes ready is FOREVER, not merely "delayed" (an earlier version of
-    /// this note claimed the latter; measured, it is wrong). Repro: `main` blocks in `accept()` while an
-    /// eager `Executor` job blocks on a `Channel` nothing can ever send. Chezzi prints `listening` and
-    /// hangs (rc=124 under `timeout 12`).
-    ///
-    /// **That is the ancestor's answer — do not "fix" it in code.** Go behaves the same way: an open
-    /// socket is a runnable party, so `all goroutines are asleep` does not fire (measured — `main` in
-    /// `ln.Accept()` plus a goroutine on an empty `chan int`: prints `listening`, hangs, rc=124).
+    /// **An fd that never becomes ready is a HANG, not an immediate `Err`.** That is Go-identical
+    /// (`ln.Accept()` with nobody dialing blocks forever). Three escapes are checked at the top of
+    /// every loop iteration — the op's own `timeout_ms` (`deadline`, below), the run's `--timeout`
+    /// via [`Vm::deadline_halt`], and cancellation.
     ///
     /// On an M:N worker it is accounted `inflight` (NOT a registered waiter): a socket op is woken by
     /// external OS readiness, so it stays counted awake and the deadlock verdict cannot fire —
@@ -494,9 +447,8 @@ impl Vm {
         span: Span,
         mut attempt: impl FnMut(&mut Vm) -> SockPoll,
     ) -> Result<Value, RuntimeError> {
-        // `None` when there is no worker pool at all (top-level `main`, an eager `Executor` job): the
-        // calling thread is its own, so there is nothing to demote FROM and the scheduler bookkeeping
-        // below is skipped. The wait loop itself does not care either way.
+        // `None` on a bare `Vm` with no scheduler: the scheduler bookkeeping below is skipped. The
+        // wait loop itself does not care either way.
         let sched = self.mn.as_ref().map(Arc::clone);
         let reg = self.wait_begin(spec, None, "a socket op", span)?;
         let out = loop {

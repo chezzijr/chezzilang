@@ -68,9 +68,9 @@ impl SchedCore {
         // higher-index printer's output is preserved byte-identically to a strictly sequential run.
         // `task_index`/`scope_id` are Copy, read before `f.ctx` moves out.
         let (ti, sid) = (f.task_index, f.scope_id);
-        // A scope with its own `deadlock_err` (the owner-fiber arm of `run_mn_nursery_nested`)
-        // reports ITS span instead of the sched-wide `err` — see `JoinScope::deadlock_err` and
-        // DEC-048.
+        // A scope with its own `deadlock_err` (a fiber-owned nursery's, set by
+        // `Vm::activate_fiber_owned_nursery`) reports ITS span instead of the sched-wide `err` —
+        // see `JoinScope::deadlock_err` and DEC-048.
         // TICKET-208 — else, on an `Executor`'s sched, the fiber's own blocking op: the text and
         // span the in-place path raises there. Else the sched-wide `err`.
         // Each task names its own wait: its park site, else its scope's own fault (an owner

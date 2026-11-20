@@ -1,9 +1,9 @@
 //! W13-7: an Executor job parked at a nursery join whose only child is channel-blocked pins its
 //! pool thread at `CHEZZI_THREADS=1`, so a sibling job that would feed that channel never starts.
 //! `docs/reference/concurrency/` (TICKET-052) promises "a blocked job no longer pins its pool thread
-//! … fixed for every shape above", but the yield bracket (`src/vm/pool.rs` `yield_slot`) only fires
-//! for a job blocked directly ON a channel, not for a job parked at a nursery join whose CHILD is.
-//! Go's `GOMAXPROCS=1` twin (`sched/go/h1.go`) completes.
+//! … fixed for every shape above", but the pool's slot yield (since deleted: jobs now run as fibers
+//! on the run's workers and park) fired only for a job blocked directly ON a channel, not for a job
+//! parked at a nursery join whose CHILD is. Go's `GOMAXPROCS=1` twin (`sched/go/h1.go`) completes.
 //!
 //! Spawns and polls rather than calling `output()`: a hung child never closes its pipes, so
 //! `output()` would wedge this test binary instead of failing it.

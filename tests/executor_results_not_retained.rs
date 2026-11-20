@@ -4,7 +4,8 @@
 //! 8 MB cap.
 //!
 //! **Lives in `tests/` — its own process — on purpose, not in `test_runner.rs`'s `mod tests`.**
-//! `vm::pool` is ONE process-wide `OnceLock`, shared by every test in whatever binary it runs in. At
+//! The run's workers come from ONE process-wide worker count and runner budget (`width::RUNNERS`),
+//! shared by every test in whatever binary it runs in. At
 //! an 8 MB cap and ~1 MB per job, as few as 8 of this test's OWN 300 submissions sitting
 //! queued-but-not-yet-dispatched trips the cap — and that is genuine, correctly-accounted memory
 //! (`ExecutorCore::pending`), not a measurement bug (see the `EXEC_MEM_CAP_LOCK` doc in
@@ -19,7 +20,7 @@
 //! contention-dependent there. `cargo test`'s default is to run test BINARIES one at a time (never
 //! two targets' bodies executing concurrently, only the `#[test]` fns WITHIN one binary run
 //! concurrently), so a dedicated integration-test binary gives this program the exclusive access to
-//! `vm::pool` its 8 MB margin assumes, without weakening the cap or lock-stepping it against every
+//! the runners its 8 MB margin assumes, without weakening the cap or lock-stepping it against every
 //! other `Executor` test in the tree.
 
 use std::path::Path;

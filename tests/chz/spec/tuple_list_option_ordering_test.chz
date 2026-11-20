@@ -124,3 +124,28 @@ test fn nan_elements_follow_cpython():
 test fn nested_containers_order():
     assert [(1, "a"), (1, "b")] < [(1, "a"), (2, "a")]
     assert [[1, 2], [1]] > [[1, 2], []]
+
+# Ten list levels per call, so 1 200 calls nest 12 000 levels (past `MAX_STRUCTURAL_DEPTH`) and stay
+# under the call-depth cap.
+fn deep_lt[T: Comparable](a: T, b: T, k: int) -> bool:
+    if k == 0:
+        return a < b
+    return deep_lt([[[[[[[[[[a]]]]]]]]]], [[[[[[[[[[b]]]]]]]]]], k - 1)
+
+fn deep_eq[T: Comparable](a: T, b: T, k: int) -> bool:
+    if k == 0:
+        return a == b
+    return deep_eq([[[[[[[[[[a]]]]]]]]]], [[[[[[[[[[b]]]]]]]]]], k - 1)
+
+test fn a_too_deep_nested_list_order_faults_as_its_eq_does():
+    # 9 990 levels fit the budget, for `<` as for `==`
+    assert deep_lt(0, 1, 999)
+    assert deep_eq(0, 0, 999)
+    lt := recover: deep_lt(0, 1, 1200)
+    eq := recover: deep_eq(0, 0, 1200)
+    match (lt, eq):
+        (!a, !b): assert a.error() == b.error(), a.error()
+        _: assert false, "a 12 000-deep `<` and `==` must both fault"
+    match lt:
+        ?_: pass
+        !e: assert e.error().contains("maximum structural depth"), e.error()

@@ -15,38 +15,34 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Where the running code sits, as far as blocking is concerned. Derived by [`Vm::block_ctx`].
+/// Every party that runs code is a fiber on a worker shell (`main` is fiber 1, an `Executor` job a
+/// fiber), so the one question is whether a host frame is under it.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(super) enum BlockCtx {
-    /// An M:N worker shell running a fiber with no host frame under it: the fiber can snapshot-park.
+    /// A fiber with no host frame under it: it can snapshot-park.
     Park,
-    /// An M:N worker shell inside a native callback, `defer:` drain, generator resume or
-    /// `Shared.update` closure: the host stack cannot be unwound, so the worker blocks in place and
-    /// hands its runner slot to a replacement.
-    Demote,
-    /// The inline outermost-`parallel:` builder (`mn_enlist_sched`). It has no worker loop to
-    /// drive a park.
-    Builder { reentered: bool },
-    /// A thread that owns itself: `main`, a `main` `defer:`, `main` inside a callback.
-    OwnThread { reentered: bool },
+    /// A fiber with a host (Rust) frame under it: an FFI callback, a map/set probe hook, the
+    /// Rust-stack `defer` drain, or an `Inline` native's callee. The host stack cannot be unwound,
+    /// so the worker blocks in place and hands its runner slot to a replacement.
+    Reentered,
 }
 
 impl BlockCtx {
-    /// May this fiber snapshot-park here: an M:N worker shell with no host frame under it?
-    /// (TICKET-298, SD4: THE reader; do not re-derive it from `mn` and `native_reentry`.)
+    /// May this fiber snapshot-park here: no host frame under it?
+    /// (TICKET-298, SD4: THE reader; do not re-derive it from `native_reentry`.)
     pub(super) fn parks(self) -> bool {
         match self {
             BlockCtx::Park => true,
-            BlockCtx::Demote | BlockCtx::Builder { .. } | BlockCtx::OwnThread { .. } => false,
+            BlockCtx::Reentered => false,
         }
     }
 
-    /// Is a host (Rust) frame under the running code: a native callback, a synchronous drain, a
-    /// generator resume or a box closure? (TICKET-298, SD4: THE reader of `native_reentry > 0`.)
+    /// Is a host (Rust) frame under the running code? (TICKET-298, SD4: THE reader of
+    /// `native_reentry > 0`.)
     pub(super) fn reentered(self) -> bool {
         match self {
             BlockCtx::Park => false,
-            BlockCtx::Demote => true,
-            BlockCtx::Builder { reentered } | BlockCtx::OwnThread { reentered } => reentered,
+            BlockCtx::Reentered => true,
         }
     }
 }
@@ -143,11 +139,7 @@ pub(super) enum Handover {
 pub(super) enum Permit {
     /// keep it (a wait that ends at once)
     Keep,
-    /// give it back for the whole wait (Go: a blocking syscall hands off its P), and give the
-    /// runner slot (bit 0) of the `parallel:` body the thread runs to the claim, which starts a
-    /// runner for the tasks the body queued (TICKET-211). The slot goes in [`Vm::wait_enter`] and
-    /// [`Vm::nursery_counts`], so a guard's bounded first stage (DEC-016) hands it over at its
-    /// second stage.
+    /// give it back for the whole wait (Go: a blocking syscall hands off its P)
     Release,
     /// keep it, and stamp the thread's watch slot: the watcher releases the permit of a call that
     /// lasts past a tick (Go `sysmon` retakes the P of a cgo call)
@@ -165,8 +157,7 @@ pub(super) enum Account {
 
 /// The steps a wait on a VM host thread takes besides the GC detach that every wait takes, and the
 /// counts it registers for the two deadlock verdicts: [`wait_steps`]'s answer. [`Vm::wait_begin`]
-/// takes them and [`Vm::wait_end`] drops them; a nursery join takes its counts through
-/// [`Vm::nursery_counts`].
+/// takes them and [`Vm::wait_end`] drops them.
 ///
 /// A parked fiber registers none of these: its park files it with its sched (`parked_n`,
 /// `join_parked`, a timer's `inflight`). A parked fiber is not a waiting thread.
@@ -177,7 +168,7 @@ pub(super) struct WaitSteps {
 }
 
 impl WaitSteps {
-    /// No counts, no demote and no body slot to hand over: only the permit step.
+    /// No counts and no demote: only the permit step.
     fn registers_nothing(self) -> bool {
         self.hand == Handover::Keep && self.permit != Permit::Release
     }
@@ -191,7 +182,7 @@ impl WaitSteps {
 /// - A wait that ends by itself ([`WaitSpec::will_return`]), demoted, is `inflight`.
 /// - Any other wait, demoted, is a [`Waiter`].
 /// - A nursery joiner hands its slot over in `Vm::joiner_shell` where it may not help (the
-///   `Demote` and `InPlace` cells of [`mode`]).
+///   `Demote` cell of [`mode`]).
 pub(super) fn wait_steps(spec: Option<WaitSpec>, ctx: BlockCtx) -> WaitSteps {
     let Some(spec) = spec else {
         return WaitSteps {
@@ -208,9 +199,7 @@ pub(super) fn wait_steps(spec: Option<WaitSpec>, ctx: BlockCtx) -> WaitSteps {
             permit: Permit::Release,
             hand: match mode(ctx, spec) {
                 BlockMode::Demote | BlockMode::InPlace => Handover::Joiner,
-                BlockMode::Park | BlockMode::Help | BlockMode::InlineSleep | BlockMode::Refuse => {
-                    Handover::Keep
-                }
+                BlockMode::Park => Handover::Keep,
             },
         },
         WaitSpec::Recv
@@ -261,29 +250,6 @@ impl Blocked {
     }
 }
 
-/// What a wait handed over ([`WaitSteps`]), taken back on drop.
-pub(super) struct Counts {
-    /// the scheds whose body runner slot this wait handed over ([`Permit::Release`])
-    runners: Vec<Arc<MnSched>>,
-}
-
-impl Counts {
-    fn none() -> Self {
-        Counts {
-            runners: Vec::new(),
-        }
-    }
-}
-
-impl Drop for Counts {
-    fn drop(&mut self) {
-        // TICKET-211 — the body runs again on its own thread: it takes bit 0 back.
-        for s in &self.runners {
-            s.body_runner(false);
-        }
-    }
-}
-
 /// How an op blocks in a context.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(super) enum BlockMode {
@@ -291,25 +257,17 @@ pub(super) enum BlockMode {
     Park,
     /// block this worker in place and hand its runner slot to a replacement
     Demote,
-    /// block this thread in place: it runs nothing else until the wait ends
+    /// block this thread in place, keeping its runner slot: a C call, or a `connect` handshake
+    /// under a host frame
     InPlace,
-    /// a nursery join only: wait in place AND run the joined scheduler's fibers on this thread's
-    /// stack. Legal only with no host frame under the joiner: a fiber run there may wait for
-    /// something only a buried frame can give (TICKET-245).
-    Help,
-    /// sleep this thread to the op's own deadline
-    InlineSleep,
-    /// refuse: the op returns its documented error or fault instead of blocking
-    Refuse,
 }
 
 /// THE blocking-context table. Every blocking op asks this, and nothing else, how to block.
 /// Changing a cell means changing this, `tests::every_cell_matches_the_table` and the
 /// `docs/reference/concurrency/` "Blocking-context table" in one commit.
 pub(super) fn mode(ctx: BlockCtx, spec: WaitSpec) -> BlockMode {
-    use BlockMode::{Demote, Help, InPlace, InlineSleep, Park, Refuse};
+    use BlockMode::{Demote, InPlace, Park};
     use WaitSpec as W;
-    let join = |reentered: bool| if reentered { InPlace } else { Help };
     match ctx {
         BlockCtx::Park => match spec {
             // DEC-151: stdin is a host wait we do not own. A guard wait parks on the box's lock
@@ -328,7 +286,7 @@ pub(super) fn mode(ctx: BlockCtx, spec: WaitSpec) -> BlockMode {
             | W::Nursery => Park,
             W::Extern => InPlace,
         },
-        BlockCtx::Demote => match spec {
+        BlockCtx::Reentered => match spec {
             W::Connect | W::Extern => InPlace,
             // TICKET-185: a demoted sender blocks on its published offer, as Go blocks.
             // TICKET-245: a nursery joiner hands its runner slot over and only waits.
@@ -343,31 +301,6 @@ pub(super) fn mode(ctx: BlockCtx, spec: WaitSpec) -> BlockMode {
             | W::HostFd
             | W::Socket
             | W::Guard => Demote,
-        },
-        BlockCtx::Builder { reentered } => match spec {
-            W::Recv
-            | W::Send
-            | W::Wait {
-                deadline: false, ..
-            }
-            | W::Socket => Refuse,
-            W::Wait { deadline: true, .. } | W::Timer | W::Sleep => InlineSleep,
-            W::HostFd | W::Guard => Demote,
-            W::Connect | W::Offload | W::Join | W::Extern => InPlace,
-            W::Nursery => join(reentered),
-        },
-        BlockCtx::OwnThread { reentered } => match spec {
-            W::Timer | W::Sleep => InlineSleep,
-            W::HostFd | W::Guard => Demote,
-            W::Recv
-            | W::Send
-            | W::Wait { .. }
-            | W::Offload
-            | W::Socket
-            | W::Connect
-            | W::Join
-            | W::Extern => InPlace,
-            W::Nursery => join(reentered),
         },
     }
 }
@@ -395,7 +328,7 @@ pub(super) enum Cut {
 pub(super) enum Halt {
     /// a cancel flag this party holds is tripped
     Cancelled,
-    /// a child of a nursery this party owns faulted; `floor` is that nursery's `nurseries` index,
+    /// a child of a nursery this party owns faulted; `floor` is that nursery's `eager_scheds` index,
     /// below which a `recover:` must not catch the fault (DEC-096)
     /// TICKET-195: `trace` is the faulting child's own stack trace
     ChildFault {
@@ -407,7 +340,7 @@ pub(super) enum Halt {
 
 /// One open nursery of a party, borrowed: what [`halt_of`] reads.
 pub(super) struct OwnedRef<'a> {
-    /// the nursery's `nurseries` index
+    /// the nursery's `eager_scheds` index
     pub(super) n: usize,
     /// the nursery's cancel flag, which a faulting child trips in `MnSched::finish_with`, in the
     /// lock hold that stores its fault
@@ -476,7 +409,7 @@ impl WakeSet {
 /// production caller of `trip_cancel_flag`:
 /// - a child's `Exit` end (`finish_with`);
 /// - the run-wide exit (`MnSched::cancel_all`, from `halt_all_scheds`);
-/// - the abort seams (`trip_scope_cancel` from `abort_enlisted_scope`, the eager-nursery abort and
+/// - the abort seams (`trip_scope_cancel` from the eager-nursery abort and
 ///   `sched::cancel_fiber_owned_family`);
 /// - a `--timeout` gap wake (`netio::deadline_gap_wake`);
 /// - an Executor job cut (`SchedCore::cancel_one`), an Executor join that timed out
@@ -540,10 +473,9 @@ impl DemoteReg {
     }
 }
 
-/// A wait started by [`Vm::wait_begin`]: the counts it registered, the demote bracket when its
-/// steps take one, and whether it gave its run permit back. [`Vm::wait_end`] ends it.
+/// A wait started by [`Vm::wait_begin`]: the demote bracket (and the counts it registered) when
+/// its steps take one, and whether it gave its run permit back. [`Vm::wait_end`] ends it.
 pub(super) struct WaitReg {
-    counts: Counts,
     demote: Option<DemoteReg>,
     released: bool,
     /// the thread stamped its watch slot ([`Permit::Watched`])
@@ -553,13 +485,6 @@ pub(super) struct WaitReg {
 }
 
 impl WaitReg {
-    /// Take the counts out of this wait, for an in-place channel tick: it drops them after the
-    /// permit take and after its own `GatedReg`, before its next pop. Dropping them before the
-    /// `GatedReg` made `benches/sched/rendezvous_pingpong` at T=1 14% slower (r=15).
-    pub(super) fn take_counts(&mut self) -> Counts {
-        std::mem::replace(&mut self.counts, Counts::none())
-    }
-
     /// End a registered wait's demote under core lock A, in the same hold as the pop or settle
     /// that ends it (DEC-176). A no-op when the wait took no demote. [`Vm::wait_end`] still ends
     /// the wait.
@@ -593,7 +518,7 @@ impl Vm {
 
     /// THE demote bracket: take this worker off `running` and account the wait — `inflight`, or
     /// a [`Waiter`]. Spawns this thread's replacement worker once. With no M:N scheduler
-    /// (`mn == None`) it keeps DEC-052's `yield_pool_slot(None)` and accounts nothing.
+    /// (`mn == None`) it accounts nothing.
     fn block_enter(
         &mut self,
         account: Account,
@@ -601,7 +526,6 @@ impl Vm {
         span: Span,
     ) -> Result<DemoteReg, RuntimeError> {
         let Some(sched) = self.mn.as_ref().map(Arc::clone) else {
-            self.yield_pool_slot(None);
             return Ok(DemoteReg { tok: None });
         };
         let reg = {
@@ -646,54 +570,20 @@ impl Vm {
         }
     }
 
-    /// What a wait hands over ([`WaitSteps`]): a released permit gives each body's runner slot
-    /// to the claim.
-    fn counts(&self, steps: WaitSteps) -> Counts {
-        let mut counts = Counts::none();
-        if steps.permit == Permit::Release {
-            self.hand_body_runners(&mut counts);
-        }
-        counts
-    }
-
-    /// TICKET-211 — the body's thread stops running ([`Permit::Release`]): each `parallel:` body
-    /// it runs gives its runner slot to the claim, which starts runners for whatever the body
-    /// already queued. A fiber-owned nursery's body is a fiber; it has no slot of its own.
-    fn hand_body_runners(&self, counts: &mut Counts) {
-        counts.runners = self
-            .owned_eager_scopes()
-            .filter(|s| !s.fiber_owned && s.scope == 0)
-            .map(|s| {
-                let w = s.sched.body_runner(true);
-                self.start_runners(&s.sched, w);
-                Arc::clone(&s.sched)
-            })
-            .collect();
-    }
-
-    /// The counts of a nursery join or abort, from the `Nursery` row of [`wait_steps`], held
-    /// while the joiner waits. The join's permit step is the caller's [`Vm::wait_permit`] around
-    /// the whole join.
-    pub(super) fn nursery_counts(&self) -> Counts {
-        let steps = wait_steps(Some(WaitSpec::Nursery), self.block_ctx());
-        self.counts(steps)
-    }
-
-    /// The counts and the demote of a wait, steps (a) and (c) of [`wait_steps`].
+    /// The demote of a wait and the counts it registers, step (c) of [`wait_steps`].
     fn wait_enter(
         &mut self,
         steps: WaitSteps,
         on: Option<Blocked>,
         what: &str,
         span: Span,
-    ) -> Result<(Counts, Option<DemoteReg>), RuntimeError> {
-        let counts = self.counts(steps);
+    ) -> Result<Option<DemoteReg>, RuntimeError> {
         self.wait_site = on.as_ref().and_then(|b| b.listed);
         let demote = match steps.hand {
             Handover::Demote(account) => Some(self.block_enter(account, what, span)?),
             Handover::Keep | Handover::Joiner => None,
         };
-        Ok((counts, demote))
+        Ok(demote)
     }
 
     /// THE start of a wait, once for the whole wait (Go `entersyscall`): the counts [`wait_steps`]
@@ -709,10 +599,9 @@ impl Vm {
         span: Span,
     ) -> Result<WaitReg, RuntimeError> {
         let steps = wait_steps(Some(spec), self.block_ctx());
-        let (counts, demote) = self.wait_enter(steps, on, what, span)?;
+        let demote = self.wait_enter(steps, on, what, span)?;
         let (released, watched) = self.permit_take(steps.permit);
         Ok(WaitReg {
-            counts,
             demote,
             released,
             watched,
@@ -721,12 +610,11 @@ impl Vm {
     }
 
     /// The permit step alone: the start of a wait whose counts and demote come later
-    /// ([`Vm::wait_demote`], the guard's second stage, DEC-016), or a nursery join, whose counts each
-    /// join site takes ([`Vm::nursery_counts`]).
+    /// ([`Vm::wait_demote`], the guard's second stage, DEC-016), or a nursery join, which counts
+    /// nothing besides.
     pub(super) fn wait_permit(&mut self, spec: WaitSpec) -> WaitReg {
         let (released, watched) = self.permit_take(wait_steps(Some(spec), self.block_ctx()).permit);
         WaitReg {
-            counts: Counts::none(),
             demote: None,
             released,
             watched,
@@ -805,9 +693,7 @@ impl Vm {
         span: Span,
     ) -> Result<(), RuntimeError> {
         let steps = wait_steps(Some(spec), self.block_ctx());
-        let (counts, demote) = self.wait_enter(steps, on, what, span)?;
-        reg.counts = counts;
-        reg.demote = demote;
+        reg.demote = self.wait_enter(steps, on, what, span)?;
         Ok(())
     }
 
@@ -848,19 +734,16 @@ impl Vm {
         })
     }
 
-    /// End a wait (Go `exitsyscall`): drop its counts, then take the permit back if the wait gave it
-    /// up, a free one first (`pins` are the values the caller holds in Rust locals across that
-    /// take), then end an `inflight` demote. The counts go first: a party still counted as blocked
-    /// while it waits for a permit after its wait ended is a party that made progress.
+    /// End a wait (Go `exitsyscall`): take the permit back if the wait gave it up, a free one first
+    /// (`pins` are the values the caller holds in Rust locals across that take), then end an
+    /// `inflight` demote.
     pub(super) fn wait_end(&mut self, reg: WaitReg, pins: &[GcRef]) {
         let WaitReg {
-            counts,
             demote,
             released,
             watched,
             ticked: _,
         } = reg;
-        drop(counts);
         self.wait_site = None;
         self.permit_back(released, watched, pins);
         if let Some(reg) = demote {
@@ -870,7 +753,7 @@ impl Vm {
 
     /// A wait of one tick: [`Vm::wait_begin`], [`Vm::wait_door`] around `f`, [`Vm::wait_end`].
     /// For a `will_return` spec or `None`. A wait whose steps register nothing takes only its
-    /// permit step: a short C call pays no [`Counts`].
+    /// permit step: a short C call registers no count.
     pub(super) fn wait_once<R>(
         &mut self,
         spec: Option<WaitSpec>,
@@ -911,21 +794,15 @@ impl Vm {
         Ok(r)
     }
 
-    /// The blocking context of the running code, derived from `mn`, `mn_enlist_sched` and
-    /// `native_reentry` on every call. An `Executor` job is a fiber (TICKET-208).
+    /// The blocking context of the running code, derived from `native_reentry` on every call.
+    /// Every party that waits is a fiber on a worker shell: `main` is fiber 1 (`Vm::run_root`), an
+    /// `Executor` job a fiber (TICKET-208).
     pub(super) fn block_ctx(&self) -> BlockCtx {
-        let reentered = self.native_reentry > 0;
-        if self.mn.is_some() {
-            return if reentered {
-                BlockCtx::Demote
-            } else {
-                BlockCtx::Park
-            };
+        if self.native_reentry > 0 {
+            BlockCtx::Reentered
+        } else {
+            BlockCtx::Park
         }
-        if self.mn_enlist_sched.is_some() {
-            return BlockCtx::Builder { reentered };
-        }
-        BlockCtx::OwnThread { reentered }
     }
 
     /// TICKET-194 — THE cancellation check an op makes before it waits. An op calls it only after
@@ -948,9 +825,10 @@ impl Vm {
     }
 
     /// TICKET-245 — THE answer to "must this nursery joiner hand its runner slot over instead of
-    /// running fibers on its own stack?", the `Nursery` row of [`wait_steps`]. Only
-    /// [`Vm::joiner_shell`] asks it. A `Park` joiner that reaches an inline wait (an abort that
-    /// `park_abort_origin` declines) still helps.
+    /// running fibers on its own stack?", the `Nursery` row of [`wait_steps`]: a `Reentered`
+    /// joiner does, as a fiber run on its stack may wait for something only a buried frame can
+    /// give. Only [`Vm::joiner_shell`] asks it. A `Park` joiner that reaches an inline wait (an
+    /// abort that `park_abort_origin` declines) still helps.
     pub(super) fn joiner_hands_over(&self) -> bool {
         wait_steps(Some(WaitSpec::Nursery), self.block_ctx()).hand == Handover::Joiner
     }
@@ -962,16 +840,7 @@ mod tests {
 
     /// Every context, in the column order of [`TABLE`].
     fn contexts() -> Vec<BlockCtx> {
-        let mut v = vec![
-            BlockCtx::Park,
-            BlockCtx::Demote,
-            BlockCtx::Builder { reentered: false },
-            BlockCtx::Builder { reentered: true },
-        ];
-        for reentered in [false, true] {
-            v.push(BlockCtx::OwnThread { reentered });
-        }
-        v
+        vec![BlockCtx::Park, BlockCtx::Reentered]
     }
 
     /// Every wait, in the row order of [`TABLE`].
@@ -996,39 +865,34 @@ mod tests {
         v
     }
 
-    /// One row per spec, one letter per context: P Park, D Demote, I InPlace, H Help,
-    /// S InlineSleep, R Refuse. Columns: Park, Demote, Builder as reentered = f, t, then
-    /// OwnThread as reentered = f, t. The last column is `will_return`.
+    /// One row per spec, one letter per context: P Park, D Demote, I InPlace. Columns: Park,
+    /// Reentered. The last column is `will_return`.
     const TABLE: [(&str, &str, bool); 16] = [
-        ("Recv", "PD RR II", false),
-        ("Timer", "PD SS SS", true),
-        ("Send", "PD RR II", false),
-        ("Wait", "PD RR II", false),
-        ("Wait+send", "PD RR II", false),
-        ("Wait+deadline", "PD SS II", true),
-        ("Wait+deadline+send", "PD SS II", true),
-        ("Sleep", "PD SS SS", true),
-        ("Offload", "PD II II", true),
-        ("HostFd", "DD DD DD", true),
-        ("Socket", "PD RR II", true),
-        ("Connect", "PI II II", true),
-        ("Guard", "PD DD DD", false),
-        ("Join", "PD II II", false),
-        ("Nursery", "PD HI HI", false),
-        ("Extern", "II II II", true),
+        ("Recv", "PD", false),
+        ("Timer", "PD", true),
+        ("Send", "PD", false),
+        ("Wait", "PD", false),
+        ("Wait+send", "PD", false),
+        ("Wait+deadline", "PD", true),
+        ("Wait+deadline+send", "PD", true),
+        ("Sleep", "PD", true),
+        ("Offload", "PD", true),
+        ("HostFd", "DD", true),
+        ("Socket", "PD", true),
+        ("Connect", "PI", true),
+        ("Guard", "PD", false),
+        ("Join", "PD", false),
+        ("Nursery", "PD", false),
+        ("Extern", "II", true),
     ];
 
-    /// SD4 (TICKET-298): `parks` is true for `Park` alone, and `reentered` is the host-frame bit
-    /// each context was derived from (`Park` has none, `Demote` always has one).
+    /// SD4 (TICKET-298): `parks` is true for `Park` alone, and `reentered` for `Reentered` alone.
     #[test]
     fn parks_and_reentered_read_every_context() {
         for c in contexts() {
             let (parks, reentered) = match c {
                 BlockCtx::Park => (true, false),
-                BlockCtx::Demote => (false, true),
-                BlockCtx::Builder { reentered } | BlockCtx::OwnThread { reentered } => {
-                    (false, reentered)
-                }
+                BlockCtx::Reentered => (false, true),
             };
             assert_eq!(c.parks(), parks, "parks of {c:?}");
             assert_eq!(c.reentered(), reentered, "reentered of {c:?}");
@@ -1041,9 +905,6 @@ mod tests {
             BlockMode::Park => 'P',
             BlockMode::Demote => 'D',
             BlockMode::InPlace => 'I',
-            BlockMode::Help => 'H',
-            BlockMode::InlineSleep => 'S',
-            BlockMode::Refuse => 'R',
         };
         let specs = specs();
         assert_eq!(specs.len(), TABLE.len());
@@ -1063,22 +924,22 @@ mod tests {
     /// J the nursery joiner's hand-over. Every listed spec but `Extern` gives its permit back
     /// ([`Permit::Release`]); `Extern` is [`Permit::Watched`].
     const STEPS: [(&str, &str); 16] = [
-        ("Recv", "K W K K K K"),
-        ("Timer", "K F K K K K"),
-        ("Send", "K W K K K K"),
-        ("Wait", "K W K K K K"),
-        ("Wait+send", "K W K K K K"),
-        ("Wait+deadline", "K F K K K K"),
-        ("Wait+deadline+send", "K F K K K K"),
-        ("Sleep", "K F K K K K"),
-        ("Offload", "K F K K K K"),
-        ("HostFd", "F F F F F F"),
-        ("Socket", "K F K K K K"),
-        ("Connect", "K K K K K K"),
-        ("Guard", "K W W W W W"),
-        ("Join", "K W K K K K"),
-        ("Nursery", "K J K J K J"),
-        ("Extern", "K K K K K K"),
+        ("Recv", "K W"),
+        ("Timer", "K F"),
+        ("Send", "K W"),
+        ("Wait", "K W"),
+        ("Wait+send", "K W"),
+        ("Wait+deadline", "K F"),
+        ("Wait+deadline+send", "K F"),
+        ("Sleep", "K F"),
+        ("Offload", "K F"),
+        ("HostFd", "F F"),
+        ("Socket", "K F"),
+        ("Connect", "K K"),
+        ("Guard", "K W"),
+        ("Join", "K W"),
+        ("Nursery", "K J"),
+        ("Extern", "K K"),
     ];
 
     #[test]

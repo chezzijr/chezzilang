@@ -1160,7 +1160,7 @@ fn a_provider_frame_in_a_trace_is_readable() {
 }
 
 /// TICKET-048 (W8-14 residual) — a nursery-deadlock fault's headline must name a real file and
-/// position, not the placeholder `Span::RUNTIME` used at `run_mn_nursery_outermost`'s
+/// position, not the placeholder `Span::RUNTIME` the outermost builder (since deleted) used at its
 /// nursery deadlock sites. It rendered `line 1, col 1` with no file, unlike an ordinary in-task
 /// fault one line away. One global report (plan 2026-11-17): the headline is task 1's own wait,
 /// here main at its `parallel:` join (3:5), and the sender follows (Go twin: fatal, all asleep).

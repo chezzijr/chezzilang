@@ -4,6 +4,9 @@
 //! `CHEZZI_SCHED_STATS=1`, keep at most 5 OS threads (Go 1.27: 5 threads, 0.21 s), and finish
 //! within 2x the same program with `ch.recv()` in the body, run by the same binary in the same test.
 //! Before the plan each deferred wait demoted its worker: about 2005 threads and 38 s.
+//!
+//! The twin (plan 2026-11-18-every-wait-parks Task 6): the same 2000 tasks each wait inside a
+//! nested `==` hook (`[E(1)] == [E(1)]`), whose hook runs as a frame and parks.
 
 use std::io::Read;
 use std::process::{Command, Stdio};
@@ -27,6 +30,36 @@ ch := Channel[int](0)
 fn f():
     {wait}
     print(\"x\")
+
+fn main():
+    parallel:
+        for _ in 0..{TASKS}:
+            spawn f()
+        spawn:
+            time.sleep_ms(200)
+            for _ in 0..{TASKS}:
+                ch.send(1)
+main()
+"
+    )
+}
+
+/// The `==` twin: each task's `[E(1)] == [E(1)]` waits in `E.eq` on `ch`, then prints `x`.
+fn eq_program() -> String {
+    format!(
+        "import time from std
+ch := Channel[int](0)
+
+struct E:
+    n: int
+    fn eq(self, other: E) -> bool:
+        match ch.recv():
+            ?v: return self.n == other.n + v - 1
+            !_: return false
+
+fn f():
+    if [E(1)] == [E(1)]:
+        print(\"x\")
 
 fn main():
     parallel:
@@ -154,4 +187,37 @@ fn two_thousand_tasks_waiting_in_a_defer_park() {
     assert_eq!(deferred.demotes(), Some(0), "{summary}");
     assert!(deferred.peak_threads <= MAX_THREADS, "{summary}");
     assert!(deferred.wall <= body.wall * 2, "{summary}");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn two_thousand_tasks_waiting_in_a_nested_eq_hook_park() {
+    let body = probe("eq-body", &program("ch.recv()"));
+    assert_eq!(body.code, Some(0), "body twin: {}", body.stderr);
+    let hooked = probe("eq", &eq_program());
+    let summary = format!(
+        "eq run: code={:?} demotes={:?} peak_threads={} wall={:?} (body twin: demotes={:?} \
+         peak_threads={} wall={:?}); stderr tail: {:?}",
+        hooked.code,
+        hooked.demotes(),
+        hooked.peak_threads,
+        hooked.wall,
+        body.demotes(),
+        body.peak_threads,
+        body.wall,
+        hooked.stderr.lines().rev().take(3).collect::<Vec<_>>()
+    );
+    assert_eq!(hooked.code, Some(0), "{summary}");
+    assert_eq!(
+        hooked.stdout,
+        "x\n".repeat(TASKS),
+        "every task prints; {summary}"
+    );
+    assert!(
+        hooked.stderr.contains("[sched-stats] workers=2 "),
+        "{summary}"
+    );
+    assert_eq!(hooked.demotes(), Some(0), "{summary}");
+    assert!(hooked.peak_threads <= MAX_THREADS, "{summary}");
+    assert!(hooked.wall <= body.wall * 2, "{summary}");
 }

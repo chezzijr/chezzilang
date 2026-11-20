@@ -1,34 +1,8 @@
-//! VM: scheduler data types: joiner steps, fd waits, fibers, local queues, eager and join scopes,
+//! VM: scheduler data types: fd waits, fibers, local queues, eager and join scopes,
 //! the scope table, op step and park records.
 //! Split out of `src/vm/mod.rs`. `super::*` is the parent module.
 
 use super::*;
-
-/// TICKET-118 (W13-7) — what a marked pool-slot joiner does on its next wait/park pass:
-/// `Untimed` (not the marked joiner, or its sched still has work), `Timed` (marked and idle, but
-/// under one `DEMOTE_POLL_BACKOFF` tick so far), or `Yield` (marked and idle for a full tick — hand
-/// the pool slot over).
-pub(super) enum JoinerStep {
-    Untimed,
-    Timed,
-    Yield,
-}
-
-/// TICKET-118 (W13-7) — while held, `sched.core.pool_joiner` names this OS thread as the one
-/// eligible to hand its bounded-pool slot to a replacement while it waits idle on this sched's
-/// nursery join (DEC-052: only the top-level `Vm`, `mn.is_none()`, ever installs this). Restores
-/// the previous marker (usually `None`) on drop, so a nested join's guard does not clobber an outer
-/// one — though only the outermost `mn.is_none()` thread ever installs one in practice.
-pub(super) struct PoolJoinerGuard {
-    pub(super) sched: Arc<MnSched>,
-    pub(super) prev: Option<std::thread::ThreadId>,
-}
-
-impl Drop for PoolJoinerGuard {
-    fn drop(&mut self) {
-        self.sched.lock().pool_joiner = self.prev;
-    }
-}
 
 /// D5 owe #3 Path C (#3 socket half) — block the (replacement-covered) worker on `fd` until it is
 /// readable/writable per `interest` OR `timeout` elapses, then return. Used by [`Vm::demote_block_socket`]
@@ -80,22 +54,13 @@ pub(super) struct FiberCtx {
     pub(super) call_depth: usize,
     pub(super) cur_base: usize,
     pub(super) handlers: Vec<Handler>,
-    pub(super) nurseries: Vec<Vec<QueuedTask>>,
-    /// Cross-nursery flat scheduler (M:N) — parallel to [`Vm::nurseries`] (lockstep): `Some(scope_id)`
-    /// if this nursery was EARLY-ENLISTED into the one global sched (its sibling tasks already seeded as
-    /// a scope so a *nested* nursery's owner can run them — the case-A cross-nursery wake), else `None`
-    /// (the normal lazy path: tasks run + reduce at this nursery's own `JoinNursery`). When `Some`, the
-    /// nursery's `tasks` vec was drained (consumed into the scope), and its `JoinNursery` reduces the
-    /// recorded scope's slot sub-range instead of running the tasks — preserving the per-nursery-join
-    /// flush ORDER (so non-blocking nested spawns still flush deterministically).
-    pub(super) mn_scopes: Vec<Option<usize>>,
     /// TASK B — see [`Vm::nursery_defer_floors`]; carried per-fiber so a parked fiber's per-nursery
-    /// defer floors travel with its `nurseries` across `swap_ctx`.
+    /// defer floors travel with its nurseries across `swap_ctx`.
     pub(super) nursery_defer_floors: Vec<LevelFloor>,
     /// TICKET-048 — see [`Vm::nursery_spans`]; carried per-fiber so a parked fiber's spans travel
     /// with its nurseries across `swap_ctx`.
     pub(super) nursery_spans: Vec<Span>,
-    /// Per-connection spawn — parallel to [`Vm::nurseries`] (same length, pushed/popped in lockstep):
+    /// Per-connection spawn — see [`Vm::eager_scheds`]:
     /// `Some` for an EAGER nursery (one entered under `--parallel` inside a live fiber, `mn.is_some()`)
     /// holding the live inner [`MnSched`] a `spawn` in this body injects handlers into; `None` for a
     /// lazy/top-level nursery (queue-at-join). Carried per-fiber so the open scope travels across a
@@ -115,6 +80,11 @@ pub(super) struct FiberCtx {
     pub(super) held_gens: Vec<super::core::GenHold>,
     /// See [`Vm::drains`]: the task's live defer drains, carried across a park.
     pub(super) drains: Vec<super::Drain>,
+    /// See [`Vm::walk_base`]: the structural depth the task's parked `==` and `str` walks have
+    /// consumed.
+    pub(super) walk_base: usize,
+    /// See [`Vm::repr_active`]: the containers the task's parked renders have open.
+    pub(super) repr_active: Vec<super::GcRef>,
     /// M1.6 — this context owns its own per-fiber side state (`executors`, `str_intern` and the
     /// in-flight socket-op state below), so [`Vm::swap_ctx`] swaps it. `false`
     /// for a context that aliases the shell's (tests only: every fiber and box context owns its
@@ -304,8 +274,8 @@ impl Fiber {
     }
 }
 
-/// TICKET-188 — THE walk of a party's open nurseries, outermost first: `n` is the `nurseries`
-/// index (`eager_scheds` is lockstep with `nurseries`, DEC-048), `None` entries skipped.
+/// TICKET-188 — THE walk of a party's open nurseries, outermost first: `n` is the `eager_scheds`
+/// index (the nursery depth, DEC-048), `None` entries skipped.
 pub(super) fn open_nurseries(
     eager: &[Option<EagerScope>],
 ) -> impl DoubleEndedIterator<Item = block::OwnedRef<'_>> {
@@ -346,8 +316,8 @@ pub(super) struct Handler {
     /// past the `LeaveDeferScope`s of any defer scopes opened *inside* the recover block, so their
     /// markers would leak; the catch paths truncate `defer_markers` back to this length.
     pub(super) markers_len: usize,
-    /// `nurseries.len()` at install. A fault inside a `parallel:` body or a spawned task jumps past
-    /// the `JoinNursery` that would pop the nursery; the catch path truncates `nurseries` back to
+    /// `eager_scheds.len()` at install. A fault inside a `parallel:` body or a spawned task jumps past
+    /// the `JoinNursery` that would pop the nursery; the catch path truncates `eager_scheds` back to
     /// this length so the stale nursery (and its aborted siblings) is reclaimed.
     pub(super) nursery_len: usize,
 }
@@ -612,39 +582,15 @@ impl LocalQ {
 /// `EnterNursery` under `--parallel` inside a live fiber, rather than lazily built at `JoinNursery`).
 /// A `spawn` in the body injects a handler fiber into `sched` immediately (see [`MnSched::inject`]),
 /// so the acceptor keeps running while handlers execute on the sched's farmed workers. Lives on a
-/// per-fiber stack ([`FiberCtx::eager_scheds`]) in lockstep with `nurseries`, so an early
-/// `?`/`return`/`break`/`recover:` reclaims it alongside the matching `nurseries` level.
+/// per-fiber stack ([`FiberCtx::eager_scheds`]), one entry per open nursery level, so an early
+/// `?`/`return`/`break`/`recover:` reclaims it with its level.
 pub(super) struct EagerScope {
     /// The live inner sched handlers are injected into; the acceptor becomes its inline worker at join.
     pub(super) sched: Arc<MnSched>,
     /// This inner nursery's cancel token (distinct from the outer's): a handler fault trips it to
     /// abort the accept loop + sibling handlers; the fault then propagates up as the acceptor's fault.
     pub(super) cancel: Arc<AtomicBool>,
-    /// The DEDICATED raw OS thread (NOT the bounded pool) that drains injected handlers DURING the
-    /// body. The eager body has no inline worker between `EnterNursery` and `JoinNursery`, so a live
-    /// drainer that does not depend on the bounded pool is what guarantees liveness — on a 1-core box
-    /// the pool would farm zero helpers, and nested eager nurseries would exhaust the pool (an
-    /// undetectable hang, since the running body stays counted awake). Joined at the end of
-    /// `join_eager_nursery`/`abort_eager_nursery` (it exits once the sched terminates). `None` only if
-    /// the thread failed to spawn (then the inline join worker is the sole drainer — bounded loops
-    /// still complete, just without mid-body concurrency).
-    ///
-    /// §2c1 — `Some` exactly when this scope OWNS `sched` (it is the OUTERMOST eager nursery on its
-    /// thread, so it built the sched and the drainer, and tears both down at its join). A NESTED eager
-    /// nursery on the same thread is a *scope* on the enclosing scope's sched and has no drainer of its
-    /// own — the owner's one drainer serves every scope, because it drains the GLOBAL queue.
-    ///
-    /// It is never `None` for an owner: `activate_eager_nursery` returns `None` rather than build a
-    /// drainer-less owner, so the caller falls back to the lazy queue-at-join path instead of leaving
-    /// a nursery with no worker at all during its body.
-    pub(super) drainer: Option<std::thread::JoinHandle<()>>,
-    /// TICKET-073 — the [`sched::NestedDrainerSlot`] this scope's `drainer` holds, if any. Held so the
-    /// budget share lives until the drainer is joined at the end of `join_eager_nursery` /
-    /// `abort_eager_nursery`, and released by `Drop` on every path out of `EagerScope` (see
-    /// `NestedDrainerSlot`'s own doc for why a hand-written release is not safe here).
-    pub(super) drainer_slot: Option<sched::NestedDrainerSlot>,
-    /// §2c1 — this nursery's scope id on `sched`. `0` for an owner; a fresh appended scope for a
-    /// nested eager nursery sharing the owner's sched.
+    /// §2c1 — this nursery's scope id on `sched` (`0` for an `Executor`'s private sched).
     ///
     /// **Why nesting must share ONE sched.** TICKET-099's `wake_run_wide` now reaches a sibling's
     /// private sched too, so wake is no longer the reason two nested eager nurseries on the same
@@ -655,10 +601,6 @@ pub(super) struct EagerScope {
     /// nursery restores it: the inline owner drains the GLOBAL queue, so it runs a sibling scope's
     /// fiber, and the body stays counted awake until it parks.
     pub(super) scope: usize,
-    /// TICKET-103 — scope lives on the spawning fiber's own sched (`self.mn`) because no private
-    /// eager sched was available (`worker_count() == 1` or a denied `NestedDrainerSlot`); no
-    /// drainer, no `body_open`.
-    pub(super) fiber_owned: bool,
     /// TICKET-103 — continuation scopes, spawn order, sharing `cancel`; see
     /// [`MnSched::inject_or_extend`].
     pub(super) more_scopes: Vec<usize>,
@@ -837,13 +779,6 @@ pub(super) struct MnSched {
     /// recruits no host worker while one visits: the visitor takes the handed-off fiber, and it
     /// checks this sched again under the host's lock after it leaves.
     pub(super) visitors: AtomicUsize,
-    /// TICKET-159/211 — how many runner leases `Vm::start_runners` handed to `runner_cache` for this
-    /// sched are still serving it. The count lives on the sched because the thread that starts them
-    /// (a spawning fiber, or the body at its own block) is not the thread that waits for them:
-    /// `join_eager_nursery` / `abort_eager_nursery` wait on `helpers_gone` until it reaches zero.
-    /// A lease's thread parks in `runner_cache` for the next sched instead of being joined.
-    pub(super) helpers_live: Mutex<usize>,
-    pub(super) helpers_gone: Condvar,
     /// TICKET-164 — fibers this sched handed to a worker (`Take::Run` from
     /// [`Self::take_runnable`]). Test-only; published per run by
     /// [`run_capture_counting_picks`].
@@ -893,10 +828,9 @@ pub(super) struct JoinScope {
     pub(super) ancestors: Vec<Arc<AtomicBool>>,
     /// This scope's own deadlock fault, used instead of `MnSched::deadlock_err` when set. The
     /// verdict clones ONE error into every asleep fiber's slot with no park site (DEC-048,
-    /// `record_deadlocked`), so a scope with a more specific span (the owner-fiber arm of
-    /// `run_mn_nursery_nested`) overrides it here. `None` for every other scope, including an
-    /// early-enlisted outer scope (DEC-048: it reports the BUILDER's span) and the
-    /// `(None, Some(held))` late-spawn arm.
+    /// `record_deadlocked`), so a scope with a more specific span (a fiber-owned nursery's, set by
+    /// `Vm::activate_fiber_owned_nursery`) overrides it here. `None` for every other scope (an
+    /// `Executor`'s scope, a test fixture's).
     pub(super) deadlock_err: Option<RuntimeError>,
     /// TICKET-125 — the scope of the fiber that owns this fiber-owned nursery; `None` otherwise.
     pub(super) parent_scope: Option<usize>,
@@ -1086,10 +1020,6 @@ pub(super) struct SchedCore {
     /// sub-range (reduce/take operate per-scope on that sub-slice — see `drain_scopes`).
     pub(super) slots: Vec<Option<TaskOutcome>>,
     pub(super) running: usize, // fibers currently swapped into a worker (executing)
-    /// TICKET-118 (W13-7) — the OS thread of the top-level `Vm` (`mn.is_none()`) joining this
-    /// sched's nursery, the only thread that may hand its bounded-pool slot over while it waits
-    /// (DEC-052).
-    pub(super) pool_joiner: Option<std::thread::ThreadId>,
     /// TICKET-126 (W13-24) — the `CANCEL_GEN` value at which this sched's last drain scan found no
     /// cancelled scope owing a drain. Written only by [`SchedCore::drain_scan_due`].
     pub(super) drain_scan_gen: u64,
@@ -1104,9 +1034,9 @@ pub(super) struct SchedCore {
     /// join is over.
     pub(super) exec_joiners: Vec<(std::sync::Weak<MnSched>, usize, usize)>,
     /// Cross-nursery flat scheduler (M:N) — the per-nursery join records, replacing the old scalar
-    /// `{done,total,body_open}`. ONE global `MnSched` is shared by every nested `run_mn_nursery` /
-    /// eager nursery (built only by the outermost owner); each `register_scope` appends a `JoinScope`
-    /// and enlists its fibers into the SAME global run queue. A fiber carries its `scope_id`; the inline
+    /// `{done,total,body_open}`. ONE `MnSched` (the run's root sched) is shared by every nursery of
+    /// the run; each `register_scope_seeded` appends a `JoinScope` and enlists its fibers into the
+    /// SAME global run queue. A fiber carries its `scope_id`; the inline
     /// owner of a scope stops when ITS OWN scope is done (scope-scoped owner stop), while it drains the
     /// global queue (so it naturally runs cross-nursery siblings — the case-A fix). TICKET-199 — a
     /// [`ScopeTable`]: ids are never reissued, and a retired id reads as absent.

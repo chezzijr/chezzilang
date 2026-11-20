@@ -96,13 +96,13 @@ pub fn assert_same_lines(first: &str, second: &str) {
 thread_local! {
     /// TICKET-164 — scheduler picks (`Take::Run` returns) made by the current test's own VM run.
     /// Thread-local, same reason as `core::CORE_PROBES`: the lib suite runs tests concurrently, so a
-    /// process-global counter would be polluted by another test's run. Published by the outermost
-    /// nursery join (`sched::run_mn_nursery_outermost` / `sched::join_eager_nursery`) on the VM's own
-    /// thread, then read here by [`run_capture_counting_picks`].
+    /// process-global counter would be polluted by another test's run. Published by the run's root
+    /// sched at its end (`Vm::run_root`) on the VM's own thread, then read here by
+    /// [`run_capture_counting_picks`].
     pub(crate) static RUN_PICKS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     /// TICKET-233 — costs of the current test's own run, counted instead of timed so CPU load
     /// cannot move them. Each is read by [`run_capture_counting`] and counts only work done on the
-    /// thread that runs the program's top level.
+    /// thread that runs the program: its one worker.
     ///
     /// `Vm::elem_equal` calls (every element comparison a collection method makes).
     pub(crate) static ELEM_COMPARES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
@@ -111,43 +111,53 @@ thread_local! {
     /// Receiver bytes `Vm::core_method` cloned before dispatching a `str` method.
     pub(crate) static STR_RECV_CLONED_BYTES: std::cell::Cell<usize> =
         const { std::cell::Cell::new(0) };
-    /// TICKET-211 — `(peak runner threads, runner slot denials, runner thread spawns, peak runner
-    /// permit holders)` of the current test's own run, set by `run_file_inner` from the run's
-    /// `QuiesceState`; read by [`run_file_counting_runners`]. The fourth is TICKET-230's.
-    pub(crate) static RUN_PEAK_RUNNERS: std::cell::Cell<(usize, usize, usize, usize)> =
-        const { std::cell::Cell::new((0, 0, 0, 0)) };
+    /// TICKET-211 — `(peak runner threads, runner thread spawns, peak runner permit holders)` of
+    /// the current test's own run, set by `run_file_inner` from the run's `QuiesceState`; read by
+    /// [`run_file_counting_runners`]. The third is TICKET-230's.
+    pub(crate) static RUN_PEAK_RUNNERS: std::cell::Cell<(usize, usize, usize)> =
+        const { std::cell::Cell::new((0, 0, 0)) };
+    /// Set by [`Vm::run_one_worker`] for its run: the root sched has one worker, this thread.
+    pub(crate) static ONE_WORKER_ROOT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
-/// [`run_capture`], plus the number of scheduler picks the run made (TICKET-164). Runs on its own
-/// thread like [`run_program_bytes`], since [`RUN_PICKS`] is thread-local to the VM's own thread.
+/// [`run_capture`], plus the number of scheduler picks the run made (TICKET-164). The run is
+/// [`Vm::run`], at the run's worker count; its root sched publishes the picks on this thread.
 #[cfg(test)]
 pub fn run_capture_counting_picks(src: &str) -> (Result<String, RunError>, usize) {
-    run_capture_counting(src, &RUN_PICKS)
+    run_counted(src, &RUN_PICKS, Vm::run)
 }
 
 #[cfg(test)]
 impl Vm {
-    /// Every module's top level on THIS thread's own `Vm`, in place, not as the run's root fiber
-    /// (`main` is fiber 1 on whichever worker takes it, [`Vm::run_root`]): for a white-box test
-    /// that reads this thread's counters or this `Vm`'s caches. Starts as [`Vm::run`] does;
-    /// [`Vm::finish_run`] ends main's count.
-    pub(crate) fn run_in_place(&mut self) -> Result<(), RuntimeError> {
-        self.run_start();
-        for idx in 0..self.program.modules.len() {
-            let (proto, home) = self.init_module(idx)?;
-            self.run_proto(proto, home, None, Vec::new(), false, true, Span::RUNTIME)?;
-        }
-        Ok(())
+    /// Every module's top level as the run's root fiber, as [`Vm::run`] runs them, on a root sched
+    /// of ONE worker: this thread. For a white-box test that reads this thread's counters or the
+    /// caches of the `Vm` that ran `main` (its method caches come back to this `Vm` at the end).
+    pub(crate) fn run_one_worker(&mut self) -> Result<(), RuntimeError> {
+        ONE_WORKER_ROOT.with(|c| c.set(true));
+        let r = self.run();
+        ONE_WORKER_ROOT.with(|c| c.set(false));
+        r
     }
 }
 
-/// [`run_capture`], plus the value `counter` reached during the run (TICKET-233). Runs on its own
-/// thread like [`run_program_bytes`], since every counter is thread-local to the VM's own thread:
-/// the program runs in place on it ([`Vm::run_in_place`]).
+/// [`run_capture`], plus the value `counter` reached during the run (TICKET-233). Every counter is
+/// thread-local to the thread that runs the program, so the run has one worker, the VM thread
+/// ([`Vm::run_one_worker`]).
 #[cfg(test)]
 pub fn run_capture_counting(
     src: &str,
     counter: &'static std::thread::LocalKey<std::cell::Cell<usize>>,
+) -> (Result<String, RunError>, usize) {
+    run_counted(src, counter, Vm::run_one_worker)
+}
+
+/// `run` over `src` on its own thread like [`run_program_bytes`], with `counter` zeroed before the
+/// run and read after it on that thread.
+#[cfg(test)]
+fn run_counted(
+    src: &str,
+    counter: &'static std::thread::LocalKey<std::cell::Cell<usize>>,
+    run: fn(&mut Vm) -> Result<(), RuntimeError>,
 ) -> (Result<String, RunError>, usize) {
     let src = src.to_string();
     std::thread::Builder::new()
@@ -157,7 +167,7 @@ pub fn run_capture_counting(
             let (out, result) = match test_program(&src) {
                 Ok(p) => {
                     let mut vm = Vm::new(Arc::new(p));
-                    let r = vm.run_in_place();
+                    let r = run(&mut vm);
                     let r = end_run(&mut vm, r);
                     (vm.out, r)
                 }
@@ -170,27 +180,24 @@ pub fn run_capture_counting(
         .expect("VM thread panicked")
 }
 
-/// Run the file at `entry` and return its output, the run's peak runner-thread count, its runner
-/// slot denials, the OS threads it started for non-Executor runners (TICKET-211) and its peak
-/// runner permit holders (TICKET-230). Runs on its own thread, since [`RUN_PEAK_RUNNERS`] is
+/// Run the file at `entry` and return its output, the run's peak runner-thread count, the runner
+/// OS threads it started (TICKET-211) and its peak runner permit holders (TICKET-230). Runs on its own thread, since [`RUN_PEAK_RUNNERS`] is
 /// thread-local to the VM's own thread.
 #[cfg(test)]
-pub fn run_file_counting_runners(
-    entry: &std::path::Path,
-) -> (RunOutput, usize, usize, usize, usize) {
+pub fn run_file_counting_runners(entry: &std::path::Path) -> (RunOutput, usize, usize, usize) {
     let entry = entry.to_path_buf();
     std::thread::Builder::new()
         .stack_size(VM_STACK_BYTES)
         .spawn(move || {
-            RUN_PEAK_RUNNERS.with(|p| p.set((0, 0, 0, 0)));
+            RUN_PEAK_RUNNERS.with(|p| p.set((0, 0, 0)));
             let out = to_str_output(run_built(
                 || crate::compiler::compile_entry_file(&entry, None),
                 crate::native::HostConfig::default(),
                 None,
                 false,
             ));
-            let (peak, denials, spawns, permits) = RUN_PEAK_RUNNERS.with(|p| p.get());
-            (out, peak, denials, spawns, permits)
+            let (peak, spawns, permits) = RUN_PEAK_RUNNERS.with(|p| p.get());
+            (out, peak, spawns, permits)
         })
         .expect("failed to spawn VM thread")
         .join()
@@ -272,7 +279,7 @@ pub fn run_capture_stress(src: &str) -> String {
 }
 
 /// Run a single-file program, returning stdout (or error) plus the **final nursery-stack depth**
-/// (`self.nurseries.len()` after the run). A clean program leaves it at 0; a leaked `parallel:`
+/// (`self.eager_scheds.len()` after the run). A clean program leaves it at 0; a leaked `parallel:`
 /// nursery (a `?`/return that skipped its `JoinNursery`) shows up as a non-zero residual — the
 /// white-box check for the `do_return` nursery-truncation fix (test helper).
 #[cfg(test)]
@@ -288,7 +295,7 @@ pub fn run_capture_nursery_len(src: &str) -> (Result<String, RunError>, usize) {
             let mut vm = Vm::new(Arc::new(program));
             let result = vm.run();
             let result = end_run(&mut vm, result);
-            let nursery_depth = vm.nurseries.len();
+            let nursery_depth = vm.eager_scheds.len();
             (result.map(|()| captured(vm.out)), nursery_depth)
         })
         .expect("failed to spawn VM thread")
@@ -428,7 +435,6 @@ pub fn run_built(
     RUN_PEAK_RUNNERS.with(|p| {
         p.set((
             vm.quiesce.peak_runner_threads.load(Ordering::SeqCst),
-            vm.quiesce.runner_slot_denials.load(Ordering::SeqCst),
             vm.quiesce.runner_spawns.load(Ordering::SeqCst),
             vm.quiesce.width_probe.peak.load(Ordering::SeqCst),
         ))

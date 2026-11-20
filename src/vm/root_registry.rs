@@ -25,8 +25,6 @@ pub(super) struct RootView<'a> {
     pub(super) stack: &'a [Value],
     /// Each frame's home module, backing closure and pending `defer` calls.
     pub(super) frames: &'a [CallFrame],
-    /// Pending `spawn` tasks (C4): their callee/receiver/args are roots until the task runs.
-    pub(super) nurseries: &'a [Vec<QueuedTask>],
     /// A not-yet-started fiber's task, launched on its first schedule.
     pub(super) start: Option<&'a PendingCall>,
     /// The module namespace objects (the run's, M3.1): every context roots them.
@@ -57,11 +55,6 @@ impl RootView<'_> {
                 out.extend(d.roots());
             }
         }
-        for nursery in self.nurseries {
-            for task in nursery {
-                out.extend(task.roots());
-            }
-        }
         if let Some(task) = self.start {
             out.extend(task.roots());
         }
@@ -85,7 +78,6 @@ impl Vm {
         RootView {
             stack: &self.stack,
             frames: &self.frames,
-            nurseries: &self.nurseries,
             start: None,
             module_objs: Some(&self.module_objs),
             executors: &self.executors,
@@ -113,7 +105,6 @@ impl FiberCtx {
         RootView {
             stack: &self.stack,
             frames: &self.frames,
-            nurseries: &self.nurseries,
             start: self.start.as_ref(),
             module_objs: Some(&self.module_objs),
             executors: &self.executors,

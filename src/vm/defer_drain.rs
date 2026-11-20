@@ -5,9 +5,10 @@
 //! drained frame. The trampoline's ops ([`DrainStep`]) run each record above the drain's marker
 //! through `Op::Call`'s or `Op::CallMethod`'s own path, so a wait in a `defer` body parks the task
 //! and rewinds to `DrainStep::Call` like any call. A record stays in its frame's `deferred` list
-//! until its call returns, so the GC keeps it rooted ([`super::root_registry`]). A drain reached
-//! from a synchronous native caller (`native_reentry > 0`), and the unwind of a hard halt, run
-//! the records on the Rust stack instead ([`Vm::run_one_deferred`]); both paths call a record with
+//! until its call returns, so the GC keeps it rooted ([`super::root_registry`]). Every drain runs
+//! so, a hard halt's too ([`Vm::unwind_halt`]), but one reached from a synchronous native caller
+//! (`native_reentry > 0`: an FFI callback, a map/set probe hook), which runs the records on the
+//! Rust stack instead ([`Vm::run_one_deferred`]); both paths call a record with
 //! [`Vm::call_loaded`].
 
 use super::frames::{Caught, Unwind};
@@ -131,7 +132,7 @@ impl Vm {
             is_toplevel: false,
             deferred: Vec::new(),
             defer_markers: Vec::new(),
-            nursery_len: self.nurseries.len(),
+            nursery_len: self.eager_scheds.len(),
             has_implicit_nursery: false,
             call_span: Span::RUNTIME,
             argc: 0,
@@ -251,12 +252,12 @@ impl Vm {
         self.deferring > 0 || !self.drains.is_empty()
     }
 
-    /// A synchronous unwind drops trampoline frame `fi` (a hard halt met a drain): end its drain,
-    /// and drop the record it was running (a live trampoline always has one loaded), as the
-    /// synchronous drain pops a record after it ran. Returns the latest fault the drain's records raised, which
-    /// the unwind ranks as a `defer` fault, as the synchronous drain's fault is; the rest of the
-    /// drained frame's `defer`s run next, in the same unwind. The continuation does not run: the
-    /// unwind replaces it.
+    /// An unwind drops trampoline frame `fi` (a hard halt or the deadlock verdict met a task inside
+    /// a drain): end its drain, and drop the record it was running (a live trampoline always has
+    /// one loaded), as a drain pops a record after it ran. Returns the latest fault the drain's
+    /// records raised, which the hard-halt unwind ranks as a `defer` fault ([`Vm::unwind_on`]); the
+    /// rest of the drained frame's `defer`s run next, in the same unwind. The continuation does not
+    /// run: the unwind replaces it.
     pub(super) fn drop_drain_frame(&mut self, fi: usize) -> Option<RuntimeError> {
         let d = self.drains.pop().expect("a trampoline frame has its drain");
         debug_assert_eq!(d.frame, fi);

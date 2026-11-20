@@ -1,15 +1,10 @@
-//! VM: type names, display and stringify.
+//! VM: type names, display, and the `print` / `str` render: a walk whose `str` hooks run as
+//! frames that can park.
 //! Split out of `src/vm/stmt.rs`. `super::*` is the parent module.
 
 use super::stmt::BoxCore;
 use super::*;
 use crate::base::hooks::Hook;
-
-/// The heap values of a print walk's element copy, the ones it roots (M3.0a C6): an inline int,
-/// bool or nil needs no root, so a list of them pushes nothing.
-fn walk_roots(vals: impl Iterator<Item = Value>) -> Vec<Value> {
-    vals.filter(|v| v.child_gcref().is_some()).collect()
-}
 
 /// `Writer(open)` / `Reader(closed)`: an I/O handle's text, without its fd.
 fn io_handle_text(label: &str, open: bool) -> String {
@@ -170,7 +165,7 @@ impl Vm {
             // A boxed float/big-int is heap-tagged → the `Obj::FloatBox`/`Obj::BigInt` arms below.
             ValueView::Obj(h) => match self.heap.get(h) {
                 // NESTED (`depth > 0`) means this string sits inside a container / field / payload,
-                // so it renders as its `repr` — same rule as `stringify_nested_into`, applied here
+                // so it renders as its `repr` — same rule as [`Vm::str_walk`]'s `nested`, applied here
                 // by depth alone because this renderer is `&self` and has no display-hook path that
                 // preserves depth. A top-level `display` of a `str` stays its bare characters.
                 Obj::Str(s) if depth > 0 => Ok(crate::slice::str_repr(s)),
@@ -376,11 +371,10 @@ impl Vm {
         self.display_box(core, depth, &mut OpenRender::default())
     }
 
-    /// Protocol-aware render for `print` / interpolation: a struct with a self-only
-    /// `str(self) -> str` method (the `Stringable` protocol) dispatches to it; everything else uses
-    /// the default structural repr, recursing through `stringify` so nested structs honour the
-    /// protocol too. Distinct from the `&self` `display` above, which stays the pure structural form
-    /// for error/debug text.
+    /// Protocol-aware render for `print` / interpolation / `str()` with no frame to resume: a
+    /// struct or enum with a `str` hook (the `Stringable` protocol) dispatches to it, nested
+    /// (`guarded_walk`); everything else takes the default structural repr. Distinct from the
+    /// `&self` `display` above, which stays the pure structural form for error/debug text.
     pub(super) fn stringify(
         &mut self,
         v: Value,
@@ -392,21 +386,186 @@ impl Vm {
         Ok(s)
     }
 
-    /// Render `v` by appending into `out` — the allocation-free core shared by `stringify` (which
-    /// wraps it in a fresh `String`) and `BuildStr` (which reuses one buffer across all interpolation
-    /// parts). Byte-identical output to the old return-a-`String` form; only the intermediate
-    /// per-part / per-element `String`s are gone.
+    /// [`Vm::stringify`] appending onto `out`: a top-level (bare) render, a `str` its characters.
+    pub(super) fn stringify_into(
+        &mut self,
+        out: &mut String,
+        v: Value,
+        span: Span,
+        depth: usize,
+    ) -> Result<(), RuntimeError> {
+        self.str_walk(out, v, false, depth, None, &[], span)
+            .map(|_| ())
+    }
+
+    /// `Op::ToStr`: the value on the stack top becomes its str. Out of line for `step`'s frame
+    /// (commit 1450077).
+    #[inline(never)]
+    pub(super) fn op_to_str(&mut self, span: Span) -> Result<(), RuntimeError> {
+        let v = self.stack[self.stack.len() - 1]; // leave rooted until the str replaces it
+        let mut out = String::new();
+        if self.str_walk(&mut out, v, false, 0, Some(StrThen::ToStr), &[], span)? {
+            self.str_finish(StrThen::ToStr, out, span)?;
+        }
+        Ok(())
+    }
+
+    /// `Op::BuildStr`: parts `i..` of the `n` on the stack top render onto `s` (one buffer, no
+    /// per-part `String`); then the str replaces them. A part whose render parks keeps `[n, i]`
+    /// below its walk ([`StrThen::Build`]). Each part stays rooted in place while it renders.
+    /// Out of line for `step`'s frame (commit 1450077).
+    #[inline(never)]
+    pub(super) fn build_str(
+        &mut self,
+        n: usize,
+        i: usize,
+        mut s: String,
+        span: Span,
+    ) -> Result<(), RuntimeError> {
+        let at = self.stack.len() - n;
+        for i in i..n {
+            let p = self.stack[at + i];
+            let state = [Value::int(n as i64), Value::int(i as i64)];
+            if !self.str_walk(&mut s, p, false, 0, Some(StrThen::Build), &state, span)? {
+                return Ok(());
+            }
+        }
+        self.stack.truncate(at);
+        let h = self.heap.alloc(Obj::Str(s.into()));
+        self.push(Value::obj(h));
+        Ok(())
+    }
+
+    /// `Op::Assert`, which only runs on its failing path: a comparison's operands render
+    /// ([`Vm::assert_text`]), then it faults ([`Vm::assert_fault`]). Out of line for `step`'s
+    /// frame (commit 1450077).
+    #[cold]
+    #[inline(never)]
+    pub(super) fn op_assert(&mut self, span: Span) -> Result<(), RuntimeError> {
+        match self.assert_op().1 {
+            Some(_) => self.assert_text(0, String::new(), span),
+            None => Err(self.assert_fault(None, span)),
+        }
+    }
+
+    /// The top frame's failing `Op::Assert`: its `has_msg` and `cmp`.
+    fn assert_op(&self) -> (bool, Option<crate::base::op::AssertCmp>) {
+        let f = self.frames.last().expect("an assert runs in a frame");
+        let Op::Assert { has_msg, cmp } = &self.program.protos[f.proto].code[f.ip - 1] else {
+            unreachable!("an assert text is rendered only by Op::Assert")
+        };
+        (*has_msg, *cmp)
+    }
+
+    /// A failed comparison `assert`'s text from operand `side` on, onto `s`: `l`, ` <op> `, `r`,
+    /// each nested; then its fault. The two operand values sit on the stack under `msg`
+    /// (duplicated by the compiler before the comparison consumed the originals), rooted until the
+    /// last render ends. A render that parks goes on in [`StrThen::Assert`]. One that faults drops
+    /// the operand text only, and so does a fault in its `str` hook frame ([`Vm::fault_in`]): a
+    /// faulting operand never makes a failed assertion an error.
+    pub(super) fn assert_text(
+        &mut self,
+        side: usize,
+        mut s: String,
+        span: Span,
+    ) -> Result<(), RuntimeError> {
+        let (has_msg, cmp) = self.assert_op();
+        let symbol = cmp.expect("a comparison assert").symbol();
+        let at = self.stack.len() - 2 - usize::from(has_msg);
+        for side in side..2 {
+            if side == 1 {
+                s.push(' ');
+                s.push_str(symbol);
+                s.push(' ');
+            }
+            let v = self.stack[at + side];
+            let then = StrThen::Assert { right: side == 1 };
+            match self.str_walk(&mut s, v, true, 0, Some(then), &[], span) {
+                Ok(true) => {}
+                Ok(false) => return Ok(()),
+                Err(_) => return Err(self.assert_fault(None, span)),
+            }
+        }
+        Err(self.assert_fault(Some(s), span))
+    }
+
+    /// THE fault of a failed `assert`, with its comparison's text if that rendered: its operands
+    /// and `msg` leave the stack. The one site that flags an assert failure: the `test fn` runner
+    /// buckets it as FAIL, every other fault (`is_assert: false`) as ERROR.
+    pub(super) fn assert_fault(&mut self, cmp_text: Option<String>, span: Span) -> RuntimeError {
+        let (has_msg, cmp) = self.assert_op();
+        let n = self.stack.len();
+        let msg = if has_msg {
+            self.val_str(self.stack[n - 1])
+        } else {
+            None
+        };
+        self.stack
+            .truncate(n - usize::from(has_msg) - if cmp.is_some() { 2 } else { 0 });
+        let message = match (msg, cmp_text) {
+            (Some(m), Some(c)) => format!("assertion failed: {m} ({c})"),
+            (Some(m), None) => format!("assertion failed: {m}"),
+            (None, Some(c)) => format!("assertion failed: {c}"),
+            (None, None) => "assertion failed".to_string(),
+        };
+        RuntimeError {
+            message,
+            span,
+            is_assert: true,
+            is_over_memory: false,
+            is_timed_out: false,
+            is_panic: false,
+        }
+    }
+
+    /// The fault `e` left a failed `assert`'s operand `str` hook frame (its walk's header on the
+    /// stack top): the walk's slots go, and the assert faults with no operand text
+    /// ([`Vm::assert_text`]; base ran the hook nested and dropped a faulting render's text). A halt
+    /// [`Vm::cleanup_halt`] keeps is `Err`, itself.
+    pub(super) fn assert_hook_fault(
+        &mut self,
+        e: RuntimeError,
+        span: Span,
+    ) -> Result<RuntimeError, RuntimeError> {
+        self.cleanup_halt(e)?;
+        let n = self.stack.len();
+        let levels = self.stack[n - 2].as_int() as usize;
+        self.stack.truncate(n - STR_HEADER - levels * STR_LEVEL - 2);
+        Ok(self.assert_fault(None, span))
+    }
+
+    /// The fault of a map lookup that missed `key`, the key rendered as a nested element renders
+    /// (a `str` quoted, an `int` bare). `flat` (the caller runs on the dispatch loop): a `str` hook
+    /// runs as a frame that can park, and the fault waits for its return ([`StrThen::KeyText`]).
+    /// The key stays rooted in the render's slot.
+    pub(super) fn key_not_found(
+        &mut self,
+        flat: bool,
+        key: Value,
+        span: Span,
+    ) -> Result<(), RuntimeError> {
+        let mut ks = String::new();
+        let then = flat.then_some(StrThen::KeyText);
+        if self.str_walk(&mut ks, key, true, 0, then, &[], span)? {
+            return Err(self.key_fault(&ks, span));
+        }
+        Ok(())
+    }
+
+    /// `key not found: <key>`, the key's text rendered.
+    fn key_fault(&self, key: &str, span: Span) -> RuntimeError {
+        self.err(format!("key not found: {key}"), span)
+    }
+
     /// `Op::ToStrFmt` — render the top-of-stack value per the parsed format spec. Scalars map
-    /// straight to a [`crate::fmtspec::FmtArg`]; non-scalars are rendered via the normal
-    /// `stringify_into` first (rooted on the operand stack, so a `str` method's nested frames see a
-    /// live object), then formatted as a plain string. A LITERAL width/precision is already capped at
-    /// compile time. A nested `{expr}` one (`{s:<{w}}`) sits on the stack above the value — width,
-    /// then precision — and is resolved and capped by [`crate::fmtspec::field_from_int`] BEFORE
-    /// anything is rendered or allocated, so a huge runtime width is a clean error, never an OOM.
-    /// Lives in its own `#[inline(never)]` helper to keep `step`'s frame small (commit 1450077).
-    ///
-    /// A value with a `str` hook runs the hook as a frame ([`RetAction::StringifyFmt`]) once the
-    /// nested fields are checked; its return renders through [`Vm::render_str_fmt`].
+    /// straight to a [`crate::fmtspec::FmtArg`]; anything else renders first (a `str` hook's result
+    /// included; rooted on the operand stack), then formats as a plain string. A LITERAL
+    /// width/precision is already capped at compile time. A nested `{expr}` one (`{s:<{w}}`) sits
+    /// on the stack above the value — width, then precision — and is resolved and capped by
+    /// [`crate::fmtspec::field_from_int`] BEFORE anything is rendered or allocated, so a huge
+    /// runtime width is a clean error, never an OOM. Lives in its own `#[inline(never)]` helper to
+    /// keep `step`'s frame small (commit 1450077). A render that parks finishes in
+    /// [`Vm::fmt_finish`] ([`StrThen::Fmt`]).
     #[inline(never)]
     pub(super) fn op_to_str_fmt(
         &mut self,
@@ -415,12 +574,40 @@ impl Vm {
     ) -> Result<(), RuntimeError> {
         let nested = spec.dyn_width as usize + spec.dyn_precision as usize;
         let v = self.stack[self.stack.len() - 1 - nested];
-        if self.hook_of(v, Hook::Str) {
+        let scalar = self.int_val(v).is_some()
+            || v.is_float()
+            || v.as_obj()
+                .is_some_and(|h| matches!(self.heap.get(h), Obj::Str(_)));
+        if !scalar {
             self.fmt_fields(spec, span)?;
-            self.push_hook_frame(Hook::Str, v, &[], RetAction::StringifyFmt, span)?;
+            let mut out = String::new();
+            if self.str_walk(&mut out, v, false, 0, Some(StrThen::Fmt), &[], span)? {
+                self.fmt_finish(spec, out, span)?;
+            }
             return Ok(());
         }
-        self.render_str_fmt(spec, false, span)
+        let resolved = self.fmt_fields(spec, span)?;
+        for _ in 0..nested {
+            self.pop();
+        }
+        let spec = resolved.as_ref().unwrap_or(spec);
+        let mut out = String::new();
+        if let Some(n) = self.int_val(v) {
+            crate::fmtspec::apply(spec, crate::fmtspec::FmtArg::Int(n), &mut out)
+                .map_err(|m| self.err(m, span))?;
+        } else if v.is_float() {
+            let x = self.float_of(v);
+            crate::fmtspec::apply(spec, crate::fmtspec::FmtArg::Float(x), &mut out)
+                .map_err(|m| self.err(m, span))?;
+        } else {
+            let s = self.val_str(v).unwrap_or_default();
+            crate::fmtspec::apply(spec, crate::fmtspec::FmtArg::Str(&s), &mut out)
+                .map_err(|m| self.err(m, span))?;
+        }
+        self.pop();
+        let h = self.heap.alloc(Obj::Str(out.into()));
+        self.push(Value::obj(h));
+        Ok(())
     }
 
     /// `spec` with its nested width/precision fields (the `nested` values on the stack top)
@@ -449,295 +636,439 @@ impl Vm {
         Ok(Some(fs))
     }
 
-    /// `Op::ToStrFmt`'s render: the value under its nested fields becomes the formatted str.
-    /// `hooked`: the value's `str` hook returned, and its result sits on the stack top; it takes
-    /// the value's slot and renders as a plain string.
-    pub(super) fn render_str_fmt(
+    /// `Op::ToStrFmt`'s end for a value that is not a scalar: `rendered` (bool, `None`, a
+    /// container, a `str` hook's result) pads as a plain string (type chars / precision fault in
+    /// `apply`), and the str replaces the value and its nested fields.
+    pub(super) fn fmt_finish(
         &mut self,
         spec: &crate::fmtspec::FormatSpec,
-        hooked: bool,
+        rendered: String,
         span: Span,
     ) -> Result<(), RuntimeError> {
         let nested = spec.dyn_width as usize + spec.dyn_precision as usize;
-        if hooked {
-            let res = self.pop();
-            let at = self.stack.len() - 1 - nested;
-            self.stack[at] = res;
-        }
         let resolved = self.fmt_fields(spec, span)?;
         for _ in 0..nested {
             self.pop();
         }
         let spec = resolved.as_ref().unwrap_or(spec);
-        let v = self.stack[self.stack.len() - 1]; // leave rooted; rendering may run user code
         let mut out = String::new();
-        if !hooked && let Some(n) = self.int_val(v) {
-            crate::fmtspec::apply(spec, crate::fmtspec::FmtArg::Int(n), &mut out)
-                .map_err(|m| self.err(m, span))?;
-        } else if !hooked && v.is_float() {
-            let x = self.float_of(v);
-            crate::fmtspec::apply(spec, crate::fmtspec::FmtArg::Float(x), &mut out)
-                .map_err(|m| self.err(m, span))?;
-        } else if !hooked
-            && let Some(h) = v.as_obj()
-            && matches!(self.heap.get(h), Obj::Str(_))
-        {
-            let s = match self.heap.get(h) {
-                Obj::Str(s) => s.clone(),
-                Obj::Bytes(_)
-                | Obj::ByteArray(_)
-                | Obj::BigInt(_)
-                | Obj::FloatBox(_)
-                | Obj::Iter { .. }
-                | Obj::List(_)
-                | Obj::Tuple(_)
-                | Obj::Map(_)
-                | Obj::Set(_)
-                | Obj::Struct { .. }
-                | Obj::Enum { .. }
-                | Obj::Cell(_)
-                | Obj::Func { .. }
-                | Obj::Closure { .. }
-                | Obj::Module(_)
-                | Obj::Native { .. }
-                | Obj::Builtin(_)
-                | Obj::Cffi(_)
-                | Obj::Ptr(_)
-                | Obj::Channel(_)
-                | Obj::Shared(_)
-                | Obj::RwShared(_)
-                | Obj::Atomic(_)
-                | Obj::AtomicInt(_)
-                | Obj::Executor(_)
-                | Obj::Socket(_)
-                | Obj::Listener(_)
-                | Obj::Writer(_)
-                | Obj::Reader(_)
-                | Obj::Generator(_) => unreachable!(),
-            };
-            crate::fmtspec::apply(spec, crate::fmtspec::FmtArg::Str(&s), &mut out)
-                .map_err(|m| self.err(m, span))?;
-        } else {
-            // Bool/Nil/containers/structs, or a `str` hook's result: render with the normal
-            // stringify, then treat as a string for fill/align/width (type chars/precision error
-            // via `apply`).
-            let mut rendered = String::new();
-            self.stringify_into(&mut rendered, v, span, 0)?;
-            crate::fmtspec::apply(spec, crate::fmtspec::FmtArg::Other(&rendered), &mut out)
-                .map_err(|m| self.err(m, span))?;
-        }
-        self.pop();
+        crate::fmtspec::apply(spec, crate::fmtspec::FmtArg::Other(&rendered), &mut out)
+            .map_err(|m| self.err(m, span))?;
         let h = self.heap.alloc(Obj::Str(out.into()));
-        self.push(Value::obj(h));
+        let top = self.stack.len() - 1;
+        self.stack[top] = Value::obj(h);
         Ok(())
     }
 
-    pub(super) fn stringify_into(
+    /// THE render of `print`, interpolation and `str()`: append `v` onto `out`, a `str` bare, or
+    /// (`nested`: inside a container, a field, a payload, an error text) as its Python `repr`
+    /// (quoted + escaped), so `["a", "b"]` and `["a, b"]` differ and `[""]` is not `[]`
+    /// (`docs/contributing/gaps.md` §W7-25). A `str(self)` hook's result is the object's own
+    /// rendering, never quoted: it renders bare at the hooked value's depth. `depth` is the structural depth `v` sits at; every render tests
+    /// `walk_base + depth` against [`MAX_STRUCTURAL_DEPTH`] per value, so a `str` hook that
+    /// renders continues on the same budget (see [`Vm::walk_base`]).
+    ///
+    /// A value with no `str` hook in it renders by a `&self` walk on the host stack with no user
+    /// code and no heap allocation ([`Vm::str_tight`]). At the first hooked value the render
+    /// starts again on levels in operand-stack slots ([`Vm::str_levels`]): with `then` (the
+    /// caller runs on the dispatch loop) the hook runs as a frame that can park, and `Ok(false)`
+    /// says so: its return resumes the walk ([`Vm::str_resume`]) and feeds `then`, with `state`
+    /// (the caller's own slots, pushed only then) below the walk. With no `then` the hook runs
+    /// nested ([`Vm::guarded_walk`]) and the answer is always `Ok(true)`.
+    #[inline]
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn str_walk(
         &mut self,
         out: &mut String,
         v: Value,
-        span: Span,
+        nested: bool,
         depth: usize,
-    ) -> Result<(), RuntimeError> {
+        then: Option<StrThen>,
+        state: &[Value],
+        span: Span,
+    ) -> Result<bool, RuntimeError> {
         use std::fmt::Write as _;
+        if !nested {
+            if self.walk_base + depth > MAX_STRUCTURAL_DEPTH {
+                return Err(self.depth_exceeded_err(span));
+            }
+            if let Some(n) = self.int_val(v) {
+                let _ = write!(out, "{n}");
+                return Ok(true);
+            }
+            if v.is_float() {
+                out.push_str(&format_float(self.float_of(v)));
+                return Ok(true);
+            }
+            if let Some(b) = v.as_bool() {
+                out.push_str(if b { "true" } else { "false" });
+                return Ok(true);
+            }
+            if v.is_nil() {
+                out.push_str(Self::NONE_TEXT);
+                return Ok(true);
+            }
+            if let Some(h) = v.as_obj()
+                && let Obj::Str(s) = self.heap.get(h)
+            {
+                out.push_str(s);
+                return Ok(true);
+            }
+        }
+        self.str_obj(out, v, nested, depth, then, state, span)
+    }
+
+    /// [`Vm::str_walk`] past its inline scalar answers: the tight walk, then the walk on levels.
+    #[inline(never)]
+    #[allow(clippy::too_many_arguments)]
+    fn str_obj(
+        &mut self,
+        out: &mut String,
+        v: Value,
+        nested: bool,
+        depth: usize,
+        then: Option<StrThen>,
+        state: &[Value],
+        span: Span,
+    ) -> Result<bool, RuntimeError> {
+        let mark = out.len();
+        let mut open = std::mem::take(&mut self.repr_active);
+        let ra = open.len();
+        let item = Item {
+            v,
+            d: depth,
+            nested,
+            hooks: true,
+        };
+        let r = self.str_tight(out, &mut open, item, span);
+        open.truncate(ra);
+        self.repr_active = open;
+        if r? {
+            return Ok(true);
+        }
+        out.truncate(mark);
+        let floor = self.stack.len();
+        if then.is_some() {
+            self.stack.extend_from_slice(state);
+        }
+        // The value's root slot, then the output buffer's (nil until a park fills it).
+        self.stack.extend([v, Value::nil()]);
+        let base = self.stack.len();
+        match self.str_levels(out, base, ra, Some(item), then, span) {
+            Ok(true) => {
+                self.str_merge(base - 1, out);
+                self.stack.truncate(floor);
+                Ok(true)
+            }
+            Ok(false) => Ok(false),
+            Err(e) => {
+                self.stack.truncate(floor);
+                self.repr_active.truncate(ra);
+                Err(e)
+            }
+        }
+    }
+
+    /// The walk of `it` up to its first hooked value or busy I/O handle (`Ok(false)`): no user
+    /// code runs and nothing allocates on the heap, so nothing can park, collect or mutate, and
+    /// the walk recurses on the host stack over each container's children in place
+    /// (`MAX_STRUCTURAL_DEPTH` bounds it, as at every value). `open` is the render's open
+    /// containers ([`Vm::repr_active`], moved out for the walk); the caller restores it and, at
+    /// `Ok(false)`, renders again on levels, which meet the same values in the same order up to
+    /// that one. The value rules are [`Vm::str_item`]'s.
+    fn str_tight(
+        &self,
+        out: &mut String,
+        open: &mut Vec<GcRef>,
+        mut it: Item,
+        span: Span,
+    ) -> Result<bool, RuntimeError> {
+        loop {
+            match self.str_item(out, open, it, span)? {
+                Got::Done => return Ok(true),
+                Got::Tail(v, d, nested) => {
+                    it = Item {
+                        v,
+                        d,
+                        nested,
+                        hooks: true,
+                    }
+                }
+                Got::Open(kind, h, d) => return self.str_tight_kids(out, open, kind, h, d, span),
+                Got::Hook | Got::Busy => return Ok(false),
+            }
+        }
+    }
+
+    /// [`Vm::str_tight`] over the children of `h`, its opener written: each at depth `d`, nested,
+    /// then its closer. Out of line, so the recursion's frame stays small.
+    #[inline(never)]
+    fn str_tight_kids(
+        &self,
+        out: &mut String,
+        open: &mut Vec<GcRef>,
+        kind: Open,
+        h: GcRef,
+        d: usize,
+        span: Span,
+    ) -> Result<bool, RuntimeError> {
+        if kind.tracks() {
+            open.push(h);
+        }
+        let def = self.str_def(kind, h);
+        let mut i = 0;
+        let all = self.str_kids_each(h, |v| {
+            str_sep(out, kind, i, def);
+            i += 1;
+            let it = Item {
+                v,
+                d,
+                nested: true,
+                hooks: true,
+            };
+            self.str_tight(out, open, it, span)
+        })?;
+        if !all {
+            return Ok(false);
+        }
+        str_close(out, kind, i);
+        if kind.tracks() {
+            open.pop();
+        }
+        Ok(true)
+    }
+
+    /// Run `f` over the children of the container `h` in render order (a map's key, then its
+    /// value, per entry), until it answers `false`.
+    fn str_kids_each(
+        &self,
+        h: GcRef,
+        mut f: impl FnMut(Value) -> Result<bool, RuntimeError>,
+    ) -> Result<bool, RuntimeError> {
+        match self.heap.get(h) {
+            Obj::List(xs) => {
+                for v in xs.iter() {
+                    if !f(v)? {
+                        return Ok(false);
+                    }
+                }
+            }
+            Obj::Tuple(xs) => {
+                for &v in xs {
+                    if !f(v)? {
+                        return Ok(false);
+                    }
+                }
+            }
+            Obj::Map(m) => {
+                for (_, k, v) in m.entries.iter() {
+                    if !f(k)? || !f(v)? {
+                        return Ok(false);
+                    }
+                }
+            }
+            Obj::Set(s) => {
+                for (_, e) in s.entries.iter() {
+                    if !f(e)? {
+                        return Ok(false);
+                    }
+                }
+            }
+            Obj::Struct { fields, .. } => {
+                for v in fields.iter() {
+                    if !f(v)? {
+                        return Ok(false);
+                    }
+                }
+            }
+            Obj::Enum { payload, .. } => {
+                for v in payload.iter() {
+                    if !f(v)? {
+                        return Ok(false);
+                    }
+                }
+            }
+            Obj::Str(_)
+            | Obj::Bytes(_)
+            | Obj::ByteArray(_)
+            | Obj::BigInt(_)
+            | Obj::FloatBox(_)
+            | Obj::Iter { .. }
+            | Obj::Cell(_)
+            | Obj::Func { .. }
+            | Obj::Closure { .. }
+            | Obj::Module(_)
+            | Obj::Native { .. }
+            | Obj::Builtin(_)
+            | Obj::Cffi(_)
+            | Obj::Ptr(_)
+            | Obj::Channel(_)
+            | Obj::Shared(_)
+            | Obj::RwShared(_)
+            | Obj::Atomic(_)
+            | Obj::AtomicInt(_)
+            | Obj::Executor(_)
+            | Obj::Socket(_)
+            | Obj::Listener(_)
+            | Obj::Writer(_)
+            | Obj::Reader(_)
+            | Obj::Generator(_) => unreachable!("a render opens a container"),
+        }
+        Ok(true)
+    }
+
+    /// The struct def whose field names a `Struct` level writes; `None` for any other level.
+    fn str_def(&self, kind: Open, h: GcRef) -> Option<&crate::base::op::StructDef> {
+        if kind != Open::Struct {
+            return None;
+        }
+        let Obj::Struct { tid, .. } = self.heap.get(h) else {
+            unreachable!("a struct level holds a struct")
+        };
+        self.program.structs.get(self.struct_name_of_tid(*tid))
+    }
+
+    /// One value's render step, the rules every render shares: write `it`'s text, or its opener
+    /// and ask for its children, or ask for its hook. `open` holds the containers whose default
+    /// render is in progress: one met again is a back edge and renders as `[...]` / `{...}` /
+    /// `Set(...)` / `...` (W14-35c, CPython's `Py_ReprEnter`; a stack, not a visited set, so a
+    /// shared acyclic child renders in full).
+    fn str_item(
+        &self,
+        out: &mut String,
+        open: &[GcRef],
+        it: Item,
+        span: Span,
+    ) -> Result<Got, RuntimeError> {
+        use std::fmt::Write as _;
+        let Item {
+            v,
+            d,
+            nested,
+            hooks,
+        } = it;
+        if nested && let Some(h) = v.as_obj() {
+            if let Obj::Str(s) = self.heap.get(h) {
+                out.push_str(&crate::slice::str_repr(s));
+                return Ok(Got::Done);
+            }
+            // A nested carrier keeps the nested (repr) mode for its payload: `[!'boom']`.
+            if let Obj::Enum {
+                variant_id,
+                payload,
+            } = self.heap.get(h)
+                && let Some(prefix) = self.carrier_prefix(*variant_id, payload)
+            {
+                out.push_str(prefix);
+                return Ok(match payload.try_get(0) {
+                    Some(p) => Got::Tail(p, d + 1, true),
+                    None => {
+                        out.push_str(Self::NONE_TEXT);
+                        Got::Done
+                    }
+                });
+            }
+        }
         // Guard against cyclic data overflowing the host stack — turns SIGABRT into a recoverable
-        // `RuntimeError`. Tested against `walk_base + depth`: a `str` hook that stringifies from
+        // `RuntimeError`. Tested against `walk_base + depth`: a `str` hook that renders from
         // inside its BODY continues on the same shared budget rather than restarting at 0 (see
-        // `Vm::walk_base`) — without that, hook-nesting × per-hook depth is unbounded and the
-        // process dies uncatchably. The hook's RESULT is re-stringified at the *same* `depth` after
-        // `guarded_walk` restored, so a non-recursive protocol hook still doesn't burn the budget.
-        if self.walk_base + depth > MAX_STRUCTURAL_DEPTH {
+        // `Vm::walk_base`). The hook's RESULT renders at the hooked value's own depth, so a
+        // non-recursive protocol hook doesn't burn the budget.
+        if self.walk_base + d > MAX_STRUCTURAL_DEPTH {
             return Err(self.depth_exceeded_err(span));
         }
         if let Some(n) = self.int_val(v) {
             let _ = write!(out, "{n}");
-        } else if v.is_float() {
+            return Ok(Got::Done);
+        }
+        if v.is_float() {
             out.push_str(&format_float(self.float_of(v)));
-        } else if let Some(b) = v.as_bool() {
+            return Ok(Got::Done);
+        }
+        if let Some(b) = v.as_bool() {
             out.push_str(if b { "true" } else { "false" });
-        } else if v.is_nil() {
+            return Ok(Got::Done);
+        }
+        let Some(h) = v.as_obj() else {
             out.push_str(Self::NONE_TEXT);
-        } else if let Some(h) = v.as_obj() {
-            // ROOT the object on the operand stack: a `str` method runs nested frames that GC at
-            // instruction boundaries, and the container keeps its transitive contents reachable.
-            self.push(v);
-            let r = self.stringify_obj_into(out, h, span, depth);
-            self.pop();
-            return r;
-        }
-        Ok(())
-    }
-
-    /// Render a value that is NESTED inside something else — a list/tuple/map/set element, a struct
-    /// field, an enum payload. Identical to [`Self::stringify_into`] except that a `str` renders as
-    /// its Python `repr` (quoted + escaped) instead of its bare characters, so `["a", "b"]` and
-    /// `["a, b"]` no longer print the same text and `[""]` no longer prints `[]` (`docs/contributing/gaps.md`
-    /// §W7-25). CPython's `str` vs `repr` split, same rule.
-    ///
-    /// NOT used for a `str(self)` display hook's RESULT: that string is the object's own rendering,
-    /// not a nested value, so it must never be quoted (those sites re-enter `stringify_into` at the
-    /// same depth deliberately).
-    pub(super) fn stringify_nested_into(
-        &mut self,
-        out: &mut String,
-        v: Value,
-        span: Span,
-        depth: usize,
-    ) -> Result<(), RuntimeError> {
-        if let Some(h) = v.as_obj()
-            && let Obj::Str(s) = self.heap.get(h)
-        {
-            out.push_str(&crate::slice::str_repr(s));
-            return Ok(());
-        }
-        // A nested carrier keeps the nested (repr) mode for its payload: `[!'boom']`.
-        if let Some(h) = v.as_obj()
-            && let Obj::Enum {
-                variant_id,
-                payload,
-            } = self.heap.get(h)
-            && let Some(prefix) = self.carrier_prefix(*variant_id, payload)
-        {
-            let inner = payload.try_get(0);
-            out.push_str(prefix);
-            return match inner {
-                Some(p) => self.stringify_nested_into(out, p, span, depth + 1),
-                None => {
-                    out.push_str(Self::NONE_TEXT);
-                    Ok(())
-                }
-            };
-        }
-        self.stringify_into(out, v, span, depth)
-    }
-
-    pub(super) fn stringify_obj_into(
-        &mut self,
-        out: &mut String,
-        h: GcRef,
-        span: Span,
-        depth: usize,
-    ) -> Result<(), RuntimeError> {
-        use std::fmt::Write as _;
-        // Clone the object's shape out so no heap borrow is held across the nested `&mut self` calls.
-        match self.heap.get(h).clone() {
-            Obj::Str(s) => out.push_str(&s),
-            // Boxed scalars stringify identically to the inline `Int`/`Float`.
-            Obj::BigInt(n) => out.push_str(&n.to_string()),
-            Obj::FloatBox(f) => out.push_str(&format_float(f)),
-            // `bytes` interpolates/prints as its Python `b'...'` repr (shared helper).
-            Obj::Bytes(b) => out.push_str(&crate::slice::bytes_repr(&b)),
-            // `bytearray` interpolates/prints as `bytearray(b'...')` (shared helper).
+            return Ok(Got::Done);
+        };
+        match self.heap.get(h) {
+            Obj::Str(s) => out.push_str(s),
+            // Boxed scalars render identically to the inline `Int`/`Float`.
+            Obj::BigInt(n) => {
+                let _ = write!(out, "{n}");
+            }
+            Obj::FloatBox(f) => out.push_str(&format_float(*f)),
+            // `bytes` renders as its Python `b'...'` repr, `bytearray` as `bytearray(b'...')`.
+            Obj::Bytes(b) => out.push_str(&crate::slice::bytes_repr(b)),
             Obj::ByteArray(b) => out.push_str(&crate::slice::bytearray_repr(&b.to_vec())),
-            Obj::List(items) => {
-                // W14-35c: a list met again while its own render is open is a back edge.
-                if self.repr_active.contains(&h) {
-                    out.push_str("[...]");
-                    return Ok(());
-                }
+            Obj::List(_) if open.contains(&h) => out.push_str("[...]"),
+            Obj::List(_) => {
                 out.push('[');
-                self.stringify_open_seq(out, h, &items.to_vec(), span, depth)?;
-                out.push(']');
+                return Ok(Got::Open(Open::List, h, d + 1));
             }
-            Obj::Tuple(items) => {
+            Obj::Tuple(_) => {
                 out.push('(');
-                self.stringify_seq_into(out, &items, span, depth + 1)?;
-                out.push_str(crate::base::words::tuple_tail(items.len()));
-                out.push(')');
+                return Ok(Got::Open(Open::Tuple, h, d + 1));
             }
-            Obj::Map(m) => {
-                if self.repr_active.contains(&h) {
-                    out.push_str("{...}");
-                    return Ok(());
-                }
+            Obj::Map(_) if open.contains(&h) => out.push_str("{...}"),
+            Obj::Map(_) => {
                 out.push('{');
-                self.stringify_open_map(out, h, &m.entries, span, depth)?;
-                out.push('}');
+                return Ok(Got::Open(Open::Map, h, d + 1));
             }
-            Obj::Set(s) => {
-                if s.entries.is_empty() {
-                    out.push_str("Set()");
-                } else if self.repr_active.contains(&h) {
-                    out.push_str("Set(...)");
-                    return Ok(());
-                } else {
-                    out.push('{');
-                    self.stringify_open_set(out, h, &s.entries, span, depth)?;
-                    out.push('}');
-                }
+            Obj::Set(s) if s.entries.is_empty() => out.push_str("Set()"),
+            Obj::Set(_) if open.contains(&h) => out.push_str("Set(...)"),
+            Obj::Set(_) => {
+                out.push('{');
+                return Ok(Got::Open(Open::Set, h, d + 1));
             }
-            Obj::Struct { tid, fields } => {
-                // Resolve the type key from `tid` (owned — the `str` hook below takes `&mut self`,
-                // so a `&self` borrow of the name can't live across it). Cold stringify path.
-                let name = self.struct_name_of_tid(tid).to_string();
-                // The `str` hook overrides the default repr. The checker decided whether the
-                // type has it; a `str` that is not the hook is an ordinary method and never runs
-                // here. The hook re-enters the VM and may start its own structural walk, so hand
-                // it the depth this walk has already consumed — one shared budget (see
-                // [`Vm::walk_base`]). The `stringify_into(out, res, ...)` below runs AFTER
-                // `guarded_walk` restored, at the outer `depth`: it is the hook's RESULT.
-                let def = self.program.structs.get(name.as_str()).cloned();
-                let base = self.walk_base + depth;
-                if let Some(res) = self.guarded_walk(base, |vm| {
-                    vm.invoke_hook(Hook::Str, Value::obj(h), &[], span)
-                })? {
-                    return self.stringify_into(out, res, span, depth);
+            // The `str` hook overrides the default repr. The checker decided whether the type has
+            // it; a `str` that is not the hook is an ordinary method and never runs here.
+            Obj::Struct { .. } if hooks && self.hook_of(v, Hook::Str) => return Ok(Got::Hook),
+            // W14-35c: the DEFAULT repr only (a hook is never guarded, like CPython's user
+            // `__repr__`). CPython's dataclass repr writes `...` for the whole re-entered object.
+            Obj::Struct { .. } if open.contains(&h) => out.push_str("..."),
+            Obj::Struct { tid, .. } => {
+                // ROOT REDESIGN — the BARE display name, not the qualified identity key.
+                let name = self.struct_name_of_tid(*tid);
+                match self.program.structs.get(name) {
+                    Some(def) => out.push_str(&def.display_name),
+                    None => out.push_str(&crate::base::words::bare_display(name)),
                 }
-                // Positional layout: recover declaration-order field names from the StructDef (the
-                // same `def` already cloned for the `str` hook) — no per-instance name strings.
-                // ROOT REDESIGN — render the BARE display name, not the qualified identity key.
-                let display = def
-                    .as_ref()
-                    .map(|d| d.display_name.clone())
-                    .unwrap_or_else(|| crate::base::words::bare_display(&name));
-                // W14-35c: the DEFAULT repr only (a `str` hook returned above and is never guarded,
-                // like CPython's user `__repr__`). CPython's dataclass repr writes `...` for the
-                // whole re-entered object.
-                if self.repr_active.contains(&h) {
-                    out.push_str("...");
-                    return Ok(());
-                }
-                let _ = write!(out, "{display}(");
-                self.stringify_open_fields(out, h, def.as_ref(), &fields.to_vec(), span, depth)?;
-                out.push(')');
+                out.push('(');
+                return Ok(Got::Open(Open::Struct, h, d + 1));
             }
+            Obj::Enum { .. } if hooks && self.hook_of(v, Hook::Str) => return Ok(Got::Hook),
             Obj::Enum {
                 variant_id,
                 payload,
             } => {
-                // The `str` hook overrides the default `Variant(payload)` repr (see the struct arm).
-                let base = self.walk_base + depth;
-                if let Some(res) = self.guarded_walk(base, |vm| {
-                    vm.invoke_hook(Hook::Str, Value::obj(h), &[], span)
-                })? {
-                    return self.stringify_into(out, res, span, depth);
-                }
                 // A carrier prints its prefix, then its payload in the mode of the position the
-                // carrier itself occupies. This is the bare (str) mode; a nested carrier is
-                // rendered by `stringify_nested_into` before it reaches here.
-                if let Some(prefix) = self.carrier_prefix(variant_id, &payload) {
+                // carrier itself occupies. This is the bare (str) mode; a nested carrier took the
+                // nested arm above.
+                if let Some(prefix) = self.carrier_prefix(*variant_id, payload) {
                     out.push_str(prefix);
-                    return match payload.try_get(0) {
-                        Some(v) => self.stringify_into(out, v, span, depth),
+                    return Ok(match payload.try_get(0) {
+                        Some(p) => Got::Tail(p, d, false),
                         None => {
                             out.push_str(Self::NONE_TEXT);
-                            Ok(())
+                            Got::Done
                         }
-                    };
+                    });
                 }
-                // M19 lever #2 — recover the variant name from the id (cold stringify path).
-                out.push_str(self.enum_names(variant_id).1);
+                // M19 lever #2 — recover the variant name from the id (cold render path).
+                out.push_str(self.enum_names(*variant_id).1);
                 if !payload.is_empty() {
                     out.push('(');
-                    self.stringify_seq_into(out, &payload.to_vec(), span, depth + 1)?;
-                    out.push(')');
+                    return Ok(Got::Open(Open::Enum, h, d + 1));
                 }
             }
             Obj::Func { proto, .. } => {
                 let _ = write!(
                     out,
                     "<fn {}>",
-                    crate::base::provider_name::display_fn_name(&self.program.protos[proto].name)
+                    crate::base::provider_name::display_fn_name(&self.program.protos[*proto].name)
                 );
             }
             Obj::Closure { .. } => out.push_str("<closure>"),
@@ -753,216 +1084,456 @@ impl Vm {
             Obj::Cffi(c) => {
                 let _ = write!(out, "<extern fn {}>", c.name());
             }
-            // Channel / Shared / Executor have no protocol hook — reuse the structural `Display`
-            // (`stringify`'s catch-all falls back to `Display` too).
+            // Channel / Executor / sockets have no protocol hook: the structural `Display`.
             Obj::Channel(_)
             | Obj::AtomicInt(_)
             | Obj::Executor(_)
             | Obj::Socket(_)
             | Obj::Listener(_)
-            | Obj::Ptr(_) => {
-                out.push_str(&self.display_guarded(Value::obj(h), depth)?);
-            }
-            // The print path waits for a busy handle through the wait door: a read or write can
-            // hold the lock while it waits detached (a FIFO read).
-            Obj::Writer(core) => {
-                let open = self.io_state_door(&core.inner, core.waits, span)?;
-                out.push_str(&io_handle_text("Writer", open));
-            }
-            Obj::Reader(core) => {
-                let open = self.io_state_door(&core.inner, core.waits, span)?;
-                out.push_str(&io_handle_text("Reader", open));
-            }
+            | Obj::Ptr(_) => out.push_str(&self.display_guarded(v, d)?),
+            // A read or write can hold the handle's lock while it waits detached (a FIFO read):
+            // the walk on levels waits for it through the wait door ([`Vm::io_state_door`]).
+            Obj::Writer(core) => match io_state(&core.inner) {
+                Some(o) => out.push_str(&io_handle_text("Writer", o)),
+                None => return Ok(Got::Busy),
+            },
+            Obj::Reader(core) => match io_state(&core.inner) {
+                Some(o) => out.push_str(&io_handle_text("Reader", o)),
+                None => return Ok(Got::Busy),
+            },
             // TICKET-246 / M3.3 — a box renders through its one renderer, with no wait.
-            Obj::Shared(c) => out.push_str(&self.display_box_alone(BoxCore::Shared(&c), depth)?),
-            Obj::RwShared(c) => {
-                out.push_str(&self.display_box_alone(BoxCore::RwShared(&c), depth)?)
-            }
-            Obj::Atomic(c) => out.push_str(&self.display_box_alone(BoxCore::Atomic(&c), depth)?),
-            // Experimental generators stringify opaquely (no protocol hook).
+            Obj::Shared(c) => out.push_str(&self.display_box_alone(BoxCore::Shared(c), d)?),
+            Obj::RwShared(c) => out.push_str(&self.display_box_alone(BoxCore::RwShared(c), d)?),
+            Obj::Atomic(c) => out.push_str(&self.display_box_alone(BoxCore::Atomic(c), d)?),
+            // Experimental generators render opaquely (no protocol hook).
             Obj::Generator(_) => out.push_str("<generator>"),
             // A cell is a transparent by-reference box (never a user-visible operand — reads
-            // `CellLoad` first); defensively stringify its inner value.
-            Obj::Cell(v) => self.stringify_into(out, v.get(), span, depth)?,
+            // `CellLoad` first); defensively render its inner value.
+            Obj::Cell(c) => return Ok(Got::Tail(c.get(), d, false)),
             Obj::Iter { .. } => out.push_str("<iterator>"),
         }
-        Ok(())
+        Ok(Got::Done)
     }
 
-    // W14-35c — the four open-render helpers below hold `repr_active` open around one container's
-    // element walk and close it on the `Ok` AND the `Err` path. M3.0a C6 — each walks a Rust copy
-    // of the container's elements, so it roots them for the walk (`Vm::with_roots`): the walk can
-    // wait in the GC door (a busy `Writer`) or run a `str` hook, and a collection meanwhile must not
-    // free an element that another task unlinked from the container. They are `#[inline(never)]` so the
-    // `Result` temporaries they need stay out of `stringify_obj_into`'s frame: a `str` hook that
-    // re-enters `str(self)` recurses through that frame, and a bigger frame would trip the native
-    // stack before the call-depth cap (`self_referential_stringable_hits_depth_limit`).
-
-    #[inline(never)]
-    fn stringify_open_seq(
+    /// The render on levels from `base` (its levels in [`STR_LEVEL`]-slot groups, above the
+    /// value's root and the output buffer): first `item`, then the top level's next child, until
+    /// no level is left (`Ok(true)`). `ra` is `repr_active`'s length when the render began. A
+    /// hooked value parks (`then`: `Ok(false)`) or runs its hook nested.
+    fn str_levels(
         &mut self,
         out: &mut String,
-        h: GcRef,
-        elems: &[Value],
+        base: usize,
+        ra: usize,
+        mut item: Option<Item>,
+        then: Option<StrThen>,
         span: Span,
-        depth: usize,
-    ) -> Result<(), RuntimeError> {
-        self.repr_active.push(h);
-        let r = self.stringify_seq_into(out, elems, span, depth + 1);
-        self.repr_active.pop();
-        r
+    ) -> Result<bool, RuntimeError> {
+        loop {
+            if let Some(it) = item.take() {
+                match self.str_item(out, &self.repr_active, it, span)? {
+                    Got::Done => {}
+                    Got::Tail(v, d, nested) => {
+                        item = Some(Item {
+                            v,
+                            d,
+                            nested,
+                            hooks: true,
+                        });
+                        continue;
+                    }
+                    Got::Open(kind, h, d) => self.str_push_level(kind, h, d),
+                    Got::Busy => {
+                        let text = self.io_text_door(it.v, span)?;
+                        out.push_str(&text);
+                    }
+                    Got::Hook => {
+                        // The hook's result renders bare in the value's place, at its depth; a
+                        // type with no hook body after all renders its default repr.
+                        let bare = |res: Value| Item {
+                            v: res,
+                            d: it.d,
+                            nested: false,
+                            hooks: true,
+                        };
+                        let res = match then {
+                            Some(then) => match self.str_park(out, base, ra, it, then, span)? {
+                                true => return Ok(false),
+                                false => None,
+                            },
+                            None => {
+                                // The hook re-enters the VM and may start its own structural
+                                // walk, so hand it the depth this render has already consumed.
+                                let at = self.walk_base + it.d;
+                                self.guarded_walk(at, |vm| {
+                                    vm.invoke_hook(Hook::Str, it.v, &[], span)
+                                })?
+                            }
+                        };
+                        item = Some(match res {
+                            Some(res) => bare(res),
+                            None => Item { hooks: false, ..it },
+                        });
+                        continue;
+                    }
+                }
+            }
+            if self.stack.len() == base {
+                return Ok(true);
+            }
+            item = self.str_level_step(out);
+        }
     }
 
-    #[inline(never)]
-    fn stringify_open_map(
-        &mut self,
-        out: &mut String,
-        h: GcRef,
-        entries: &RVec<MapEntry>,
-        span: Span,
-        depth: usize,
-    ) -> Result<(), RuntimeError> {
-        let roots = walk_roots(entries.iter().flat_map(|(_, k, mv)| [k, mv]));
-        self.with_roots(&roots, |vm| {
-            vm.stringify_map_entries(out, h, entries, span, depth)
-        })
+    /// Push a level for the container `h` (its opener written; its children render at depth
+    /// `d`): a snapshot list of its children, as the default render always walked, so a hook that
+    /// mutates `h` does not change what it prints and the children it has still to render stay
+    /// alive. `h` sits in its slot while the snapshot allocates.
+    fn str_push_level(&mut self, kind: Open, h: GcRef, d: usize) {
+        let at = self.stack.len();
+        let tag = (d << 3) | kind as usize;
+        self.stack.extend([
+            Value::int(tag as i64),
+            Value::obj(h),
+            Value::nil(),
+            Value::int(0),
+        ]);
+        let kids = self.walk_children(h);
+        let snap = self.heap.alloc(Obj::List(kids.into()));
+        self.stack[at + 2] = Value::obj(snap);
+        if kind.tracks() {
+            self.repr_active.push(h);
+        }
     }
 
-    fn stringify_map_entries(
+    /// The top level's next child to render, its separator written; or, past its last child, its
+    /// closer written and the level popped (`None`).
+    fn str_level_step(&mut self, out: &mut String) -> Option<Item> {
+        let t = self.stack.len() - STR_LEVEL;
+        let tag = self.stack[t].as_int() as usize;
+        let (kind, d) = (Open::of(tag & 7), tag >> 3);
+        let (h, snap) = (self.stack[t + 1].as_gcref(), self.stack[t + 2].as_gcref());
+        let i = self.stack[t + 3].as_int() as usize;
+        match self.walk_child(snap, i) {
+            Some(v) => {
+                str_sep(out, kind, i, self.str_def(kind, h));
+                self.stack[t + 3] = Value::int(i as i64 + 1);
+                Some(Item {
+                    v,
+                    d,
+                    nested: true,
+                    hooks: true,
+                })
+            }
+            None => {
+                str_close(out, kind, i);
+                if kind.tracks() {
+                    self.repr_active.pop();
+                }
+                self.stack.truncate(t);
+                None
+            }
+        }
+    }
+
+    /// A busy `Writer` / `Reader`'s text, once its lock is free: its fd's wait, so the holder's
+    /// FIFO peer runs at one worker too.
+    fn io_text_door(&mut self, v: Value, span: Span) -> Result<String, RuntimeError> {
+        let h = v.as_gcref();
+        if let Obj::Writer(core) = self.heap.get(h) {
+            let core = core.clone();
+            let open = self.io_state_door(&core.inner, core.waits, span)?;
+            return Ok(io_handle_text("Writer", open));
+        }
+        if let Obj::Reader(core) = self.heap.get(h) {
+            let core = core.clone();
+            let open = self.io_state_door(&core.inner, core.waits, span)?;
+            return Ok(io_handle_text("Reader", open));
+        }
+        unreachable!("only an I/O handle is busy")
+    }
+
+    /// Push the header and the `str` hook frame of the hooked value `it`. The text so far moves
+    /// into the render's buffer (slot `base - 1`), appended in place. The hook runs with
+    /// `walk_base` raised by its depth (the shared budget), restored by its return
+    /// ([`Vm::str_resume`]) or its unwind ([`Vm::drop_ret`]). `Ok(false)`: no hook body.
+    fn str_park(
         &mut self,
         out: &mut String,
-        h: GcRef,
-        entries: &RVec<MapEntry>,
+        base: usize,
+        ra: usize,
+        it: Item,
+        then: StrThen,
         span: Span,
-        depth: usize,
+    ) -> Result<bool, RuntimeError> {
+        self.str_stash(base - 1, out);
+        let saved = self.walk_base;
+        let levels = (self.stack.len() - base) / STR_LEVEL;
+        self.stack
+            .extend([ra, saved, levels, it.d].map(|k| Value::int(k as i64)));
+        self.walk_base = saved + it.d;
+        let ret = RetAction::StringifyWalk(then);
+        let pushed = self.push_hook_frame(Hook::Str, it.v, &[], ret, span);
+        if !matches!(pushed, Ok(true)) {
+            self.walk_base = saved;
+            self.stack.truncate(base + levels * STR_LEVEL);
+        }
+        pushed
+    }
+
+    /// Append `out` to the render's buffer in `slot` (a `bytearray`, made at the first park) and
+    /// clear it.
+    fn str_stash(&mut self, slot: usize, out: &mut String) {
+        if out.is_empty() {
+            return;
+        }
+        if self.stack[slot].is_nil() {
+            let h = self.heap.alloc(Obj::ByteArray(RVec::new()));
+            self.stack[slot] = Value::obj(h);
+        }
+        let h = self.stack[slot].as_gcref();
+        let heap = self.heap.write(h);
+        if let Obj::ByteArray(b) = heap.get(h) {
+            b.extend_from_slice(heap, out.as_bytes());
+        }
+        out.clear();
+    }
+
+    /// Put the render's buffer in `slot` (if a park made one) in front of `out`.
+    fn str_merge(&mut self, slot: usize, out: &mut String) {
+        let Some(h) = self.stack[slot].as_obj() else {
+            return;
+        };
+        let Obj::ByteArray(b) = self.heap.get(h) else {
+            unreachable!("a render's buffer is a bytearray")
+        };
+        let bytes = b.to_vec();
+        let mut s = String::from_utf8(bytes).expect("a render's buffer holds the str it was given");
+        s.push_str(out);
+        *out = s;
+    }
+
+    /// A render's hook frame returned: its result on the stack top, over the header. Render it
+    /// in the hooked value's place and run the walk on; at its end feed `then`. On a fault the
+    /// walk's slots and `then`'s go.
+    pub(super) fn str_resume(&mut self, then: StrThen, span: Span) -> Result<(), RuntimeError> {
+        let res = self.pop();
+        let n = self.stack.len();
+        let [ra, saved, levels, d] = [4, 3, 2, 1].map(|k| self.stack[n - k].as_int() as usize);
+        self.stack.truncate(n - STR_HEADER);
+        self.walk_base = saved;
+        let base = self.stack.len() - levels * STR_LEVEL;
+        let mut out = String::new();
+        let item = Item {
+            v: res,
+            d,
+            nested: false,
+            hooks: true,
+        };
+        match self.str_levels(&mut out, base, ra, Some(item), Some(then), span) {
+            Ok(true) => {
+                self.str_merge(base - 1, &mut out);
+                self.stack.truncate(base - 2);
+                self.str_finish(then, out, span)
+            }
+            Ok(false) => Ok(()),
+            Err(e) => {
+                self.stack.truncate(base - 2 - then.slots());
+                self.repr_active.truncate(ra);
+                match then {
+                    StrThen::Assert { .. } => Err(self.assert_fault(None, span)),
+                    StrThen::ToStr
+                    | StrThen::Fmt
+                    | StrThen::Push
+                    | StrThen::Print { .. }
+                    | StrThen::Build
+                    | StrThen::KeyText => Err(e),
+                }
+            }
+        }
+    }
+
+    /// A render's hook frame unwound (`base` its frame base): restore `walk_base` and close the
+    /// containers the render had open. The slots go with the caller's stack.
+    pub(super) fn str_walk_drop(&mut self, base: usize) {
+        self.walk_base = self.stack[base - 3].as_int() as usize;
+        self.repr_active
+            .truncate(self.stack[base - 4].as_int() as usize);
+    }
+
+    /// Feed a finished render to its continuation; its `state` is on the stack top.
+    pub(super) fn str_finish(
+        &mut self,
+        then: StrThen,
+        out: String,
+        span: Span,
     ) -> Result<(), RuntimeError> {
-        self.repr_active.push(h);
-        let mut r = Ok(());
-        for (i, (_, k, mv)) in entries.iter().enumerate() {
+        match then {
+            StrThen::ToStr => {
+                let h = self.heap.alloc(Obj::Str(out.into()));
+                let top = self.stack.len() - 1;
+                self.stack[top] = Value::obj(h);
+                Ok(())
+            }
+            StrThen::Push => {
+                let h = self.heap.alloc(Obj::Str(out.into()));
+                self.push(Value::obj(h));
+                Ok(())
+            }
+            StrThen::Fmt => {
+                let program = Arc::clone(&self.program);
+                let caller = self.frames.last().expect("a hook returns to its caller");
+                let Op::ToStrFmt(spec) = &program.protos[caller.proto].code[caller.ip - 1] else {
+                    unreachable!("a Fmt render is started only by Op::ToStrFmt")
+                };
+                self.fmt_finish(spec, out, span)
+            }
+            StrThen::Print { custom } => self.print_resume(custom, out, span),
+            StrThen::Build => {
+                let i = self.pop().as_int() as usize;
+                let n = self.pop().as_int() as usize;
+                self.build_str(n, i + 1, out, span)
+            }
+            StrThen::Assert { right } => self.assert_text(usize::from(right) + 1, out, span),
+            StrThen::KeyText => Err(self.key_fault(&out, span)),
+        }
+    }
+}
+
+/// What a render's answer feeds once its parked hook frame returns
+/// ([`RetAction::StringifyWalk`]).
+#[derive(Clone, Copy, Debug)]
+pub(super) enum StrThen {
+    /// `Op::ToStr`: the str replaces the value on the stack top
+    ToStr,
+    /// `Op::ToStrFmt`: the caller's spec pads the str; the value and its nested fields sit below
+    Fmt,
+    /// `x.str()` (the intrinsic): push the str
+    Push,
+    /// a `print` arg: the line runs on from the next arg; `[argc, i]` sit below the walk
+    Print { custom: bool },
+    /// an interpolated part (`Op::BuildStr`): the parts run on; `[n, i]` sit below the walk
+    Build,
+    /// a failed `assert`'s left (or `right`) operand: its text runs on, then the assert faults
+    /// ([`Vm::assert_text`]); the operands sit below the walk
+    Assert { right: bool },
+    /// a missing map key: the lookup faults with its text ([`Vm::key_not_found`])
+    KeyText,
+}
+
+impl StrThen {
+    /// The `state` slots its caller keeps below the walk.
+    fn slots(self) -> usize {
+        match self {
+            StrThen::ToStr
+            | StrThen::Fmt
+            | StrThen::Push
+            | StrThen::Assert { .. }
+            | StrThen::KeyText => 0,
+            StrThen::Print { .. } | StrThen::Build => 2,
+        }
+    }
+}
+
+/// One container level of a render on levels: `[tag, h, snap, i]`. `tag` packs the [`Open`] kind
+/// (low 3 bits) and the depth its children render at; `h` is the container, `snap` the snapshot
+/// list of its children, `i` the next child.
+const STR_LEVEL: usize = 4;
+
+/// What a parked render keeps above its levels, under the hook frame: `[ra, walk_base, levels,
+/// depth]`, `repr_active`'s length when the render began, the `walk_base` to restore, the level
+/// count and the hooked value's depth.
+const STR_HEADER: usize = 4;
+
+/// A container a render opens: its children render between its opener and its closer.
+#[derive(Clone, Copy, PartialEq)]
+enum Open {
+    List = 0,
+    Tuple = 1,
+    Map = 2,
+    Set = 3,
+    Struct = 4,
+    Enum = 5,
+}
+
+impl Open {
+    fn of(tag: usize) -> Open {
+        match tag {
+            0 => Open::List,
+            1 => Open::Tuple,
+            2 => Open::Map,
+            3 => Open::Set,
+            4 => Open::Struct,
+            _ => Open::Enum,
+        }
+    }
+
+    /// A back edge can reach it: it is in `repr_active` while its children render.
+    fn tracks(self) -> bool {
+        match self {
+            Open::List | Open::Map | Open::Set | Open::Struct => true,
+            Open::Tuple | Open::Enum => false,
+        }
+    }
+}
+
+/// One value a render has still to write: at depth `d`, `nested` (a `str` as its repr), and
+/// whether a `str` hook may run (`false` once a hooked type turned out to have no hook body).
+#[derive(Clone, Copy)]
+struct Item {
+    v: Value,
+    d: usize,
+    nested: bool,
+    hooks: bool,
+}
+
+/// What one value's render step ([`Vm::str_item`]) asks for next.
+enum Got {
+    /// the value's text is written
+    Done,
+    /// render this value in its place: a carrier's payload, a cell's value (depth, nested)
+    Tail(Value, usize, bool),
+    /// the opener is written: render the children of the container at this depth, then its closer
+    Open(Open, GcRef, usize),
+    /// a struct or enum with a `str` hook: the hook's result renders in its place
+    Hook,
+    /// a `Writer` / `Reader` whose lock another task holds: wait for it
+    Busy,
+}
+
+/// The text before child `i` of a `kind` container: `, ` between children, a map's `: ` between
+/// its key and value, a struct field's `name=`.
+fn str_sep(out: &mut String, kind: Open, i: usize, def: Option<&crate::base::op::StructDef>) {
+    use std::fmt::Write as _;
+    match kind {
+        Open::Map if i % 2 == 1 => out.push_str(": "),
+        Open::List | Open::Tuple | Open::Map | Open::Set | Open::Struct | Open::Enum => {
             if i > 0 {
                 out.push_str(", ");
             }
-            r = self.stringify_nested_into(out, k, span, depth + 1);
-            if r.is_err() {
-                break;
+        }
+    }
+    if kind == Open::Struct {
+        match def.and_then(|d| d.fields.get(i)) {
+            Some(k) => {
+                let _ = write!(out, "{k}=");
             }
-            out.push_str(": ");
-            r = self.stringify_nested_into(out, mv, span, depth + 1);
-            if r.is_err() {
-                break;
+            None => {
+                let _ = write!(out, "{i}=");
             }
         }
-        self.repr_active.pop();
-        r
     }
+}
 
-    #[inline(never)]
-    fn stringify_open_set(
-        &mut self,
-        out: &mut String,
-        h: GcRef,
-        entries: &RVec<SetEntry>,
-        span: Span,
-        depth: usize,
-    ) -> Result<(), RuntimeError> {
-        let roots = walk_roots(entries.iter().map(|(_, e)| e));
-        self.with_roots(&roots, |vm| {
-            vm.stringify_set_entries(out, h, entries, span, depth)
-        })
-    }
-
-    fn stringify_set_entries(
-        &mut self,
-        out: &mut String,
-        h: GcRef,
-        entries: &RVec<SetEntry>,
-        span: Span,
-        depth: usize,
-    ) -> Result<(), RuntimeError> {
-        self.repr_active.push(h);
-        let mut r = Ok(());
-        for (i, (_, e)) in entries.iter().enumerate() {
-            if i > 0 {
-                out.push_str(", ");
-            }
-            r = self.stringify_nested_into(out, e, span, depth + 1);
-            if r.is_err() {
-                break;
-            }
+/// The closer of a `kind` container of `n` children.
+fn str_close(out: &mut String, kind: Open, n: usize) {
+    match kind {
+        Open::List => out.push(']'),
+        Open::Tuple => {
+            out.push_str(crate::base::words::tuple_tail(n));
+            out.push(')');
         }
-        self.repr_active.pop();
-        r
-    }
-
-    #[inline(never)]
-    fn stringify_open_fields(
-        &mut self,
-        out: &mut String,
-        h: GcRef,
-        def: Option<&crate::base::op::StructDef>,
-        fields: &[Value],
-        span: Span,
-        depth: usize,
-    ) -> Result<(), RuntimeError> {
-        let roots = walk_roots(fields.iter().copied());
-        self.with_roots(&roots, |vm| {
-            vm.stringify_fields(out, h, def, fields, span, depth)
-        })
-    }
-
-    fn stringify_fields(
-        &mut self,
-        out: &mut String,
-        h: GcRef,
-        def: Option<&crate::base::op::StructDef>,
-        fields: &[Value],
-        span: Span,
-        depth: usize,
-    ) -> Result<(), RuntimeError> {
-        use std::fmt::Write as _;
-        self.repr_active.push(h);
-        let mut r = Ok(());
-        for (i, fv) in fields.iter().enumerate() {
-            if i > 0 {
-                out.push_str(", ");
-            }
-            match def.and_then(|d| d.fields.get(i)) {
-                Some(k) => {
-                    let _ = write!(out, "{k}=");
-                }
-                None => {
-                    let _ = write!(out, "{i}=");
-                }
-            }
-            r = self.stringify_nested_into(out, *fv, span, depth + 1);
-            if r.is_err() {
-                break;
-            }
-        }
-        self.repr_active.pop();
-        r
-    }
-
-    /// Render `elems`, a Rust copy of a sequence's elements, rooted for the walk (M3.0a C6, see
-    /// the open-render helpers above).
-    #[inline(never)]
-    pub(super) fn stringify_seq_into(
-        &mut self,
-        out: &mut String,
-        elems: &[Value],
-        span: Span,
-        depth: usize,
-    ) -> Result<(), RuntimeError> {
-        let roots = walk_roots(elems.iter().copied());
-        self.with_roots(&roots, |vm| {
-            for (i, e) in elems.iter().enumerate() {
-                if i > 0 {
-                    out.push_str(", ");
-                }
-                vm.stringify_nested_into(out, *e, span, depth)?;
-            }
-            Ok(())
-        })
+        Open::Map | Open::Set => out.push('}'),
+        Open::Struct | Open::Enum => out.push(')'),
     }
 }
 

@@ -580,9 +580,9 @@ fn inject_or_extend_opens_a_continuation_when_the_target_is_not_last() {
     assert_eq!(s.lock().scopes[3].total, 2);
 }
 
-/// TICKET-211 — the one runner claim never claims more than the worker count, a body block hands
-/// the body's slot to a fiber runner, and the joiner is refused once the budget is full. On a lazy
-/// sched (`run_mn_nursery_outermost`), whose runners are fixed at build, the claim starts nothing.
+/// TICKET-211 — the one runner claim never claims more than the worker count, claims up to it
+/// while tasks wait, and claims a freed bit again. On a sched whose runners are all claimed at
+/// build (`MnSched::mark_all_runners_claimed`), the claim starts nothing.
 #[test]
 fn claim_runners_never_exceeds_the_worker_count() {
     let set_bits = |s: &MnSched| s.lock().runner_wids.iter().filter(|b| **b).count();
@@ -593,18 +593,19 @@ fn claim_runners_never_exceeds_the_worker_count() {
             c.runner_wids[0] = true;
             c.runner_wids[1] = true;
         }
-        s.open_body(0);
         for _ in 0..2 * n {
             let _ = s.inject_or_extend(mk_pending_fiber(0), 0);
             assert!(set_bits(&s) <= n.max(2), "n={n}: {} bits", set_bits(&s));
         }
-        let _ = s.body_runner(true);
-        assert!(
-            !s.lock().runner_wids[0],
-            "n={n}: a blocked body frees bit 0"
+        assert_eq!(
+            set_bits(&s),
+            n.max(2),
+            "n={n}: waiting tasks claim up to the count"
         );
+        // A runner leaving clears its bit (`close_body` for bit 0); the next claim takes it again.
+        s.lock().runner_wids[0] = false;
+        let _ = s.inject_or_extend(mk_pending_fiber(0), 0);
         assert_eq!(set_bits(&s), if n >= 2 { n } else { 1 }, "n={n}");
-        assert!(!s.claim_joiner(), "n={n}: the budget is full");
 
         let lazy = MnSched::new(0, n, Arc::new(AtomicBool::new(false)), dl_err(), 0);
         lazy.mark_all_runners_claimed();

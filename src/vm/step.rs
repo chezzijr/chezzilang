@@ -46,60 +46,9 @@ impl Vm {
             Op::Pop => {
                 self.pop();
             }
-            Op::Assert { has_msg, cmp } => {
-                // Reached only on the failing path: the compiler emits `Op::Assert` after a
-                // `JumpIfFalse` that already consumed (and tested) `cond`, so this op always faults.
-                // `msg` (if present) was evaluated lazily just before us — `msg` is only
-                // evaluated when the assertion fails.
-                let extra = if *has_msg { 1 } else { 0 };
-                let n = self.stack.len();
-                let msg = if *has_msg {
-                    let m = self.stack[n - 1];
-                    self.val_str(m)
-                } else {
-                    None
-                };
-                // For a comparison, the two operand VALUES sit on the stack under `msg` (duplicated
-                // by the compiler before the comparison consumed the originals). Render them around
-                // `cmp`'s symbol; keep them rooted on the operand stack until the last render
-                // finishes, since a `str` method it runs could otherwise collect them. If either
-                // render faults, drop the operand text but still return `is_assert: true` below — a
-                // faulting operand must never reclassify a failed assertion as an error.
-                let cmp_text = if let Some(c) = cmp {
-                    let l = self.stack[n - 2 - extra];
-                    let r = self.stack[n - 1 - extra];
-                    let mut s = String::new();
-                    let rendered = self
-                        .stringify_nested_into(&mut s, l, span, 0)
-                        .and_then(|()| {
-                            s.push(' ');
-                            s.push_str(c.symbol());
-                            s.push(' ');
-                            self.stringify_nested_into(&mut s, r, span, 0)
-                        });
-                    rendered.ok().map(|()| s)
-                } else {
-                    None
-                };
-                self.stack
-                    .truncate(n - extra - if cmp.is_some() { 2 } else { 0 });
-                let message = match (msg, cmp_text) {
-                    (Some(m), Some(c)) => format!("assertion failed: {m} ({c})"),
-                    (Some(m), None) => format!("assertion failed: {m}"),
-                    (None, Some(c)) => format!("assertion failed: {c}"),
-                    (None, None) => "assertion failed".to_string(),
-                };
-                // The ONE site that flags an assert failure — the `test fn` runner buckets this as
-                // FAIL, every other (`is_assert: false`) fault as ERROR.
-                return Err(RuntimeError {
-                    message,
-                    span,
-                    is_assert: true,
-                    is_over_memory: false,
-                    is_timed_out: false,
-                    is_panic: false,
-                });
-            }
+            // Reached only on the failing path: the compiler emits `Op::Assert` after a
+            // `JumpIfFalse` that already consumed (and tested) `cond`, so this op always faults.
+            Op::Assert { .. } => return self.op_assert(span),
             Op::GetLocal(slot) => {
                 let v = self.stack[self.base() + slot];
                 self.push(v);
@@ -256,7 +205,7 @@ impl Vm {
                     .last()
                     .map(|f| f.defer_markers.len())
                     .unwrap_or(0),
-                nursery_len: self.nurseries.len(),
+                nursery_len: self.eager_scheds.len(),
             }),
             Op::PopHandler => {
                 self.handlers.pop();
@@ -607,40 +556,12 @@ impl Vm {
                 self.push(a);
                 self.push(b);
             }
-            Op::ToStr => {
-                let v = self.stack[self.stack.len() - 1]; // leave rooted; stringify may run user code
-                // A `str` hook runs as a frame (its receiver is the frame's local).
-                if self.hook_of(v, crate::base::hooks::Hook::Str) {
-                    self.pop();
-                    self.push_hook_frame(
-                        crate::base::hooks::Hook::Str,
-                        v,
-                        &[],
-                        RetAction::Stringify,
-                        span,
-                    )?;
-                    return Ok(());
-                }
-                let s = self.stringify(v, span, 0)?;
-                self.pop();
-                let h = self.heap.alloc(Obj::Str(s.into()));
-                self.push(Value::obj(h));
-            }
+            // A `str` hook the render reaches runs as a frame (`display.rs`, `StrThen`).
+            Op::ToStr => self.op_to_str(span)?,
             // Body in an `#[inline(never)]` helper so `step`'s frame stays small (the deep-recursion
             // depth-guard test overflows in debug if `step` grows — see commit 1450077).
             Op::ToStrFmt(spec) => self.op_to_str_fmt(spec, span)?,
-            Op::BuildStr(n) => {
-                let at = self.stack.len() - *n;
-                // Stringify in place so each interpolated part stays rooted while a `str` method runs.
-                let mut s = String::new();
-                for i in 0..*n {
-                    let p = self.stack[at + i];
-                    self.stringify_into(&mut s, p, span, 0)?; // one buffer, no per-part String
-                }
-                self.stack.truncate(at);
-                let h = self.heap.alloc(Obj::Str(s.into()));
-                self.push(Value::obj(h));
-            }
+            Op::BuildStr(n) => self.build_str(*n, 0, String::new(), span)?,
             Op::ListClone => {
                 // Snapshot a `for` iterand into an index-iterable list (a body that mutates the
                 // source does not disturb iteration). `builtin_items` holds the rows.
@@ -689,10 +610,8 @@ impl Vm {
             Op::IterableToCursor => {
                 // One-time `for`-entry conversion: a PURE-`Iterable` struct (has `iter`, lacks `next`)
                 // becomes its cursor (so the seq path drains it); everything else passes through.
-                // Shared with `drain_iterable` (`List()`/`Set()`/`Map()`/`.iter()`) so every consumer
-                // of the checker's `Iterable` admission set accepts the same witnesses.
                 let v = self.pop();
-                self.iterable_to_cursor(v, true, span)?;
+                self.iterable_to_cursor(v, span)?;
             }
             Op::Yield => {
                 // Experimental generator suspend: the yielded value is on the stack top and the
@@ -713,6 +632,8 @@ impl Vm {
                 // a callback or a `defer` (TICKET-136, W14-16), so it goes through
                 // `recv_step_or_demote`: an M:N fiber there demotes instead of faulting a false
                 // deadlock. Outside a re-entry it takes the snapshot-park / block-in-place path.
+                // A drain's step frame receives here too, at the drain's span.
+                let span = self.step_span(span);
                 let v = self.pop();
                 let Some(h) = v.as_obj() else {
                     return Err(self.err("`for` over a non-channel value".to_string(), span));

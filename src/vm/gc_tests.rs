@@ -1201,8 +1201,8 @@ main()";
             let mut vm = Vm::new(Arc::new(test_program(src).expect("compiles")));
             vm.gc_stress = false;
             let before = test_counts().1;
-            // In place: the counts are this thread's, and `main` as fiber 1 runs on a worker.
-            let result = vm.run_in_place();
+            // One worker: the counts are this thread's, and `main` runs on it.
+            let result = vm.run_one_worker();
             let freed = test_counts().1 - before;
             vm.finish_run(result).expect("runs");
             (captured(vm.out), vm.gc_coord.stop_stats().0, freed)
@@ -1595,6 +1595,32 @@ fn share_handle<T: Send + 'static, R: Send + 'static>(
         .expect("VM thread panicked")
 }
 
+/// `g.next()` from a test thread, on the frame path: [`Vm::gen_resume`] pushes the body frame
+/// (`GenThen::Push`) and this `Vm`'s dispatch loop runs it to its next `yield` (→ `Some(v)`) or its
+/// end (→ `None`); no host frame is under it. A Rust panic in the resume ends the task, as a
+/// worker's `run_one_fiber` ends it: the holds the resume pushed drop, and each puts its
+/// still-running generator back `Done`.
+fn generator_next(vm: &mut Vm, h: GcRef, span: Span) -> Result<Value, RuntimeError> {
+    let level = vm.frames.len();
+    let len = vm.stack.len();
+    let holds = vm.held_gens.len();
+    let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        vm.gen_resume(h, GenThen::Push, span)?;
+        vm.run_until(level)
+    }));
+    match run {
+        Ok(Ok(())) => Ok(vm.pop()),
+        Ok(Err(e)) => {
+            vm.stack.truncate(len);
+            Err(e)
+        }
+        Err(p) => {
+            vm.held_gens.truncate(holds);
+            std::panic::resume_unwind(p)
+        }
+    }
+}
+
 /// M2.4 — two threads drive one generator through two `Vm` handles on one heap. Each `.next()`
 /// gives a value, `None`, or the "generator already running" fault; no call crashes, every value
 /// goes to exactly one caller, in order, and `None` comes only after the last value (a resume
@@ -1628,7 +1654,7 @@ main()"
             for _ in 0..10_000_000 {
                 // The loop's back edge: a safepoint, as a bytecode loop has.
                 w.gc_poll();
-                match w.generator_next(g, Span::RUNTIME) {
+                match generator_next(w, g, Span::RUNTIME) {
                     Ok(r) => match w.heap.get(r.as_obj().expect("an Option")) {
                         Obj::Enum {
                             variant_id,
@@ -1694,7 +1720,7 @@ fn a_panic_inside_a_resume_leaves_the_generator_done() {
     let g = vm.alloc_generator(9999, home, None, Vec::new());
     let h = g.as_obj().expect("a generator object");
     let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let _ = vm.generator_next(h, Span::RUNTIME);
+        let _ = generator_next(&mut vm, h, Span::RUNTIME);
     }));
     assert!(r.is_err(), "the resume panicked");
     let Ok(parked) = vm.gen_take(h, Span::RUNTIME) else {
@@ -1894,7 +1920,9 @@ main()"
 }
 
 /// M3.0a C3 — a native that holds its host thread runs in the GC door, detached, so a stop does
-/// not wait for it. Thread A calls one (`Kind::Blocking`) on the shared list `L`; the native reads
+/// not wait for it. Thread A calls one (`Kind::HostWait`, the kind that holds its thread in every
+/// context; a `Kind::Blocking` native parks on the offload pool unless a host frame is under it)
+/// on the shared list `L`; the native reads
 /// `L` through `arg_str_list` a few times. Thread B, until A is done, overwrites `L[k]` with a new
 /// str (the old one is unlinked), sorts `L` (the old block retires), allocates junk that a freed
 /// slot can be reused for, and collects. The door copies the args out of the heap BEFORE it opens
@@ -1939,7 +1967,7 @@ main()"
                     w.gc_poll();
                     let r = w.invoke_native(
                         probe,
-                        crate::native::Kind::Blocking,
+                        crate::native::Kind::HostWait,
                         vec![Value::obj(l)],
                         sp,
                     );
@@ -1982,11 +2010,11 @@ main()"
 }
 
 /// M3.0a C6 — the print walk waits for a busy `Writer` through the GC door while it holds the
-/// elements of the list it renders in a Rust copy. Thread A sets `outer[1]` to a new list `xs`
-/// and prints `outer = [W, xs]` while a plain thread holds `W`'s lock in bursts (a write in
-/// progress), so the walk opens the door before it reaches `xs`; thread B sets `outer[1] = 0`
-/// (`xs` is unlinked), allocates junk strs and collects. The walk roots every element it holds,
-/// so it prints `xs` or `0`, never freed memory. Run under `CHEZZI_GC_STRESS=1` too.
+/// elements of the list it renders in a heap snapshot on its level (`display.rs`). Thread A sets
+/// `outer[1]` to a new list `xs` and prints `outer = [W, xs]` while a plain thread holds `W`'s
+/// lock in bursts (a write in progress), so the walk opens the door before it reaches `xs`; thread
+/// B sets `outer[1] = 0` (`xs` is unlinked), allocates junk strs and collects. The walk's slots
+/// root the snapshot, so it prints `xs` or `0`, never freed memory. Run under `CHEZZI_GC_STRESS=1` too.
 #[test]
 fn the_print_walk_roots_what_it_holds_across_a_door() {
     const PRINTS: usize = 100;

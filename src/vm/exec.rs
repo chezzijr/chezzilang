@@ -162,10 +162,6 @@ impl Vm {
             fault_trace_depth: 0,
             task: deadlock::TaskPath::default(),
             gc_stress: gc_door::gc_stress_env(),
-            nurseries: Vec::new(),
-            mn_scopes: Vec::new(),
-            mn_enlisted: 0,
-            mn_enlist_sched: None,
             eager_scheds: Vec::new(),
             fiber_scope: None,
             nursery_defer_floors: Vec::new(),
@@ -211,7 +207,6 @@ impl Vm {
             demoted: false, // D5 owe #3 (Path C)
             guest_of: None,
             extern_spare: None,
-            slice_in_place: false,
             run_permit: None,
             cancel: None,
             cancel_outer: Vec::new(),
@@ -263,8 +258,6 @@ impl Vm {
         std::mem::swap(&mut self.call_depth, &mut ctx.call_depth);
         std::mem::swap(&mut self.cur_base, &mut ctx.cur_base);
         std::mem::swap(&mut self.handlers, &mut ctx.handlers);
-        std::mem::swap(&mut self.nurseries, &mut ctx.nurseries);
-        std::mem::swap(&mut self.mn_scopes, &mut ctx.mn_scopes);
         std::mem::swap(
             &mut self.nursery_defer_floors,
             &mut ctx.nursery_defer_floors,
@@ -283,6 +276,8 @@ impl Vm {
         std::mem::swap(&mut self.guard_ticket, &mut ctx.guard_ticket);
         std::mem::swap(&mut self.held_gens, &mut ctx.held_gens);
         std::mem::swap(&mut self.drains, &mut ctx.drains);
+        std::mem::swap(&mut self.walk_base, &mut ctx.walk_base);
+        std::mem::swap(&mut self.repr_active, &mut ctx.repr_active);
         // stdin is NOT swapped: it is ONE source every task shares (Go/Python) — see `Stdin` and
         // `spawn_worker`, which hands the M:N worker the same shared handle.
         //
@@ -333,12 +328,11 @@ impl Vm {
 
     /// Run `f` with the native-reentry guard raised (B1). A blocking `recv` reached while the guard
     /// is up cannot park (its caller's loop/recursion state lives on the Rust stack, not in a
-    /// [`Fiber`]), so it faults `deadlock` instead of suspending.
+    /// [`Fiber`]), so it demotes instead of suspending (`BlockCtx::Reentered`).
     ///
-    /// `guarded` is the back-edge of a native LOOP: one call per element (list HOFs, the sort-key
-    /// and merge-comparator loops, `Shared`/`RwShared` each/fold, the struct-iterator collect), so it
-    /// runs [`Vm::guarded_checkpoint`] before [`Vm::reentered`]. A native that calls user code once
-    /// uses `reentered` (TICKET-194).
+    /// `guarded` is the back-edge of a native LOOP: one call per element (the Rust-stack `defer`
+    /// drain), so it runs [`Vm::guarded_checkpoint`] before [`Vm::reentered`]. A native that calls
+    /// user code once uses `reentered` (TICKET-194).
     pub(super) fn guarded<T>(
         &mut self,
         f: impl FnOnce(&mut Self) -> Result<T, RuntimeError>,
@@ -348,8 +342,8 @@ impl Vm {
     }
 
     /// TICKET-194 — THE re-entry bracket: raises `native_reentry` around `f`, with no cancellation
-    /// checkpoint. A native that calls user code ONCE (an operator or protocol hook, a generator
-    /// resume, `update`/`read`/`write`) enters it here: that call does not wait, so it is not a
+    /// checkpoint. A native that calls user code ONCE (a probe hook, an `Inline` native callee,
+    /// an FFI callback) enters it here: that call does not wait, so it is not a
     /// cancellation point (owner decision: only a wait or a loop back-edge is one). The callee's own back-edges
     /// and waits still cut it. A run-wide halt still lands at the hook's frame push
     /// ([`Vm::call_halt`], TICKET-224).
@@ -563,35 +557,6 @@ impl Vm {
         }
     }
 
-    /// Resume generator `h` from a synchronous native caller: run it to its next `yield`
-    /// (→ `Some(v)`) or its end (→ `None`, state `Done`). The body runs on this frame stack under
-    /// [`Vm::reentered`] ([`Vm::gen_resume`] with [`GenThen::Push`]), so a wait in it re-enters as in
-    /// any nested callback. The dispatch loop resumes with `gen_resume` itself and does not come here.
-    pub(super) fn generator_next(&mut self, h: GcRef, span: Span) -> Result<Value, RuntimeError> {
-        let level = self.frames.len();
-        let len = self.stack.len();
-        let holds = self.held_gens.len();
-        // A Rust panic inside the resume (a task fault) leaves the generator `Done`, not running:
-        // Python marks a generator that raised as finished. A caught panic (an FFI callback's
-        // trampoline) keeps this `Vm` alive, so the holds the resume pushed are dropped here:
-        // each puts its still-running generator back `Done`.
-        let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            self.gen_resume(h, GenThen::Push, span)?;
-            self.reentered(|s| s.run_until(level))
-        }));
-        match run {
-            Ok(Ok(())) => Ok(self.pop()),
-            Ok(Err(e)) => {
-                self.stack.truncate(len);
-                Err(e)
-            }
-            Err(p) => {
-                self.held_gens.truncate(holds);
-                std::panic::resume_unwind(p)
-            }
-        }
-    }
-
     /// Resume generator `h` on this frame stack: push `h`, then its body frame over its slots with
     /// [`RetAction::Gen`] (`then` is what the resume's `Option` result feeds). The frame's `yield`
     /// ([`Vm::gen_yield`]) or return hands `Some(v)` / `None` to `then`; a `Done` generator hands
@@ -649,7 +614,7 @@ impl Vm {
                 // checker-banned in a generator), so its floor is the driver's.
                 frame.base = base;
                 frame.call_span = span;
-                frame.nursery_len = self.nurseries.len();
+                frame.nursery_len = self.eager_scheds.len();
                 frame.ret = ret;
                 let (frame_len, depth) = (self.frames.len(), self.call_depth - 1);
                 self.stack.append(&mut ctx.stack);
@@ -829,6 +794,11 @@ impl Vm {
         self.push(Value::obj(cell));
         let cancel = Arc::new(AtomicBool::new(false));
         let nworkers = worker_count();
+        #[cfg(test)]
+        let nworkers = match super::ONE_WORKER_ROOT.with(std::cell::Cell::get) {
+            true => 1,
+            false => nworkers,
+        };
         let mut inner = MnSched::new(
             1,
             nworkers,
@@ -863,10 +833,10 @@ impl Vm {
             ..FiberCtx::default()
         };
         let ctx = self.root_registry.register(ctx);
-        // One runner thread per other worker (Go: one M per P), not the process pool: the pool
-        // starts `worker_count()` threads of its own beside this one. Every thread is born before
-        // the seed: no fiber runs while this thread still spawns (main's code could cap the
-        // address space under a thread not yet born, as the pool's up-front start never let it).
+        // One runner thread per other worker (Go: one M per P). Every thread is born before the
+        // seed: no fiber runs while this thread still spawns (main's code could cap the address
+        // space under a thread not yet born). A thread the OS refuses gives its wid back and is
+        // not retried: the run goes on with one worker fewer.
         for wid in 1..nworkers {
             let shell = self.spawn_shell(&sched, &cancel);
             if super::sched::spawn_worker_thread(shell, &sched, "chezzi-mn", wid, SENTINEL_SCOPE)
@@ -893,6 +863,11 @@ impl Vm {
             sched.wait_for_completion();
         });
         self.quiesce.set_host(prev_host);
+        // `Vm::run_one_worker`: `main` ran on this thread's one shell, whose caches a test reads.
+        #[cfg(test)]
+        if super::ONE_WORKER_ROOT.with(std::cell::Cell::get) {
+            self.method_ic = std::mem::take(&mut shell.method_ic);
+        }
         drop(shell);
         #[cfg(test)]
         super::RUN_PICKS.with(|p| p.set(p.get() + sched.picks.load(Ordering::Relaxed)));
@@ -1194,9 +1169,8 @@ impl Vm {
     /// A test running longer than `MS` is hard-aborted (bypassing `recover:`) and bucketed `TimedOut`.
     /// A wall-clock trip is non-deterministic, which is why it is OFF unless a test asks for it.
     /// Observed at the loop back-edge (+ spawned fibers), and —
-    /// for the ops a back-edge cannot reach — in `block_halt_check` (blocked in place),
-    /// `block_until_deadline` (a wait whose deadline we own, W7-16) and at `chan_recv_step` /
-    /// `op_wait_poll`'s PARK, which is the only path to a parked fiber (W7-17).
+    /// for the ops a back-edge cannot reach — in the demoted waits' halt reads (`block_halts`) and at
+    /// `chan_recv_step` / `op_wait_poll`'s PARK, which is the only path to a parked fiber (W7-17).
     pub fn set_timeout(&mut self, ms: u64) {
         self.timeout_ms = ms;
     }

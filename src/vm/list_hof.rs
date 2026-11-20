@@ -1,10 +1,10 @@
 //! VM: list higher-order methods, sorting, reductions, map pairs.
 //! Split out of `src/vm/call.rs`. `super::*` is the parent module.
 
+use super::compare::CmpThen;
 use super::rvec::View;
 use super::*;
 use crate::base::builtin_method::ListMethod;
-use crate::base::hooks::Hook;
 
 /// A list method that calls its callback once per element, in order: the loop
 /// [`Vm::list_hof`] runs. `sort_by_key` / `min_by` / `max_by` are its key pass.
@@ -166,10 +166,10 @@ impl SortKind {
 /// compared (the snapshot, or `sort_by_key`'s keys), the comparator (`sort_by`), the index buffer
 /// (two halves of `n` indices), the merge node `lo..hi`, its depth in the tree and its two
 /// cursors.
-const SORT_SLOTS: usize = 10;
+pub(super) const SORT_SLOTS: usize = 10;
 
 /// The slots a min / max scan keeps on the caller's operand stack: `[src, snap, vals, best, i]`.
-const EXTREME_SLOTS: usize = 5;
+pub(super) const EXTREME_SLOTS: usize = 5;
 
 /// A merge node: `lo..hi` at `depth` in the tree of `0..n`.
 type Node = (usize, usize, usize);
@@ -345,7 +345,7 @@ impl Vm {
         let mut i = self.stack[base + 4].as_int() as usize;
         if let Some(out) = out {
             if !self.hof_post(kind, base, i, out, span)? {
-                return self.hof_finish(kind, base, flat, span);
+                return self.hof_finish(kind, base, span);
             }
             i += 1;
         }
@@ -373,7 +373,7 @@ impl Vm {
             }
             i += 1;
         }
-        self.hof_finish(kind, base, flat, span)
+        self.hof_finish(kind, base, span)
     }
 
     /// Apply the callback's result `out` for element `i`. `false` stops the loop.
@@ -456,13 +456,7 @@ impl Vm {
 
     /// The loop is over: replace its slots with the result (a sort or a min / max scan by the
     /// keys runs on from them first).
-    fn hof_finish(
-        &mut self,
-        kind: HofKind,
-        base: usize,
-        flat: bool,
-        span: Span,
-    ) -> Result<(), RuntimeError> {
+    fn hof_finish(&mut self, kind: HofKind, base: usize, span: Span) -> Result<(), RuntimeError> {
         let acc = self.stack[base + 2];
         let result = match kind {
             HofKind::Map
@@ -478,9 +472,9 @@ impl Vm {
                     self.alloc_enum("Option", "Some", &[acc])
                 }
             }
-            HofKind::SortByKey => return self.sort_by_keys(base, flat, span),
+            HofKind::SortByKey => return self.sort_by_keys(base, span),
             HofKind::MinBy | HofKind::MaxBy => {
-                return self.min_max_by_keys(base, matches!(kind, HofKind::MaxBy), flat, span);
+                return self.min_max_by_keys(base, matches!(kind, HofKind::MaxBy), span);
             }
         };
         self.stack.truncate(base);
@@ -516,15 +510,14 @@ impl Vm {
         Ok(())
     }
 
-    /// Run the comparator method `m` on the list `src_h`, leaving its result on the stack, or
-    /// (`flat`) the comparator's frame. `Ok(false)` for a `sort` whose order never calls user code
-    /// (primitives use `core_method`'s `value_order` sort).
+    /// Run the comparator method `m` on the list `src_h`, leaving its result on the stack, or the
+    /// comparator's frame. `Ok(false)` for a `sort` whose order never calls user code (primitives
+    /// use `core_method`'s `value_order` sort).
     pub(super) fn list_compare_method(
         &mut self,
         src_h: GcRef,
         m: CmpMethod,
         args: &[Value],
-        flat: bool,
         span: Span,
     ) -> Result<bool, RuntimeError> {
         match m {
@@ -535,19 +528,19 @@ impl Vm {
                         span,
                     ));
                 }
-                self.sort_list(src_h, SortKind::By, args[0], flat, span)?;
+                self.sort_list(src_h, SortKind::By, args[0], span)?;
             }
             CmpMethod::Sort => {
                 self.arity_err("sort", args, 0, span)?;
                 if !self.compare_reenters(src_h) {
                     return Ok(false);
                 }
-                self.sort_list(src_h, SortKind::Natural, Value::nil(), flat, span)?;
+                self.sort_list(src_h, SortKind::Natural, Value::nil(), span)?;
             }
             CmpMethod::Min | CmpMethod::Max => {
                 let is_max = matches!(m, CmpMethod::Max);
                 self.arity_err(if is_max { "max" } else { "min" }, args, 0, span)?;
-                self.list_reduce_extreme(src_h, is_max, flat, span)?;
+                self.list_reduce_extreme(src_h, is_max, span)?;
             }
         }
         Ok(true)
@@ -566,14 +559,13 @@ impl Vm {
 
     /// Sort the list `src_h` in place by `kind`'s comparator (`cmp` for `sort_by`), stable. The
     /// merge reads a SNAPSHOT taken now, so a comparator that mutates the list cannot perturb it
-    /// (and [`Vm::sort_mutation_check`] reports the mutation). Leaves `nil` on the stack, or
-    /// (`flat`) the comparator's frame, whose return runs the merge on ([`RetAction::Sort`]).
+    /// (and [`Vm::sort_mutation_check`] reports the mutation). Leaves `nil` on the stack, or the
+    /// comparator's frame, whose return runs the merge on ([`RetAction::Sort`]).
     fn sort_list(
         &mut self,
         src_h: GcRef,
         kind: SortKind,
         cmp: Value,
-        flat: bool,
         span: Span,
     ) -> Result<(), RuntimeError> {
         // ROOT the source list: a method receiver is popped before dispatch, so an inline
@@ -588,12 +580,12 @@ impl Vm {
         // The values compared are the elements themselves.
         self.push(Value::obj(snap_h));
         self.push(cmp);
-        self.sort_start(kind, flat, span)
+        self.sort_start(kind, span)
     }
 
     /// Start the merge over the four slots `[src, snap, vals, cmp]` on the stack top: push the
     /// index buffer and the first merge node, then run it.
-    fn sort_start(&mut self, kind: SortKind, flat: bool, span: Span) -> Result<(), RuntimeError> {
+    fn sort_start(&mut self, kind: SortKind, span: Span) -> Result<(), RuntimeError> {
         let snap_h = self.stack[self.stack.len() - 3]
             .as_obj()
             .expect("the snapshot");
@@ -613,7 +605,7 @@ impl Vm {
         for k in [lo, hi, depth, lo, lo + (hi - lo) / 2] {
             self.push(Value::int(k as i64));
         }
-        self.sort_resume(kind, None, flat, span)
+        self.sort_resume(kind, None, span)
     }
 
     /// Run a merge on from its stack slots: first apply `out`, the comparator's result for the
@@ -622,11 +614,10 @@ impl Vm {
         &mut self,
         kind: SortKind,
         out: Option<Value>,
-        flat: bool,
         span: Span,
     ) -> Result<(), RuntimeError> {
         let base = self.stack.len() - SORT_SLOTS;
-        let r = self.sort_step(kind, base, out, flat, span);
+        let r = self.sort_step(kind, base, out, span);
         if r.is_err() {
             self.stack.truncate(base);
         }
@@ -635,13 +626,14 @@ impl Vm {
 
     /// The top-down merge sort's merges, in its post-order (the comparator sees the same pairs in
     /// the same order as the recursive form), each node `lo..hi` merging its runs `lo..mid` and
-    /// `mid..hi` from one half of the index buffer into the other ([`halves`]).
+    /// `mid..hi` from one half of the index buffer into the other ([`halves`]). Each comparison
+    /// that calls user code is a frame whose return runs the merge on; a callee with no frame (an
+    /// `Inline` native, a builtin) runs nested.
     fn sort_step(
         &mut self,
         kind: SortKind,
         base: usize,
         out: Option<Value>,
-        flat: bool,
         span: Span,
     ) -> Result<(), RuntimeError> {
         let slot = |vm: &Vm, k: usize| vm.stack[base + k];
@@ -700,30 +692,22 @@ impl Vm {
                 SortKind::By => {
                     // The per-comparison cancel point: this loop's back-edge.
                     self.guarded_checkpoint()?;
-                    if flat {
-                        self.sort_save(base, [lo, hi, depth, li, ri]);
-                        if self.push_callback_frame(cmp, &[a, b], RetAction::Sort(kind), span)? {
-                            return Ok(());
-                        }
+                    self.sort_save(base, [lo, hi, depth, li, ri]);
+                    if self.push_callback_frame(cmp, &[a, b], RetAction::Sort(kind), span)? {
+                        return Ok(());
                     }
                     let out = self.reentered(|vm| vm.invoke_value(cmp, vec![a, b], span))?;
                     self.sort_verdict(kind, out, span)?
                 }
+                // `<= Equal` keeps the left element first on ties → stable.
                 SortKind::ByKey | SortKind::Natural => {
-                    if flat && self.compare_hook_pair(a, b) {
-                        self.sort_save(base, [lo, hi, depth, li, ri]);
-                        if self.push_hook_frame(
-                            Hook::Compare,
-                            a,
-                            &[b],
-                            RetAction::Sort(kind),
-                            span,
-                        )? {
-                            return Ok(());
-                        }
+                    // A `compare` hook the pair reaches, at the top or nested in a tuple / list
+                    // key, is a frame whose return runs the merge on.
+                    self.sort_save(base, [lo, hi, depth, li, ri]);
+                    match self.cmp_run(a, b, true, Some(CmpThen::Sort(kind)), span)? {
+                        Some(ord) => ord.unwrap_or(std::cmp::Ordering::Equal).is_le(),
+                        None => return Ok(()),
                     }
-                    // `<= Equal` keeps the left element first on ties → stable.
-                    self.order_key(a, b, span)?.is_le()
                 }
             });
         }
@@ -806,14 +790,14 @@ impl Vm {
 
     /// `xs.sort_by_key(f)` once its key pass ([`Vm::list_hof`]) is done: a stable in-place sort
     /// by the keys, from the loop's slots `[src, snap, keys, f, i]` at `base`. Struct / enum /
-    /// tuple / list keys run the merge ([`Vm::sort_start`]), each struct key's `compare` a frame
-    /// when `flat`; scalar keys never re-enter, so Rust's stable sort orders them.
-    fn sort_by_keys(&mut self, base: usize, flat: bool, span: Span) -> Result<(), RuntimeError> {
+    /// tuple / list keys run the merge ([`Vm::sort_start`]), each struct key's `compare` a frame;
+    /// scalar keys never re-enter, so Rust's stable sort orders them.
+    fn sort_by_keys(&mut self, base: usize, span: Span) -> Result<(), RuntimeError> {
         let [src_h, snap_h, keys_h] =
             [0, 1, 2].map(|k| self.stack[base + k].as_obj().expect("a rooted list"));
         if self.compare_reenters(keys_h) {
             self.stack.truncate(base + 4);
-            return self.sort_start(SortKind::ByKey, flat, span);
+            return self.sort_start(SortKind::ByKey, span);
         }
         let keys = match self.heap.get(keys_h).as_list() {
             Some(v) => v.to_vec(),
@@ -840,14 +824,13 @@ impl Vm {
     /// `xs.min()` / `xs.max()` — the extremal element by natural order, over a rooted SNAPSHOT (a
     /// struct element's `compare` may mutate, even shrink, the source list). Leaves `Option[T]` —
     /// `None` on an empty list (Rust's `Iterator::min`/`max`, matching the sibling
-    /// `first`/`last`/`pop`), NOT a fault — or (`flat`) a `compare` frame ([`Vm::extreme_resume`]).
+    /// `first`/`last`/`pop`), NOT a fault — or a `compare` frame ([`Vm::extreme_resume`]).
     /// First-seen tie-break (an equal element never displaces the earlier best), matching
     /// Python's `min`/`max`.
     fn list_reduce_extreme(
         &mut self,
         src_h: GcRef,
         is_max: bool,
-        flat: bool,
         span: Span,
     ) -> Result<(), RuntimeError> {
         self.push(Value::obj(src_h)); // ROOT the source list
@@ -861,7 +844,7 @@ impl Vm {
         self.push(Value::obj(snap_h));
         self.push(Value::int(0));
         self.push(Value::int(1));
-        self.extreme_resume(is_max, None, flat, span)
+        self.extreme_resume(is_max, None, span)
     }
 
     /// `xs.min_by(f)` / `xs.max_by(f)` once its key pass ([`Vm::list_hof`]) is done: the ELEMENT
@@ -871,12 +854,11 @@ impl Vm {
         &mut self,
         base: usize,
         is_max: bool,
-        flat: bool,
         span: Span,
     ) -> Result<(), RuntimeError> {
         self.stack[base + 3] = Value::int(0);
         self.stack[base + 4] = Value::int(1);
-        self.extreme_resume(is_max, None, flat, span)
+        self.extreme_resume(is_max, None, span)
     }
 
     /// Run a min / max scan on from its slots `[src, snap, vals, best, i]`: first apply `out`, the
@@ -886,11 +868,10 @@ impl Vm {
         &mut self,
         is_max: bool,
         out: Option<Value>,
-        flat: bool,
         span: Span,
     ) -> Result<(), RuntimeError> {
         let base = self.stack.len() - EXTREME_SLOTS;
-        let r = self.extreme_step(is_max, base, out, flat, span);
+        let r = self.extreme_step(is_max, base, out, span);
         if r.is_err() {
             self.stack.truncate(base);
         }
@@ -902,7 +883,6 @@ impl Vm {
         is_max: bool,
         base: usize,
         out: Option<Value>,
-        flat: bool,
         span: Span,
     ) -> Result<(), RuntimeError> {
         let [snap_h, vals_h] =
@@ -931,15 +911,16 @@ impl Vm {
                 Some(v) => (v.get(i), v.get(best)),
                 None => unreachable!(),
             };
-            if flat && self.compare_hook_pair(cur, best_v) {
-                self.stack[base + 3] = Value::int(best as i64);
-                self.stack[base + 4] = Value::int(i as i64);
-                let ret = RetAction::MinMax { max: is_max };
-                if self.push_hook_frame(Hook::Compare, cur, &[best_v], ret, span)? {
-                    return Ok(());
-                }
-            }
-            if displaces(self.order_key(cur, best_v, span)?) {
+            // A `compare` hook the pair reaches, at the top or nested in a tuple / list, is a frame
+            // whose return runs the scan on.
+            self.stack[base + 3] = Value::int(best as i64);
+            self.stack[base + 4] = Value::int(i as i64);
+            let then = CmpThen::MinMax { max: is_max };
+            let ord = match self.cmp_run(cur, best_v, true, Some(then), span)? {
+                Some(ord) => ord.unwrap_or(std::cmp::Ordering::Equal),
+                None => return Ok(()),
+            };
+            if displaces(ord) {
                 best = i;
             }
             i += 1;
@@ -957,64 +938,13 @@ impl Vm {
     }
 
     /// Do two values order through a `compare` hook (both structs or enums)? Such a pair is never
-    /// a TICKET-146 sequence pair. [`Vm::order_key`] reads it, and a flat sort or scan pushes the
-    /// hook's frame for it.
-    fn compare_hook_pair(&self, a: Value, b: Value) -> bool {
+    /// a TICKET-146 sequence pair ([`Vm::order_pair`] tests that first).
+    pub(super) fn compare_hook_pair(&self, a: Value, b: Value) -> bool {
         let hooked = |v: Value| {
             v.as_obj()
                 .is_some_and(|h| matches!(self.heap.get(h), Obj::Struct { .. } | Obj::Enum { .. }))
         };
         hooked(a) && hooked(b)
-    }
-
-    /// Natural order over two `sort_by_key` keys: a Comparable struct or enum key dispatches to its
-    /// `compare`; scalar keys (int/float/str) use the built-in [`Vm::compare`]. The checker has
-    /// verified the key type is orderable.
-    pub(super) fn order_key(
-        &mut self,
-        a: Value,
-        b: Value,
-        span: Span,
-    ) -> Result<std::cmp::Ordering, RuntimeError> {
-        // TICKET-146: a same-kind tuple / List / Option pair walks lexicographically under the TOTAL
-        // order. MUST precede the struct/enum gate — an `Option` is an `Obj::Enum` with no `compare`.
-        if self.seq_pair(a, b) {
-            return Ok(self
-                .seq_order(a, b, true, span)?
-                .unwrap_or(std::cmp::Ordering::Equal));
-        }
-        if self.compare_hook_pair(a, b) {
-            return self.struct_compare(a, b, span);
-        }
-        // Float keys order by `float_order` for the WHOLE comparison (not just the NaN case), exactly
-        // mirroring `sort()`'s `value_order` Float arm — so `sort_by_key` and `sort()` agree on every
-        // float pair: `-0.0`/`+0.0` are Equal (stable, first wins, like CPython) and NaN is
-        // deterministic, to one end. Int keys deliberately stay on the int path below (`Int.cmp`):
-        // routing them through `as_f64` would lose precision past 2^53.
-        if a.is_float() && b.is_float() {
-            return Ok(super::arith::float_order(
-                self.float_of(a),
-                self.float_of(b),
-            ));
-        }
-        match self.compare(a, b) {
-            Some(ord) => Ok(ord),
-            // Numeric `None` means a NaN float — handled above for the Float/Float case; this arm
-            // only catches a mixed int/float key pair (not reachable for a single key type K), kept
-            // deterministic via `float_order` for safety.
-            None if self.is_numeric(a) && self.is_numeric(b) => {
-                Ok(super::arith::float_order(self.as_f64(a), self.as_f64(b)))
-            }
-            // Genuinely-incomparable types: unreachable from well-typed source; kept for safety.
-            None => Err(self.err(
-                format!(
-                    "sort_by_key keys are not comparable: {} vs {}",
-                    self.type_name(a),
-                    self.type_name(b)
-                ),
-                span,
-            )),
-        }
     }
 
     /// Built-in methods on `str` / `list` (M6). The result is returned (not pushed) so the caller

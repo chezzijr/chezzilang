@@ -169,8 +169,8 @@ a sibling's fault reach a sleeping task the same way, and the task still unwinds
 Resource caps, measured:
 
 - **`chezzi test --timeout` reaches every blocking wait** — `sleep_ms` and `timer(ms).recv()`,
-  top-level, in a nursery and in an `Executor`, blocked in place or parked, and inside a native
-  callback (`[0].map(f)` whose `f` waits on a `recv`, a `send`, a `wait:`, a `time.sleep_ms` or a
+  top-level, in a nursery and in an `Executor`, blocked in place or parked, and inside a callback
+  (`[0].map(f)` whose `f` waits on a `recv`, a `send`, a `wait:`, a `time.sleep_ms` or a
   `time.timer(ms).recv()`). A parked `send` reads it when it wakes, as a parked `recv` does.
   A `recv`, `send` or `wait:` parked in a `parallel:` task wakes at the deadline even when no other task wakes it.
   A parked timer is armed
@@ -372,6 +372,13 @@ feed waits for it. So does a wait on a socket: the other end may still write, so
 reads a socket nobody writes to waits for it (Go: a goroutine blocked in a network read is never a
 deadlock). If some task still runs while the cleanup is stuck, the run hangs, as in Go.
 
+**A hard halt's cleanup parks too.** The `defer`s a `--max-heap` or `--timeout` halt runs drain on
+the task's frames, as any other drain (plan `2026-11-18-every-wait-parks`), so a wait in them parks,
+and under `--max-heap` a stuck one is the deadlock above. The `--timeout` deadline also cuts every
+wait inside a `defer` (TICKET-286): a `defer` that waits past the deadline does not finish, and no
+deadlock is reported; the test ends with the timeout text. Go's `go test -timeout` runs no `defer`
+at all.
+
 **Which fault is reported.** At the end of a run (and of each test in `chezzi test`) one ranking
 picks the report:
 
@@ -457,6 +464,6 @@ Linux, cores = user/real): `--threads=1` **1.00**, `=2` 1.91, `=4` 3.02 — matc
 flaky concurrency repro. Reduction-budget preemption fires per dispatched op regardless of worker
 count, so one runner is enough to cancel a spinning task: a spinner plus a faulting sibling at
 `--threads=1` faulted in 4–6 ms in 15 of 15 runs, with no hang. The budget also preempts a CPU loop
-inside a native callback (`List.map`/`sort`/`Shared.update` closures) and an `Executor` job, so a
+inside a callback (`List.map`/`sort`/`Shared.update` closures, a hook) and an `Executor` job, so a
 callback spin or a CPU-bound job no longer starves a sibling, a sleeper or a cancelling fault. How the
 runner budget works: [`concurrency-runtime.md`](../../design/concurrency-runtime.md#one-runner-budget).

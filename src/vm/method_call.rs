@@ -1,6 +1,8 @@
 //! VM: arity checks, native-bodied methods, operator hooks, `do_method_call`, static calls.
 //! Split out of `src/vm/call.rs`. `super::*` is the parent module.
 
+use super::builtins::DrainThen;
+use super::compare::CmpThen;
 use super::shared_methods::RwCall;
 use super::*;
 use crate::base::hooks::Hook;
@@ -210,6 +212,50 @@ impl Vm {
         Ok(true)
     }
 
+    /// Push the intrinsic method `which`'s answer on `recv` ([`Vm::intrinsic_proto_method`]);
+    /// `Ok(false)` when it declines. `eq` (M23) is the SAME structural walk `==` takes, so
+    /// `x.eq(y)` can never disagree with `x == y`; an element `eq` hook it reaches runs as a
+    /// frame whose return pushes the answer ([`EqThen::Push`]).
+    fn push_intrinsic(
+        &mut self,
+        recv: Value,
+        which: Intrinsic,
+        args: &[Value],
+        span: Span,
+    ) -> Result<bool, RuntimeError> {
+        if let (Intrinsic::Hook(Hook::Eq), &[other]) = (which, args) {
+            if let Some(eq) = self.eq_run(recv, other, 0, Some(EqThen::Push), span)? {
+                self.push(Value::bool(eq));
+            }
+            return Ok(true);
+        }
+        // `compare` on a tuple / list is the total order `sort()` uses; an element `compare` hook
+        // it reaches runs as a frame whose return pushes the int ([`CmpThen::Push`]).
+        if let (Intrinsic::Hook(Hook::Compare), &[other]) = (which, args)
+            && self.seq_pair(recv, other)
+        {
+            if let Some(ord) = self.cmp_run(recv, other, true, Some(CmpThen::Push), span)? {
+                let ord = ord.unwrap_or(std::cmp::Ordering::Equal);
+                self.push(Value::int(ord as i64));
+            }
+            return Ok(true);
+        }
+        // `str` for a kind with no `str` of its own is the render `print` and `"{x}"` use; an
+        // element `str` hook it reaches runs as a frame whose return pushes the str.
+        if let (Intrinsic::Hook(Hook::Str), []) = (which, args) {
+            let mut out = String::new();
+            if self.str_walk(&mut out, recv, false, 0, Some(StrThen::Push), &[], span)? {
+                self.str_finish(StrThen::Push, out, span)?;
+            }
+            return Ok(true);
+        }
+        let Some(v) = self.intrinsic_proto_method(recv, which, args, span)? else {
+            return Ok(false);
+        };
+        self.push(v);
+        Ok(true)
+    }
+
     /// The fault an operator reports on a struct or enum that has no `hook`.
     pub(super) fn missing_hook(&self, recv: Value, hook: Hook, span: Span) -> RuntimeError {
         let method = hook.method();
@@ -282,8 +328,7 @@ impl Vm {
         let at = self.stack.len() - argc;
         let args: Vec<Value> = self.stack.split_off(at);
         self.pop();
-        if let Some(v) = self.intrinsic_proto_method(recv, Intrinsic::Hook(hook), &args, span)? {
-            self.push(v);
+        if self.push_intrinsic(recv, Intrinsic::Hook(hook), &args, span)? {
             return Ok(());
         }
         if hook == Hook::Iter && args.is_empty() && self.hook_of(recv, Hook::Next) {
@@ -341,7 +386,7 @@ impl Vm {
                 self.check_proto_arity(proto, argc + 1, span)?;
                 let home = self.module_obj(cell.module_idx as usize);
                 // Experimental generators — a generator method allocates rather than running (else its
-                // `Op::Yield` would poison the host run with no `generator_next` to drive it).
+                // `Op::Yield` would poison the host run with no resume to drive it).
                 if self.program.protos[proto].is_generator {
                     let mut gen_args = Vec::with_capacity(argc + 1);
                     gen_args.push(recv);
@@ -496,16 +541,19 @@ impl Vm {
                 self.core_method_as(recv.as_gcref(), arm, &args, span)?
             }
             // A list HOF runs its loop here: each callback is a frame, so a wait in it parks. So
-            // does a sort or a min / max whose comparator may be user code.
+            // does a sort or a min / max whose comparator may be user code, and a scan by `==`.
             NativeArm::List(m) => {
                 let h = recv.as_gcref();
                 if let Some(kind) = HofKind::of(m) {
                     return self.list_hof(h, kind, args, true, span);
                 }
                 if let Some(c) = CmpMethod::of(m)
-                    && self.list_compare_method(h, c, &args, true, span)?
+                    && self.list_compare_method(h, c, &args, span)?
                 {
                     return Ok(());
+                }
+                if let Some(kind) = Scan::of(m) {
+                    return self.list_scan(h, kind, &args, true, span);
                 }
                 self.core_method_as(h, arm, &args, span)?
             }
@@ -626,16 +674,18 @@ impl Vm {
         match which {
             // `.iter()` on a built-in collection → a FRESH cursor over a snapshot of what
             // `for x in X` yields: the [`builtin_items`](Self::builtin_items) row, or a channel's
-            // drained values.
+            // drained values (each receive a step frame, so a wait parks: [`Vm::drain_resume`]).
             Intrinsic::CollectionIter if args.is_empty() => {
                 let h = recv.as_gcref();
-                // Both readers may alloc (str per-char); root the receiver across the call.
+                if matches!(self.heap.get(h), Obj::Channel(_)) {
+                    let acc = self.heap.alloc(Obj::List(RVec::new()));
+                    self.push(recv);
+                    self.push(Value::obj(acc));
+                    return self.drain_resume(DrainThen::Cursor, None, span);
+                }
+                // The reader may alloc (str per-char); root the receiver across the call.
                 self.push(recv);
-                let items: Option<RVec<Value>> = if matches!(self.heap.get(h), Obj::Channel(_)) {
-                    Some(self.drain_iterable(recv, span)?.into())
-                } else {
-                    self.builtin_items(h)
-                };
+                let items: Option<RVec<Value>> = self.builtin_items(h);
                 self.pop(); // unroot receiver
                 if let Some(items) = items {
                     let cursor = self.heap.alloc(Obj::Iter {
@@ -693,8 +743,7 @@ impl Vm {
                 return self.do_call(argc, span);
             }
             Intrinsic::Hook(_) | Intrinsic::AsPath | Intrinsic::Error(_) => {
-                if let Some(v) = self.intrinsic_proto_method(recv, which, &args, span)? {
-                    self.push(v);
+                if self.push_intrinsic(recv, which, &args, span)? {
                     return Ok(());
                 }
             }

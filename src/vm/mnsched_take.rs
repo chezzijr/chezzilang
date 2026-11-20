@@ -80,8 +80,6 @@ impl MnSched {
     ) -> Take {
         // TICKET-213 — an idle Executor runner has already waited once for a next job.
         let mut lingered = false;
-        let mut idle_since = None;
-        let me = std::thread::current().id();
         struct IdleReg<'a>(&'a MnSched);
         impl Drop for IdleReg<'_> {
             fn drop(&mut self) {
@@ -247,11 +245,11 @@ impl MnSched {
             // (passed its own `scope_id`) returns `Stop` when ITS OWN scope is complete (`done == total`
             // && !body_open), EVEN while other scopes still have work — because its OS thread drains the
             // GLOBAL queue (it ran cross-nursery siblings while alive), the moment its scope is done it
-            // must return so the nested `run_mn_nursery` unwinds back to its caller (an OUTER fiber whose
-            // continuation may unblock the rest). It does NOT set global `terminate` (that would stop
-            // farmed helpers other scopes still need). A FARMED helper passes the SENTINEL scope_id
-            // (`usize::MAX`) and never self-stops — it keeps draining the global queue until global
-            // `terminate` (set by `finish` only when ALL scopes are done, or by deadlock/fault/exit).
+            // must return so its join (`Vm::join_fiber_owned_nursery`) goes back to its caller (an
+            // OUTER fiber whose continuation may unblock the rest). It does NOT set global
+            // `terminate` (that would stop farmed helpers other scopes still need). A FARMED helper
+            // passes the SENTINEL scope_id (`usize::MAX`) and never self-stops — it keeps draining
+            // the global queue until global `terminate` (set by `finish` only when ALL scopes are done, or by deadlock/fault/exit).
             // `body_open` (eager) holds the scope open against a transient `done == total`. Single-scope
             // fast path: an outermost owner with one scope behaves exactly like the old `done == total`.
             // The owner stops only when its whole FAMILY — the origin scope plus any TICKET-103
@@ -352,26 +350,6 @@ impl MnSched {
                 c.global.is_empty(),
                 "D4e park invariant: runnable==0 but the global queue is non-empty"
             );
-            // TICKET-118 (W13-7) — only the marked joiner (`SchedCore::pool_joiner`) ever times or
-            // yields here; every other idle worker keeps its untimed/timed choice above unchanged.
-            match self.joiner_step(&c, me, &mut idle_since) {
-                JoinerStep::Untimed => {}
-                JoinerStep::Timed => {
-                    vm.wait_door(&[], |_| {
-                        let (guard, _) = self
-                            .cv
-                            .wait_timeout(c, DEMOTE_POLL_BACKOFF)
-                            .unwrap_or_else(|e| e.into_inner());
-                        drop(guard);
-                    });
-                    continue;
-                }
-                JoinerStep::Yield => {
-                    drop(c);
-                    crate::vm::pool::yield_slot(None);
-                    continue;
-                }
-            }
             // TICKET-128 (W13-25) — a worker with NOTHING runnable sleeps on `idle_cv`, not `cv`,
             // so a rendezvous handoff can recruit exactly this one sleeper (`recruit`) instead of
             // broadcasting to every parked worker. `notify_waiters` still reaches this wait; only

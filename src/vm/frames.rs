@@ -66,12 +66,19 @@ pub(super) enum UnwindThen {
         base_level: usize,
         std_site: Option<(Span, Span)>,
     },
+    /// [`Vm::fault_in`]'s unwind of a failed `assert`'s operand `str` hook frame (the last frame
+    /// it drops), uncaught inside the hook: the assert faults at `span` with no operand text
+    /// ([`Vm::assert_hook_fault`]), as a fault of the loop entered at `base_level`.
+    AssertHook { base_level: usize, span: Span },
     /// The cancel funnel of a fiber's outermost loop ([`Vm::cancel_unwind`]).
     Cancel,
-    /// A `--max-heap` abort at the dispatch loop's top ([`Vm::run_until`]): every `defer` of the
-    /// unwound frames runs, on frames, so a wait in one parks the task and counts it asleep (plan
-    /// 2026-11-17, owner); no level is joined, as the synchronous hard-halt unwind joins none.
-    OverMemory,
+    /// A hard halt (`--timeout`, `--max-heap`), or a cancel below a fiber's outermost loop
+    /// ([`Vm::unwind_halt`]): past every `recover:`, with the halt's marker kept on what emerges.
+    /// Every `defer` of the unwound frames runs, on frames, so a wait in one parks the task and
+    /// counts it asleep (plan 2026-11-18, owner; Go runs defers on the goroutine). Only a cut party
+    /// (`report`: a cancel, an owner bypass) leaves and aborts each level; it waits for them
+    /// inline.
+    Bypass { report: bool },
 }
 
 impl Unwind {
@@ -85,9 +92,11 @@ impl Unwind {
     /// loop.
     fn parks(&self) -> bool {
         match self.then {
-            UnwindThen::Fault { base_level, .. } => base_level == 0,
+            UnwindThen::Fault { base_level, .. } | UnwindThen::AssertHook { base_level, .. } => {
+                base_level == 0
+            }
             UnwindThen::Cancel => true,
-            UnwindThen::OverMemory => false,
+            UnwindThen::Bypass { .. } => false,
         }
     }
 }
@@ -260,7 +269,7 @@ impl Vm {
             is_toplevel,
             deferred: Vec::new(),
             defer_markers: Vec::new(),
-            nursery_len: self.nurseries.len(),
+            nursery_len: self.eager_scheds.len(),
             has_implicit_nursery: self.program.protos[proto].has_implicit_nursery,
             call_span: span,
             argc,
@@ -300,7 +309,7 @@ impl Vm {
     /// that entered the innermost run of std frames (Rust's `#[track_caller]`). `None` when the
     /// innermost frame is user code or no frame's caller is a user file: decline, never guess.
     pub(super) fn std_entry_call_site(&self) -> Option<Span> {
-        for f in self.frames.iter().rev().filter(|f| f.proto != DRAIN_PROTO) {
+        for f in self.frames.iter().rev().filter(|f| !is_trampoline(f.proto)) {
             let own = self.program.protos[f.proto]
                 .lines
                 .iter()
@@ -362,19 +371,13 @@ impl Vm {
                     match self.owned_drain(base_level) {
                         None => {
                             // `Ok`: the unwind runs on as a drain of this loop.
-                            self.unwind_on(Unwind {
-                                target: base_level,
-                                rte: over_rte,
-                                defer_err: None,
-                                escaped_err: None,
-                                then: UnwindThen::OverMemory,
-                            })?;
+                            self.unwind_halt(base_level, false, over_rte)?;
                             continue;
                         }
                         Some(t) if self.frames.len() > t + 1 => {
-                            let d = self.unwind_deferred(t + 1, false);
-                            let e = self.unwind_result(over_rte, d, false).over_memory();
-                            self.drain_fault(e);
+                            if let Err(e) = self.unwind_halt(t + 1, false, over_rte) {
+                                self.drain_fault(e);
+                            }
                         }
                         Some(_) => {}
                     }
@@ -389,12 +392,10 @@ impl Vm {
             // its straight-line prologue, so a `defer` it registers is ALWAYS registered before
             // anything can kill it — "does my cleanup run?" no longer depends on scheduler timing.
             // The cancel still unwinds like an uncaught fault that bypasses `recover:` — see the
-            // post-step funnel below (`Cut::Cancelled` ⇒ `unwind_deferred(base_level, false)`).
+            // post-step funnel below (`Cut::Cancelled` ⇒ [`Vm::on_step_fault`]).
             //
             // D3: reduction-counting preemption — gated on `self.mn` (an M:N worker shell running fibers
-            // off the shared queue) or on `slice_in_place` (TICKET-205: an `Executor` job or a gated
-            // nursery body, which has no sched of its own but is a party of `width::RUNNERS`).
-            // Decrement the budget per dispatched op; at
+            // off the shared queue). Decrement the budget per dispatched op; at
             // exhaustion yield this worker so a queued sibling runs (round-robin fairness). A yielded
             // cancelled fiber observes the cancel at its next checkpoint. The
             // `native_reentry == 0` guard mirrors `recv`-park: a yield inside a native callback can't
@@ -403,7 +404,7 @@ impl Vm {
             // `slice_end_in_place`). Outside a callback this reuses the suspend/rewind contract —
             // frames stay intact, resume re-enters `run_until(0)` — but carries no channel handle (a
             // voluntary park).
-            if self.mn.is_some() || self.slice_in_place {
+            if self.mn.is_some() {
                 if self.reds == 0 {
                     debug_assert!(
                         width::holds(),
@@ -430,10 +431,11 @@ impl Vm {
             // SAFETY: `program` points into `self.program`'s immutable, never-reassigned
             // `Arc<Program>` (see the loop-entry note); the pointee outlives the loop and `op`
             // borrows program data disjoint from the `&mut self` fields `step` touches.
-            // The one id past `Program::protos` is the defer-drain trampoline's (`DRAIN_PROTO`).
+            // The ids past `Program::protos` are the VM's trampolines' ([`is_trampoline`]).
             let proto_ref = match unsafe { &*program }.protos.get(pid) {
                 Some(p) => p,
-                None => defer_drain::drain_proto(),
+                None if pid == DRAIN_PROTO => defer_drain::drain_proto(),
+                None => call::step_proto(),
             };
             let op = &proto_ref.code[ip];
             let span = proto_ref.lines[ip];
@@ -721,25 +723,35 @@ impl Vm {
         // `recover:` is transparent to every fault of a run whose verdict is latched: the fault
         // takes the uncaught path (defers and escaped-nursery reports unchanged).
         let fatal = self.deadlocked();
+        // A failed `assert`'s operand `str` hook frame the fault would unwind is its floor: base
+        // ran that hook nested, as a loop of its own, and a fault in it only drops the operand
+        // text ([`Vm::assert_text`]), so the unwind ends in the assert's own fault
+        // ([`UnwindThen::AssertHook`]). A bypass (a cancel, a hard halt) and a verdict pass it.
+        let hook = if fatal {
+            None
+        } else {
+            self.assert_hook_frame(base_level)
+        };
+        let floor = hook.unwrap_or(base_level);
         let caught_here =
-            !fatal && matches!(self.handlers.last().copied(), Some(h) if h.frame_len > base_level);
+            !fatal && matches!(self.handlers.last().copied(), Some(h) if h.frame_len > floor);
         // TICKET-208 — a delivered job fault (`Cut::RunFault`) bypasses `recover:` as a cancel
         // does: it ends the run, and this party's `defer`s still run.
         let cancel_bypass = (self.is_cancelled() || matches!(self.cut, Some(Cut::RunFault)))
             && !(self.in_defer() && caught_here);
         // TICKET-096 — a nursery OWNER's cut is `Delivered { floor: Some(n) }` while a child fault
-        // recorded at `nurseries` index `n` is unwinding it. A handler with `Handler::nursery_len
+        // recorded at `eager_scheds` index `n` is unwinding it. A handler with `Handler::nursery_len
         // > n` was installed INSIDE nursery `n`'s body — in the cancelled scope — and must not
         // catch (measured: `recover:` wrapping a `parallel:` whose child panics keeps printing
         // `outer r=Err('boom')` at rc=0, since that handler sits at `nursery_len <= n`, outside
-        // the nursery). The `n < self.nurseries.len()` term is a liveness guard: a floor left by a
+        // the nursery). The `n < self.eager_scheds.len()` term is a liveness guard: a floor left by a
         // fault that was neither caught nor propagated cannot bypass an unrelated later handler.
         // This makes the delivery happen ONCE — the owner aborts at the first delivery instead of
         // catching and re-reading the recorded fault at every later checkpoint.
         let owner_bypass = matches!(
             (self.cut, self.handlers.last()),
             (Some(Cut::Delivered { floor: Some(n) }), Some(h))
-                if caught_here && n < self.nurseries.len() && h.nursery_len > n
+                if caught_here && n < self.eager_scheds.len() && h.nursery_len > n
         );
         if cancel_bypass || owner_bypass || rte.is_over_memory || rte.is_timed_out {
             let over_mem = rte.is_over_memory;
@@ -756,7 +768,7 @@ impl Vm {
             if report && base_level == 0 && !over_mem && !timed {
                 return self.cancel_unwind(rte);
             }
-            return Err(self.unwind_keeping_halt(base_level, report, rte));
+            return self.unwind_halt(base_level, report, rte);
         }
         // Capture the stack trace of an uncaught fault now, while the frames are still intact
         // (the unwind below drops them). The deepest fault wins: the original fault captures
@@ -781,13 +793,13 @@ impl Vm {
             None
         };
         let target = match self.handlers.last().copied() {
-            Some(h) if !fatal && h.frame_len > base_level => h.frame_len,
-            _ => base_level,
+            Some(h) if !fatal && h.frame_len > floor => h.frame_len,
+            _ => floor,
         };
         // A genuine fault (not a B3.4 cancel / `std.os.exit`, both handled above) cancels-and-
         // reports each unwound frame's escaped nurseries — emitted PER FRAME: each `parallel:`
         // level runs its body `defer`s, then is aborted, innermost first (TICKET-299); then the
-        // frame's implicit nursery is aborted and its remaining `defer`s run. `unwind_deferred`
+        // frame's implicit nursery is aborted and its remaining `defer`s run. `unwind_on`
         // does the interleaving; this covers BOTH the uncaught arm
         // (no handler) and the frames discarded above a catching `recover:`.
         // TICKET-152 (W14-37): a FATAL deadlock drops its frames without running their
@@ -800,16 +812,32 @@ impl Vm {
             self.unwind_no_defer(target);
             return self.finish_fault(base_level, rte, true, std_site);
         }
+        let then = match hook {
+            Some(f) if f == target => UnwindThen::AssertHook {
+                base_level,
+                span: self.frames[f].call_span,
+            },
+            Some(_) | None => UnwindThen::Fault {
+                base_level,
+                std_site,
+            },
+        };
         self.unwind_on(Unwind {
             target,
             rte,
             defer_err: None,
             escaped_err: None,
-            then: UnwindThen::Fault {
-                base_level,
-                std_site,
-            },
+            then,
         })
+    }
+
+    /// The innermost frame at or above `base_level` that is a failed `assert`'s operand `str`
+    /// hook ([`StrThen::Assert`]).
+    fn assert_hook_frame(&self, base_level: usize) -> Option<usize> {
+        self.frames[base_level..]
+            .iter()
+            .rposition(|f| matches!(f.ret, RetAction::StringifyWalk(StrThen::Assert { .. })))
+            .map(|i| base_level + i)
     }
 
     /// The frame count a trace is as deep as: the live frames but the drain trampolines, so a
@@ -824,16 +852,29 @@ impl Vm {
     /// frame's `defer`s as a drain ([`Vm::drain_then`], [`DrainCont::Unwind`] resumes here after
     /// it); under a synchronous native caller they run on the Rust stack. At a fiber's outermost
     /// loop it parks at a fiber-owned nursery that is not done ([`FaultPark::Unwind`]) and
-    /// [`Vm::resume_fault_unwind`] re-enters here at the same frame.
+    /// [`Vm::resume_fault_unwind`] re-enters here at the same frame. A drain trampoline it meets (a
+    /// hard halt met a fiber inside a `defer`) ends its drain ([`Vm::drop_drain_frame`]): the fault
+    /// its records raised ranks as a `defer` fault of this unwind, and the drained frame's other
+    /// `defer`s run next.
     pub(super) fn unwind_on(&mut self, mut u: Unwind) -> Result<(), RuntimeError> {
         let park = u.parks();
-        let joins = !matches!(u.then, UnwindThen::OverMemory);
+        let joins = match u.then {
+            UnwindThen::Fault { .. } | UnwindThen::AssertHook { .. } | UnwindThen::Cancel => true,
+            UnwindThen::Bypass { report } => report,
+        };
         while self.frames.len() > u.target {
             let fi = self.frames.len() - 1;
+            if self.frames[fi].proto == DRAIN_PROTO {
+                if let Some(e) = self.drop_drain_frame(fi) {
+                    u.defer_err = Some(e);
+                }
+                self.pop_unwound_frame();
+                continue;
+            }
             // TICKET-299: a `parallel:` level of the frame runs its body `defer`s, then its abort,
             // innermost first (`Vm::leave_level`); the frame's implicit nursery and `defer`s follow.
-            if joins && self.nurseries.len() > self.level_floor(fi) {
-                let top = self.nurseries.len() - 1;
+            if joins && self.eager_scheds.len() > self.level_floor(fi) {
+                let top = self.eager_scheds.len() - 1;
                 // A `defer` that will not run (a pending `os.exit`, a halt that cuts cleanup) stays
                 // in the frame: only a record that runs makes the drain below progress.
                 if self.drains_on_frames()
@@ -884,13 +925,23 @@ impl Vm {
                 let rte = self.unwind_result(u.rte, u.defer_err, false);
                 self.finish_fault(base_level, rte, false, std_site)
             }
+            UnwindThen::AssertHook { base_level, span } => {
+                let rte = self.unwind_result(u.rte, u.defer_err, false);
+                match self.assert_hook_fault(rte, span) {
+                    Ok(e) => self.fault_in(base_level, e),
+                    Err(halt) => self.cleanup_met_halt(base_level, halt),
+                }
+            }
             // A lower frame's `defer` runs later and supersedes; the first escaped child fault
             // stays first.
             UnwindThen::Cancel => {
                 Err(self.unwind_result(u.rte, u.defer_err.or(u.escaped_err), true))
             }
-            UnwindThen::OverMemory => {
-                Err(self.unwind_result(u.rte, u.defer_err, false).over_memory())
+            UnwindThen::Bypass { report } => {
+                let (over_mem, timed) = (u.rte.is_over_memory, u.rte.is_timed_out);
+                let rte = self.unwind_result(u.rte, u.defer_err.or(u.escaped_err), report);
+                let rte = if over_mem { rte.over_memory() } else { rte };
+                Err(if timed { rte.timed_out() } else { rte })
             }
         }
     }
@@ -966,20 +1017,25 @@ impl Vm {
         }
     }
 
-    /// Unwind to `base_level` past every `recover:` and re-stamp the hard-halt marker of `rte`
-    /// (`--max-heap`, `--timeout`) on what emerges: a `defer` that faults mid-unwind replaces the
-    /// error, and the marker must travel with it. The one body of both hard-halt bypasses,
-    /// [`Vm::on_step_fault`]'s and [`Vm::cleanup_met_halt`]'s.
-    fn unwind_keeping_halt(
+    /// THE hard-halt unwind: down to `target` past every `recover:`, its `defer`s drained on
+    /// frames ([`UnwindThen::Bypass`]), and the hard-halt marker of `rte` (`--max-heap`,
+    /// `--timeout`) re-stamped on what emerges: a `defer` that faults mid-unwind replaces the error,
+    /// and the marker must travel with it. `Ok` while a drain runs on; the drain's end returns the
+    /// `Err`. Every hard-halt bypass reaches it: [`Vm::on_step_fault`]'s, [`Vm::cleanup_met_halt`]'s,
+    /// `run_until`'s `--max-heap` check and the worker loop's resume arms.
+    pub(super) fn unwind_halt(
         &mut self,
-        base_level: usize,
+        target: usize,
         report: bool,
         rte: RuntimeError,
-    ) -> RuntimeError {
-        let (over_mem, timed) = (rte.is_over_memory, rte.is_timed_out);
-        let rte = self.unwind_cancelled(base_level, report, rte);
-        let rte = if over_mem { rte.over_memory() } else { rte };
-        if timed { rte.timed_out() } else { rte }
+    ) -> Result<(), RuntimeError> {
+        self.unwind_on(Unwind {
+            target,
+            rte,
+            defer_err: None,
+            escaped_err: None,
+            then: UnwindThen::Bypass { report },
+        })
     }
 
     /// The tail of [`Vm::on_step_fault`] after the frame unwind: relocate a std fault, then catch
@@ -1002,12 +1058,15 @@ impl Vm {
         };
         // A deferred `std.os.exit`, or a cleanup that met the latched verdict, turns the unwind
         // into a hard halt.
-        let rte = self.cleanup_met_halt(base_level, rte)?;
+        let rte = match self.cleanup_halt(rte) {
+            Ok(rte) => rte,
+            Err(e) => return self.cleanup_met_halt(base_level, e),
+        };
         match self.handlers.last().copied() {
             Some(h) if !fatal && h.frame_len > base_level => {
                 self.handlers.pop();
                 self.cancel_unwind_faulted = false;
-                // `unwind_deferred` already dropped frames down to `h.frame_len`; restore the
+                // The unwind already dropped frames down to `h.frame_len`; restore the
                 // operand stack / call-depth / ip to the boundary's snapshot.
                 self.stack.truncate(h.stack_len);
                 self.call_depth = h.call_depth;
@@ -1069,7 +1128,7 @@ impl Vm {
     /// innermost first), then drains the recover block's own `defer`s ([`Vm::catch_drained`]). The
     /// first run and every resume ([`FaultPark::Catch`]) enter here (DEC-294).
     fn reclaim_caught(&mut self, c: Caught) -> Result<(), RuntimeError> {
-        if self.nurseries.len() > c.nursery_len {
+        if self.eager_scheds.len() > c.nursery_len {
             return self.leave_level(LevelThen::Catch(Box::new(c)));
         }
         let defer_len = c.defer_len;
@@ -1108,10 +1167,13 @@ impl Vm {
         rte: RuntimeError,
     ) -> Result<(), RuntimeError> {
         debug_assert!(
-            self.nurseries.len() <= nursery_len,
+            self.eager_scheds.len() <= nursery_len,
             "reclaim_caught left every level"
         );
-        let rte = self.cleanup_met_halt(base_level, rte)?;
+        let rte = match self.cleanup_halt(rte) {
+            Ok(rte) => rte,
+            Err(e) => return self.cleanup_met_halt(base_level, e),
+        };
         // Convert the fault message (a `str`, i.e. an `Error`) into `Err(msg)`; the
         // boundary's `done` label receives a ready `Result`.
         let sp = rte.span;
@@ -1183,8 +1245,9 @@ impl Vm {
     ///
     /// `!self.is_cancelled()` latches on the first observation: a `defer` containing a loop must not
     /// re-fire the check and skip the remaining defers while the cancel unwind is already in flight.
-    /// The `Err` is funnelled by `run_until`'s post-step handler into `unwind_deferred(base_level,
-    /// false)` — defers run, `recover:` inside the task is bypassed (a cancelled task must die).
+    /// The `Err` is funnelled by `run_until`'s post-step handler into the cancel unwind
+    /// ([`Vm::on_step_fault`]) — defers run, `recover:` inside the task is bypassed (a cancelled
+    /// task must die).
     /// A run-wide halt also lands at a function entry ([`Vm::call_halt`], TICKET-224); a cancel does not.
     pub(super) fn jump_checked(&mut self, target: usize, span: Span) -> Result<(), RuntimeError> {
         let ip = self.frames.last().unwrap().ip;
@@ -1386,24 +1449,20 @@ impl Vm {
         self.fault_trace_depth = usize::MAX;
     }
 
-    /// TICKET-223 — `on_step_fault`'s read of `Vm::cleanup_halt`: on a verdict it also drops the
-    /// frames left above `base_level` without their `defer`s (DEC-152). TICKET-289: a hard halt
-    /// (`--timeout`, `--max-heap`) a cleanup met unwinds them past every `recover:` through
-    /// [`Vm::unwind_keeping_halt`], which keeps the marker on what emerges.
-    fn cleanup_met_halt(
-        &mut self,
-        base_level: usize,
-        rte: RuntimeError,
-    ) -> Result<RuntimeError, RuntimeError> {
-        match self.cleanup_halt(rte) {
-            Ok(rte) => Ok(rte),
-            Err(e) if self.deadlocked() => {
-                self.unwind_no_defer(base_level);
-                Err(e)
-            }
-            Err(e) if executor_hard_halt(&e) => Err(self.unwind_keeping_halt(base_level, false, e)),
-            Err(e) => Err(e),
+    /// TICKET-223 — `on_step_fault`'s end of a cleanup that met a halt (`e`, the `Err` of
+    /// [`Vm::cleanup_halt`]): on a verdict it also drops the frames left above `base_level`
+    /// without their `defer`s (DEC-152). TICKET-289: a hard halt (`--timeout`, `--max-heap`) a
+    /// cleanup met unwinds them past every `recover:` through [`Vm::unwind_halt`], which keeps the
+    /// marker on what emerges.
+    fn cleanup_met_halt(&mut self, base_level: usize, e: RuntimeError) -> Result<(), RuntimeError> {
+        if self.deadlocked() {
+            self.unwind_no_defer(base_level);
+            return Err(e);
         }
+        if executor_hard_halt(&e) {
+            return self.unwind_halt(base_level, false, e);
+        }
+        Err(e)
     }
 
     /// TICKET-195 — is this party unwinding a cancel ([`Cut::Cancelled`])?
@@ -1499,8 +1558,6 @@ impl Vm {
     /// `#[inline(never)]` keeps the arm one call instruction.
     #[inline(never)]
     pub(super) fn op_enter_nursery(&mut self, span: Span) {
-        self.nurseries.push(Vec::new());
-        self.mn_scopes.push(None); // lockstep — set Some(scope_id) only if early-enlisted
         // TICKET-299 — capture this parallel body's defer floor so every exit but fall-through
         // can run the body's defers before the nursery reclaim (`Vm::leave_level`, `nursery_defer_floors`).
         let floor = self
@@ -1521,7 +1578,7 @@ impl Vm {
         // That is Go's `go f()`: the task starts at the `spawn`, and the join keeps its own
         // (orthogonal) job of guaranteeing COMPLETION by the barrier (`docs/design/roadmap.md` §2b/§2c1).
         //
-        // A nursery entered inside a spawned task (`mn.is_some()`) never builds a private sched:
+        // A nursery never builds a private sched:
         // at EVERY worker count it registers a scope on the fiber's OWN sched
         // (`activate_fiber_owned_nursery`), its tasks start at the `spawn` on that sched's
         // existing workers, adding no thread, and the owner PARKS at its join (`Disp::JoinPark`,
@@ -1535,16 +1592,9 @@ impl Vm {
         // worker for a joiner that can park (TICKET-125 and TICKET-127 false-faulted `i6n2` at
         // T=4); a joiner inside a native callback cannot park and hands its slot over in
         // `Vm::joiner_shell` (TICKET-245). Cost: while the OUTER body is open, these tasks share the outer sched's
-        // runners (`docs/contributing/gaps.md` W13-27).
-        //
-        // A top-level nursery has no outer worker to starve and creates exactly ONE drainer per
-        // thread, so it stays eager; if that drainer thread fails, `activate_fiber_owned_nursery`
-        // returns `None` (there is no `self.mn`) and the nursery queues its tasks to the join.
-        let eager = self.mn.is_none();
-        let scope = eager
-            .then(|| self.activate_eager_nursery(span))
-            .flatten()
-            .or_else(|| self.activate_fiber_owned_nursery(span));
+        // runners (`docs/contributing/gaps.md` W13-27). Every party that runs code is a fiber on a
+        // worker shell (`Vm::run_root`), main included, so this is every nursery.
+        let scope = self.activate_fiber_owned_nursery(span);
         self.eager_scheds.push(scope);
     }
 
@@ -1584,7 +1634,12 @@ pub(super) fn raw_frames(frames: &[CallFrame]) -> Vec<(ProtoId, Span)> {
     frames
         .iter()
         .rev()
-        .filter(|f| !f.is_toplevel && f.proto != DRAIN_PROTO)
+        .filter(|f| !f.is_toplevel && !is_trampoline(f.proto))
         .map(|f| (f.proto, f.call_span))
         .collect()
+}
+
+/// Is `proto` one the VM owns (the defer drain's, a native loop's step), which no trace names?
+pub(super) fn is_trampoline(proto: ProtoId) -> bool {
+    proto == DRAIN_PROTO || proto == call::STEP_PROTO
 }

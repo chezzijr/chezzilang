@@ -23,17 +23,6 @@ macro_rules! core_accessor {
 const GUARD_SPINS: usize = 4;
 const GUARD_SPIN_LOOPS: usize = 64;
 
-/// The `Err` text of a would-block socket op in a context whose table cell is `Refuse` (an eager
-/// `Executor` job, `block::mode`'s Socket/Connect row). One copy for every socket op.
-pub(super) fn sock_would_block_msg(op: &str) -> String {
-    format!(
-        "{op} would block: an Executor job doesn't own its thread — blocking here would starve \
-         every other job and `parallel:` nursery sharing the pool. Do this socket op inside \
-         `spawn:` or a `parallel:` nursery instead, where it parks rather than blocking a shared \
-         thread."
-    )
-}
-
 /// The shared fault for a `send` to a CLOSED channel. ONE const: the top-of-`send` guard, the `wait:` send arm and the eager
 /// blocked-sender loop must all emit byte-identical text. Go panics `send on closed channel` here.
 pub(super) const CLOSED_SEND: &str = "send on a closed channel";
@@ -291,7 +280,7 @@ impl Vm {
     /// acquire has given up. Registers the wait as a waiter (never `inflight` — a guard wait has
     /// no promised external progress; see `SchedCore::waiters`' doc), registers this thread as a
     /// blocked party so the process-wide verdict can see it, and polls
-    /// [`Vm::block_halt_check`] every [`super::DEMOTE_POLL_BACKOFF`] so `--timeout`, cancel and
+    /// [`Vm::block_halts`] every [`super::DEMOTE_POLL_BACKOFF`] so `--timeout`, cancel and
     /// `os.exit` reach a guard waiter exactly like every other blocking-in-place site. The counters
     /// are un-accounted via `guard_wait_exit` on every exit path (no `?` before that call).
     fn guard_wait_block<'a>(
@@ -326,7 +315,7 @@ impl Vm {
                 Err(e) => break Err(e),
                 Ok(None) => {}
             }
-            if let Err(e) = self.block_halt_check(span) {
+            if let Err(e) = self.block_halts(span) {
                 break Err(e);
             }
             if let Some(sched) = self.mn.as_ref().map(Arc::clone) {

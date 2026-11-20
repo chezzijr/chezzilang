@@ -344,7 +344,9 @@ impl MnSched {
     }
     /// A `recv` took a value on `key` (TICKET-185): requeue every parked party whose hand-off
     /// committed ([`WakeKind::Settled`]) — the sender whose offer `pop_for` took or moved into the
-    /// buffer — and leave every queued party parked. The enlist route of [`Vm::wake_senders_core`].
+    /// buffer — and leave every queued party parked. A test fixture's wake; the engine's is
+    /// [`MnSched::handoff_wake`].
+    #[cfg(test)]
     pub(super) fn recv_wake(&self, key: usize, core: &Arc<ChannelCore>) {
         let kind = WakeKind::Settled;
         let mut c = self.lock();
@@ -507,15 +509,12 @@ impl MnSched {
     /// `wake_bucket` at all four callers, the park/send/wait gap requeues, `cancel_drain`,
     /// `complete_offload`, and the batch-grab surplus push above). Exactly one other site increments
     /// `runnable` without notifying — `register_scope_seeded`, which seeds a nested nursery's fibers on
-    /// a LIVE sched — and it has **two callers whose safety arguments are different**, which matters
-    /// because this enumeration is the whole liveness case:
-    ///   - `Vm::run_mn_nursery_nested` (`sched.rs`, the seeding caller) is safe because it becomes the
-    ///     consumer on the very next line (`shell.mn_worker_loop(..)`) — the `yield_fiber` argument.
-    ///   - `Vm::activate_eager_nursery`'s nested-scope branch (`sched.rs`) is NOT: it returns an
-    ///     `EagerScope` with no loop after it. It is safe **only because it passes `Vec::new()`**, so
-    ///     the `fetch_add` is `+0` and nothing becomes runnable. **A future commit that seeds a
-    ///     non-empty vec there gets no notify and no consumer** — add the notify at that call site if
-    ///     you ever do.
+    /// a LIVE sched — and its one engine caller matters, because this enumeration is the whole
+    /// liveness case: `Vm::activate_fiber_owned_nursery` (`nursery.rs`) returns an `EagerScope` with
+    /// no loop after it. It is safe **only because it passes `Vec::new()`**, so the `fetch_add` is
+    /// `+0` and nothing becomes runnable (each `spawn` then injects through `inject_or_extend`,
+    /// which notifies). **A future commit that seeds a non-empty vec there gets no notify and no
+    /// consumer** — add the notify at that call site if you ever do.
     ///
     /// `seed` is a third no-notify site, but it runs pre-start. This is the sys-time collapse W8-7
     /// measured.

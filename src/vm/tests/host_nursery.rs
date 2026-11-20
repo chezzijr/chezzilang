@@ -521,7 +521,8 @@ fn recover_caught_fault_runs_frame_defers_after_reclaim() {
 }
 
 /// Multi-frame interleave: each unwound frame reclaims its nursery and runs its own `defer` before
-/// the next (outer) frame — innermost-first. Guards the per-frame interleave in `unwind_deferred`
+/// the next (outer) frame — innermost-first. Guards the per-frame interleave in the unwind's
+/// `defer` drain (`Vm::drain_then`)
 /// against batching regressions. (§2c1: the report half of the old `report, cleanup, report,
 /// cleanup` sequence is gone; the per-frame defer ORDER is what this ever guarded.)
 #[test]

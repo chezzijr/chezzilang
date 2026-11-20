@@ -303,8 +303,8 @@ test fn b_after():
     print("after")
 "#;
 /// `--timeout`: the offloaded sleep ends with the halt while `victim` is cancelled, so the
-/// worker loop's hard-halt arm unwinds through `unwind_deferred_escaped` with
-/// `report_escaped && run_defers` and leaves both levels there. The run-wide halt also ends the
+/// worker loop's hard-halt arm unwinds through `Vm::unwind_halt` (`UnwindThen::Bypass { report:
+/// true }`, its `defer`s drained on frames) and leaves both levels there. The run-wide halt also ends the
 /// kids, so their letters are stripped (measured: `C` in 1 of 7 T=2 runs).
 const TIMEOUT_HALT: &str = "                time.sleep_ms(60000)";
 const TIMEOUT_CHECK: &str =

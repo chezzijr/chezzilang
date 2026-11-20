@@ -87,7 +87,8 @@ impl Vm {
 
     /// Run frame `fi`'s pending `defer`s down to `marker`, LIFO, on the Rust stack, each asked for
     /// by [`Vm::has_next_deferred`]. Returns the latest fault; an exit ends the drain and is the
-    /// result. The dispatch loop's drains run as a trampoline instead ([`Vm::drain_then`]).
+    /// result. Only under a synchronous native caller (an FFI callback, a probe hook): every other
+    /// drain runs as a trampoline ([`Vm::drain_then`]).
     pub(super) fn drain_deferred(&mut self, fi: usize, marker: usize) -> Option<RuntimeError> {
         let mut err = None;
         loop {
@@ -116,49 +117,26 @@ impl Vm {
         self.drain_then(marker, DrainCont::Op)
     }
 
-    /// Unwind frames from the current depth down to `target_frame_len`, running each discarded
-    /// frame's deferred calls (innermost first) before dropping it. Used on a fault: deferred
-    /// cleanup runs as the stack unwinds, before a `recover:` boundary regains control (or before
-    /// the program exits on an uncaught fault). A fault in a deferred call supersedes the original.
-    ///
-    /// `report_escaped` — a genuine fault or a B3.4 cancel (TICKET-135, W14-39), but not `std.os.exit`, cancels
-    /// each discarded frame's escaped nurseries (its implicit nursery + any inner `parallel:` the
-    /// fault unwound past) BEFORE that frame's `defer`s run: each nursery reports as the body
-    /// unwinds, and only then do the frame's defers run. The MODULE top-level nursery is preserved
-    /// (it joins only on a clean run to program end; an uncaught top-level fault leaves it silent).
-    pub(super) fn unwind_deferred(
-        &mut self,
-        target_frame_len: usize,
-        report_escaped: bool,
-    ) -> Option<RuntimeError> {
-        self.unwind_deferred_escaped(target_frame_len, report_escaped, true)
-            .0
-    }
-
     /// TICKET-152 (W14-37) — the FATAL-deadlock unwind: drop every frame down to
     /// `target_frame_len` WITHOUT running its `defer`s. A deadlock verdict is the runtime declaring
     /// that no task can make progress, so a `defer` that itself blocks would run inside a runtime
     /// that has already said so; Go's `fatal error: all goroutines are asleep - deadlock!` runs
-    /// none, and parked siblings already run none (DEC-092). `report_escaped` stays `true`: DEC-135
-    /// (W14-39) measured that skipping the escaped-nursery abort orphans parked children and hangs
-    /// the join at `CHEZZI_THREADS=1`. What the aborted nurseries' children ended with is not
-    /// reported: the verdict's fault stands, and its cut tasks are in the run's listing.
+    /// none, and parked siblings already run none (DEC-092). Each frame's escaped nurseries are
+    /// still aborted ([`Vm::escaped_floor`]): DEC-135 (W14-39) measured that skipping the abort
+    /// orphans parked children and hangs the join at `CHEZZI_THREADS=1`. What the aborted
+    /// nurseries' children ended with is not reported: the verdict's fault stands, and its cut
+    /// tasks are in the run's listing. A drain trampoline met on the way ends its drain
+    /// ([`Vm::drop_drain_frame`]). Every other unwind runs its `defer`s ([`Vm::unwind_on`]).
     pub(super) fn unwind_no_defer(&mut self, target_frame_len: usize) {
         self.cut_held_guards();
-        self.unwind_deferred_escaped(target_frame_len, true, false);
-    }
-
-    /// TICKET-147 (W14-12) — the bypass funnels' unwind: run [`Vm::unwind_deferred_escaped`] and rank
-    /// what it raised (a `defer` fault, or a fault of a nested nursery it aborted) against `rte`
-    /// through [`Vm::unwind_result`].
-    pub(super) fn unwind_cancelled(
-        &mut self,
-        target_frame_len: usize,
-        report_escaped: bool,
-        rte: RuntimeError,
-    ) -> RuntimeError {
-        let (defer, escaped) = self.unwind_deferred_escaped(target_frame_len, report_escaped, true);
-        self.unwind_result(rte, defer.or(escaped), report_escaped)
+        while self.frames.len() > target_frame_len {
+            let fi = self.frames.len() - 1;
+            let _ = self.drain_escaped_nursery(self.escaped_floor(fi));
+            if self.frames[fi].proto == DRAIN_PROTO {
+                let _ = self.drop_drain_frame(fi);
+            }
+            self.pop_unwound_frame();
+        }
     }
 
     /// TICKET-195 — THE defer ranking of an unwind that has a cause: `cause` is the fault that
@@ -200,63 +178,6 @@ impl Vm {
         }
     }
 
-    /// [`Vm::unwind_deferred`] that also reports the first fault an aborted (escaped) nursery's
-    /// children ended with, as `(defer_fault, first_escaped_child_fault)`. TICKET-147 (W14-12): a
-    /// genuine fault keeps the defer fault as its root cause (`unwind_deferred` drops the second
-    /// element); the cancel funnels replace their `cancelled` sentinel with either.
-    ///
-    /// `run_defers` — `false` ONLY on the fatal-deadlock unwind, TICKET-152: the frames are dropped
-    /// where they stand.
-    ///
-    /// The synchronous unwind: a hard halt's, a fatal deadlock's, and a bypass inside a nested loop.
-    /// A fault's or a cancel's unwind runs its `defer`s on the dispatch loop ([`Vm::unwind_on`]);
-    /// both leave each of a frame's `parallel:` levels (its body `defer`s, then the abort,
-    /// innermost first; TICKET-299), report the frame's other escaped nurseries above
-    /// [`Vm::escaped_floor`] before its remaining `defer`s and drop it with
-    /// [`Vm::pop_unwound_frame`]. A hard halt in a task that is not cancelled passes
-    /// `report_escaped == false` (TICKET-135): it runs every `defer` of the frame, the levels' body
-    /// `defer`s innermost first, and joins no level. A hard halt in a cancelled task
-    /// (`worker_loop.rs`, the offloaded-sleep halt arm) passes `true` and leaves each level here. A drain
-    /// trampoline met on the way ends its drain ([`Vm::drop_drain_frame`]): the fault its records
-    /// raised ranks as a `defer` fault of this unwind.
-    pub(super) fn unwind_deferred_escaped(
-        &mut self,
-        target_frame_len: usize,
-        report_escaped: bool,
-        run_defers: bool,
-    ) -> (Option<RuntimeError>, Option<RuntimeError>) {
-        let mut err = None;
-        let mut escaped_err: Option<RuntimeError> = None;
-        while self.frames.len() > target_frame_len {
-            let fi = self.frames.len() - 1;
-            // TICKET-299: each `parallel:` level of the frame runs its body `defer`s, then is aborted,
-            // innermost first (DEC-152: none of it on a fatal deadlock).
-            if report_escaped && run_defers {
-                while self.nurseries.len() > self.level_floor(fi) {
-                    let top = self.nurseries.len() - 1;
-                    if let Some(e) = self.leave_level_now(fi) {
-                        err = Some(e);
-                    }
-                    let child = self.drain_escaped_nursery(top);
-                    escaped_err = escaped_err.or(child);
-                }
-            }
-            if report_escaped {
-                let child = self.drain_escaped_nursery(self.escaped_floor(fi));
-                escaped_err = escaped_err.or(child);
-            }
-            if self.frames[fi].proto == DRAIN_PROTO {
-                if let Some(e) = self.drop_drain_frame(fi) {
-                    err = Some(e);
-                }
-            } else if run_defers && let Some(e) = self.drain_deferred(fi, 0) {
-                err = Some(e);
-            }
-            self.pop_unwound_frame();
-        }
-        (err, escaped_err)
-    }
-
     /// The nurseries an unwind of frame `fi` reports as escaped, before the frame's `defer`s: those
     /// above this count (innermost-first, so inner `parallel:` levels report before the frame's
     /// implicit one). The module nursery is kept.
@@ -267,14 +188,14 @@ impl Vm {
         } else {
             f.nursery_len
         };
-        floor.min(self.nurseries.len())
+        floor.min(self.eager_scheds.len())
     }
 
     /// TICKET-299: the nursery count below frame `fi`'s `parallel:` levels; its implicit nursery and
     /// the module nursery sit at or below it.
     pub(super) fn level_floor(&self, fi: usize) -> usize {
         let f = &self.frames[fi];
-        (f.nursery_len + usize::from(f.has_implicit_nursery)).min(self.nurseries.len())
+        (f.nursery_len + usize::from(f.has_implicit_nursery)).min(self.eager_scheds.len())
     }
 
     /// Drop the top frame of an unwind, after its `defer`s, with the `recover:` handlers it
@@ -331,7 +252,7 @@ impl Vm {
                 // this `?`. A re-run finds the drained levels gone and takes back the fault the
                 // first run parked with.
                 if let Some(h) = self.same_frame_handler()
-                    && self.nurseries.len() > h.nursery_len
+                    && self.eager_scheds.len() > h.nursery_len
                 {
                     let parked = self.take_escape_park();
                     return self.try_levels(span, parked);
@@ -366,7 +287,7 @@ impl Vm {
         err: Option<RuntimeError>,
     ) -> Result<(), RuntimeError> {
         match self.same_frame_handler() {
-            Some(h) if self.nurseries.len() > h.nursery_len => {
+            Some(h) if self.eager_scheds.len() > h.nursery_len => {
                 self.leave_level(LevelThen::Try { span, err })
             }
             Some(_) | None => self.try_escape(span, err),

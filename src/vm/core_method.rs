@@ -137,7 +137,8 @@ impl Vm {
                 Ok(Some(self.pop()))
             }
             // `Stringable` for a kind with no `str` method of its own: the SAME rendering `print`
-            // and `"{x}"` use. Miss-only, so a declared `str` hook is dispatched first.
+            // and `"{x}"` use. Miss-only, so a declared `str` hook is dispatched first. A caller on
+            // the dispatch loop renders through `push_intrinsic`, where an element hook parks.
             (Hook::Str, 0) => {
                 let s = self.stringify(recv, span, 0)?;
                 Ok(Some(Value::obj(self.heap.alloc(Obj::Str(s.into())))))
@@ -168,15 +169,12 @@ impl Vm {
             // "same end `sort()` puts it", which is why this delegates instead of re-deriving.
             //
             // Reached only from the `None` (NaN) branch, never unconditionally: `order_key`'s struct
-            // branch calls `struct_compare` (a USER `compare`), and intrinsic dispatch must stay
+            // branch calls a USER `compare`, and intrinsic dispatch must stay
             // miss-only so a user method always wins. A `±0.0` pair therefore still answers via
             // `self.compare` (IEEE-Equal) exactly as before — only NaN comes through here.
             // `order_key`'s terminal `Err` is unreachable behind the `is_numeric` gate.
-            // TICKET-146: a tuple / List / Option receiver walks lexicographically (total order).
-            (Hook::Compare, 1) if self.seq_pair(recv, args[0]) => {
-                let other = args[0];
-                Ok(Some(Value::int(self.order_key(recv, other, span)? as i64)))
-            }
+            // TICKET-146: a tuple / List receiver walks lexicographically (total order) on the
+            // dispatch loop, where an element hook parks ([`Vm::push_intrinsic`]).
             (Hook::Compare, 1) => match self.compare(recv, args[0]) {
                 Some(ord) => Ok(Some(Value::int(ord as i64))),
                 None if self.is_numeric(recv) && self.is_numeric(args[0]) => {
@@ -187,20 +185,6 @@ impl Vm {
                 // caller's `has no method` error standing, exactly as before.
                 None => Ok(None),
             },
-            // `Eq` (M23) → the SAME structural equality `==` uses, so `x.eq(y)` can never disagree
-            // with `x == y`. Serves the four scalar grants. Miss-only like the rest, so
-            // a user type's own `eq` method is dispatched before this ever runs.
-            // (`values_equal_guarded` is the operator's OWN worker — not the fault-swallowing
-            // `values_equal` test wrapper — so a cyclic operand raises the same recoverable
-            // depth fault `==` raises instead of silently answering "not equal".)
-            (Hook::Eq, 1) => {
-                let other = args[0];
-                Ok(Some(Value::bool(
-                    self.with_roots(&[recv, other], |vm| {
-                        vm.values_equal_guarded(recv, other, 0, span)
-                    })?,
-                )))
-            }
             (Hook::Index, 1) => {
                 self.push(recv);
                 self.push(args[0]);
@@ -230,6 +214,7 @@ impl Vm {
                 self.op_contains(false, span)?;
                 Ok(Some(self.pop()))
             }
+            // `Eq` is the dispatch loop's: its walk can park ([`Vm::push_intrinsic`]).
             (
                 Hook::Iter
                 | Hook::Next
@@ -255,6 +240,44 @@ impl Vm {
                 _,
             ) => Ok(None),
         }
+    }
+
+    /// W8-34: `unique()` over a list whose every element is a flat scalar key dedupes through a
+    /// hash index in one pass instead of a linear scan per element; `None` for any other list
+    /// (the scan of [`Vm::list_scan`]). The gate is all-or-nothing over the WHOLE list, never
+    /// per-element: `bytes == bytearray` is content-equal, so mixing would let an indexed `bytes`
+    /// and a scanned `bytearray` of equal content both survive. A bucket hit is still confirmed by
+    /// `elem_equal` — the hash only picks candidates, the compare remains the verdict (DEC-014). A
+    /// flat key never reaches user code, so nothing here collects before the result list owns
+    /// the elements.
+    pub(super) fn unique_by_hash(
+        &mut self,
+        h: GcRef,
+        span: Span,
+    ) -> Result<Option<Value>, RuntimeError> {
+        let Obj::List(items) = self.heap.get(h) else {
+            unreachable!()
+        };
+        let items = items.to_vec();
+        if !items.iter().all(|&v| self.is_flat_hash_key(v)) {
+            return Ok(None);
+        }
+        let seen = SetData::default();
+        for &v in &items {
+            let hv = self.scalar_hash(v);
+            let mut dup = false;
+            for p in seen.candidates(hv) {
+                if self.elem_equal(seen.entries.get(p).1, v, 0, span)? {
+                    dup = true;
+                    break;
+                }
+            }
+            if !dup {
+                seen.push(&self.heap, hv, v);
+            }
+        }
+        let out: Vec<Value> = seen.entries.iter().map(|(_, v)| v).collect();
+        Ok(Some(Value::obj(self.heap.alloc(Obj::List(out.into())))))
     }
 
     /// W7-8 `PathLike` → the RAW OS bytes of a path spelled as a `str`/`bytes`/`bytearray`.
@@ -841,7 +864,6 @@ impl Vm {
                             h,
                             CmpMethod::of(which).expect("a comparator method"),
                             args,
-                            false,
                             span,
                         )? {
                             return Ok(self.pop());
@@ -857,28 +879,6 @@ impl Vm {
                         };
                         items.replace(heap, &elems);
                         Ok(Value::nil())
-                    }
-                    // `elems` is a Rust-local clone and `target` came off the stack at dispatch, so
-                    // both the receiver and the target are rooted across the (re-entrant) `eq`.
-                    ListMethod::Contains => {
-                        self.arity_err("contains", args, 1, span)?;
-                        let target = args[0];
-                        let elems = items.to_vec();
-                        let found = self
-                            .with_roots(&[Value::obj(h), target], |vm| {
-                                vm.seq_slot(&elems, target, span)
-                            })?
-                            .is_some();
-                        Ok(Value::bool(found))
-                    }
-                    ListMethod::IndexOf => {
-                        self.arity_err("index_of", args, 1, span)?;
-                        let target = args[0];
-                        let elems = items.to_vec();
-                        let idx = self.with_roots(&[Value::obj(h), target], |vm| {
-                            vm.seq_slot(&elems, target, span)
-                        })?;
-                        Ok(Value::int(idx.map(|i| i as i64).unwrap_or(-1)))
                     }
                     ListMethod::Concat => {
                         self.arity_err("concat", args, 1, span)?;
@@ -1003,7 +1003,6 @@ impl Vm {
                             h,
                             CmpMethod::of(which).expect("a comparator method"),
                             args,
-                            false,
                             span,
                         )?;
                         Ok(self.pop())
@@ -1059,72 +1058,20 @@ impl Vm {
                             h,
                             CmpMethod::of(which).expect("a comparator method"),
                             args,
-                            false,
                             span,
                         )?;
                         Ok(self.pop())
                     }
-                    // unique/dedup: NEW list, never mutate the receiver. Equality is the same
-                    // `elem_equal` `contains` uses (works on floats) — which since M23 can dispatch a
-                    // user `eq` and so re-enter the VM. Root the snapshotted ELEMENTS, not just the
-                    // receiver: an `eq` that clears the receiver mid-walk orphans every element
-                    // `items`/`out` still hold (`out` ⊆ `items`, so `items` covers both).
-                    ListMethod::Unique | ListMethod::Dedup => {
-                        self.arity_err(method, args, 0, span)?;
-                        let Obj::List(items) = self.heap.get(h) else {
-                            unreachable!()
-                        };
-                        let items = items.to_vec();
-                        let out = self.with_elem_roots(&[Value::obj(h)], &items, |vm| {
-                            let mut out: Vec<Value> = Vec::new();
-                            if which == ListMethod::Dedup {
-                                // Collapse only CONSECUTIVE runs (Rust `Vec::dedup`): keep an element
-                                // iff it differs from the previously-kept one.
-                                for &v in &items {
-                                    let keep = match out.last() {
-                                        Some(&p) => !vm.elem_equal(p, v, 0, span)?,
-                                        None => true,
-                                    };
-                                    if keep {
-                                        out.push(v);
-                                    }
-                                }
-                            } else if items.iter().all(|&v| vm.is_flat_hash_key(v)) {
-                                // W8-34: every element is a flat scalar key, so dedupe through a hash
-                                // index in one pass instead of a linear scan per element. The gate is
-                                // all-or-nothing over the WHOLE list, never per-element: `bytes ==
-                                // bytearray` is content-equal, so mixing would let an indexed `bytes`
-                                // and a scanned `bytearray` of equal content both survive. A bucket hit
-                                // is still confirmed by `elem_equal` — the hash only picks candidates,
-                                // the compare remains the verdict (DEC-014).
-                                let seen = SetData::default();
-                                for &v in &items {
-                                    let hv = vm.scalar_hash(v);
-                                    let mut dup = false;
-                                    for p in seen.candidates(hv) {
-                                        if vm.elem_equal(seen.entries.get(p).1, v, 0, span)? {
-                                            dup = true;
-                                            break;
-                                        }
-                                    }
-                                    if !dup {
-                                        seen.push(&vm.heap, hv, v);
-                                    }
-                                }
-                                out = seen.entries.iter().map(|(_, v)| v).collect();
-                            } else {
-                                // Remove ALL duplicates, first-occurrence order (Python `dict.fromkeys`).
-                                // Fallback for any non-flat element (container, Struct/Enum,
-                                // ByteArray) — same O(n^2) scan as before the hash-index fast path above.
-                                for &v in &items {
-                                    if vm.seq_slot(&out, v, span)?.is_none() {
-                                        out.push(v);
-                                    }
-                                }
-                            }
-                            Ok(out)
-                        })?;
-                        Ok(Value::obj(self.heap.alloc(Obj::List(out.into()))))
+                    // `do_method_call` runs these before it gets here; a direct caller runs the
+                    // same scan with a nested element `eq`. unique/dedup build a NEW list, never
+                    // mutating the receiver.
+                    ListMethod::Contains
+                    | ListMethod::IndexOf
+                    | ListMethod::Unique
+                    | ListMethod::Dedup => {
+                        let kind = Scan::of(which).expect("a list scan");
+                        self.list_scan(h, kind, args, false, span)?;
+                        Ok(self.pop())
                     }
                     // chunk/windows build a `List[List[T]]`. Each inner-list alloc may GC, so the outer
                     // list is ROOTED on the operand stack and every inner handle is pushed into it

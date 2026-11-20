@@ -15,8 +15,7 @@
 //!
 //! M1.7 — a task's payload (`Vm::prepare_worker`) is the spawner's callee and args, by handle since
 //! M3.4. Between the spawn op's pop and `ReadyWorker::into_fiber`, which registers the fiber's
-//! context, those values are in no root set (a lazy nursery's queued task is rooted by
-//! `nurseries` instead). The payload `Vm` never collects (it has no token and is not its core's
+//! context, those values are in no root set. The payload `Vm` never collects (it has no token and is not its core's
 //! only handle), and the spawner reaches no safepoint, collection or door in between, so no stop
 //! can complete while those values are unrooted: the stop waits for the spawner.
 //! [`PayloadInFlight`] checks the second half in debug builds.

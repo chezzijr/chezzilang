@@ -3,9 +3,55 @@
 
 use super::*;
 use crate::base::builtin::Builtin;
+use crate::base::op::Proto;
+use std::sync::LazyLock;
+
+/// The step trampoline's proto id, the one below the defer drain's ([`DRAIN_PROTO`]). It indexes no
+/// `Program::protos` entry: the dispatch loop fetches [`step_proto`] for it.
+pub(super) const STEP_PROTO: ProtoId = DRAIN_PROTO - 1;
+
+/// The step at which a step frame receives from the channel it holds (`Op::ChanRecvOrClosed`).
+pub(super) const RECV_STEP: usize = 6;
+
+/// The step trampoline, built once per process: each step is the one op a native loop (a list HOF,
+/// a sort, a box method, a `from_iter` drain) hands the dispatch loop, then `Return`, whose
+/// `RetAction` runs the loop on. Step `2 * argc` calls the callee below `argc` args (a native that
+/// can wait, which has no frame of its own: [`Vm::push_callback_frame`]); [`RECV_STEP`] receives one
+/// value. So a wait in the op parks the task, as at any call. Its ops run at the frame's
+/// `call_span`, the loop's own span ([`Vm::step_span`]).
+pub(super) fn step_proto() -> &'static Proto {
+    static PROTO: LazyLock<Proto> = LazyLock::new(|| {
+        let code = vec![
+            Op::Call(0),
+            Op::Return,
+            Op::Call(1),
+            Op::Return,
+            Op::Call(2),
+            Op::Return,
+            Op::ChanRecvOrClosed,
+            Op::Return,
+        ];
+        Proto {
+            name: "<native step>".to_string(),
+            arity: 0,
+            min_arity: 0,
+            n_slots: 0,
+            lines: vec![Span::RUNTIME; code.len()],
+            code,
+            has_implicit_nursery: false,
+            is_generator: false,
+            is_test: false,
+            decl_span: Span::RUNTIME,
+            capture_names: Vec::new(),
+        }
+    });
+    &PROTO
+}
 
 /// Why `coerce_json` stopped: a decode mismatch (the `Err` of the decode's `Result`), or a fault
-/// raised by a field default it ran, which propagates as a runtime fault (TICKET-198).
+/// raised before a field default's frame (its module not yet initialized, a cancel, the call
+/// depth), which propagates as a runtime fault (TICKET-198). A fault inside the default unwinds
+/// through its frame.
 pub(super) enum DecodeFail {
     Msg(String),
     Fault(RuntimeError),
@@ -106,6 +152,7 @@ impl Vm {
             }
         }
         // Slow path — native, struct, or not-callable.
+        let span = self.step_span(span);
         let args: Vec<Value> = self.stack.split_off(at);
         let callee = self.pop();
         let v = self.invoke_value(callee, args, span)?;
@@ -140,9 +187,12 @@ impl Vm {
 
     /// [`Vm::invoke_value`] for a loop continuation on the dispatch loop: push `f`'s frame over
     /// `args` with `ret` and return `true`; the loop runs it and its return applies `ret`, so a
-    /// wait in `f` parks like any call. `false`, with nothing pushed, for a callee that runs no
-    /// frame of its own (a native, a builtin, an extern, a generator fn): the caller runs it with
-    /// `invoke_value`.
+    /// wait in `f` parks like any call. A native that can wait (any [`crate::native::Kind`] but
+    /// `Inline`) has no frame of its own: its call is a step frame's op ([`step_proto`]), so a
+    /// waiting native (`time.sleep_ms`) parks too. `false`, with nothing pushed, for a callee the
+    /// caller runs in place with `invoke_value`, as a direct call runs it: an inline native (it
+    /// never waits), a builtin (it runs the hooks it calls nested at a direct call too), an extern
+    /// (a C call blocks in place) and a generator fn (its call runs no code).
     pub(super) fn push_callback_frame(
         &mut self,
         f: Value,
@@ -153,9 +203,14 @@ impl Vm {
         let (proto, home, closure) = match self.callable(f) {
             Some(Callee::Func { proto, home }) => (proto, home, None),
             Some(Callee::Closure { proto, home }) => (proto, home, f.as_obj()),
-            Some(Callee::Native { .. } | Callee::Builtin(_) | Callee::Cffi(_)) | None => {
-                return Ok(false);
+            Some(Callee::Native { kind, .. }) => {
+                if matches!(kind, crate::native::Kind::Inline) {
+                    return Ok(false);
+                }
+                self.push_call_step(f, args, ret, span);
+                return Ok(true);
             }
+            Some(Callee::Builtin(_) | Callee::Cffi(_)) | None => return Ok(false),
         };
         if self.program.protos[proto].is_generator {
             return Ok(false);
@@ -166,6 +221,54 @@ impl Vm {
         self.stack.extend_from_slice(args);
         self.finish_frame(proto, home, closure, base, true, false, span, ret);
         Ok(true)
+    }
+
+    /// The span an op of the top frame runs at, `line` its line's: a step frame's proto has no
+    /// lines of its own ([`step_proto`]), so its op runs at the loop's span, the frame's
+    /// `call_span`.
+    pub(super) fn step_span(&self, line: Span) -> Span {
+        if let Some(f) = self.frames.last()
+            && f.proto == STEP_PROTO
+        {
+            return f.call_span;
+        }
+        line
+    }
+
+    /// Push the step frame whose op calls `f` on `args` ([`Vm::push_callback_frame`]). Out of
+    /// line: an inline native's callback loop does not pay for it.
+    #[inline(never)]
+    fn push_call_step(&mut self, f: Value, args: &[Value], ret: RetAction, span: Span) {
+        self.push(f);
+        self.stack.extend_from_slice(args);
+        self.push_step_frame(args.len() + 1, 2 * args.len(), ret, span);
+    }
+
+    /// Push a step frame ([`step_proto`]) over the `n` values on the stack top, at step `ip`, with
+    /// `ret` and the loop's `span`. It counts no call depth: a native's call adds none.
+    pub(super) fn push_step_frame(&mut self, n: usize, ip: usize, ret: RetAction, span: Span) {
+        let base = self.stack.len() - n;
+        let home = match self.frames.last() {
+            Some(f) => f.home,
+            None => self.entry_home(),
+        };
+        self.frames.push(CallFrame {
+            proto: STEP_PROTO,
+            ip,
+            base,
+            home,
+            closure: None,
+            counted: false,
+            is_toplevel: false,
+            deferred: Vec::new(),
+            defer_markers: Vec::new(),
+            nursery_len: self.eager_scheds.len(),
+            has_implicit_nursery: false,
+            call_span: span,
+            argc: 0,
+            ret,
+        });
+        self.cur_base = base;
     }
 
     /// Dispatch an already-evaluated callable `Value` on evaluated args, *returning* the result
@@ -436,15 +539,13 @@ impl Vm {
         // falls through to inline. Record the call + extracted primitive args; the worker loop hands
         // it to the pool ([`Disp::Offload`]) and `paused()` skips the (missing) result-push here. The
         // result is lowered + pushed by the worker that resumes the fiber after completion.
-        // CANCELLATION CHECKPOINT — a blocking op is a cancel-delivery point regardless of whether an
-        // M:N sched is in scope: it sits OUTSIDE the `mn.is_some()` offload gate below. A `mn == None`
-        // context (top-level `main`, the inline outermost-`parallel:` builder VM, an eager `Executor`
-        // job) needs it every bit as much as an M:N worker — it is the only checkpoint a `sleep_ms` /
-        // `io` / `fs` / `request` / `process` call offers, and without it a cancelled fiber (one the
-        // cancel drain re-drove, say) would run the blocking call to completion, stalling the whole
-        // teardown for its full duration, and then keep executing the straight-line statements after
-        // it. On an M:N worker it also stops a post-cancel `sleep_ms` from delaying the teardown by
-        // the full sleep.
+        // CANCELLATION CHECKPOINT — a blocking op is a cancel-delivery point in every context: it
+        // sits OUTSIDE the offload gate below. Under a host frame it is the only checkpoint a
+        // `sleep_ms` / `io` / `fs` / `request` / `process` call offers, and without it a cancelled
+        // fiber (one the cancel drain re-drove, say) would run the blocking call to completion,
+        // stalling the whole teardown for its full duration, and then keep executing the
+        // straight-line statements after it. It also stops a post-cancel `sleep_ms` from delaying
+        // the teardown by the full sleep.
         if kind.blocks() {
             self.wait_halt(span)?;
         }
@@ -519,32 +620,6 @@ impl Vm {
                 .checked_add(std::time::Duration::from_millis(ms as u64))
                 .unwrap_or_else(|| now + std::time::Duration::from_secs(86_400 * 365));
             return self.demote_block_until(deadline, WaitSpec::Sleep, "sleep_ms", span);
-        }
-        // W7-16 — every OTHER timed wait with `ms > 0`: an eager `Executor` job (`mn == None`), the
-        // top-level `main` thread, the inline outermost-`parallel:` builder VM, or a `mn == None`
-        // native callback.
-        // All of them used to reach `native::time::sleep_ms`'s bare `std::thread::sleep`, which is a
-        // hole in every halt the loop it replaces would have checked: `cancel()` at 50 ms against
-        // a `sleep_ms(3000)` waited the full 3012 ms AND ran the job's post-sleep code, and
-        // `chezzi test --timeout=200` did not abort it either (measured: PASS, 3 s). The deadline is
-        // OURS, so it stays a checkpoint for its whole duration — see [`Vm::block_until_deadline`].
-        //
-        // Deliberately NOT gated on `native_reentry == 0`: a native callback loop is already a
-        // documented cancellation checkpoint, `demote_block_until` above already faults from inside
-        // one, and `block_halt_check` only ever returns `Err` — it never unwinds VM state.
-        //
-        // `checked_add` saturates a pathological `ms` (centuries) to a far-future deadline rather than
-        // panicking on `Instant` overflow, matching the offload path's own saturation above.
-        if kind == Kind::TimedWait
-            && let Some(ms) = args.first().and_then(|v| self.int_val(*v))
-            && ms > 0
-        {
-            let now = std::time::Instant::now();
-            let deadline = now
-                .checked_add(std::time::Duration::from_millis(ms as u64))
-                .unwrap_or_else(|| now + std::time::Duration::from_secs(86_400 * 365));
-            self.block_until_deadline(WaitSpec::Sleep, deadline, span)?;
-            return Ok(Value::nil());
         }
         let writes_before = self.stdout_writes;
         // A native that holds its host thread (`Blocking` run inline, `HostWait`) waits through
@@ -776,7 +851,7 @@ impl Vm {
         let frame_top = self.frames.last().unwrap();
         let nursery_floor = frame_top.nursery_len;
         let implicit = frame_top.has_implicit_nursery;
-        if implicit && self.nurseries.len() > nursery_floor {
+        if implicit && self.eager_scheds.len() > nursery_floor {
             // A body defer faulted above the implicit nursery: return `Err` with the frame intact,
             // so the fault path cancels the implicit nursery and runs the remaining defers, as for a
             // join fault. Joining could park and lose the fault.
@@ -820,7 +895,7 @@ impl Vm {
         self.push(ret); // rooted across the reclaim below, which can wait and so collect
         // Reclaim any `parallel:` nursery this frame opened but whose `JoinNursery` was skipped by a
         // `?`/return escape (no-op on the normal fall-through path — `JoinNursery` already popped it,
-        // so `nurseries.len() == frame.nursery_len`; also a no-op when the implicit nursery above was
+        // so `eager_scheds.len() == frame.nursery_len`; also a no-op when the implicit nursery above was
         // just joined). Mirrors the `recover:` catch path; a nested frame keeps the parent's
         // nursery (it captured the parent depth
         // at entry). TASK B: route through `drain_escaped_nursery` so the unstarted tasks are
@@ -841,6 +916,12 @@ impl Vm {
         if let Some(e) = defer_err.or(escaped) {
             self.pop();
             self.drop_ret(frame.ret, frame.base);
+            // A failed `assert`'s operand `str` hook: its fault drops the operand text only.
+            if let RetAction::StringifyWalk(StrThen::Assert { .. }) = frame.ret {
+                return Err(self
+                    .assert_hook_fault(e, frame.call_span)
+                    .unwrap_or_else(|halt| halt));
+            }
             return Err(e);
         }
         // A hook frame's operator post-step, at the operator's own span.
@@ -850,15 +931,16 @@ impl Vm {
             | RetAction::ToBool
             | RetAction::EqBool { .. }
             | RetAction::CmpOp(_)
-            | RetAction::Stringify
-            | RetAction::StringifyFmt
+            | RetAction::StringifyWalk(_)
             | RetAction::Hof(_)
             | RetAction::Drain(_)
-            | RetAction::Print { .. }
             | RetAction::Sort(_)
             | RetAction::MinMax { .. }
             | RetAction::Box(_)
-            | RetAction::Gen(_)) => self.apply_ret(ret, frame.call_span),
+            | RetAction::Gen(_)
+            | RetAction::EqWalk(_)
+            | RetAction::CmpWalk(_)
+            | RetAction::JsonDefault) => self.apply_ret(ret, frame.call_span),
         }
     }
 
@@ -906,8 +988,8 @@ impl Vm {
         // would also permanently disable the cancel bypass, letting an ordinary outer `recover:` defeat a
         // nursery cancel. A `Drop` guard can't be used (it would alias `self` across the call).
         self.deferring += 1;
-        // Guarded: a synchronous drain is Rust-stack state, so a blocking `recv` inside it cannot
-        // park — it demotes or is judged (B1).
+        // Guarded: a synchronous drain is Rust-stack state (under an FFI callback or a probe hook),
+        // so a blocking `recv` inside it cannot park — it demotes.
         let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             self.guarded(|vm| vm.run_loaded(fi))
         }));

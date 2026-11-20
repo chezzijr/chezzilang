@@ -33,8 +33,9 @@ expectation, never against a second run. Two `cargo test` gates carry the suite:
 A schedule-dependent failure replays under a fixed seed: `CHEZZI_SCHED_SEED=<u64>` (seeded
 scheduler mode; a failing run reports its seed on stderr, see `docs/contributing/dev-commands.md`).
 
-Both live in `tests/`, not the lib unit suite: `vm::pool` is one process-wide `OnceLock`, so a test
-that needs uncontended pool workers must have its own process. So `cargo test` — not just
+Both live in `tests/`, not the lib unit suite: the worker count and the runner budget
+(`width::RUNNERS`) are process-wide, so a test that needs uncontended workers must have its own
+process. So `cargo test` — not just
 `chezzi test` — is the authoritative gate.
 
 ## What stays in Rust (not portable)

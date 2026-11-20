@@ -458,3 +458,82 @@ fn key_chain(d: int) -> KeyLink:
 test fn key_inserted_from_a_deep_eq_hook_is_still_snapshotted():
     assert key_chain(4998) == key_chain(4998), "shallow map key aliased at hook depth 9998"
     assert key_chain(4999) == key_chain(4999), "shallow map key aliased at hook depth 10000"
+
+# ---- a nested `==` walk on frames (plan 2026-11-18-every-wait-parks Task 1a) ----
+# An element `eq` reached from a container walk or a list scan runs as a frame, so it can wait and
+# its task parks (`tests/callback_park_grid.rs` owns the park / deadlock grid). The walk keeps its
+# levels in slots below that frame; these pin what the slots must hold across it.
+
+gate := Channel[int](0)
+
+struct Waits:
+    n: int
+    fn eq(self, other: Waits) -> bool:
+        return self.n == other.n + (gate.recv() ?? 0)
+
+test fn a_waiting_element_eq_answers_every_walk_and_scan():
+    parallel:
+        spawn:
+            for _ in 0..3:
+                gate.send(0)
+            gate.close()
+        a: Map[str, List[Waits]] = {"x": [Waits(1)], "y": [Waits(2), Waits(3)]}
+        b: Map[str, List[Waits]] = {"y": [Waits(2), Waits(3)], "x": [Waits(1)]}
+        assert a == b
+        assert [[Waits(1), Waits(2)], [Waits(3)]] != [[Waits(1), Waits(2)], [Waits(4)]]
+        assert [Waits(3), Waits(1), Waits(3), Waits(2), Waits(1)].unique().len() == 3
+        assert [Waits(1), Waits(1), Waits(2), Waits(2), Waits(1)].dedup().len() == 3
+        assert [Waits(5), Waits(6), Waits(1)].index_of(Waits(1)) == 2
+        assert Waits(6) in [Waits(5), Waits(6)]
+        assert not [Waits(5)].contains(Waits(9))
+        assert [[Waits(1)]].eq([[Waits(1)]])
+
+shrink: List[Shrinks] = []
+
+struct Shrinks:
+    n: int
+    fn eq(self, other: Shrinks) -> bool:
+        if shrink.len() > 0:
+            _ := shrink.pop()
+        return self.n == other.n
+
+test fn an_eq_that_empties_the_list_mid_walk_compares_the_snapshot():
+    for n in [1, 2, 3]:
+        shrink.push(Shrinks(n))
+    assert shrink == [Shrinks(1), Shrinks(2), Shrinks(3)]
+    assert shrink.len() == 0
+
+enum Chain:
+    End
+    Link(Chain)
+
+fn chain_of(n: int) -> Chain:
+    c := Chain.End
+    for _ in 0..n:
+        c = Chain.Link(c)
+    return c
+
+struct Rewalks:
+    n: int
+    fn eq(self, other: Rewalks) -> bool:
+        return chain_of(6000) == chain_of(6000)
+
+enum Tower:
+    Top(Rewalks)
+    Floor(Tower)
+
+fn tower(n: int) -> Tower:
+    t := Tower.Top(Rewalks(0))
+    for _ in 0..n:
+        t = Tower.Floor(t)
+    return t
+
+test fn a_fault_in_a_nested_eq_frame_gives_the_budget_back():
+    # the hook runs 3 000 levels down and walks 6 000 more: within the shared budget
+    assert tower(3000) == tower(3000)
+    r := recover: tower(5000) == tower(5000)
+    match r:
+        ?_: assert false, "5 000 + 6 000 levels must exceed the shared budget"
+        !e: assert e.error().contains("maximum structural depth"), e.error()
+    # the unwound hook frame gave its raised `walk_base` back
+    assert chain_of(9000) == chain_of(9000)

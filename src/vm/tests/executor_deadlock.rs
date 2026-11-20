@@ -655,8 +655,8 @@ print(\"after nursery\")
 /// This is the one that pins R2 independently of the veto. Pre-fix output, measured: `child waiting`
 /// → `job sending` **at 50 ms — the send really happened** → `sleeper done` at 2 s → nursery deadlock
 /// at 2008 ms, **with the value sitting in the channel queue**. `child got 7` never printed. An eager
-/// job's `Vm` gets neither `mn` nor `mn_enlist_sched` (`spawn_worker` sets neither; the only `mn`
-/// assignment in the tree is `spawn_shell`'s), so `channel_send_wire` took the no-sched branch and
+/// job's `Vm` got no `mn` (`spawn_worker` does not set it; the only `mn` assignment in the tree is
+/// `spawn_shell`'s), so `channel_send_wire` took the no-sched branch and
 /// `Vm::wake_on_send` returned immediately on its empty `scheduler_stack` — while the waiter sat in
 /// `SchedCore::parked`, drainable only by that sched's `wake_bucket`, whose idle workers `cv.wait`
 /// with no timeout. Fixed by the `Vm::sched_registry` walk in `wake_on_send`.
@@ -921,7 +921,7 @@ ex.shutdown()
 
 /// W7-58, THE JUDGE FENCE (R3). Two stuck nurseries and NOT ONE polling party: the top-level
 /// `parallel:` owner and the eager job that opened its own `parallel:` are both sitting in
-/// `mn_worker_loop`, which never calls `block_halt_check`. So with the party registration alone this
+/// `mn_worker_loop`, which never calls `block_halts`. So with the party registration alone this
 /// program still hangs — nobody ever ASKS the verdict. An idle worker of a quiesced sched therefore
 /// escalates to the process-wide question on the owner's behalf.
 ///
@@ -1330,43 +1330,15 @@ print(\"main done\")
     );
 }
 
-/// W7-13 — a healthy cap-1 handshake must be driven by WAKEUPS, not by the poll timeout.
+/// W7-13 — a cap-1 `Executor` handshake stays correct: 30 runs of a 200-value pipeline each print
+/// `sum 19900` and none hangs (120 s bound).
 ///
-/// `block_wait_tick` used to hand a freshly-taken `core.q` guard straight to `cv.wait_timeout` with no
-/// predicate. Its caller had already dropped that lock to attempt its `send`/`recv`, and then ran
-/// `block_halt_check` (which takes `exec_registry` + per-core `eager`) before re-taking it — so a
-/// consumer's `notify_all` landing in that window hit a condvar nobody was on yet and was lost, and
-/// the sender slept a whole `DEMOTE_POLL_BACKOFF` on a channel that already had room.
-///
-/// **This asserts on the DEFECT ITSELF, not on how long the pipeline took, and that is what makes it
-/// load-independent.** [`crate::vm::blocking::BLOCK_WAITS_SLEPT_WHILE_READY`] counts waits that burned a
-/// whole `DEMOTE_POLL_BACKOFF` tick and then woke to find the channel READY — the lost wakeup, in one
-/// number. `wait_timeout_while` re-evaluates the predicate under the guard after each inner wait, so
-/// `timed_out()` implies "still not ready" and that counter is structurally ZERO in a fixed build, on
-/// an idle machine and on a hammered one alike. Mutation-verified by reverting the call to the old
-/// bare `wait_timeout` (which has no such guarantee): **0 of 323 waits fixed, 309 of 1014 broken**,
-/// over these same 6 runs. The bug is that dense, so 6 runs replace the 30 the old timing bound
-/// needed, and the test costs 0.05 s instead of 0.21 s idle / 5.07 s loaded.
-///
-/// **Two earlier designs failed, and both are recorded here because neither failure is obvious.**
-///
-/// 1. **A wall-clock bound on 30 pipelines.** Mutation separation was real (0.14 s fixed vs 2.19 s
-///    broken on the release binary) but useless in the suite: the same 30 runs took **5.07 s** under
-///    an ordinary full `cargo test` at `RUST_TEST_THREADS=4` — CPU contention costs MORE than the bug
-///    does, so every bound loose enough not to fail on a busy machine also passed while the bug was
-///    live. It failed on every full-suite run, permanently.
-/// 2. **A process-global count of EXPIRED waits.** libtest runs the whole file in ONE process, and
-///    the eager tests a dozen slots away in name order each park a job on a `timer(200)` — ~40
-///    expired ticks apiece, onto the same global. That version passed alone, passed when the suite
-///    scheduled kindly, and FAILED at 24 under `--test-threads=8`; it had already reported one false
-///    green.
-///
-/// The counter used here is process-global too, and is immune to (2) for a reason worth stating: it
-/// counts only an event a healthy build CANNOT produce. A neighbour's honest 5 ms timer park is a
-/// wait that expired while genuinely not ready and never touches it; a neighbour could pollute this
-/// only by hitting the same defect, and then failing is the correct outcome. Since main is fiber 1
-/// (plan 2026-11-17) its waits park, so this program may reach `block_wait_tick` zero times; only
-/// the correctness half is kept (owner, 2026-11-17).
+/// History: `block_wait_tick` once handed a fresh `core.q` guard to a bare `cv.wait_timeout`, so a
+/// consumer's `notify_all` that landed before the wait was lost and the sender slept a whole
+/// `DEMOTE_POLL_BACKOFF` on a channel with room. A process-global counter of such lost wakeups
+/// guarded it. Since main is fiber 1 (plan 2026-11-17) this program's waits park, and plan
+/// 2026-11-18-every-wait-parks Task 6 deleted `block_wait_tick`, its counters and every in-place
+/// wait cell: no party waits on a condvar here, so only the correctness half is left.
 #[test]
 fn eager_handshake_is_driven_by_wakeups_not_by_the_poll_timeout() {
     let src = "
@@ -1387,9 +1359,6 @@ ex.shutdown()
     let entry = write_temp_chz("w713_handshake_wakeups", src);
     let (tx, rx) = std::sync::mpsc::channel();
     let e = entry.clone();
-    use std::sync::atomic::Ordering::Relaxed;
-    let waits0 = crate::vm::blocking::BLOCK_WAITS.load(Relaxed);
-    let stalls0 = crate::vm::blocking::BLOCK_WAITS_SLEPT_WHILE_READY.load(Relaxed);
     std::thread::spawn(move || {
         let mut bad = Vec::new();
         for _ in 0..30 {
@@ -1413,18 +1382,9 @@ ex.shutdown()
             panic!("the pipeline worker panicked — see the panic above this one")
         }
     };
-    let waits = crate::vm::blocking::BLOCK_WAITS.load(Relaxed) - waits0;
-    let stalls = crate::vm::blocking::BLOCK_WAITS_SLEPT_WHILE_READY.load(Relaxed) - stalls0;
     assert!(
         bad.is_empty(),
         "the pipeline must still be correct: {bad:#?}"
-    );
-    assert_eq!(
-        stalls, 0,
-        "{stalls} of {waits} blocking waits slept a full 5 ms poll tick and then woke to a channel \
-         that was ALREADY ready — a healthy handshake is driven by notifications, and W7-13's lost \
-         wakeup is the only thing that produces this (measured: 0 fixed, 309 of 1014 waits with \
-         `block_wait_tick` reverted to a bare `wait_timeout`, same 6 runs)"
     );
 }
 
@@ -1524,30 +1484,17 @@ match t.get():
     );
 }
 
-/// W7-13r(a) — an eager `wait:` block must be woken by its first arm, not by the poll timeout.
+/// W7-13r(a) — 300 gated `wait:` wakeups each receive their arm's value exactly once (`44850`),
+/// in the `plain` cell and in `skewed_even`, where `main` finds the value already queued on half the
+/// rounds (the W15-8 interleaving, with no host load). 60 s bound.
 ///
-/// `op_wait_poll`'s eager branch was a bare `thread::sleep(DEMOTE_POLL_BACKOFF)`, so EVERY wake cost a
-/// full 5 ms tick however fast the value arrived. It now waits on ARM 0's condvar with the tick as the
-/// timeout — the trick `demote_wait_block` already used for the same N-arms-no-single-condvar problem,
-/// which is why the earlier "this needs a new multi-channel wait primitive" note was wrong.
-///
-/// TICKET-270 -- the blocks floor is gated on `WAIT_ARM0_ENTRIES`: a `main` descheduled after
-/// `gate.send(true)` finds the value queued and never enters the block branch (W15-8: `got 149`,
-/// `got 178`, `got 229`). No entry skips the floor; any entry needs `blocks >= 1`. The `skewed_even`
-/// cell makes that interleaving on half the rounds with no host load.
-///
-/// Every blocking `wait:` wakeup must block on arm 0's condvar and none of them may sleep its
-/// whole tick with arm 0 already ready (TICKET-059: `WAIT_ARM0_BLOCKS` / `WAIT_ARM0_SLEPT_WHILE_READY`
-/// replace a wall-clock bound, which was NOT redundant — measured, a blind `thread::sleep(tick)`
-/// revert still prints `44850` and passes every output assertion, only the timing failed
-/// (`took 1.552389135s`), so the counted floor is what actually catches a reverted wakeup path: it
-/// falls from 300 to 0. `WAIT_ARM0_SLEPT_WHILE_READY` is zero by construction on a healthy build
-/// (`wait_timeout_while` re-checks the predicate under the guard before returning) and reads 3 under a
-/// plain `wait_timeout` revert (W7-13's own defect).
+/// History: `op_wait_poll`'s eager branch once slept a whole `DEMOTE_POLL_BACKOFF` per wake, then
+/// waited on arm 0's condvar; the `WAIT_ARM0_*` counters (TICKET-059, TICKET-270) guarded that
+/// branch. Since main is fiber 1 (plan 2026-11-17) every `wait:` here parks, so no run reached the
+/// branch (each printed `SKIP`). Plan 2026-11-18-every-wait-parks Task 6 deleted the branch and its
+/// counters with the in-place cells; the correctness half stays.
 #[test]
 fn an_eager_wait_block_is_woken_by_its_arm_not_by_the_poll_timeout() {
-    use crate::vm::blocking::{WAIT_ARM0_BLOCKS, WAIT_ARM0_ENTRIES, WAIT_ARM0_SLEPT_WHILE_READY};
-    use std::sync::atomic::Ordering::Relaxed;
     // `skewed_even` delays `main` between its `gate.send` and its `wait:` on even rounds, so `prod`
     // wins that race and `main` finds the value queued: the interleaving a descheduled `main` makes
     // under host load (W15-8), reproduced with no load.
@@ -1559,9 +1506,6 @@ fn an_eager_wait_block_is_woken_by_its_arm_not_by_the_poll_timeout() {
         ),
     ];
     for (name, skew) in cells {
-        let entries0 = WAIT_ARM0_ENTRIES.load(Relaxed);
-        let blocks0 = WAIT_ARM0_BLOCKS.load(Relaxed);
-        let stalls0 = WAIT_ARM0_SLEPT_WHILE_READY.load(Relaxed);
         // The `gate` handshake is what makes this test exercise the path at all: `cons` announces that it
         // is about to block, and only then does `prod` send. Without it `prod` races ahead, every `wait:`
         // finds its value already queued, and the block branch is never reached — measured: the vacuous
@@ -1603,30 +1547,13 @@ print(s)
         let outcome = rx.recv_timeout(std::time::Duration::from_secs(60));
         let _ = std::fs::remove_file(&entry);
         let (out, rdbg, failed) = outcome.expect("300 `wait:` wakeups did not finish in 60 s");
-        assert!(!failed, "the program must succeed: out={out:?} r={rdbg}");
+        assert!(
+            !failed,
+            "{name}: the program must succeed: out={out:?} r={rdbg}"
+        );
         assert_eq!(
             out, "44850\n",
-            "every arm value must still be received exactly once"
-        );
-        let entries = WAIT_ARM0_ENTRIES.load(Relaxed) - entries0;
-        let blocks = WAIT_ARM0_BLOCKS.load(Relaxed) - blocks0;
-        let stalls = WAIT_ARM0_SLEPT_WHILE_READY.load(Relaxed) - stalls0;
-        assert_eq!(
-            stalls, 0,
-            "{name}: an eager `wait:` slept its whole tick with arm 0 already ready -- the W7-13 lost \
-         wakeup is back (measured 0 fixed, 3 under a plain wait_timeout)"
-        );
-        if entries == 0 {
-            eprintln!(
-                "SKIP {name}: no `wait:` reached the block branch (main arrived after every send), so \
-             this run cannot tell a condvar wait from a blind sleep"
-            );
-            continue;
-        }
-        assert!(
-            blocks >= 1,
-            "{name}: {entries} `wait:` entries reached the block branch and none waited on arm 0's \
-         condvar -- a blind thread::sleep is back (measured 0 under that revert)"
+            "{name}: every arm value must still be received exactly once"
         );
     }
 }
@@ -1884,9 +1811,9 @@ ex.shutdown()
 /// host frame under it fell through to the inline-sleep. The exclusion was about the deadlock
 /// verdict being unable to JUDGE such a party — not about whether it may block — and a LIVE TIMER
 /// ARM removes that risk, because the wait provably ends at the deadline. The first fix was a
-/// separate `timed_block` term; TICKET-062 made it redundant, and `block::mode` now blocks every
-/// `OwnThread` `wait:` in place (`vm_wait_in_native_callback_no_sender_deadlocks` fences the
-/// no-timer half).
+/// separate `timed_block` term; TICKET-062 made it redundant. Since `main` is a fiber (plan
+/// 2026-11-17) the wait under a host frame demotes, the `Reentered` cell of `block::mode`
+/// (`vm_wait_in_native_callback_no_sender_deadlocks` fences the no-timer half).
 #[test]
 fn a_wait_timer_arm_in_a_native_callback_loses_to_a_sibling_value() {
     let src = "
@@ -1943,7 +1870,7 @@ ex.shutdown()
 /// | `cancel()` at 50 ms, job waiting on `timer(3000)` | `timer` printed, exit @ **3007 ms** | nothing printed, exit @ **57 ms** |
 ///
 /// Measured on release binaries built in separate target dirs. The block-in-place path re-checks
-/// `block_halt_check` (cancel included) once per tick, so the cancel now lands within one
+/// `block_halts` (cancel included) once per tick, so the cancel now lands within one
 /// `DEMOTE_POLL_BACKOFF` instead of one timer deadline — and the arm body never runs.
 #[test]
 fn a_timer_armed_eager_wait_is_cancellable_by_cancel() {

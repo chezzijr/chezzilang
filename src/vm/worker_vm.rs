@@ -68,8 +68,8 @@ impl Vm {
         // verdict must see every party of THIS run and none of any other's (`future.md` §2d step 0).
         worker.quiesce = Arc::clone(&self.quiesce);
         // W7-56 — and the sched registry, so a wake from a worker that holds NO sched of its own
-        // (every eager `Executor` job: this fn sets neither `mn` nor `mn_enlist_sched`) still reaches
-        // a fiber parked on one of the run's nurseries. See `Vm::sched_registry`.
+        // (this fn does not set `mn`) still reaches a fiber parked on one of the run's nurseries.
+        // See `Vm::sched_registry`.
         worker.sched_registry = Arc::clone(&self.sched_registry);
         // M1.4 — and the root registry, so every fiber built from this worker is listed in the run's.
         worker.root_registry = self.root_registry.clone();

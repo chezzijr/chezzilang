@@ -606,9 +606,8 @@ pub fn acquire_update_guard_within<'a>(
 /// B3.3-threads: `cv` is the real-OS-thread blocking primitive. A `recv` on an empty queue waits on
 /// `cv` (paired with `q`'s `Mutex`); a `send` `notify_all`s it after pushing. An ordinary M:N `recv`
 /// snapshot-parks the *fiber* instead and never touches `cv`. `cv` IS used by every party that
-/// blocks in place on its own thread: a party with no scheduler at all (top-level `main`, an eager
-/// `Executor` job — [`Vm::block_recv`]), and **D5 owe #3 Path C**, where a `recv` reached inside an
-/// M:N native callback can't snapshot-park, so the worker thread DEMOTES — it blocks in place on
+/// blocks in place on its own thread: **D5 owe #3 Path C**, where a `recv` reached under a host
+/// frame can't snapshot-park, so the worker thread DEMOTES — it blocks in place on
 /// `cv` and resumes when a sibling `send` `notify_all`s it (`MnSched::send_wake` + the non-mn
 /// `send`). The wait loop re-checks the queue / cancel / terminate on every wake
 /// (spurious-wakeup-safe; bounded poll).
@@ -1602,10 +1601,7 @@ impl ExecutorCore {
         *self.scope.lock().unwrap() = Some(super::EagerScope {
             sched,
             cancel: Arc::clone(&self.cancel),
-            drainer: None,
-            drainer_slot: None,
             scope: 0,
-            fiber_owned: false,
             more_scopes: Vec::new(),
         });
     }

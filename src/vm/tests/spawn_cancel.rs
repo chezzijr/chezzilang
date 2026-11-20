@@ -180,7 +180,7 @@ fn parallel_cpu_sibling_aborts_on_sibling_fault() {
 /// earlier version of this comment wrongly claimed "no timing race"). The surviving race was
 /// scheduler-side and AFTER the fault: the cancel trip and its `cancel_drain` sit two core-lock
 /// acquisitions apart, and an idle worker's deadlock check landing in that gap used to reap the
-/// still-parked consumer as `Deadlocked`, dropping it WITHOUT `unwind_deferred` — so this printed
+/// still-parked consumer as `Deadlocked`, dropping it WITHOUT a `defer` drain — so this printed
 /// `0` roughly 35/200 runs under CPU contention. This test is the REGRESSION guard for that race
 /// under the run's one verdict ([`MnSched::on_deadlock`]): a failure here is a scheduler bug, not a
 /// flaky token.
@@ -218,13 +218,13 @@ fn parallel_spinning_sibling_does_not_hang_the_nursery_under_cancel() {
     assert_eq!(out, "42\n", "the spinner was cancelled and ran its defer");
 }
 
-/// N4 (second seam — `abort_enlisted_scope`): a cancelled task's `defer` must run when the cancel
-/// comes from an EARLY-ENLISTED outer nursery whose body ESCAPES past its join (here: a nested
-/// `parallel:` inside the outer body → `early_enlist_outer` seeds the outer scope's tasks as live
-/// fibers; the `return` then escapes → `drain_escaped_nursery` → `abort_enlisted_scope`). That seam
-/// once left a window where a spurious DEADLOCK dropped the parked `task` fiber without
-/// `unwind_deferred` — its `defer` never ran, invisibly (`abort_enlisted_scope` discards the reduce,
-/// so not even the bogus `Deadlocked` surfaced). It trips the cancel FIRST
+/// N4 (second seam — once `abort_enlisted_scope`): a cancelled task's `defer` must run when the
+/// cancel comes from an outer nursery whose body ESCAPES past its join with a nested `parallel:`
+/// inside it (`drain_escaped_nursery`). The early-enlist seam this was written for (the outermost
+/// builder seeded the outer scope's tasks as live fibers) once left a window where a spurious
+/// DEADLOCK dropped the parked `task` fiber without a `defer` drain — its `defer` never ran,
+/// invisibly. That builder is gone (plan 2026-11-18-every-wait-parks Task 6: `main` is a fiber,
+/// so both nurseries are fiber-owned scopes); the abort trips the cancel FIRST
 /// (`MnSched::trip_scope_cancel`, under the core lock).
 ///
 /// `gate` (the nested nursery's task) consumes the token `task` sends only AFTER registering its
@@ -249,7 +249,7 @@ fn parallel_defer_runs_when_enlisted_nursery_escapes() {
 /// `Fault` via `run_one_fiber`'s `catch_unwind` fallback. Without a trip of its scope cancel the scope
 /// aborts with `cancel == false`: `cancel_drain` requeues the parked siblings, they re-run `recv`,
 /// `park`'s gap re-check sees no cancel and PARKS THEM AGAIN, and the run's deadlock verdict ends
-/// them without `unwind_deferred` — their `defer`s silently skipped, hidden behind the panic-fault
+/// them without a `defer` drain — their `defer`s silently skipped, hidden behind the panic-fault
 /// (`reduce_task_slots` ranks Fault > Deadlocked). `MnSched::finish_with` is the one trip of a task's
 /// aborting end, so the grid holds every outcome kind: a `Fault` (a panic's included) and an `Exit`
 /// trip the flag the fiber ran under, under the core lock with the slot; the others trip nothing.
@@ -347,7 +347,7 @@ fn an_aborting_outcome_trips_the_fibers_cancel_at_finish() {
 /// recv path). `worker` (inline) registers `defer cleanup(s)`, signals `trigger` it has started,
 /// then spins; cancelled mid-loop, the unwind must run the defer (writing 42). Regression guard:
 /// a raw `return Err` from the loop top would bypass the defer machinery — this asserts the
-/// cancel unwinds through `unwind_deferred`. (Without the fix this prints `0`.)
+/// cancel unwinds through the `defer` drain. (Without the fix this prints `0`.)
 #[test]
 fn parallel_defer_runs_on_back_edge_cancel() {
     let src = "import Shared from std.concurrency\nfn cleanup(s: Shared[int]):\n    s.set(42)\n\
@@ -542,9 +542,12 @@ fn golden_parallel_cross_nursery_fanout_chz_matches_expected() {
 }
 
 /// Cross-nursery flat scheduler — an INLINE-BODY `send` (issued on the builder VM, `self.mn ==
-/// None`, sched held only in `mn_enlist_sched`) must wake an enlisted, parked outer sibling. Before
+/// None`, sched held only by the builder) must wake an enlisted, parked outer sibling. Before
 /// the routing fix this false-faulted `deadlock` under `--parallel` (value queued, receiver never
 /// made runnable); the right output is "O got 42". 30s watchdog.
+/// The inline builder and the sched it held are gone (plan 2026-11-18-every-wait-parks
+/// Task 6): `main` is a fiber, so every nursery here is a fiber-owned scope and the wait parks;
+/// the test keeps the program and its expected outcome.
 #[test]
 fn golden_parallel_cross_nursery_inline_send_chz_matches_expected() {
     let src = include_str!("../../../examples/parallel_cross_nursery_inline_send.chz");
@@ -635,6 +638,9 @@ fn parallel_cross_nursery_independent_3level_runs_all() {
 /// removing the gate alone clobbered the held sched). The middle nursery is early-enlisted, then
 /// refilled by a `spawn:` after `inner()`; that late task runs at the join on the HELD sched as a
 /// fresh trailing scope. Must print the literal line multiset (incl. "M2"). 30s watchdog.
+/// The inline builder and the sched it held are gone (plan 2026-11-18-every-wait-parks
+/// Task 6): `main` is a fiber, so every nursery here is a fiber-owned scope and the late task runs on it;
+/// the test keeps the program and its expected outcome.
 #[test]
 fn parallel_cross_nursery_late_spawn_into_middle_runs() {
     let src = "fn inner():\n    spawn:\n        print(\"inner\")\nfn mid():\n    parallel:\n        spawn:\n            print(\"M1\")\n        inner()\n        spawn:\n            print(\"M2\")\nfn main():\n    parallel:\n        spawn:\n            print(\"O1\")\n        mid()\n    print(\"done\")\nmain()\n";

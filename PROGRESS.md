@@ -41,14 +41,16 @@ per test: the test fails, its tasks are dropped, a guard one held is released `C
 of the file runs. Main runs as fiber 1, and an Executor's jobs run on the root sched's workers.
 Grids: `tests/awake_count_grid.rs`, `tests/wait_counts_grid.rs`, `tests/cut_release_grid.rs`.
 
-A wait inside a callback parks, as in Go. A hook, an operator, an f-string part, `print`'s `str`, a
-HOF callback, a sort comparator, a `from_iter` drain, a `Shared`/`RwShared` closure and a generator
-body run as frames with a `RetAction` (`src/vm/ret_action.rs`). A `defer` drain is a trampoline
-frame (`src/vm/defer_drain.rs`). The nested container walks, map/set probes, `json.decode` defaults
-and FFI callbacks still re-enter and wait in place, which counts awake, so a deadlock there hangs
-(`gaps.md` W23-1). Grid: `tests/callback_park_grid.rs`. A guard wait and `Executor.shutdown()` park
-too, and a guard holder is preempted: every op of `tests/blocking_context_grid.rs` but `stdin` runs
-with `demotes=0`.
+Every wait in user code parks its fiber, as every Go goroutine wait goes through `gopark`
+(2026-11-20, plan `2026-11-18-every-wait-parks`). A hook, an operator, a nested `==`/`str`/`<`
+walk, a HOF callback (a native callee too), a sort comparator, a `from_iter` or `ch.iter()` drain,
+a `json.decode` default, a `Shared`/`RwShared` closure and a generator body run as frames with a
+`RetAction` (`src/vm/ret_action.rs`); every `defer` drain, a hard halt's included, is a trampoline
+frame (`src/vm/defer_drain.rs`). Only a map/set probe hook and an FFI callback keep a host frame:
+their wait demotes and counts awake, so a deadlock there hangs (`gaps.md` W23-1); stdin demotes and
+a C call blocks in place. A guard wait and `Executor.shutdown()` park too, and a guard holder is
+preempted: every op of `tests/blocking_context_grid.rs` (two contexts, `Park` and `Reentered`) but
+`stdin` runs with `demotes=0`. Grid: `tests/callback_park_grid.rs`.
 
 The checker has a non-fatal warning channel (`Severity::Warning`, `"severity"` in `--errors=json`,
 `DiagnosticSeverity::WARNING` in the LSP). It has five rules:
@@ -77,8 +79,10 @@ file (`tests/source_layout.rs`), facts 1-9, builtin dispatch by id, one redeclar
 workspace crates, the blocking-point table (`block::wait_steps`), the boundary-block table
 (`boundary::RULES`) and one deadlock check (2026-11-18, phase 3 of the Go runtime model, pulled
 first: the per-scope, per-sched and family judges, the lock-cycle and re-entry checks and the
-`is_deadlock` error field are gone). Next in that model: phase 1 (operator walks as frames,
-hard-halt drains), resumed from its paused plan.
+`is_deadlock` error field are gone), and phase 1, every wait parks (2026-11-20: the nested
+walks, native callees, drains, json defaults and hard-halt drains as frames; the block table down
+to two contexts; the builder nursery, `pool.rs` and `runner_cache.rs` deleted). Next in that model:
+phase 2 (cancel as a wake) and phase 4 (`Executor` in `std`), each with its own plan.
 
 ## What is next
 

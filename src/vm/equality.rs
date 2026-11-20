@@ -4,7 +4,6 @@
 use super::arith::cmp_int_f64;
 use super::arith::float_order;
 use super::*;
-use crate::base::hooks::Hook;
 
 impl Vm {
     pub(super) fn compare(&self, l: Value, r: Value) -> Option<std::cmp::Ordering> {
@@ -60,13 +59,13 @@ impl Vm {
     /// change: for every other value raw-word equality already implied `==`.
     ///
     /// NOT for the `==` OPERATOR — bare `nan == nan` must stay false (Python parity). Use this only
-    /// where an element/field/entry is being matched (`in`, `index_of`, `has`, and the recursive arms
-    /// of [`Self::values_equal_guarded`]); the operator's own entry point calls the worker directly.
+    /// where an element/field/entry is being matched (a map/set probe, the set algebra); the
+    /// walk's own element compares and the list scans take [`Self::elem_run`].
     ///
     /// `&mut self` since M23: the worker can dispatch a user `eq(self, o: Self) -> bool`, which
-    /// re-enters the VM. The identity short-circuit below still runs FIRST, so an element compared
-    /// against itself never reaches user code (CPython's `PyObject_RichCompareBool`, which the
-    /// `==` OPERATOR deliberately does not share — see [`Self::values_equal_guarded`]).
+    /// re-enters the VM (synchronously here). The identity short-circuit still runs FIRST, so an
+    /// element compared against itself never reaches user code (CPython's
+    /// `PyObject_RichCompareBool`, which the `==` OPERATOR deliberately does not share).
     #[inline]
     pub(super) fn elem_equal(
         &mut self,
@@ -75,46 +74,14 @@ impl Vm {
         depth: usize,
         span: Span,
     ) -> Result<bool, RuntimeError> {
-        #[cfg(test)]
-        super::ELEM_COMPARES.with(|c| c.set(c.get() + 1));
-        if l == r {
-            return Ok(true);
-        }
-        self.values_equal_guarded(l, r, depth, span)
-    }
-
-    /// First index in `hay` structurally-equal to `needle`, or `None`. Depth-fault propagating
-    /// (`?`), so a cyclic operand raises the same recoverable "maximum structural depth" fault as
-    /// `==` instead of silently comparing unequal. Allocation-free flat scan.
-    ///
-    /// `hay` must NOT be borrowed out of `self.heap` (M23: `elem_equal` takes `&mut self`) — every
-    /// caller already passes a cloned/local element vec. For a heap Map/Set use
-    /// [`Self::map_probe`] / [`Self::set_probe`], which re-read the container per candidate.
-    ///
-    /// Roots `hay` + `needle` HERE rather than at each of the four call sites: the callers root the
-    /// source list and the needle, which does NOT keep the cloned elements alive once a re-entrant
-    /// `eq` empties that list. One guard in the shared scan covers `in`, `contains`, `index_of` and
-    /// `unique` alike.
-    #[inline]
-    pub(super) fn seq_slot(
-        &mut self,
-        hay: &[Value],
-        needle: Value,
-        span: Span,
-    ) -> Result<Option<usize>, RuntimeError> {
-        self.with_elem_roots(hay, &[needle], |vm| {
-            for (i, v) in hay.iter().enumerate() {
-                if vm.elem_equal(*v, needle, 0, span)? {
-                    return Ok(Some(i));
-                }
-            }
-            Ok(None)
-        })
+        let eq = self.elem_run(l, r, depth, None, span)?;
+        Ok(eq.expect("a walk with no continuation answers"))
     }
 
     /// First candidate position in a LOCAL (not-yet-heap) Set's `entries` whose element structurally
     /// equals `key`, or `None`. `cands` are `candidates(hash(key))` positions; `entries[p].1` is the
-    /// element. Depth-fault propagating (see [`Self::seq_slot`]).
+    /// element. Depth-fault propagating (`?`): a cyclic operand raises the same recoverable
+    /// "maximum structural depth" fault as `==`.
     ///
     /// Only for a `SetData` the caller owns (a half-built literal / set-algebra result). A Set that
     /// already lives on the heap must go through [`Self::set_probe`].
@@ -127,7 +94,7 @@ impl Vm {
         span: Span,
     ) -> Result<Option<usize>, RuntimeError> {
         // The local's elements live only in the caller's Rust-local `SetData` — root them across the
-        // (re-entrant) compare, exactly as [`Self::seq_slot`] does for a cloned element vec.
+        // (re-entrant) compare.
         let elems: Vec<Value> = if self.eq_may_reenter() {
             entries.iter().map(|(_, e)| e).collect()
         } else {
@@ -145,7 +112,7 @@ impl Vm {
 
     /// First candidate position in a LOCAL (not-yet-heap) Map's `entries` whose key structurally
     /// equals `key`, or `None`. `cands` are `candidates(hash(key))` positions; `entries[p].1` is the
-    /// stored key. Depth-fault propagating (see [`Self::seq_slot`]).
+    /// stored key. Depth-fault propagating (see [`Self::set_slot`]).
     ///
     /// Only for a `MapData` the caller owns; a heap Map must go through [`Self::map_probe`].
     #[inline]
@@ -323,21 +290,16 @@ impl Vm {
         self.program.any_eq_hook
     }
 
-    /// Root the ELEMENTS of two cloned element/field/entry vecs across `f` — the container-equality
+    /// Root the ELEMENTS of two cloned element/entry vecs across `f` — a local set/map probe's
     /// shape, and a no-op when no `eq` can re-enter (see [`Self::eq_may_reenter`]).
     ///
-    /// Rooting the two source CONTAINERS is not enough. A container-equality arm snapshots the child
-    /// handles into a Rust local and then walks it; a re-entrant `eq` that empties the sources
-    /// orphans every child still to be compared, and the next `heap.get` on one of them is a
-    /// `dangling GcRef` abort (or, before the collection catches up, a compare against a recycled
-    /// object — equality that depends on GC timing). The children are what the walk actually holds,
-    /// so the children are what gets pinned; the containers are pinned transitively by whatever
-    /// rooted the top of the walk. Inductive down the recursion: each level roots the children it
-    /// hands to the next.
-    /// `#[inline(never)]` is MEASURED, not decoration: inlining the six container-arm closures back
-    /// into `values_equal_guarded` bloats it enough to cost the neighbouring codegen **+3.3% on the
-    /// `struct` bench** — a bench with no `==` in it at all. Keeping the walks out of line puts every
-    /// bench back to flat (`docs/contributing/benchmarks.md`).
+    /// Rooting the source CONTAINER is not enough: the probe holds the child handles in a Rust
+    /// local, and a re-entrant `eq` that empties the source orphans every child still to be
+    /// compared (a `dangling GcRef` abort, or a compare against a recycled object). The `==` walk
+    /// roots its children in its level slots instead (`walk.rs`).
+    /// `#[inline(never)]` is MEASURED, not decoration: inlining the closures back into their
+    /// callers once cost the neighbouring codegen **+3.3% on the `struct` bench** — a bench with no
+    /// `==` in it at all (`docs/contributing/benchmarks.md`).
     #[inline(never)]
     pub(super) fn with_elem_roots<T>(
         &mut self,
@@ -373,23 +335,11 @@ impl Vm {
         out
     }
 
-    /// Depth-guarded structural equality — and, since M23, the single place a user
-    /// `eq(self, o: Self) -> bool` is dispatched from, so EVERY consumer (the `==`/`!=` operator,
-    /// `in`, `index_of`, `unique`/`dedup`, map/set key probing, the recursive `List`/`Tuple`/`Map`/
-    /// `Set`/`Struct`/`Enum` arms) inherits it. Returns `Err` (recoverable) once recursion exceeds
-    /// [`MAX_STRUCTURAL_DEPTH`] — guarding against cyclic data structures overflowing the host stack.
-    ///
-    /// The hook is dispatched BEFORE the `ha == hb` identity short-circuit: CPython's `do_richcompare`
-    /// has no identity fast path either, so `x == x` really does call the user's `eq`. Containers get
-    /// the identity shortcut from [`Self::elem_equal`] instead (CPython's
-    /// `PyObject_RichCompareBool`), which never reaches this function for an identical pair.
-    ///
-    /// `MAX_STRUCTURAL_DEPTH` is threaded through the structural recursion, and the guard tests
-    /// `walk_base + depth` — so a user `eq` that itself compares does NOT restart at 0: it continues
-    /// on the SAME budget (see [`Vm::walk_base`]), CPython's model. Call depth alone never rescues
-    /// this: the repro that motivated the fix (W8-43) dies at hook-nesting depth ~5 000 of a 10 000
-    /// `MAX_CALL_DEPTH` cap, because each of those 5 000 levels stacks a fresh 100-frame native walk
-    /// on the host stack — the call-depth guard counts the levels, not their product.
+    /// Depth-guarded structural equality, synchronous: [`Vm::eq_run`] with no continuation, so a
+    /// hooked pair's `eq` runs nested. The `==` operator, the list scans and the `eq` intrinsic
+    /// take the walk that parks; the map/set probes and the set algebra keep this one. Returns
+    /// `Err` (recoverable) once the walk exceeds [`MAX_STRUCTURAL_DEPTH`].
+    #[inline]
     pub(super) fn values_equal_guarded(
         &mut self,
         l: Value,
@@ -397,226 +347,8 @@ impl Vm {
         depth: usize,
         span: Span,
     ) -> Result<bool, RuntimeError> {
-        if self.walk_base + depth > MAX_STRUCTURAL_DEPTH {
-            return Err(self.depth_exceeded_err(span));
-        }
-        // Exact i64 equality when BOTH operands are integral (inline `Int` OR boxed `BigInt`) —
-        // Python parity. MUST precede the mixed arm below: the both-integral arm has already
-        // returned there, so at most one side of a mixed numeric pair is integral, and the other
-        // side is always a boxed float. The canonical-rep invariant (inline XOR boxed) makes this
-        // correct across kinds: an inline int and a boxed big-int are never equal.
-        if self.is_integral(l) && self.is_integral(r) {
-            return Ok(self.int_of(l) == self.int_of(r));
-        }
-        // Mixed int/float (`1 == 1.0` above 2^53) compares exactly via `cmp_int_f64`, never `as_f64`.
-        if self.is_integral(l) && self.is_numeric(r) {
-            return Ok(
-                cmp_int_f64(self.int_of(l), self.float_of(r)) == Some(std::cmp::Ordering::Equal)
-            );
-        }
-        if self.is_integral(r) && self.is_numeric(l) {
-            return Ok(
-                cmp_int_f64(self.int_of(r), self.float_of(l)) == Some(std::cmp::Ordering::Equal)
-            );
-        }
-        // float==float compares via f64 (so `nan == nan` stays `false`).
-        if self.is_numeric(l) && self.is_numeric(r) {
-            return Ok(self.float_of(l) == self.float_of(r));
-        }
-        match (l.view(), r.view()) {
-            (ValueView::Bool(a), ValueView::Bool(b)) => Ok(a == b),
-            (ValueView::Nil, ValueView::Nil) => Ok(true),
-            (ValueView::Obj(ha), ValueView::Obj(hb)) => {
-                // `Eq` protocol (M23): two values of one declared type that has the `eq` hook. Both operands are already GC-reachable from
-                // whatever rooted the top of this walk (`with_roots` at the entry points).
-                // `eq_hook_off` is `Atomic.cas`'s window (see the field's doc): a compare under the
-                // box's value lock must stay structural, whatever the checker did or did not see.
-                if !self.eq_hook_off && self.eq_hook_applies(l, r) {
-                    // The hook re-enters the VM and may start its own structural walk, so hand it
-                    // the depth this walk has already consumed — one shared budget (see
-                    // [`Vm::walk_base`]), not a fresh 10 000 per nesting level.
-                    let base = self.walk_base + depth;
-                    let res = self
-                        .guarded_walk(base, |vm| vm.invoke_hook(Hook::Eq, l, &[r], span))?
-                        .unwrap_or(Value::nil());
-                    return self.hook_bool(res, Hook::Eq, span);
-                }
-                if ha == hb {
-                    return Ok(true);
-                }
-                // Snapshot the element/entry handles out of the heap so the borrow is released before
-                // recursing through `&self` methods (mirrors the borrow discipline of the seq paths).
-                match (self.heap.get(ha), self.heap.get(hb)) {
-                    (Obj::Str(a), Obj::Str(b)) => Ok(a == b),
-                    (Obj::Bytes(a), Obj::Bytes(b)) => Ok(a == b),
-                    // `bytearray` equality is structural byte-equality. Cross-type `bytes ==
-                    // bytearray` is content-equal (Python parity: `b"a" == bytearray(b"a")` is true).
-                    (Obj::ByteArray(a), Obj::ByteArray(b)) => Ok(a.iter().eq(b.iter())),
-                    (Obj::Bytes(a), Obj::ByteArray(b)) => Ok(a.iter().copied().eq(b.iter())),
-                    (Obj::ByteArray(a), Obj::Bytes(b)) => Ok(a.iter().eq(b.iter().copied())),
-                    (Obj::List(a), Obj::List(b)) => {
-                        if a.len() != b.len() {
-                            return Ok(false);
-                        }
-                        let (a, b): (Vec<Value>, Vec<Value>) = (a.to_vec(), b.to_vec());
-                        self.with_elem_roots(&a, &b, |vm| {
-                            for (x, y) in a.iter().zip(&b) {
-                                if !vm.elem_equal(*x, *y, depth + 1, span)? {
-                                    return Ok(false);
-                                }
-                            }
-                            Ok(true)
-                        })
-                    }
-                    (Obj::Tuple(a), Obj::Tuple(b)) => {
-                        if a.len() != b.len() {
-                            return Ok(false);
-                        }
-                        let (a, b): (Vec<Value>, Vec<Value>) = (a.clone(), b.clone());
-                        self.with_elem_roots(&a, &b, |vm| {
-                            for (x, y) in a.iter().zip(&b) {
-                                if !vm.elem_equal(*x, *y, depth + 1, span)? {
-                                    return Ok(false);
-                                }
-                            }
-                            Ok(true)
-                        })
-                    }
-                    // Maps are unordered: equal iff same size and every (key, value) entry of `a` has
-                    // a structurally-equal match in `b` (mirrors the Set arm; the cached hash is unused).
-                    (Obj::Map(a), Obj::Map(b)) => {
-                        if a.entries.len() != b.entries.len() {
-                            return Ok(false);
-                        }
-                        let ae: Vec<(Value, Value)> =
-                            a.entries.iter().map(|(_, k, v)| (k, v)).collect();
-                        let be: Vec<(Value, Value)> =
-                            b.entries.iter().map(|(_, k, v)| (k, v)).collect();
-                        // Keys AND values are in flight here — flatten both sides for the roots.
-                        let flat = |e: &[(Value, Value)]| -> Vec<Value> {
-                            e.iter().flat_map(|&(k, v)| [k, v]).collect()
-                        };
-                        let (af, bf) = if self.eq_may_reenter() {
-                            (flat(&ae), flat(&be))
-                        } else {
-                            (Vec::new(), Vec::new())
-                        };
-                        self.with_elem_roots(&af, &bf, |vm| {
-                            for (ka, va) in &ae {
-                                let mut found = false;
-                                for (kb, vb) in &be {
-                                    if vm.elem_equal(*ka, *kb, depth + 1, span)?
-                                        && vm.elem_equal(*va, *vb, depth + 1, span)?
-                                    {
-                                        found = true;
-                                        break;
-                                    }
-                                }
-                                if !found {
-                                    return Ok(false);
-                                }
-                            }
-                            Ok(true)
-                        })
-                    }
-                    // Sets are unordered: equal iff same size and every element of `a` is in `b`.
-                    (Obj::Set(a), Obj::Set(b)) => {
-                        if a.entries.len() != b.entries.len() {
-                            return Ok(false);
-                        }
-                        let ae: Vec<Value> = a.entries.iter().map(|(_, x)| x).collect();
-                        let be: Vec<Value> = b.entries.iter().map(|(_, x)| x).collect();
-                        self.with_elem_roots(&ae, &be, |vm| {
-                            for x in &ae {
-                                let mut found = false;
-                                for y in &be {
-                                    if vm.elem_equal(*x, *y, depth + 1, span)? {
-                                        found = true;
-                                        break;
-                                    }
-                                }
-                                if !found {
-                                    return Ok(false);
-                                }
-                            }
-                            Ok(true)
-                        })
-                    }
-                    (
-                        Obj::Struct {
-                            tid: ta,
-                            fields: fa,
-                        },
-                        Obj::Struct {
-                            tid: tb,
-                            fields: fb,
-                        },
-                    ) => {
-                        // Positional structural compare: the `ta != tb` guard preserves type
-                        // distinction (same tid ⇒ same StructDef ⇒ identical field order), so a
-                        // by-position value compare suffices — no per-field name clone needed. Equal
-                        // tid ⟹ same struct type (tids are dense per-type ids), one int compare.
-                        if ta != tb || fa.len() != fb.len() {
-                            return Ok(false);
-                        }
-                        let fa: Vec<Value> = fa.to_vec();
-                        let fb: Vec<Value> = fb.to_vec();
-                        self.with_elem_roots(&fa, &fb, |vm| {
-                            for (va, vb) in fa.iter().zip(&fb) {
-                                if !vm.elem_equal(*va, *vb, depth + 1, span)? {
-                                    return Ok(false);
-                                }
-                            }
-                            Ok(true)
-                        })
-                    }
-                    (
-                        Obj::Enum {
-                            variant_id: va,
-                            payload: pa,
-                        },
-                        Obj::Enum {
-                            variant_id: vb,
-                            payload: pb,
-                        },
-                    ) => {
-                        // M19 lever #2 — equal `variant_id` ⟹ same enum type AND variant (ids are
-                        // globally unique per (enum, variant) pair), so this one int compare subsumes the
-                        // old `ty == ty && variant == variant`.
-                        if va != vb || pa.len() != pb.len() {
-                            return Ok(false);
-                        }
-                        let pa: Vec<Value> = pa.to_vec();
-                        let pb: Vec<Value> = pb.to_vec();
-                        self.with_elem_roots(&pa, &pb, |vm| {
-                            for (x, y) in pa.iter().zip(&pb) {
-                                if !vm.elem_equal(*x, *y, depth + 1, span)? {
-                                    return Ok(false);
-                                }
-                            }
-                            Ok(true)
-                        })
-                    }
-                    // Two first-class builtin-fn values are equal iff they name the SAME builtin. Each
-                    // value-position use emits a fresh `Op::LoadBuiltin` → a distinct handle, so the
-                    // `ha == hb` identity short-circuit above never fires; compare by name instead
-                    // (derived `PartialEq` on the `Rc<str>` name).
-                    (Obj::Builtin(a), Obj::Builtin(b)) => Ok(a == b),
-                    // Boxed scalars compare by value, identically to the inline `Int`/`Float` arms.
-                    (Obj::BigInt(a), Obj::BigInt(b)) => Ok(a == b),
-                    (Obj::FloatBox(a), Obj::FloatBox(b)) => Ok(a == b),
-                    // TICKET-177: a handle (or a `ptr`) is equal iff it names the same core, its
-                    // `Obj::identity` key. Two slots can wrap one core, so the `ha == hb`
-                    // shortcut above is only the fast path. Anything else reaching here is
-                    // a kind mismatch or a `Slot` object in another slot: unequal.
-                    (a, b) => Ok(matches!(
-                        (a.identity(), b.identity()),
-                        (Identity::Core(x), Identity::Core(y)) if x == y
-                    )),
-                }
-            }
-            _ => Ok(false),
-        }
+        let eq = self.eq_run(l, r, depth, None, span)?;
+        Ok(eq.expect("a walk with no continuation answers"))
     }
 
     /// Total order over scalar values for `sort()`. The checker restricts `sort` to a homogeneous

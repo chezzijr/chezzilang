@@ -3,12 +3,13 @@
 use super::*;
 
 /// Process-wide lock serializing the `--max-heap` tests that submit hundreds of jobs to a real
-/// `Executor` (`vm::pool` is a single process-wide `OnceLock`, shared by every test in the
-/// process — same shape as `native::rand::TEST_RNG_LOCK` / `vm::TEST_WORKER_LOCK`). Two of these
-/// tests running concurrently (the default under `cargo test`'s multi-threaded harness) both
-/// flood the ONE shared pool at once, so a job that would normally dispatch and finish almost
-/// immediately instead queues behind a SIBLING test's few hundred jobs. That queue backlog is
-/// real, accounted memory (`ExecutorCore::pending`), not a measurement bug — and it is
+/// `Executor` (the run's workers come from one process-wide worker count and runner budget,
+/// `width::RUNNERS`, shared by every test in the process — same shape as
+/// `native::rand::TEST_RNG_LOCK` / `vm::TEST_WORKER_LOCK`). Two of these tests running concurrently
+/// (the default under `cargo test`'s multi-threaded harness) both flood the ONE shared runner
+/// budget at once, so a job that would normally dispatch and finish almost immediately instead
+/// queues behind a SIBLING test's few hundred jobs. That queue backlog is real, accounted memory
+/// (`ExecutorCore::pending`), not a measurement bug — and it is
 /// indistinguishable in total bytes from the retention regression these tests exist to catch
 /// (both are `job_count × payload_size`), so no cap value or payload size can tell them apart
 /// while they race. Measured: `executor_results_are_not_retained` alone passes 100% (10/10, both
@@ -284,13 +285,14 @@ struct Suite:
     );
 }
 
-// `chz_suite_passes` moved to `tests/chz_suite.rs` (Task 7b): `vm::pool` is one process-wide
-// `OnceLock`, and running the whole `tests/chz` dogfood suite inside this shared lib-test binary
-// meant it contended with ~4150 unrelated tests for that one pool under `RUST_TEST_THREADS=4` —
-// measured 8/8 failures on `cancel_interrupts_a_sleeping_job`'s wall-clock bound
-// (`tests/chz/stdlib/sleep_cancel_test.chz:45`). A dedicated integration-test binary gets the
-// pool to itself (cargo runs test binaries one at a time), matching the same fix already applied
-// to `executor_results_not_retained.rs` / `executor_reentrant_shutdown.rs` / `chezzi_threads_cli.rs`.
+// `chz_suite_passes` moved to `tests/chz_suite.rs` (Task 7b): `vm::pool` was one process-wide
+// `OnceLock` (since deleted; the worker count and the runner budget `width::RUNNERS` are
+// process-wide the same way), and running the whole `tests/chz` dogfood suite inside this shared
+// lib-test binary meant it contended with ~4150 unrelated tests for that one pool under
+// `RUST_TEST_THREADS=4` — measured 8/8 failures on `cancel_interrupts_a_sleeping_job`'s wall-clock
+// bound (`tests/chz/stdlib/sleep_cancel_test.chz:45`). A dedicated integration-test binary gets the
+// pool to itself (cargo runs test binaries one at a time), matching the same fix already applied to
+// `executor_results_not_retained.rs` / `executor_reentrant_shutdown.rs` / `chezzi_threads_cli.rs`.
 
 #[test]
 fn error_bucket_for_non_assert_fault() {
@@ -584,12 +586,12 @@ fn over_memory_counts_an_executor_result_backlog() {
 // `tests/executor_results_not_retained.rs`. At this test's 8 MB cap and ~1 MB per job, as few
 // as 8 of its OWN 300 submissions sitting queued-but-not-dispatched trips the cap — genuine,
 // correctly-accounted memory, not a measurement bug — so sharing this binary's ONE process-wide
-// `vm::pool` with its ~65 `executor`-named lib-test siblings made it fail 10/10 under
-// `RUST_TEST_THREADS=4`, and widening the cap only hid that (still 10/10 at 4× the cap; it did
-// not clear until the cap was within shouting distance of the FULL backlog, at which point a
-// genuine regression could no longer trip it either). See the new file's header for the full
-// evidence and the `EXEC_MEM_CAP_LOCK` doc above for the sibling family this paired with before
-// the move.
+// `vm::pool` (since deleted; the runner budget is process-wide the same way) with its ~65
+// `executor`-named lib-test siblings made it fail 10/10 under `RUST_TEST_THREADS=4`, and widening
+// the cap only hid that (still 10/10 at 4× the cap; it did not clear until the cap was within
+// shouting distance of the FULL backlog, at which point a genuine regression could no longer trip
+// it either). See the new file's header for the full evidence and the `EXEC_MEM_CAP_LOCK` doc
+// above for the sibling family this paired with before the move.
 
 /// W7-26r — the cap must be observed while the parent fiber is BLOCKED IN A JOIN, where it
 /// reaches no instruction boundary and so never sweeps. Both programs below build their payload
@@ -1341,14 +1343,14 @@ fn timeout_reaches_a_job_blocked_on_a_channel_and_on_wait() {
     // never reaches 0 (plan 2026-11-17: a partial deadlock hangs, as in Go), which restores the
     // accepted hang this test exists for.
     //
-    // Honest limit, verified by mutation (stub out the deadline read in `Vm::block_halt_check` and
+    // Honest limit, verified by mutation (stub out the deadline read in `Vm::block_halts` and
     // this still passes): what it now pins is the END-TO-END guarantee — a test whose `shutdown()`
     // is blocked still reaches a verdict, and control never falls through — not the eager path's
     // OWN deadline read in isolation. The spinner hard-halts on the deadline at its back-edge,
     // which trips the executor's cancel flag, and the blocked job can exit through THAT arm of the
     // same check. Isolating the eager read again needs a one-worker pool so the sibling never runs
-    // at all, and `chezzi test` has no `--threads` (the pool is a process-wide `OnceLock`, so it
-    // cannot be resized in-process either) — see gaps.md `W7-12r`.
+    // at all, and `chezzi test` has no `--threads` (the worker count is a process-wide `OnceLock`,
+    // so it cannot be resized in-process either) — see gaps.md `W7-12r`.
     for (name, body) in [
         (
             "blockrecv_test.chz",
@@ -1403,7 +1405,7 @@ fn timeout_aborts_a_sleeping_test_everywhere() {
     // W7-17 — the last two fixtures are the PARK mechanism, the one W7-16 left open and this test
     // was once named `..._on_every_block_in_place_path` to fence by omission: a `timer(ms)` wait
     // inside a `parallel:` nursery does not block in place, it snapshot-parks (`chan_recv_step`'s
-    // M:N timer branch, and `op_wait_poll`'s timer arm), so it reaches neither `block_halt_check`
+    // M:N timer branch, and `op_wait_poll`'s timer arm), so it reaches neither `block_halts`
     // nor a loop back-edge. Measured pre-fix: 3004 ms under `--timeout=300` for BOTH, with the
     // post-wait `assert false` running. **No runnable sibling in either fixture** — a spinning
     // sibling's own back-edge trips the deadline at 303 ms and hides the bug entirely, which is
@@ -1479,7 +1481,7 @@ fn timeout_aborts_a_sleeping_test_everywhere() {
 /// lesson (its fix shipped green while silently skipping every `defer`, because "did it stop
 /// promptly" is satisfied just as well by a task that skipped its cleanup); the wake-and-re-check
 /// mechanism preserves it because the fiber faults from INSIDE the VM and unwinds normally, where
-/// the run's deadlock verdict ends a task without `unwind_deferred`.
+/// the run's deadlock verdict ends a task without draining its `defer`s.
 ///
 /// `show_output` because a timed-out test's buffered stdout is hidden by default like any other
 /// test's — the `defer` output is there, it just needs the flag (verified: the same fixture also
@@ -1860,7 +1862,7 @@ fn timeout_aborts_a_joiner_whose_job_has_no_checkpoint() {
     assert!(text.contains("TIMED-OUT t"), "report:\n{text}");
     // The `sleep 2` is the discriminator: pre-fix the join waited the child out (measured 9 010 ms
     // with a `sleep 9`); post-fix it aborts at ~509 ms. Kept SHORT because this strands one
-    // process-global `vm::pool` worker for the child's whole lifetime after the test returns.
+    // process-global `blocking_pool` thread for the child's whole lifetime after the test returns.
     assert!(
         elapsed < std::time::Duration::from_secs(1),
         "the cap did not reach the joiner: {elapsed:?}; report:\n{text}"
@@ -2285,9 +2287,9 @@ fn over_memory_defer_is_still_capped_during_unwind() {
     }
 }
 
-/// A `--max-heap` abort drains its `defer`s synchronously, on the Rust stack. A wait in that drain
-/// that can never complete is still a deadlock: the run's one verdict ends it like any other
-/// asleep task (plan 2026-11-07-defer-drain-frames, Task 4).
+/// A `--max-heap` abort drains its `defer`s on frames, so a wait in that drain parks. One that can
+/// never complete is a deadlock: the run's one verdict ends it like any other asleep task, and the
+/// test stays over memory (plan 2026-11-07-defer-drain-frames, Task 4).
 #[test]
 fn a_wait_in_a_max_heap_defer_drain_is_judged() {
     let d = TmpDir::new();
@@ -2312,6 +2314,83 @@ fn a_wait_in_a_max_heap_defer_drain_is_judged() {
             && text.contains("task 1: recv() on an empty channel at ")
             && !text.contains("task 2:"),
         "a wait in a hard-halt defer drain that nobody can satisfy is a deadlock; report:\n{text}"
+    );
+}
+
+/// The `defer`s of a task that `--timeout` ends in an offloaded sleep, and a `defer` whose wait
+/// can never complete, as `(file, defer body)`.
+const TIMEOUT_DRAINS: [(&str, &str); 2] = [
+    (
+        "sleepdefer_test.chz",
+        "        time.sleep_ms(5)\n        print(\"DEFER-DONE\")\n",
+    ),
+    (
+        "stuckdefer_test.chz",
+        "        v := ch.recv()\n        print(\"GOT {v}\")\n",
+    ),
+];
+
+/// Runs `TIMEOUT_DRAINS[i]` under `--timeout=200` in a spawned task blocked in a sleep, and returns
+/// the report and how many workers demoted. Call it in a child test binary
+/// ([`crate::vm::rerun_in_child`]): the demote count is process-wide.
+fn run_timeout_drain(i: usize) -> (String, bool, usize) {
+    let (file, body) = TIMEOUT_DRAINS[i];
+    let d = TmpDir::new();
+    let f = d.write(
+        file,
+        &format!(
+            "import std.time\nch: Channel[int] = Channel[int](0)\nfn w():\n    defer:\n{body}    \
+             time.sleep_ms(60000)\ntest fn t():\n    parallel:\n        spawn w()\n"
+        ),
+    );
+    let before = crate::vm::demote_count();
+    let (text, passed) = run_tests_halt_watchdog(file, &f, 200, 0);
+    (text, passed, crate::vm::demote_count() - before)
+}
+
+/// A `--timeout` unwind drains its `defer`s on frames, as a fault's does: a wait in one parks the
+/// task (no worker demotes), and the test reports the timeout as the base binary does. A park past
+/// the deadline is cut at the park, inside a `defer` too (TICKET-286), so the `defer`'s sleep ends
+/// at once and its print never runs, as on the base binary.
+#[test]
+fn a_wait_in_a_timeout_defer_drain_parks() {
+    if crate::vm::rerun_in_child(module_path!(), "a_wait_in_a_timeout_defer_drain_parks") {
+        return;
+    }
+    let (text, passed, demotes) = run_timeout_drain(0);
+    assert!(!passed, "report:\n{text}");
+    assert!(
+        text.contains("TIMED-OUT t (")
+            && text.contains("sleepdefer_test.chz) test exceeded --timeout (200ms)")
+            && !text.contains("DEFER-DONE")
+            && !text.contains("deadlock"),
+        "report:\n{text}"
+    );
+    assert_eq!(
+        demotes, 0,
+        "the defer's wait must park, not demote; report:\n{text}"
+    );
+}
+
+/// A `defer` of a `--timeout` unwind that waits on a channel nobody sends to parks, and the deadline
+/// cuts that park (TICKET-286): the test times out, as on the base binary, and no worker demotes.
+#[test]
+fn a_stuck_timeout_defer_drain_times_out() {
+    if crate::vm::rerun_in_child(module_path!(), "a_stuck_timeout_defer_drain_times_out") {
+        return;
+    }
+    let (text, passed, demotes) = run_timeout_drain(1);
+    assert!(!passed, "report:\n{text}");
+    assert!(
+        text.contains("TIMED-OUT t (")
+            && text.contains("stuckdefer_test.chz) test exceeded --timeout (200ms)")
+            && !text.contains("GOT")
+            && !text.contains("deadlock"),
+        "report:\n{text}"
+    );
+    assert_eq!(
+        demotes, 0,
+        "the defer's wait must park, not demote; report:\n{text}"
     );
 }
 

@@ -425,17 +425,7 @@ impl Vm {
                         self.push(v);
                         Ok(())
                     }
-                    None => {
-                        // Render the key the same way a nested container element renders (quoted
-                        // `str`, bare `int`/etc — `stringify_nested_into`), rooted across the call
-                        // since a struct/enum key's `str()` display hook can re-enter the VM and GC.
-                        self.push(key);
-                        let mut ks = String::new();
-                        let r = self.stringify_nested_into(&mut ks, key, span, 0);
-                        self.pop();
-                        r?;
-                        Err(self.err(format!("key not found: {ks}"), span))
-                    }
+                    None => self.key_not_found(flat, key, span),
                 }
             }
             // A struct or enum with the `index` hook dispatches `obj[k]` to `index(self, k)`.

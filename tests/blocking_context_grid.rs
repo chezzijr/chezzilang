@@ -446,8 +446,8 @@ fn ops() -> Vec<Op> {
 /// The expected outcome of `op` in `ctx` with `sat`: `out`, unless a documented table cell
 /// (`docs/reference/concurrency/` "Blocking-context table") says otherwise.
 fn expect(op: &Op, ctx: &Ctx, sat: Sat, out: &'static str) -> Expect {
-    // TICKET-185: a full send (or a `wait:` send arm) in a Demote context blocks on its offer, as
-    // Go blocks — the old v1 `Refuse` cell is gone, so it takes the generic rule below.
+    // TICKET-185: a full send (or a `wait:` send arm) under a host frame blocks on its offer, as
+    // Go blocks, so it takes the generic rule below.
     // A stuck nested nursery leaves every task of the run asleep: Go faults, and so does every
     // context.
     if op.name == "nested" && sat == Sat::Nothing {

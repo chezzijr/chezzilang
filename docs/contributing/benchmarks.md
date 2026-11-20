@@ -314,6 +314,79 @@ spreads are wide; re-run on a quiet box before using a row as a baseline:
 No row is `SLOW`. The large drops (`churn2`, `churn8`, `deep_nurseries`, `rendezvous_pingpong`)
 were not sampled on a quiet box, so no cause is claimed for them here.
 
+### Every wait parks (2026-11-20)
+
+Plan `2026-11-18-every-wait-parks`: the nested `==`/`str`/`<` walks, native callees, iterable
+drains, json `default` thunks and hard-halt `defer` drains run as frames; the block table has two
+contexts; `pool.rs` and `runner_cache.rs` are gone. Release, `perf stat -e instructions:u`, median
+of 3, base `9c0f8f68` (phase 3) built in its own target dir, against the final tree. Budget: +1%
+per bench. The 13 rows at +1.00% to +1.63% were accepted by the owner (2026-11-20).
+
+| bench | base M instr | branch M instr | change |
+|---|---|---|---|
+| `benches/chz/closure.chz` | 21446.9 | 21683.3 | +1.10% |
+| `benches/chz/defer.chz` | 5321.3 | 5372.6 | +0.96% |
+| `benches/chz/empty.chz` | 9.7 | 9.7 | −0.29% |
+| `benches/chz/enum.chz` | 33696.2 | 34059.1 | +1.08% |
+| `benches/chz/fib.chz` | 4150.7 | 4201.8 | +1.23% |
+| `benches/chz/hof.chz` | 5959.3 | 5987.3 | +0.47% |
+| `benches/chz/hof_nursery.chz` | 6036.2 | 6064.2 | +0.46% |
+| `benches/chz/hook_dispatch.chz` | 2330.4 | 2365.6 | +1.51% |
+| `benches/chz/list.chz` | 7172.4 | 7252.2 | +1.11% |
+| `benches/chz/loop.chz` | 17928.8 | 18108.1 | +1.00% |
+| `benches/chz/many_list.chz` | 4921.5 | 4966.6 | +0.92% |
+| `benches/chz/many_map.chz` | 3539.7 | 3531.8 | −0.22% |
+| `benches/chz/many_struct.chz` | 6829.1 | 6859.3 | +0.44% |
+| `benches/chz/map.chz` | 2088.0 | 2072.9 | −0.72% |
+| `benches/chz/map_str.chz` | 3781.0 | 3756.8 | −0.64% |
+| `benches/chz/poly_method.chz` | 22461.6 | 22702.7 | +1.07% |
+| `benches/chz/primes.chz` | 11807.8 | 11943.4 | +1.15% |
+| `benches/chz/print_loop.chz` | 1621.5 | 1640.5 | +1.17% |
+| `benches/chz/str.chz` | 2063.4 | 2005.6 | −2.80% |
+| `benches/chz/struct.chz` | 8159.3 | 8248.0 | +1.09% |
+| `benches/chz/unique.chz` | 961.3 | 965.8 | +0.48% |
+| `benches/sched/body_and_spawn.chz` | 63432.3 | 63910.5 | +0.75% |
+| `benches/sched/burn8_nursery.chz` | 67888.2 | 68398.8 | +0.75% |
+| `benches/sched/churn2.chz` | 5770.8 | 5865.1 | +1.63% |
+| `benches/sched/churn8.chz` | 18709.5 | 18892.2 | +0.98% |
+| `benches/sched/deep_nurseries.chz` | 1173.6 | 1170.1 | −0.30% |
+| `benches/sched/executor_and_parallel.chz` | 68164.3 | 68676.6 | +0.75% |
+| `benches/sched/extern_abs.chz` | 606.1 | 601.2 | −0.80% |
+| `benches/sched/fan_open.chz` | 17496.2 | 17651.4 | +0.89% |
+| `benches/sched/guard_contend.chz` | 641.6 | 640.0 | −0.24% |
+| `benches/sched/rendezvous_pingpong.chz` | 4114.3 | 4089.8 | −0.59% |
+| `benches/sched/send_one_channel.chz` | 2203.3 | 2195.3 | −0.36% |
+| `benches/sched/spawn_fresh_graph.chz` | 1260.1 | 1243.6 | −1.32% |
+| `benches/sched/spawn_native_call.chz` | 6201.9 | 6083.4 | −1.91% |
+| `benches/sched/storm.chz` | 276.8 | 277.8 | +0.35% |
+| `benches/sched/trips.chz` | 148.0 | 147.5 | −0.34% |
+| `benches/sched/two_executors.chz` | 68408.4 | 68918.5 | +0.75% |
+
+Per task (M instructions, one run each; the counts are deterministic):
+
+| binary | `fib` | `loop` | `primes` | `struct` | `closure` |
+|---|---|---|---|---|---|
+| base (`9c0f8f68`) | 4150.7 | 17928.8 | 11807.8 | 8159.3 | 21449.5 |
+| after-1a | 4140.0 | 17928.9 | 11807.1 | 8159.3 | 21421.7 |
+| after-1b | 4156.2 | 17989.1 | 11875.4 | 8226.4 | 21537.7 |
+| after-2 | 4156.2 | 17989.2 | 11875.4 | 8226.4 | 21535.2 |
+| after-3 | 4177.7 | 18109.2 | 11942.3 | 8248.3 | 21641.3 |
+| after-4 | 4177.7 | 18109.1 | 11942.3 | 8248.4 | 21621.7 |
+| after-5 | 4150.8 | 17969.2 | 11852.7 | 8193.4 | 21495.7 |
+| after-6a | 4156.1 | 17968.5 | 11852.7 | 8193.1 | 21507.1 |
+| after-6c | 4177.5 | 18108.5 | 11941.9 | 8248.1 | 21612.2 |
+| after-6d | 4177.6 | 18108.2 | 11941.6 | 8248.0 | 21614.4 |
+| final | 4201.8 | 18108.2 | 11943.4 | 8248.0 | 21693.6 |
+
+No task adds work to the paths of `fib`, `loop` and `primes`. Their +1.0% to +1.2% comes from
+where the dispatch loop's code lands: `step`'s frame grew from 0x328 to 0x348 bytes in Task 1b,
+and the count moves per task with no feature on the path (after Task 5 it is near base). On this
+box (Broadwell E5-2680 v4) the hot VM code also runs at one of two speeds after unrelated edits:
+`list.chz` took about 2345M or 2450M cycles with a byte-identical `run_until`, and the
+legacy-decoder uops (`idq.mite_uops`, 439M against 658M) track it. So gate a change this small on
+`instructions:u`, not on cycles or wall time. The levers (shrink `step`/`run_until`, layout
+control) are in [`roadmap.md §4`](../design/roadmap.md#4-optimizations-open-levers).
+
 ### Method calls through one method table (2026-11-15)
 
 Plan `2026-11-15-error-origin-vm-method-ids`: a method call carries a `MethodId`, and one dense
@@ -432,5 +505,5 @@ GC is 0% on `fib`, `loop` and `primes`, and scalars are unboxed.
 | `xs += ys` on a `List` builds a new list (`x OP= v` is `x = x OP v`) | 20000 appends: 0.67 s vs 0.008 s for `push` | 2026-10 "TICKET-258" |
 | iterating a `Range` value (not the literal `a..b` loop) | about 3.3× the literal loop | 2026-10 "TICKET-253" |
 | T=1 channel hand-off through the runner gate | at most 1.3× (ping-pong), 1.05× (`primes_parallel`) | 2026-10 "TICKET-205" |
-| one OS drainer thread per nursery | a loop of 20 000 single-task nurseries +26% | 2026-08 "§2c1" |
 | `std.cancel` on a deep `derive()` chain (build + cancel) | superlinear in depth | 2026-08 "`std.cancel`" |
+| dispatch-loop code placement after plan `2026-11-18-every-wait-parks` | +1.0% to +1.6% instructions on 13 benches | 2026-11 "Every wait parks" |

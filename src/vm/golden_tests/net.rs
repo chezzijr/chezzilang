@@ -1089,12 +1089,10 @@ main()
 /// `Err` arm was taken and discarded `e.error()`, so it passed identically before and after the
 /// change and would not have noticed the engine losing its answer.
 ///
-/// The engine must report the kernel's refusal. `W7-59` narrowed the block-in-place gate to
-/// the eager-`Executor` job alone — NOT to the siblings' `Socket` gate. The difference is
-/// load-bearing: `accept`/`read` wait on a chezzi peer fiber that can only run on the very thread
-/// they would block, so refusing there prevented self-starvation (`W7-40` R1); a `connect`
-/// handshake is completed by the KERNEL, starves no chezzi party, and both ancestors block on it
-/// (CPython `socket.connect` 0.1 ms, Go `net.Dial` 314 µs from the main goroutine).
+/// The engine must report the kernel's refusal. `W7-59` once narrowed the `connect` refusal to
+/// the eager-`Executor` job alone (since gone: a job is a fiber and parks): a `connect` handshake
+/// is completed by the KERNEL, starves no chezzi party, and both ancestors block on it (CPython
+/// `socket.connect` 0.1 ms, Go `net.Dial` 314 µs from the main goroutine).
 ///
 /// Guards the bounded-wait property too: a regression to an unbounded wait on a non-completing
 /// handshake surfaces as the watchdog timeout below.
@@ -1406,11 +1404,9 @@ main()
     );
 }
 
-/// Per-connection spawn — the DEGENERATE eager nursery: a `parallel:` body (entered eagerly under
-/// `--parallel` inside a fiber) that injects NOTHING. `activate_eager_nursery` builds a `total==0`
-/// sched with `body_open`; `JoinNursery` must `close_body` and have the inline worker terminate
-/// immediately (`done==0==total`) and join the drainer — not hang on the empty sched. Pins the
-/// `body_open` → `close_body` → terminate handshake on the empty path.
+/// Per-connection spawn — the DEGENERATE nursery: a `parallel:` body inside a fiber that injects
+/// NOTHING. `activate_fiber_owned_nursery` registers a `total==0` scope; `JoinNursery` must find
+/// its family done at once (`done==0==total`) and go on — not hang on the empty scope.
 #[test]
 fn eager_nursery_with_zero_spawns_completes() {
     if std::thread::available_parallelism()
@@ -1436,11 +1432,11 @@ fn eager_nursery_with_zero_spawns_completes() {
     );
 }
 
-/// Per-connection spawn — CONCURRENT eager nurseries (the pool-exhaustion regression): four
-/// independent servers each run their OWN eager per-connection-spawn nursery at once. Because each
-/// eager nursery drains on a DEDICATED raw OS thread (not the bounded process pool), they do not
-/// starve each other — with the earlier pool-farmed design, four long-running eager drainers would
-/// exhaust a core-sized pool and hang (undetectably, since `body_open` vetoes the deadlock predicate).
+/// Per-connection spawn — CONCURRENT nurseries (the pool-exhaustion regression): four independent
+/// servers each run their OWN per-connection-spawn nursery at once. Every nursery's tasks are
+/// fibers of the run's one sched and park on the netpoller, so they do not starve each other — with
+/// the earlier pool-farmed design, four long-running drainers would exhaust a core-sized pool and
+/// hang.
 #[test]
 fn net_concurrent_eager_servers_do_not_exhaust_pool() {
     if std::thread::available_parallelism()

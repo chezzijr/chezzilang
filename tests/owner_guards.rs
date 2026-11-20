@@ -590,3 +590,73 @@ fn the_awake_count_has_four_writers() {
         bad.join("\n")
     );
 }
+
+/// Plan 2026-11-18-every-wait-parks Task 6: a host (Rust) frame under running code is the one
+/// thing that keeps a wait from parking, and it is counted in one place. `native_reentry` is
+/// declared on `Vm` (`vm/mod.rs`), written by `Vm::reentered` (`vm/exec.rs`) and read by
+/// `Vm::block_ctx` (`vm/block.rs`). `Vm::reentered`, `Vm::guarded` and `Vm::guarded_walk` (the
+/// ways in) are called only where code must run on the Rust stack: an FFI callback, a map/set
+/// probe hook, a structural walk with no frame to resume, the Rust-stack `defer` drain, and the
+/// `Inline` native / builtin callees of a HOF or box closure. Every other wait runs as a frame.
+#[test]
+fn a_host_frame_is_counted_in_one_place() {
+    const COUNTER: &[&str] = &["vm/mod.rs", "vm/exec.rs", "vm/block.rs"];
+    const CALLERS: &[(&str, &str)] = &[
+        ("vm/exec.rs", "defines the three"),
+        ("vm/host.rs", "an FFI callback: a C frame is under it"),
+        ("vm/hash.rs", "a map/set probe hook"),
+        (
+            "vm/walk.rs",
+            "a nested `==` with no frame to resume (`then: None`)",
+        ),
+        (
+            "vm/compare.rs",
+            "a nested `<` with no frame to resume (`then: None`)",
+        ),
+        (
+            "vm/display.rs",
+            "a nested `str` with no frame to resume (`then: None`)",
+        ),
+        ("vm/ret_action.rs", "`hook_op`'s fallback"),
+        (
+            "vm/call.rs",
+            "`run_one_deferred`, the Rust-stack `defer` drain",
+        ),
+        ("vm/list_hof.rs", "an `Inline` native or builtin HOF callee"),
+        (
+            "vm/shared_methods.rs",
+            "an `Inline` native or builtin box closure",
+        ),
+    ];
+    let src = Path::new("src");
+    let mut bad = Vec::new();
+    for path in rust_files(src) {
+        let rel = path.strip_prefix(src).unwrap();
+        if is_test_file(rel) {
+            continue;
+        }
+        let file = rel.to_string_lossy().replace('\\', "/");
+        let code = production_code(&fs::read_to_string(&path).unwrap(), false);
+        for (n, line) in code.lines().enumerate() {
+            let at = format!("src/{file}:{}", n + 1);
+            if idents(line).any(|w| w == "native_reentry") && !COUNTER.contains(&file.as_str()) {
+                bad.push(format!("{at}: names `native_reentry`"));
+            }
+            for name in ["reentered", "guarded", "guarded_walk"] {
+                let call = format!(".{name}(");
+                let calls = line.match_indices(&call).any(|(i, _)| {
+                    // `BlockCtx::reentered()` takes no argument: it reads the context.
+                    !line[i + call.len()..].starts_with(')')
+                });
+                if calls && !CALLERS.iter().any(|(f, _)| *f == file) {
+                    bad.push(format!("{at}: calls `Vm::{name}`"));
+                }
+            }
+        }
+    }
+    assert!(
+        bad.is_empty(),
+        "a host frame is counted by `Vm::reentered` alone, from the files in CALLERS:\n{}",
+        bad.join("\n")
+    );
+}

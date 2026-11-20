@@ -1,5 +1,4 @@
-//! VM: blocking waits: wait ticks, deadlines and halts, `block_recv`, `wait` polling
-//! and arms.
+//! VM: blocking waits: deadlines and halts, `wait` polling and arms.
 //! Split out of `src/vm/netio.rs`. `super::*` is the parent module.
 
 use super::core::{Pending, PendingOp, SendOutcome, Settled};
@@ -10,112 +9,16 @@ use super::quiesce::RunHalt;
 use super::*;
 
 impl Vm {
-    /// One tick of a blocking wait: honour the halts, then wait up to [`DEMOTE_POLL_BACKOFF`]. Shared
-    /// by [`Vm::block_recv`] and the blocking full-`send`.
-    ///
-    /// A job dispatched by an eager `submit` has no nursery scheduler and no [`MnSched`], and neither
-    /// does the top-level `main` thread, so their blocking ops used to fall to the "no scheduler" arms
-    /// and declare a deadlock on the spot. That verdict was TRUE while jobs only ran at the drain — the
-    /// submitter was blocked inside `shutdown()`, so no runnable task could send — and became a LIE the
-    /// moment jobs start at `submit`, because the submitter is still running and may send on the very
-    /// next statement. Both kinds of party BLOCK here instead, which is also what Python's
-    /// `ThreadPoolExecutor` does, and the *process-wide* verdict in [`crate::vm::quiesce`] decides when
-    /// there is really nobody left to feed them.
-    ///
-    /// The wait is a BOUNDED poll, not an untimed `cv.wait`, for the same reason
-    /// [`Vm::demote_recv_block`]'s is: a lost wakeup then costs latency instead of the whole run, and
-    /// the two halts that must stay un-swallowable get re-checked every tick. `--timeout` is checked
-    /// here explicitly because a blocked job never reaches `jump_checked`'s loop back-edge, which is
-    /// where every other path observes the deadline — without this, `chezzi test --timeout` could not
-    /// kill a job blocked forever on a channel, which is exactly the hang eager execution makes easier
-    /// to write.
-    ///
-    /// **W7-13 — `ready` is re-checked under the SAME lock hold that the wait consumes, and that is
-    /// the whole point of the parameter.** The caller has already tried its operation and failed, but
-    /// it dropped `core.q` to do so and then ran [`Vm::eager_halt_check`] (which takes `exec_registry`
-    /// and per-core `eager` locks — a wide window). A `notify_all` from a consumer landing anywhere in
-    /// that gap reaches a condvar NOBODY IS ON YET and is simply lost, so the caller then slept the
-    /// full [`DEMOTE_POLL_BACKOFF`] with its value already waiting. Measured on the 50-handoff cap-1
-    /// pipeline: 7 of 15 runs paid a whole extra 5 ms tick, in exact 5 ms quanta.
-    ///
-    /// `Condvar::wait_timeout_while` closes it — it evaluates the predicate under the guard BEFORE
-    /// sleeping, so a wakeup that arrived while the lock was free is observed instead of missed (and
-    /// it re-checks on spurious wakeups for free). It also re-checks the predicate AFTER each inner
-    /// wait, so `timed_out()` implies "still not ready" — which is what
-    /// [`BLOCK_WAITS_SLEPT_WHILE_READY`] (test builds only) turns into a load-independent regression
-    /// detector: revert this call to a bare `wait_timeout` and that counter goes nonzero.
-    ///
-    /// The wake it is waiting for was never missing:
-    /// [`Vm::wake_senders`] already fires on all six pop paths, and for an eager job it lands on
-    /// `core.cv`. `block_halt_check` MUST stay before the lock — the no-lock-cycle argument on
-    /// the process-wide verdict depends on the registry never being taken under `ChannelCore::q`.
-    ///
-    /// This only makes the CHANNEL conditions instant. The halts `block_halt_check` acts on — the
-    /// `--timeout` deadline, a cancel, the deadlock verdict — are not in any predicate and are still
-    /// observed once per tick, so cancellation is now the SLOWEST thing in this loop rather than the
-    /// fastest. That bound is unchanged by this fix, not introduced by it.
-    ///
-    /// The tick is one wait of `spec` (`Recv` or `Send`) on `on`: it holds no width permit and
-    /// counts as blocked, the halt check included ([`Vm::wait_begin`]). The counts end with the
-    /// tick, before the caller's next pop: a party still counted while it consumes a value is
-    /// counted as stuck at the instant it made progress (measured: a 300-handoff gate/data
-    /// pipeline, `an_eager_wait_block_is_woken_by_its_arm_not_by_the_poll_timeout`, faulted 6/10).
-    ///
-    /// M3.2 — `h` is the channel's handle, pinned for the wait: the collector reads the values in
-    /// `core` (a buffered value, this party's offer or its filled slot) through it. The receiver of
-    /// a `recv` may be a popped temporary, rooted by nothing else while this thread is detached.
-    pub(super) fn block_wait_tick(
-        &mut self,
-        spec: WaitSpec,
-        on: Blocked,
-        h: GcRef,
-        core: &Arc<ChannelCore>,
-        span: Span,
-        mut ready: impl FnMut(&mut crate::vm::core::ChanState) -> bool,
-    ) -> Result<(), RuntimeError> {
-        let gated = self.gated_register(&[core]);
-        let mut reg = self.wait_begin(spec, Some(on), "a channel wait", span)?;
-        let counts = reg.take_counts();
-        if let Err(e) = self.block_halt_check(span) {
-            self.wait_end(reg, &[h]);
-            drop(gated);
-            drop(counts);
-            return Err(e);
-        }
-        self.wait_door(&[h], |_| {
-            let q = core.q.lock().unwrap_or_else(|e| e.into_inner());
-            #[cfg_attr(not(test), allow(unused_mut))]
-            let (mut guard, waited) = core
-                .cv
-                .wait_timeout_while(q, DEMOTE_POLL_BACKOFF, |g| {
-                    !ready(g) && !super::width::reserved()
-                })
-                .unwrap_or_else(|e| e.into_inner());
-            #[cfg(test)]
-            {
-                BLOCK_WAITS.fetch_add(1, Ordering::Relaxed);
-                if waited.timed_out() && ready(&mut guard) {
-                    BLOCK_WAITS_SLEPT_WHILE_READY.fetch_add(1, Ordering::Relaxed);
-                }
-            }
-            drop((guard, waited));
-        });
-        self.wait_end(reg, &[h]);
-        drop(gated);
-        drop(counts);
-        Ok(())
-    }
-
     /// The `chezzi test --timeout` wall-clock halt, on its own so the ops that PARK a fiber can observe
     /// it too ([`Vm::chan_recv_step`], [`Vm::op_wait_poll`]) — a parked fiber reaches neither
-    /// `jump_checked`'s loop back-edge nor [`Vm::block_halt_check`], so without a checkpoint at the op
+    /// `jump_checked`'s loop back-edge nor [`Vm::block_halts`], so without a checkpoint at the op
     /// itself the deadline has no path to it at all (W7-17).
     ///
     /// Deliberately NOT gated on `native_reentry` (unlike the cancellation checkpoint it sits beside at
     /// those two call sites): a `--timeout` is a HARD abort that must always win, this only ever returns
-    /// `Err` — it never unwinds VM state — and `block_until_deadline` already returns this same error
-    /// from inside a native callback. Free when the cap is off: `Instant::now()` is read only when
-    /// `self.deadline` is `Some`.
+    /// `Err` — it never unwinds VM state — and the demoted waits' halt read (`block_halts`) already
+    /// returns this same error under a host frame. Free when the cap is off: `Instant::now()` is
+    /// read only when `self.deadline` is `Some`.
     pub(super) fn deadline_halt(&self, span: Span) -> Result<(), RuntimeError> {
         if let Some(dl) = self.deadline
             && std::time::Instant::now() >= dl
@@ -200,11 +103,15 @@ impl Vm {
         self.read_halts(read, span).map_or(Ok(()), Err)
     }
 
-    /// TICKET-200 — the one list of halts a party blocked in place observes, read with no lock held.
-    /// [`Vm::block_halt_check`] adds the deadlock verdict and the pool-slot yield;
-    /// [`Vm::guard_free_then_take`] reads it when the guard comes free; the in-place socket and
-    /// sleep waits in `sched.rs` read it directly. A new wait loop calls one of the two; it never
-    /// copies a rung.
+    /// TICKET-200 — the one list of halts a party blocked in place observes, read with no lock held:
+    /// every in-place wait loop calls it each tick, and [`Vm::guard_free_then_take`] reads it when
+    /// the guard comes free. A new wait loop calls it; it never copies a rung.
+    ///
+    /// TICKET-223 — it has no deadlock text of its own: a positive verdict is latched by
+    /// `QuiesceState::decide` and delivered by [`Vm::run_exit_err`] as one of its three causes (an
+    /// exit, a job fault, the verdict), with the report of the party site the latch recorded. An
+    /// in-place wait is awake and judges nothing: the run's awake count decides a deadlock
+    /// ([`MnSched::on_deadlock`]).
     pub(super) fn block_halts(&mut self, span: Span) -> Result<(), RuntimeError> {
         // Checked HERE because a blocked job never reaches `jump_checked`'s loop back-edge, which is
         // where every other path observes the deadline. Without it `chezzi test --timeout` could not
@@ -228,136 +135,12 @@ impl Vm {
         Ok(())
     }
 
-    /// The halts a party blocked in place must observe. Split out of [`Vm::block_wait_tick`] so the
-    /// multi-channel `wait:` path — which polls N arms instead of waiting on one condvar, and so
-    /// cannot share the tick — honours exactly the same three, rather than being the one blocking op a
-    /// `--timeout` cannot reach.
-    ///
-    /// TICKET-223 — it has no deadlock text of its own: a positive verdict is latched by
-    /// `QuiesceState::decide` and delivered by [`Vm::run_exit_err`] as one of its three causes (an
-    /// exit, a job fault, the verdict), with the report of the party site the latch recorded.
-    pub(super) fn block_halt_check(&mut self, span: Span) -> Result<(), RuntimeError> {
-        self.block_halts(span)?;
-        // An in-place wait is awake and judges nothing: the run's awake count decides a deadlock
-        // ([`MnSched::on_deadlock`]).
-        // TICKET-052 — an eager `Executor` job (`mn.is_none()`) about to wait another tick hands its
-        // pool thread to a replacement, so the job that would unblock it can still get a thread.
-        self.yield_pool_slot(Some(DEMOTE_POLL_BACKOFF));
-        Ok(())
-    }
-
-    /// Sleep until `deadline`, observing the same halts every other blocking-in-place path does
-    /// ([`Vm::block_halt_check`]) once per [`DEMOTE_POLL_BACKOFF`] — the CONTINUOUS-checkpoint
-    /// contract for a wait whose deadline WE own (`time.sleep_ms`, a `timer(ms)` channel's `recv`).
-    ///
-    /// **Why chunked `thread::sleep` and not a condvar.** A plain sleep has no channel to wait on, so
-    /// a waker would have to be notified from every cancel-trip site AND still carry a timeout for the
-    /// wall-clock deadline (which nobody notifies at all). `DEMOTE_POLL_BACKOFF` is the same bound
-    /// every other blocking path here already pays ([`Vm::block_wait_tick`], `demote_recv_block`,
-    /// `demote_block_socket`): ≤5 ms of cancel latency, 200 wakes/s per SLEEPING thread.
-    ///
-    /// The sleeper counts as no blocked party: a wait that ends by itself counts nothing
-    /// (`block::wait_steps`), so the process-wide verdict declines while it lasts, as `inflight`
-    /// does for the M:N side of the same sleep.
-    ///
-    /// **`--max-heap` reaches this loop only through the CANCEL arm, and only when the over-allocating
-    /// task shares a cancel scope with the sleeper** — a nursery sibling or an `Executor` job, whose
-    /// over-memory hard halt (`executor_hard_halt`) trips a flag this loop reads (measured: 365 ms).
-    /// A sleeping **top-level `main`** has no cancel flag, but the run has one heap, so the
-    /// over-allocating task's OVER-MEMORY verdict still ends the run (measured: 121 ms into a 3000 ms
-    /// sleep, `chezzi test --max-heap=8000000`). `--timeout` has no such gap: it is an absolute wall-clock deadline
-    /// this loop reads directly.
-    ///
-    /// The whole sleep is one wait of `spec`: it holds no width permit ([`Vm::wait_begin`]).
-    pub(super) fn block_until_deadline(
-        &mut self,
-        spec: WaitSpec,
-        deadline: std::time::Instant,
-        span: Span,
-    ) -> Result<(), RuntimeError> {
-        let reg = self.wait_begin(spec, None, "a sleep", span)?;
-        let r = loop {
-            let now = std::time::Instant::now();
-            if now >= deadline {
-                break Ok(());
-            }
-            if let Err(e) = self.block_halt_check(span) {
-                break Err(e);
-            }
-            self.wait_door(&[], |_| {
-                std::thread::sleep(DEMOTE_POLL_BACKOFF.min(deadline - now))
-            });
-        };
-        self.wait_end(reg, &[]);
-        r
-    }
-
-    /// Block on an empty `recv` until a value arrives, instead of declaring a deadlock (see
-    /// [`Vm::block_wait_tick`]). Used by an eagerly-dispatched `Executor` job and by the top-level
-    /// `main` thread — both own their OS thread and have no scheduler to park a fiber into. The settle
-    /// order matches [`Vm::demote_recv_block`]'s exactly — a queued value beats a `trip()` latch,
-    /// which beats closed-and-drained, which beats a cancel — so the two blocking-in-place paths
-    /// cannot disagree about what a channel is saying.
-    pub(super) fn block_recv(
-        &mut self,
-        h: GcRef,
-        core: &Arc<ChannelCore>,
-        span: Span,
-    ) -> Result<RecvStep, RuntimeError> {
-        loop {
-            // TICKET-185 — a rendezvous receiver publishes its SLOT in the same hold as the empty
-            // re-check, so a sender that arrives during the wait commits the slot instead of
-            // finding nobody. A fresh `Pending` per iteration; the previous one is settled below.
-            let p = Pending::new();
-            {
-                let mut q = core.q.lock().unwrap_or_else(|e| e.into_inner());
-                match self.recv_ready(core, &mut q) {
-                    core::RecvReady::Value(v) => return Ok(RecvStep::Got(v)),
-                    core::RecvReady::Fired => return Ok(RecvStep::Got(Value::bool(true))),
-                    core::RecvReady::Closed => return Ok(RecvStep::ClosedEmpty),
-                    core::RecvReady::Wait => {}
-                }
-                if core.cap == Some(0) {
-                    q.slot(&p, 0);
-                }
-            }
-            let op = PendingOp::new(Arc::clone(&p), vec![(Arc::clone(core), 0, false)]);
-            // Ready == the settle conditions the loop head consumes (a value to take, `closed`, a
-            // `trip()` latch), plus this receiver's own slot being filled, so the wait cannot sleep
-            // through a state the next iteration would immediately take (W7-13). All are written
-            // under `core.q` (`done_latch` since W7-13r(b)), so re-checking them under the guard the
-            // wait consumes closes the window.
-            let on = Blocked::at(Wait::Recv.phrase(), span);
-            let latch = self.halt_latch();
-            let r = self.block_wait_tick(WaitSpec::Recv, on, h, core, span, |g| {
-                g.recv_ready_for(Some(&p))
-                    || g.closed
-                    || core.done_latch.load(Ordering::Relaxed)
-                    || !p.is_queued()
-            });
-            // Settle before acting on a fault: a filled slot is a delivered value.
-            if let Settled::Got(_, v) = op.settle() {
-                let filled = Ok(RecvStep::Filled(v));
-                return self.settled_over_halt(
-                    latch,
-                    Some(filled),
-                    r.map(|()| RecvStep::Filled(v)),
-                );
-            }
-            r?;
-        }
-    }
-
     /// `wait:` runtime (§6d) — execute [`Op::WaitPoll`]. The `n` arm channel handles are on the
     /// operand stack (`stack[base..base+n]`, source order). Poll source order: the first channel with
     /// a queued value (or a fired timer) wins → drop the handles, push `?value`, jump to that arm's
     /// body. A closed+empty recv arm is ready too and pushes `!RecvError` (D2). Nothing ready → run
-    /// `else` (jump), else block: an M:N snapshot-park, an M:N in-callback demote, or an in-place condvar wait for a
-    /// party that owns its OS thread (an eager `Executor` job / top-level `main`, plus — for a TIMED
-    /// wait only — either of those inside a native callback). A live timer arm is just another arm on
-    /// every one of those; only the inline outermost-`parallel:` builder mid-body with no eager core
-    /// (`BlockCtx::Builder { job: false }`) still inline-sleeps to the soonest deadline (`gaps.md` N10, and
-    /// W7-14 for why the remaining inline-sleep is exactly that narrow).
+    /// `else` (jump), else block: a snapshot-park, or a demote under a host frame. A live timer arm
+    /// is just another arm on both.
     ///
     /// TICKET-185 — a `wait:` that blocks publishes ONE [`Pending`] for all its arms: an OFFER per
     /// send arm and (rendezvous only) a SLOT per recv arm. The CAS that takes an offer or fills a
@@ -474,15 +257,10 @@ impl Vm {
             has_send,
         };
         let wait_mode = self.block_mode(wait_spec);
-        // The `Refuse` cells (the inline outermost-`parallel:` builder with no worker loop and no
-        // deadline to sleep to): nothing may block, so nothing is published.
-        if wait_mode == BlockMode::Refuse {
-            return Err(self.err(Wait::select(has_send).fault_text(), span));
-        }
         if wait_mode == BlockMode::Park {
             // W7-17 — the ungated park checkpoint (see `chan_recv_step`'s): everything above settled
             // without blocking, so a hard abort had no business preempting it, but a PARK past the
-            // deadline reaches no back-edge and no `block_halt_check` and would hang — including inside
+            // deadline reaches no back-edge and no `block_halts` and would hang — including inside
             // a `defer`, where the top-of-fn check is suppressed.
             self.deadline_halt(span)?;
         }
@@ -616,126 +394,21 @@ impl Vm {
             .iter()
             .map(|&(_, _, h, is_send)| (self.channel_core(h), is_send))
             .collect();
-        // M:N inside a native callback (`native_reentry > 0`): a host-stack loop frame sits between the
-        // worker loop and here, so we cannot snapshot-park. Demote: block this worker in place until
-        // an arm may be ready (its offers and slots stay published), then REWIND so this op settles
-        // and re-polls. A live timer arm (`soonest`) bounds the wait (so a real send still beats the
-        // timer on the re-poll). Lower throughput but sound — the documented v1 limit (§6d).
-        if wait_mode == BlockMode::Demote {
-            let latch = self.halt_latch();
-            if let Err(e) = self.demote_wait_block(arms, &p, soonest, span) {
-                let settled = op.settle();
-                let settled = self.wait_settled(settled, base, meta, span);
-                return self.settled_over_halt(latch, settled, Err(e));
-            }
-            self.pending = Some(op);
-            self.rewind_op();
-            return Ok(());
-        }
-        // **W7-14 — a live timer arm must not swallow the siblings, and this pair of gates is the
-        // whole fix.** A party that owns its OS thread (an eager `Executor` job, the top-level `main`
-        // thread — with or without a native callback frame under it) blocks in place with the timer
-        // as one more arm and the wait merely CLAMPED to its deadline (below). The one `InlineSleep`
-        // cell: the INLINE outermost-`parallel:` builder mid-body
-        // (`BlockCtx::Builder { job: false }`: `mn == None`, `mn_enlist_sched == Some`) with no eager
-        // `Executor` core. It has no worker loop to drive a park, so a live timer arm inline-sleeps to
-        // the soonest deadline — the alternative is the all-parties-blocked fault, which would be
-        // wrong here. Its published offers and slots stay live for the sleep, so a receiver or sender
-        // that arrives mid-window still wins, as in Go.
-        if let Some((i, deadline)) = soonest
-            && wait_mode == BlockMode::InlineSleep
-        {
-            // W7-17 — CHUNKED, not a bare `thread::sleep`: the deadline is OURS, so it is a checkpoint
-            // for its whole duration.
-            let latch = self.halt_latch();
-            let slept = self.block_until_deadline(wait_spec, deadline, span);
+        // Under a host frame (`BlockMode::Demote`, the only other `Wait` cell): a host-stack loop
+        // frame sits between the worker loop and here, so we cannot snapshot-park. Demote: block
+        // this worker in place until an arm may be ready (its offers and slots stay published),
+        // then REWIND so this op settles and re-polls. A live timer arm (`soonest`) bounds the wait
+        // (so a real send still beats the timer on the re-poll). Lower throughput but sound — the
+        // documented v1 limit (§6d).
+        let latch = self.halt_latch();
+        if let Err(e) = self.demote_wait_block(arms, &p, soonest, span) {
             let settled = op.settle();
-            if let Some(r) = self.wait_settled(settled, base, meta, span) {
-                return self.settled_over_halt(latch, Some(r), slept);
-            }
-            slept?;
-            self.take_wait_arm(base, Some(Value::bool(true)), meta.arm_targets[i]);
-            return Ok(());
+            let settled = self.wait_settled(settled, base, meta, span);
+            return self.settled_over_halt(latch, settled, Err(e));
         }
-        // A party that owns its OS thread — an eager `Executor` job, or the top-level `main` thread,
-        // now including one inside a native callback (TICKET-062, W10-1) — blocks instead of declaring
-        // a deadlock, like the empty-`recv` and full-`send` cases, then REWINDs so the dispatch loop
-        // re-runs this `WaitPoll`, which settles and re-polls every arm. Rewinding rather than looping
-        // in place also means the halts land on the ordinary back-edge checkpoint.
-        if wait_mode == BlockMode::InPlace {
-            // The wait begins BEFORE the halt check, so this party counts ITSELF as blocked; after
-            // it, a lone `wait:`-blocked party would forever see `blocked < live` and never fault.
-            // The wait is an OR-set over every arm (§2d's OR-edge: ready on ANY arm is progress),
-            // so the verdict declines while any one of them is feedable.
-            // Non-empty: an all-off arm set returned above.
-            let (first, is_send0) = arms[0].clone();
-            let arm_cores: Vec<Arc<ChannelCore>> =
-                arms.iter().map(|(c, _)| Arc::clone(c)).collect();
-            let refs: Vec<&Arc<ChannelCore>> = arm_cores.iter().collect();
-            let _gated = self.gated_register(&refs);
-            let on = Blocked::at(Wait::select(has_send).phrase(), span);
-            let mut reg = self.wait_begin(wait_spec, Some(on), "wait", span)?;
-            let counts = reg.take_counts();
-            let latch = self.halt_latch();
-            if let Err(e) = self.block_halt_check(span) {
-                self.wait_end(reg, &[]);
-                drop(counts);
-                let settled = op.settle();
-                let settled = self.wait_settled(settled, base, meta, span);
-                return self.settled_over_halt(latch, settled, Err(e));
-            }
-            // W7-13r(a) — wait on the FIRST arm's condvar with the tick as the timeout (every other
-            // arm is observed within a tick). **The predicate must mirror what the re-run SETTLES on,
-            // arm kind by arm kind — not what merely "changed"**: a wrong predicate is a live-lock
-            // (a recv arm that read `|| g.closed` spun at 99% CPU on Go's ordinary
-            // `select { case <-done: ; case v := <-work: }` with `done` closed). So:
-            //   * any arm is ready once the `wait:`'s `Pending` settled (an offer taken, a slot
-            //     filled, an offer closed);
-            //   * a RECV arm is also ready on a value it can take (a buffered value or another
-            //     party's live offer), a `trip()` latch, or `closed` (D2: the poll takes a closed
-            //     arm, so the re-run settles on it — no spin).
-            //
-            // **The timer clamp — W7-14.** A live timer arm shortens the tick to its deadline, so the
-            // re-poll takes the timer arm AT its deadline; before it, a sibling's value wins.
-            let tick = soonest.map_or(DEMOTE_POLL_BACKOFF, |(_, d)| {
-                DEMOTE_POLL_BACKOFF.min(d.saturating_duration_since(std::time::Instant::now()))
-            });
-            let arm0_ready = |g: &mut crate::vm::core::ChanState| {
-                !p.is_queued()
-                    || (!is_send0
-                        && (g.closed
-                            || g.recv_ready_for(Some(&p))
-                            || first.done_latch.load(Ordering::Relaxed)))
-            };
-            #[cfg(test)]
-            WAIT_ARM0_ENTRIES.fetch_add(1, Ordering::Relaxed);
-            // M3.2 — the arm handles stay on the operand stack across the door, so the collector
-            // reads each arm's offers and slots through them.
-            self.wait_door(&[], |_| {
-                let q = first.q.lock().unwrap_or_else(|e| e.into_inner());
-                #[cfg_attr(not(test), allow(unused_mut))]
-                let (mut guard, waited) = first
-                    .cv
-                    .wait_timeout_while(q, tick, |g| !arm0_ready(g) && !super::width::reserved())
-                    .unwrap_or_else(|e| e.into_inner());
-                #[cfg(test)]
-                {
-                    WAIT_ARM0_BLOCKS.fetch_add(1, Ordering::Relaxed);
-                    if waited.timed_out() && arm0_ready(&mut guard) {
-                        WAIT_ARM0_SLEPT_WHILE_READY.fetch_add(1, Ordering::Relaxed);
-                    }
-                }
-                drop((guard, waited));
-            });
-            self.wait_end(reg, &[]);
-            drop(counts);
-            self.pending = Some(op);
-            self.rewind_op();
-            return Ok(());
-        }
-        // Inside a native callback: the host stack cannot be unwound to park and there is no thread
-        // of our own to block on (mirrors `chan_recv_step`'s callback fault).
-        Err(self.err(Wait::Select.fault_text(), span))
+        self.pending = Some(op);
+        self.rewind_op();
+        Ok(())
     }
 
     /// TICKET-185 — act on a `wait:`'s settled [`Pending`]: `Some` when it decided the `wait:` (an
@@ -780,65 +453,3 @@ impl Vm {
         self.frames.last_mut().unwrap().ip = target;
     }
 }
-
-/// Test-only instrumentation: how many waits [`Vm::block_wait_tick`] has performed, process-wide.
-/// A COVERAGE floor for [`BLOCK_WAITS_SLEPT_WHILE_READY`] — "this program really did block on a
-/// channel" — never a measurement: libtest runs the whole lib suite in ONE process, so a concurrent
-/// test's blocking also lands here. Only ever read as a delta, and only ever compared with `>=`.
-#[cfg(test)]
-pub(crate) static BLOCK_WAITS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-
-/// Test-only instrumentation: **W7-13's defect signature** — a [`Vm::block_wait_tick`] wait that
-/// slept its whole [`DEMOTE_POLL_BACKOFF`] tick and yet found the channel READY when it woke, i.e. a
-/// wakeup that was lost because it landed while nobody was on the condvar.
-///
-/// `wait_timeout_while` makes this UNREACHABLE by construction: it re-evaluates the predicate under
-/// the guard before returning, so `timed_out()` can only be `true` while the predicate still says
-/// NOT ready. The bare `wait_timeout` this replaced had no such guarantee, which is exactly the bug.
-/// So a healthy build increments this ZERO times no matter how loaded the machine is — which is what
-/// lets `eager_handshake_is_driven_by_wakeups_not_by_the_poll_timeout` assert on it directly, with no
-/// wall-clock threshold to flake, and process-globally, with no neighbour able to pollute it (a
-/// neighbour would have to hit the same defect, and then failing is right).
-///
-/// **Zero false positives depends on every readiness term being written under `core.q`**, because the
-/// re-check runs while [`Vm::block_wait_tick`] still holds the guard the wait returned: a term some
-/// other thread could flip in that window would be counted as a stall that never happened. All of
-/// them are — a queued value and `closed` under `ChanState`, and `done_latch` since W7-13r(b) stores
-/// it under `core.q` too. Move one back outside that lock and this counter turns flaky.
-///
-/// ONE EXCEPTION to "unreachable", found by review rather than reasoned away: on a POISONED `core.q`,
-/// `wait_timeout_while` propagates the inner wait's `Err` WITHOUT running its post-wait re-check, so
-/// the `into_inner` below can hand back `timed_out() == true` on an already-ready channel. Reaching it
-/// needs another lib test to panic while holding some `ChannelCore::q` — a run that is already failing
-/// (the bare `unwrap()`s elsewhere in this file panic on that same poison), so the cost is a
-/// misleading second failure, not a false green.
-#[cfg(test)]
-pub(crate) static BLOCK_WAITS_SLEPT_WHILE_READY: std::sync::atomic::AtomicU64 =
-    std::sync::atomic::AtomicU64::new(0);
-
-/// The eager `wait:` twin of [`BLOCK_WAITS`] — test-only instrumentation of how many times
-/// `op_wait_poll`'s blocking arm-0 wait ran, process-wide. A COVERAGE floor for
-/// [`WAIT_ARM0_SLEPT_WHILE_READY`], never a measurement, for the same reason `BLOCK_WAITS` isn't:
-/// libtest runs the whole lib suite in one process, so a concurrent test's waits also land here.
-/// Only ever read as a delta, and only ever compared with `>=` (TICKET-059).
-#[cfg(test)]
-pub(crate) static WAIT_ARM0_BLOCKS: std::sync::atomic::AtomicU64 =
-    std::sync::atomic::AtomicU64::new(0);
-
-/// The eager `wait:` twin of [`BLOCK_WAITS_SLEPT_WHILE_READY`] — a `wait_timeout_while` that slept its
-/// whole tick and yet found arm 0 already ready when it woke, i.e. a lost wakeup. Zero by
-/// construction on a healthy build for the same reason as its sibling: `wait_timeout_while`
-/// re-evaluates the predicate under the guard before returning. Only ever compared with `== 0`
-/// (TICKET-059).
-#[cfg(test)]
-pub(crate) static WAIT_ARM0_SLEPT_WHILE_READY: std::sync::atomic::AtomicU64 =
-    std::sync::atomic::AtomicU64::new(0);
-
-/// TICKET-270 — how many times `op_wait_poll` reached its blocking arm-0 wait, counted BEFORE
-/// the wait, process-wide. The gate for [`WAIT_ARM0_BLOCKS`]: a run whose `wait:`s all found
-/// their value queued never enters the block branch, so its blocks floor proves nothing. Only
-/// ever read as a delta: a zero delta skips the floor, a nonzero one requires the blocks delta
-/// to be `>= 1` (a blind-sleep revert keeps this counter and drops that one to 0).
-#[cfg(test)]
-pub(crate) static WAIT_ARM0_ENTRIES: std::sync::atomic::AtomicU64 =
-    std::sync::atomic::AtomicU64::new(0);

@@ -7,8 +7,8 @@
 //! `vm::tests::d3_thousands_of_cpu_fibers_all_complete`, run in-process through `run_capture` at
 //! the lib target's default pool (every core). The debug build then hung to its 60 s bound whenever
 //! other load shared the box (debug CLI, filer's table: 0.3 s at `CHEZZI_THREADS=8`, > 120 s at
-//! 27/28 = nproc). `vm::pool` is one process-wide `OnceLock`, so a lib test cannot size its own
-//! pool (DEC-095); a subprocess gets its own. Measured at 8 on the debug CLI under a 4-core
+//! 27/28 = nproc). The worker count is one process-wide `OnceLock`, so a lib test cannot size its
+//! own (DEC-095); a subprocess gets its own. Measured at 8 on the debug CLI under a 4-core
 //! `CPUQuota` with 28 `yes` hogs: 9.96-12.80 s, 5 of 5 green.
 //!
 //! Spawns and polls rather than calling `output()`: a hung child never closes its pipes, so

@@ -1,9 +1,10 @@
 //! The `tests/chz` dogfood gate: `chezzi test tests/chz/<dir>` on the M:N VM, one test per subdirectory.
 //!
-//! `vm::pool` is one process-wide `OnceLock`, and `sleep_cancel_test.chz` asserts `d < 1.0s` on how
-//! fast a cancelled job's worker runs, which failed 8 of 8 runs when other tests shared the pool.
+//! The worker count and the runner budget (`width::RUNNERS`) are process-wide, and
+//! `sleep_cancel_test.chz` asserts `d < 1.0s` on how fast a cancelled job's worker runs, which
+//! failed 8 of 8 runs when other tests shared the process (then its `vm::pool`, since deleted).
 //! Since TICKET-276 each directory runs the `chezzi` binary as its own process, because `cargo test`
-//! runs a binary's tests on parallel threads that would share one pool.
+//! runs a binary's tests on parallel threads that would share one runner budget.
 
 #[path = "support/chz_dirs.rs"]
 mod chz_dirs;
@@ -13,7 +14,7 @@ mod grid_tests;
 
 grid_tests!(CHZ_DIRS in chz_suite_passes: [go, spec, stdlib, suites] => crate::assert_chz_dir);
 
-/// One `tests/chz` directory through `chezzi test`, in its own process and its own pool.
+/// One `tests/chz` directory through `chezzi test`, in its own process and its own runners.
 fn assert_chz_dir(dir: &str) {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/chz")

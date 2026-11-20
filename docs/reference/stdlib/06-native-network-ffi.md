@@ -76,16 +76,12 @@ or `import Socket from std.net`); they are not global builtins.
 is carried across reads and reassembled exactly, while a **binary** payload is a clear `!e`. For
 binary, use `Socket.read_bytes` / `write_bytes` (§3).
 
-**`connect` inside an `Executor` job** returns the error `connect would block: an Executor job doesn't
-own its thread — blocking here would starve every other job and \`parallel:\` nursery sharing the pool.
-Do this socket op inside \`spawn:\` or a \`parallel:\` nursery instead, where it parks rather than
-blocking a shared thread.` A job runs on the bounded, process-wide pool with no scheduler under it,
-so blocking there takes width from every other job and every `parallel:` nursery.
-**Everywhere else `connect` blocks and succeeds**: a `spawn`/`parallel:` fiber parks on the
-netpoller, and top-level `main` blocks its thread (as CPython `socket.connect` and Go `net.Dial` do from
-the main thread). `connect` is allowed where `accept`/`read`/`read_bytes`/`write` are not, because those
-wait on a **Chezzi peer fiber** that can run only on the thread they would block, while the **kernel**
-completes a `connect` handshake. The wait honours `--timeout`, cancellation and `os.exit`.
+**A would-block socket op parks its fiber on the netpoller** (`main`, a `spawn`/`parallel:` task and
+an `Executor` job alike), as Go parks a goroutine. Under a host frame (an FFI callback, a map/set
+probe hook) `accept`/`read`/`read_bytes`/`write` demote the worker and block in place, and a
+`connect` handshake blocks in place, as CPython `socket.connect` and Go `net.Dial` block. The wait
+honours `--timeout`, cancellation and `os.exit`
+([06-blocking.md](../concurrency/06-blocking.md#stdnet--where-a-would-block-socket-op-blocks)).
 
 ### `std.ffi`
 C-ABI vocabulary for `extern "lib":` blocks (see the FFI section of `syntax.md`).

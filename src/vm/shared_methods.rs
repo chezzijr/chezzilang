@@ -123,8 +123,8 @@ impl Vm {
     /// Run box method `call`'s closure `f` on `h`'s value as a frame (`RetAction::Box`): take the
     /// guard as this task and keep it in the task's state (`Vm::held_guards`), so a wait in `f`
     /// parks the task holding it. The frame's return ([`Vm::box_done`]) or its unwind
-    /// ([`Vm::drop_ret`]) releases it. A callback that is not a frame (a native, a generator)
-    /// runs nested, under the same hold.
+    /// ([`Vm::drop_ret`]) releases it. A native that can wait runs as a step frame
+    /// ([`Vm::push_callback_frame`]); a callee with no frame runs nested, under the same hold.
     fn box_frame(
         &mut self,
         h: GcRef,
@@ -224,9 +224,9 @@ impl Vm {
         self.take_update_guard(GuardKey { lock, mode }, what, span)
     }
 
-    /// Run the closure `f` of a box method on the live value `cur`, in this task, under the guard
-    /// the caller holds. A blocking op inside `f` demotes the worker (`Vm::reentered`), so the
-    /// guard stays with this task until `f` returns.
+    /// Run the callee `f` of a box method that has no frame ([`Vm::push_callback_frame`]'s `false`)
+    /// on the live value `cur`, in this task, under the guard the caller holds. A blocking op inside
+    /// `f` demotes the worker (`Vm::reentered`), so the guard stays with this task until `f` returns.
     fn box_closure(&mut self, f: Value, cur: Value, span: Span) -> Result<Value, RuntimeError> {
         self.reentered(|vm| vm.invoke_value(f, vec![cur], span))
     }
@@ -847,17 +847,10 @@ impl Vm {
         }
         let sched = {
             let mut g = core.scope.lock().unwrap_or_else(|e| e.into_inner());
-            if g.is_none() {
-                *g = self.new_detached_sched(
-                    core.created_at,
-                    core.creator_cancel.clone(),
-                    Some(&core),
-                );
-            }
-            g.as_ref().map(|s| Arc::clone(&s.sched))
-        };
-        let Some(sched) = sched else {
-            return Err(self.err(super::EXEC_NO_RUNNER_MSG.to_string(), span));
+            let scope = g.get_or_insert_with(|| {
+                self.new_detached_sched(core.created_at, core.creator_cancel.clone(), &core)
+            });
+            Arc::clone(&scope.sched)
         };
         self.spawn_into(
             crate::vm::sched::SpawnTarget::Scope {

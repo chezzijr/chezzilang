@@ -2,7 +2,7 @@
 //! process (`tests/d3_thousands_of_cpu_fibers_cli.rs`, driving the built binary at a fixed
 //! `CHEZZI_THREADS`), never in the lib target at the default pool. At the default pool the debug
 //! build hangs to its 60 s bound whenever the box has other load (measured in `## Digest`).
-//! `vm::pool` is one process-wide `OnceLock` (DEC-095), so a lib test cannot size its own pool.
+//! The worker count is one process-wide `OnceLock` (DEC-095), so a lib test cannot size its own.
 //!
 //! Red on base: a file under `src/vm/` still holds `fn d3_thousands_of_cpu_fibers_all_complete`. Green
 //! once the fix moves it out (plan step 8) and the CLI test exists with a fixed `CHEZZI_THREADS`.

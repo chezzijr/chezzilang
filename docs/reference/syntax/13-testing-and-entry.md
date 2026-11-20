@@ -15,7 +15,10 @@ assert even_sum(10) == 20, "0..10"  # with a custom message
   `chezzi run` and in the test report.
 - For a **comparison** (`<`, `<=`, `>`, `>=`, `==`, `!=`) the message shows both operand values:
   `assertion failed: 3 == 4`, or `assertion failed: <msg> (3 == 4)` with a `msg`. `in` is excluded
-  (its right operand can be a large collection).
+  (its right operand can be a large collection). The operand text runs each value's `str` hook: a
+  fault in a hook drops the operand text (`assertion failed: <msg>`, still a failure), while a cancel or a
+  `--timeout` that lands in a hook ends the test with its own error. A hook that waits parks its
+  task, as any wait does.
 - Any other condition gives `assertion failed: <msg>`, or `assertion failed` without a `msg`.
 - `assert` works anywhere, not only in tests.
 

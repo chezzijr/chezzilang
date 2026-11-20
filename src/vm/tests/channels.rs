@@ -223,7 +223,7 @@ fn wait_send_arm_closed_channel_faults() {
 
 /// A full bounded send-arm reached INSIDE a native callback (`list.map`, `native_reentry > 0`)
 /// DEMOTES and blocks on its offer (TICKET-185 changed DEC-181's `Demote` × `Wait+send` cell from
-/// `Refuse`). With no receiver anywhere, the deadlock verdict ends it, as Go's `all goroutines are
+/// a refusal). With no receiver anywhere, the deadlock verdict ends it, as Go's `all goroutines are
 /// asleep` does; it used to fault `send on a full channel` without blocking.
 #[test]
 fn wait_send_arm_in_callback_blocks_until_the_deadlock_verdict() {
@@ -321,15 +321,18 @@ fn bounded_channel_try_send_atomic_no_overfill() {
 }
 
 /// Bug 2 — a full bounded `send` issued on the INLINE outermost-`parallel:` builder VM (`self.mn ==
-/// None`, sched held only in `mn_enlist_sched`) has NO worker loop to drive `send_suspend` →
+/// None`, sched held only by the builder) has NO worker loop to drive `send_suspend` →
 /// `Disp::SendPark`, so it must NOT snapshot-park: parking there leaks `send_suspend` set forever
 /// (`paused()` stays true → the main VM silently halts / hangs). It must FAULT with the shared
 /// full-channel deadlock message instead (the documented inline-owner-never-parks invariant).
 ///
 /// `inner()`'s nested join early-enlists the OUTER nursery (seeding sibling O) and holds the sched in
-/// `mn_enlist_sched`; the outer body then fills a cap-1 channel `t` (nobody drains it — O recvs a
+/// the builder; the outer body then fills a cap-1 channel `t` (nobody drains it — O recvs a
 /// DIFFERENT channel) and `t.send(42)` is full ⇒ a non-parkable inline-builder send ⇒ fault, not
 /// hang. M:N-only (case A is M:N-only), 30s watchdog catches the buggy silent-halt/hang.
+/// The inline builder and the sched it held are gone (plan 2026-11-18-every-wait-parks
+/// Task 6): `main` is a fiber, so every nursery here is a fiber-owned scope and the wait parks;
+/// the test keeps the program and its expected outcome.
 #[test]
 fn bounded_channel_inline_builder_full_send_faults_not_hang() {
     let src = "fn inner():\n\
@@ -391,8 +394,7 @@ fn pmap_limited_matches_pmap() {
 
 /// TICKET-211 (W1) — the grid: every nesting shape {flat, nested in a spawned task, two deep,
 /// nested in an Executor job} x outer body {open, closed} x T {2, 4, 8} must reach exactly T runner
-/// threads. A cell may stay below T only when the `NestedDrainerSlot` budget refused a start (another
-/// test holds slots), and never exceed T. The thread count replaced a wall-time test of `nested_closed`
+/// threads. The thread count replaced a wall-time test of `nested_closed`
 /// (`nested_nursery_in_spawned_task_uses_all_workers`), which failed 1 run in 10 under CPU load.
 ///
 /// TICKET-230 — every shape, plus two Executors, an Executor beside a `parallel:`, an Executor
@@ -568,14 +570,12 @@ parallel:
         for (i, (shape, body)) in shapes.iter().enumerate() {
             crate::vm::set_worker_count(t);
             let entry = write_temp_chz(&format!("w1_grid_{shape}_{t}"), &format!("{header}{body}"));
-            let ((_out, _err, res, _code), peak, denials, _spawns, permits) =
+            let ((_out, _err, res, _code), peak, _spawns, permits) =
                 crate::vm::run_file_counting_runners(&entry);
             let _ = std::fs::remove_file(&entry);
             assert!(res.is_ok(), "{shape} T={t} faulted: {res:?}");
-            if i < 8 && t >= 2 && !(peak <= t && (peak == t || denials > 0)) {
-                failures.push(format!(
-                    "{shape} T={t}: peak runner threads {peak}, slot denials {denials}"
-                ));
+            if i < 8 && t >= 2 && peak != t {
+                failures.push(format!("{shape} T={t}: peak runner threads {peak}"));
             }
             if !(1 <= permits && permits <= t) {
                 failures.push(format!(
@@ -587,9 +587,9 @@ parallel:
     assert!(failures.is_empty(), "runner-thread grid: {failures:#?}");
 }
 
-/// TICKET-211 — a nursery's runners come from parked runner threads when one is free, not from a
-/// new OS thread per claimed wid. Every task blocks on `gate.recv()` until the body sends, so each
-/// of the 200 rounds claims runners at 4 workers; reused threads keep the starts far below 200.
+/// TICKET-211 — a nursery's tasks run on the run's workers, not on a new OS thread per nursery.
+/// Every task blocks on `gate.recv()` until the body sends, so each of the 200 rounds has work for
+/// every one of 4 workers; the run's runner thread starts stay far below 200.
 #[test]
 fn nursery_rounds_reuse_their_runner_threads() {
     if crate::vm::rerun_in_child(module_path!(), "nursery_rounds_reuse_their_runner_threads") {
@@ -611,20 +611,19 @@ fn nursery_rounds_reuse_their_runner_threads() {
         "w1_reuse_rounds",
         "import std.concurrency\nfn hold(gate: Channel[int]):\n    gate.recv()\nr := 0\nwhile r < 200:\n    gate := Channel[int](8)\n    parallel:\n        for _ in 0..8:\n            spawn hold(gate)\n        for _ in 0..8:\n            gate.send(1)\n    r += 1\n",
     );
-    let ((_out, _err, res, _code), _peak, denials, spawns, _permits) =
+    let ((_out, _err, res, _code), _peak, spawns, _permits) =
         crate::vm::run_file_counting_runners(&entry);
     let _ = std::fs::remove_file(&entry);
     assert!(res.is_ok(), "{res:?}");
     assert!(
         spawns < 100,
-        "200 nursery rounds started {spawns} runner threads at 4 workers: runner threads are not reused across scheds (slot denials {denials})"
+        "200 nursery rounds started {spawns} runner threads at 4 workers: runner threads are not reused across nurseries"
     );
 }
 
-/// TICKET-211 — a `parallel:` body that waits gives its runner slot (bit 0) to the claim, so its
-/// queued tasks run on every worker while it waits: one cell per wait kind the body can reach. At
-/// 2 workers the run's peak runner threads must reach 2 (the drainer plus the runner the body's
-/// freed slot starts). A body that keeps its slot leaves the peak at 1.
+/// TICKET-211 — a `parallel:` body that waits leaves its worker to its tasks, so they run on every
+/// worker while it waits: one cell per wait kind the body can reach. At 2 workers the run's peak
+/// runner threads must reach 2.
 #[test]
 fn a_waiting_body_hands_its_runner_slot_over_in_every_wait() {
     if crate::vm::rerun_in_child(
@@ -660,11 +659,11 @@ fn a_waiting_body_hands_its_runner_slot_over_in_every_wait() {
     let mut failures = Vec::new();
     for (name, body) in waits {
         let entry = write_temp_chz(&format!("body_handover_{name}"), &format!("{header}{body}"));
-        let ((_out, _err, res, _code), peak, denials, _spawns, _permits) =
+        let ((_out, _err, res, _code), peak, _spawns, _permits) =
             crate::vm::run_file_counting_runners(&entry);
         let _ = std::fs::remove_file(&entry);
         assert!(res.is_ok(), "{name} faulted: {res:?}");
-        if peak < 2 && denials == 0 {
+        if peak < 2 {
             failures.push(format!("{name}: peak runner threads {peak} at 2 workers"));
         }
     }
@@ -912,7 +911,7 @@ fn swap_task_round_trips_output_and_owns_side_state() {
 /// Per-connection spawn: a fiber running an eager `parallel:` body can PARK (its acceptor blocks
 /// on `accept`) between `EnterNursery` and `JoinNursery`, so the open eager scope — the live
 /// inner sched + its monotonic spawn index — MUST travel with the fiber across `swap_ctx`, just
-/// like `nurseries`. Otherwise the scope leaks onto whatever fiber the shell schedules next.
+/// like its nursery depth. Otherwise the scope leaks onto whatever fiber the shell schedules next.
 #[test]
 fn eager_scope_round_trips_with_fiber_ctx() {
     let mut vm = Vm::new(Arc::new(empty_program()));
@@ -920,10 +919,7 @@ fn eager_scope_round_trips_with_fiber_ctx() {
     vm.eager_scheds.push(Some(EagerScope {
         sched: Arc::clone(&host_sched),
         cancel: Arc::new(AtomicBool::new(false)),
-        drainer: None,
-        drainer_slot: None,
         scope: 0,
-        fiber_owned: false,
         more_scopes: Vec::new(),
     }));
 
@@ -932,10 +928,7 @@ fn eager_scope_round_trips_with_fiber_ctx() {
         eager_scheds: vec![Some(EagerScope {
             sched: Arc::clone(&fiber_sched),
             cancel: Arc::new(AtomicBool::new(false)),
-            drainer: None,
-            drainer_slot: None,
             scope: 0,
-            fiber_owned: false,
             more_scopes: Vec::new(),
         })],
         ..FiberCtx::default()

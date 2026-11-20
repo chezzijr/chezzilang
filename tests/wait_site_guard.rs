@@ -75,18 +75,6 @@ const ALLOWED: &[(&str, &str, &str, &str)] = &[
         "the coordinator itself: a thread waits there stopped, detached or not yet attached",
     ),
     (
-        "pool.rs",
-        "worker_loop",
-        "",
-        "a pool thread between jobs drives no Vm, so it holds no token",
-    ),
-    (
-        "runner_cache.rs",
-        "serve",
-        "",
-        "a runner thread parks only after it dropped its shell, and the shell's token with it",
-    ),
-    (
         "blocking_pool.rs",
         "worker_loop",
         "",
@@ -165,12 +153,6 @@ const ALLOWED: &[(&str, &str, &str, &str)] = &[
         "waits for a socket; each call is in a door",
     ),
     (
-        "mnsched.rs",
-        "joiner_wait",
-        "joiner_wait(",
-        "a joiner's tick; its callers in mnsched_verdict.rs are rows",
-    ),
-    (
         "mnsched_verdict.rs",
         "wait_for_scope",
         ".wait_for_scope(",
@@ -187,18 +169,6 @@ const ALLOWED: &[(&str, &str, &str, &str)] = &[
         "join_tick",
         ".join_tick(",
         "an Executor join's tick; each call is in a door",
-    ),
-    (
-        "mnsched.rs",
-        "wait_helpers",
-        ".wait_helpers(",
-        "waits for a sched's runner leases; its caller is a row",
-    ),
-    (
-        "sched.rs",
-        "join_helpers",
-        "join_helpers(",
-        "waits for a sched's runner leases; each call is in a door",
     ),
     (
         "quiesce.rs",
@@ -262,7 +232,7 @@ const ALLOWED: &[(&str, &str, &str, &str)] = &[
     ),
     (
         "entry.rs",
-        "run_capture_counting",
+        "run_counted",
         "",
         "the test thread that spawned the VM thread joins it and runs no VM code",
     ),
@@ -661,10 +631,9 @@ fn the_scan_sees_doors_and_wrappers() {
 }
 
 /// The spellings that take a step of a wait by hand: the run permit and the demote bracket.
-/// The hand-over mechanisms (`yield_pool_slot`, `demote_once`, `hand_joiner_slot`) are not listed:
-/// a wait takes them through `Vm::block_enter` or `Vm::joiner_shell`, whose decision is the table's
-/// `Handover`; a preempted runner (`worker_loop.rs`) and an in-place tick's pool yield
-/// (`blocking.rs`) are not waits.
+/// The hand-over mechanisms (`demote_once`, `hand_joiner_slot`) are not listed: a wait takes them
+/// through `Vm::block_enter` or `Vm::joiner_shell`, whose decision is the table's `Handover`; a
+/// preempted runner (`worker_loop.rs`) is not a wait.
 const STEPS: &[&str] = &[
     "width_release(",
     "width_acquire(",
@@ -703,11 +672,6 @@ const STEP_ALLOWED: &[(&str, &str, &str)] = &[
         "run_root",
         "the thread that starts a run becomes worker 0 (main is fiber 1): it gives its permit back \
          before its runner loop, which takes one per fiber; it is not a wait",
-    ),
-    (
-        "pool.rs",
-        "worker_loop",
-        "a pool thread returns its permit at the end of a job",
     ),
 ];
 
@@ -782,7 +746,7 @@ const PARK_OWNERS: &[&str] = &[
     "blocking.rs",
 ];
 
-/// A wait takes its counts from its `WaitSpec` through `Vm::wait_begin` or `Vm::nursery_counts`:
+/// A wait takes its counts from its `WaitSpec` through `Vm::wait_begin`:
 /// no other site registers a waiter or an in-flight count.
 #[test]
 fn every_wait_count_comes_from_the_table() {
@@ -806,7 +770,7 @@ fn every_wait_count_comes_from_the_table() {
     assert!(
         bad.is_empty(),
         "a site registers a wait count by hand. Name the wait's `WaitSpec` and use \
-         `Vm::wait_begin` (or `Vm::nursery_counts` for a nursery join):\n{}",
+         `Vm::wait_begin`:\n{}",
         bad.join("\n")
     );
 }

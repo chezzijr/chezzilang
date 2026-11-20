@@ -6,7 +6,7 @@ use super::*;
 
 // ---- D2b MnSched scheduler mechanics (Step 2 — hand-built fibers, no bytecode) ----
 
-/// TICKET-096 review finding — a delivered cut's floor indexes the RUNNING fiber's `nurseries`
+/// TICKET-096 review finding — a delivered cut's floor indexes the RUNNING fiber's `eager_scheds`
 /// stack (per-fiber, swapped by `swap_ctx`), but `Vm::cut` lives on the worker-shell `Vm` and is
 /// not carried in `FiberCtx`. A floor left by the fiber that just died on this shell must not
 /// leak into the next fiber scheduled in here, or an unrelated `recover:` in that fiber is wrongly
@@ -1263,14 +1263,6 @@ fn fiber_roots_equal_vm_roots_after_swap() {
         argc: 0,
         ret: RetAction::Push,
     });
-    let (t_callee, t_arg) = (obj(&mut vm, "task-callee"), obj(&mut vm, "task-arg"));
-    vm.nurseries.push(vec![QueuedTask {
-        call: PendingCall::Call {
-            callee: Value::obj(t_callee),
-            args: vec![Value::obj(t_arg)],
-            span: Span::RUNTIME,
-        },
-    }]);
     vm.executors = vec![obj(&mut vm, "executor")];
     let interned = obj(&mut vm, "interned");
     vm.str_intern.insert(1, interned);
@@ -1312,7 +1304,6 @@ fn roots_per_field(v: &super::root_registry::RootView) -> Vec<(&'static str, Vec
     let RootView {
         stack,
         frames,
-        nurseries,
         start,
         module_objs,
         executors,
@@ -1336,13 +1327,6 @@ fn roots_per_field(v: &super::root_registry::RootView) -> Vec<(&'static str, Vec
             "frames",
             walk(RootView {
                 frames,
-                ..RootView::default()
-            }),
-        ),
-        (
-            "nurseries",
-            walk(RootView {
-                nurseries,
                 ..RootView::default()
             }),
         ),

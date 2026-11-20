@@ -546,9 +546,8 @@ impl MnSched {
     /// still settling this scope's last fiber. Poison-tolerant.
     pub(super) fn wait_for_scope(&self, scope_id: usize) {
         let mut c = self.lock();
-        let mut idle_since = None;
         while c.scopes[scope_id].done < c.scopes[scope_id].total {
-            c = self.joiner_wait(c, &mut idle_since);
+            c = self.cv.wait(c).unwrap_or_else(|e| e.into_inner());
         }
     }
 
@@ -564,9 +563,8 @@ impl MnSched {
     /// `done` strictly advances to `total`.
     pub(super) fn wait_for_completion(&self) {
         let mut c = self.lock();
-        let mut idle_since = None;
         while c.any_scope_incomplete() {
-            c = self.joiner_wait(c, &mut idle_since);
+            c = self.cv.wait(c).unwrap_or_else(|e| e.into_inner());
         }
     }
 

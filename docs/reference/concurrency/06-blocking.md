@@ -14,7 +14,7 @@ takes steps 2 and 3 once at the start of the wait and `Vm::wait_end` undoes them
 |---|---|
 | 1. detach the thread from the run's one heap | every wait |
 | 2. hold no runner permit for the whole wait, and give a `parallel:` body's runner slot to its sched | every row of the table below but `extern`, when the thread holds one; the end takes a free permit first, else queues |
-| 3. demote (hand the runner slot to a replacement) | the `D` cells below; a nursery join hands its slot over in its own joiner, in its `D` and `I` cells |
+| 3. demote (hand the runner slot to a replacement) | the `D` cells below; a nursery join hands its slot over in its own joiner, in its `D` cell |
 
 The run's one deadlock check does not read this table. It reads one run-wide count of the tasks
 that are not asleep, which changes only when a task starts, parks, is woken or ends (Go's
@@ -54,11 +54,8 @@ Contexts:
 
 | context | what it is |
 |---|---|
-| **Park** | an M:N fiber with no host frame under it |
-| **Demote** | an M:N fiber inside a nested native callback (a hook reached from a nested container walk, a map/set probe, `drain_iterable`, a `json.decode` default, an FFI callback) or a hard-halt `defer` drain (`--max-heap`, `--timeout`). A hook, an operator, a HOF callback, a sort comparator, a `from_iter` drain, a `Shared`/`RwShared` closure, a generator body and a `defer` drain run as frames on the fiber, so their waits are **Park** (since 2026-11-07) |
-| **Builder** | the inline outermost-`parallel:` builder (`job` = it carries an eager `Executor` core) |
-| **PoolJob** | an eager `Executor` job |
-| **OwnThread** | `main` (inside a frame-run callback too), a `main` `defer:`, `main` inside a nested native callback |
+| **Park** | a fiber with no host frame under it. Every party that runs Chezzi code is a fiber (`main` is fiber 1, a `spawn:` task, an `Executor` job), and every callback runs as a frame on it, so its waits are **Park** too: a hook, an operator, a nested `==`/`!=`/`in`/`str`/`<` walk (`contains`, `index_of`, `unique`, `dedup`, `sort`, `sort_by_key`, `min`/`max`, `x.eq(y)`, `x.str()`, `x.compare(y)`, `print`, an f-string, a failed `assert`'s operand text), a HOF callback (a native callee such as `xs.map(time.sleep_ms)` included), a sort comparator, a `T.from_iter(it)` or `ch.iter()` drain, a `json.decode` `default` thunk, a `Shared`/`RwShared` closure, a generator body and every `defer` drain, a hard-halt one (`--timeout`, `--max-heap`, a cancel) included |
+| **Reentered** | a fiber with a host frame under it: an FFI callback (a C frame is under it, as under Go's cgo callback), a map/set probe hook (`hash`, or a key's `eq` during a lookup or set algebra), or a `defer` drain under one of those. An `Inline` native or a builtin (`ord`, `chr`, `panic`) still runs its callee nested, but none of them can wait or call user code |
 
 Modes:
 
@@ -66,80 +63,53 @@ Modes:
 |---|---|
 | P | park the fiber on the op's own bucket |
 | D | demote: block in place, hand the runner slot to a replacement worker |
-| I | block this thread in place; it runs nothing else |
-| H | help (a nursery join only): wait in place and run the joined scheduler's fibers on this thread |
-| S | sleep to the op's own deadline |
-| R | refuse (the op's documented error or fault) |
+| I | block this thread in place, keeping its runner slot |
 
-| wait (`WaitSpec`) | Park | Demote | Builder | Builder `job` | PoolJob | OwnThread | `will_return` |
-|---|---|---|---|---|---|---|---|
-| `recv` (empty) | P | D | R | I | I | I | no |
-| `timer(ms).recv()` | P | D | S | S | S | S | yes |
-| full `send` | P | D | R | I | I | I | no |
-| `wait:` (recv arms) | P | D | R | I | I | I | no |
-| `wait:` with a send arm | P | D | R | I | I | I | no |
-| `wait:` with a timer arm | P | D | S | I | I | I | yes |
-| `wait:` with timer + send arms | P | D | S | I | I | I | yes |
-| `sleep_ms` | P | D | S | S | S | S | yes |
-| blocking native (`fs`, `request`, `process`) | P | D | I | I | I | I | yes |
-| stdin (`io.input`, …), a `Writer`/`Reader` on a FIFO, pipe or device | D | D | D | D | D | D | yes |
-| socket `accept`/`read`/`write` | P | D | R | R | R | I | yes |
-| `net.connect` handshake | P | I | I | R | R | I | yes |
-| `Shared` update guard | P | D | D | D | D | D | no |
-| `Executor.shutdown()` / join | P | D | I | I | I | I | yes |
-| `parallel:` nursery join | P | D | H¹ | H¹ | I | H¹ | no |
-| `extern` C call (the watcher hands over a long call's permit) | I | I | I | I | I | I | yes |
+| wait (`WaitSpec`) | Park | Reentered | `will_return` |
+|---|---|---|---|
+| `recv` (empty) | P | D | no |
+| `timer(ms).recv()` | P | D | yes |
+| full `send` | P | D | no |
+| `wait:` (recv arms) | P | D | no |
+| `wait:` with a send arm | P | D | no |
+| `wait:` with a timer arm | P | D | yes |
+| `wait:` with timer + send arms | P | D | yes |
+| `sleep_ms` | P | D | yes |
+| blocking native (`fs`, `request`, `process`) | P | D | yes |
+| stdin (`io.input`, …), a `Writer`/`Reader` on a FIFO, pipe or device | D | D | yes |
+| socket `accept`/`read`/`write` | P | D | yes |
+| `net.connect` handshake | P | I | yes |
+| `Shared` update guard | P | D | no |
+| `Executor.shutdown()` / join | P | D | no |
+| `parallel:` nursery join | P | D | no |
+| `extern` C call (the watcher hands over a long call's permit) | I | I | yes |
 
-¹ I when a host frame is under the joiner (a native callback, or a `defer` drain of a hard halt): the joiner only waits.
-A fiber's nursery join in a Demote context hands its runner slot to a replacement worker and waits; it
-runs no other fiber on its stack, because that fiber could wait for something only the buried frame
-can give.
-
-A Builder `R` cell for `recv`/`wait:` is the `deadlock: <wait>: no runnable task can send` fault: a blocking
-`recv`, `for v in ch:` or `wait:` issued directly in an inline `parallel:` body (not inside a
-`spawn:`) faults there, and the diagnostic points at the fix: put blocking work in a `spawn:`.
+A fiber's nursery join in the Reentered context hands its runner slot to a replacement worker and
+waits; it runs no other fiber on its stack, because that fiber could wait for something only the
+buried frame can give.
 
 How `will_return` drives the deadlock accounting, and the cells judged against Go 1.27:
 [`concurrency-runtime.md`](../../design/concurrency-runtime.md#blocking-table-accounting).
 
-**Deliberate differences from Go**, each a `R` or hang cell of the table:
+**Deliberate differences from Go**, each a hang cell of the table:
 
-- A socket op in an Executor job returns the "doesn't own its thread" `!e`; `connect` there too.
-- A wait that blocks in place inside a nested native callback (an FFI callback, a user `hash`/`eq`
-  in a map/set probe) stays awake, so with nothing that can satisfy it the run HANGS, where Go
-  faults (Go has no such case). Since 2026-11-07 a callback that runs as a frame (a hook, an
-  operator, a HOF callback, a sort comparator, a `from_iter` drain, a box closure, a generator body,
-  a `defer` drain) parks: `recv/main_cb/Nothing` (`[0].map(op)`) is the deadlock, and so is
-  `recv/main_defer/Nothing`. A wait in a `--max-heap` hard-halt `defer` drain parks too, so its
-  deadlock is reported. What still hangs is the nested list of `docs/contributing/gaps.md` W23-1,
-  pinned by the `Residual` kinds of `tests/callback_park_grid.rs`.
+- A wait in the Reentered context (an FFI callback, a user `hash`/`eq` in a map/set probe) blocks in
+  place and stays awake, so with nothing that can satisfy it the run HANGS, where Go faults (Go has
+  no such case). Every other wait parks, and its deadlock is reported: `recv/main_cb/Nothing`
+  (`[0].map(op)`), `recv/main_defer/Nothing`, a wait in a nested `==`/`str`/`<` hook, a
+  `json.decode` default and a hard-halt `defer` drain alike (plan `2026-11-18-every-wait-parks`).
+  What still hangs is `docs/contributing/gaps.md` W23-1, pinned by the `Residual` kind of
+  `tests/callback_park_grid.rs` (`map_key_hash`).
 
 ---
 
 ### `std.net` — where a would-block socket op blocks
 
-A `spawn`/`parallel:` fiber parks on the netpoller. A socket op reached where there is no fiber to
-park **blocks its thread in place** in exactly two contexts:
-
-1. a thread that owns itself: `main`, a `main` `defer:`, `main` inside a native callback
-   (Go-identical: `ln.Accept()` on the main goroutine blocks until a client arrives; CPython and Go
-   block and read in the callback and `defer:` shapes too);
-2. an M:N worker inside a native callback (which spins a replacement worker first).
-
-Everywhere else — an `Executor` job — it returns the error:
-
-```
-<op> would block: an Executor job doesn't own its thread — blocking here would starve every other job and `parallel:` nursery sharing the pool. Do this socket op inside `spawn:` or a `parallel:` nursery instead, where it parks rather than blocking a shared thread.
-```
-
-A blocked job hands its pool thread to a replacement, so the refusal no longer rests on starvation; it
-stays because widening it would change what these ops RETURN on a would-block fd (a hang instead of
-this `!e`). **The op set is `accept`/`read`/`read_bytes`/`write`; `connect` joins it ONLY inside an
-`Executor` job.** Those four wait on a Chezzi peer fiber that can only run on the very thread they
-would block, whereas a `connect` handshake is completed by the kernel and starves no Chezzi party, so
-top-level `main` blocks it and succeeds, as CPython (0.1 ms) and Go (314 µs) both do. Inside a job,
-`connect` refuses instead of spinning in place (an outer `cancel()` at 200 ms ends the run at
-209 ms). Use `spawn`/`parallel:` for socket work, which parks instead of blocking.
+A fiber parks on the netpoller: `main`, a `spawn`/`parallel:` task and an `Executor` job alike. A
+socket op **blocks its thread in place** only in the Reentered context (an FFI callback or a map/set
+probe hook): `accept`/`read`/`read_bytes`/`write` demote the worker first (a replacement worker runs
+the other fibers), and a `connect` handshake blocks in place and keeps its slot, since the kernel
+completes it and it starves no Chezzi party. Use `spawn`/`parallel:` for socket work.
 
 - **On top-level `main`, an untimed op has NO escape but SIGINT.** The escapes are the op's own
   `timeout_ms`, the run's `--timeout`, and cancellation. Under `chezzi run` two of those three do not

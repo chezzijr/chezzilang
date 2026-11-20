@@ -2,8 +2,9 @@
 //! hook calls an operator handler makes through it.
 //! `super::*` is the parent module.
 
+use super::builtins::DrainThen;
+use super::compare::CmpThen;
 use super::*;
-use crate::base::builtin_method::NativeStatic;
 use crate::base::hooks::Hook;
 
 /// The work an operator handler did after its hook returned, now done by [`Vm::do_return`] when
@@ -23,21 +24,16 @@ pub(super) enum RetAction {
     EqBool { negate: bool },
     /// A `compare` result (an int) as the `bool` of an ordering operator.
     CmpOp(Cmp),
-    /// A `str` result as `Op::ToStr`'s str.
-    Stringify,
-    /// A `str` result as `Op::ToStrFmt`'s formatted str. The spec is the caller's `Op::ToStrFmt`,
-    /// the op before the caller frame's `ip`; its nested width/precision fields sit below the
-    /// value.
-    StringifyFmt,
+    /// A `str` hook a render reached returned (`print`, `Op::ToStr` / `ToStrFmt` / `BuildStr`,
+    /// `x.str()`); the render's levels, buffer and header sit below the frame, and its text
+    /// feeds the `StrThen` ([`Vm::str_resume`]).
+    StringifyWalk(StrThen),
     /// A list HOF's callback returned; its loop runs on from the slots below the frame
     /// ([`Vm::list_hof`]).
     Hof(HofKind),
-    /// A `next` hook returned to a `T.from_iter(it)` drain; the source and the drained list sit
-    /// below the frame ([`Vm::do_native_static`]).
-    Drain(NativeStatic),
-    /// A `print` arg's `str` hook returned; the line so far sits below the frame
-    /// ([`Vm::do_print_sep`]). `custom`: the call's `sep` and `end` sit above the args.
-    Print { custom: bool },
+    /// A step of a drain returned (an `iter` or `next` hook, a channel receive); the source and
+    /// the drained list sit below the frame ([`Vm::drain_resume`]).
+    Drain(DrainThen),
     /// A sort's comparator returned (a `sort_by` fn, or a struct / enum `compare`); its merge
     /// runs on from the slots below the frame ([`Vm::sort_resume`]).
     Sort(SortKind),
@@ -51,15 +47,24 @@ pub(super) enum RetAction {
     /// A generator body frame (pushed by [`Vm::gen_resume`]); the generator's handle sits below
     /// it. Its `yield` ([`Vm::gen_yield`]) or return hands `Some(v)` / `None` to the `GenThen`.
     Gen(GenThen),
+    /// An `eq` hook a nested `==` walk reached returned; the walk's levels and header sit below
+    /// the frame, and its answer feeds the `EqThen` ([`Vm::eq_resume`]).
+    EqWalk(EqThen),
+    /// A `compare` hook a nested ordering walk reached returned; the walk's levels and header sit
+    /// below the frame, and its answer feeds the `CmpThen` ([`Vm::cmp_resume`]).
+    CmpWalk(CmpThen),
+    /// A `json.decode` field default returned; the decode's levels and the slot of its top level
+    /// sit below the frame, and the decode runs on at that field ([`Vm::json_default_resume`]).
+    JsonDefault,
 }
 
 /// What a generator resume's `Option` result feeds.
 #[derive(Clone, Copy, Debug)]
 pub(super) enum GenThen {
-    /// The caller's stack (`g.next()`, a `for` step, a synchronous [`Vm::generator_next`]).
+    /// The caller's stack (`g.next()`, a `for` step).
     Push,
-    /// A `T.from_iter(g)` drain ([`Vm::drain_resume`]).
-    Drain(NativeStatic),
+    /// A drain over the generator (`T.from_iter(g)`, [`Vm::drain_resume`]).
+    Drain(DrainThen),
 }
 
 /// An ordering operator.
@@ -130,21 +135,7 @@ impl Vm {
                 self.set_top(Value::bool(cmp.holds(ord)));
                 Ok(())
             }
-            RetAction::Stringify => {
-                // The result stays rooted on the stack while it renders.
-                let s = self.stringify(self.peek_top(), span, 0)?;
-                let h = self.heap.alloc(Obj::Str(s.into()));
-                self.set_top(Value::obj(h));
-                Ok(())
-            }
-            RetAction::StringifyFmt => {
-                let program = Arc::clone(&self.program);
-                let caller = self.frames.last().expect("a hook returns to its caller");
-                let Op::ToStrFmt(spec) = &program.protos[caller.proto].code[caller.ip - 1] else {
-                    unreachable!("a StringifyFmt frame is pushed only by Op::ToStrFmt")
-                };
-                self.render_str_fmt(spec, true, span)
-            }
+            RetAction::StringifyWalk(then) => self.str_resume(then, span),
             RetAction::Hof(kind) => {
                 let out = self.pop();
                 self.hof_resume(kind, Some(out), true, span)
@@ -153,14 +144,13 @@ impl Vm {
                 let out = self.pop();
                 self.drain_resume(which, Some(out), span)
             }
-            RetAction::Print { custom } => self.print_resume(custom, span),
             RetAction::Sort(kind) => {
                 let out = self.pop();
-                self.sort_resume(kind, Some(out), true, span)
+                self.sort_resume(kind, Some(out), span)
             }
             RetAction::MinMax { max } => {
                 let out = self.pop();
-                self.extreme_resume(max, Some(out), true, span)
+                self.extreme_resume(max, Some(out), span)
             }
             RetAction::Box(call) => {
                 let out = self.pop();
@@ -169,6 +159,9 @@ impl Vm {
                 Ok(())
             }
             RetAction::Gen(then) => self.gen_return(then, span),
+            RetAction::EqWalk(then) => self.eq_resume(then, span),
+            RetAction::CmpWalk(then) => self.cmp_resume(then, span),
+            RetAction::JsonDefault => self.json_default_resume(span),
         }
     }
 
@@ -178,18 +171,18 @@ impl Vm {
         match ret {
             RetAction::Box(_) => self.box_release(),
             RetAction::Gen(_) => self.gen_drop(base),
+            RetAction::EqWalk(_) | RetAction::CmpWalk(_) => self.walk_drop(base),
+            RetAction::StringifyWalk(_) => self.str_walk_drop(base),
             RetAction::Push
             | RetAction::Discard
             | RetAction::ToBool
             | RetAction::EqBool { .. }
             | RetAction::CmpOp(_)
-            | RetAction::Stringify
-            | RetAction::StringifyFmt
             | RetAction::Hof(_)
             | RetAction::Drain(_)
-            | RetAction::Print { .. }
             | RetAction::Sort(_)
-            | RetAction::MinMax { .. } => {}
+            | RetAction::MinMax { .. }
+            | RetAction::JsonDefault => {}
         }
     }
 

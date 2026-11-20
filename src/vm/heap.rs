@@ -302,7 +302,7 @@ pub enum Obj {
     Reader(Arc<ReaderCore>),
     /// Experimental generators (VM-only) — a suspendable coroutine produced by calling a `yield`-ing
     /// function. Holds its bytecode + home/closure + lifecycle state + parked execution context; its
-    /// `.next()` is intrinsic (see `Vm::generator_next`). Boxed to keep `Obj` small (the core carries
+    /// `.next()` is intrinsic (see `Vm::gen_resume`). Boxed to keep `Obj` small (the core carries
     /// `Vec`s of frames/stack). GC children come from [`super::GeneratorCore::gc_roots`].
     Generator(Box<super::GeneratorCore>),
 }

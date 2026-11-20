@@ -6,12 +6,30 @@ use crate::base::builtin::Builtin;
 use crate::base::builtin_method::NativeStatic;
 use crate::base::hooks::Hook;
 
+/// What a drain's source steps by ([`Vm::drain_source`]).
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum DrainSource {
+    Generator,
+    Channel,
+    Hooked,
+    Items,
+}
+
+/// What a drain on the dispatch loop ([`Vm::drain_resume`]) feeds its drained list to.
+#[derive(Clone, Copy, Debug)]
+pub(super) enum DrainThen {
+    /// `T.from_iter(it)`: the static runs on the list.
+    Static(NativeStatic),
+    /// A channel's `.iter()`: a cursor over the list.
+    Cursor,
+}
+
 impl Vm {
     /// `print` joins the `argc` args on the stack top with `sep` and appends `end`: the one print
     /// routine. `custom`: the call's `sep` and `end` values sit above the args (`Op::CallPrintSep`).
     /// The args stay rooted on the operand stack while they render. Pushes `nil`. `flat` (the
-    /// dispatch loop): an arg with a `str` hook runs it as a frame ([`RetAction::Print`]), so a
-    /// wait in it parks; a synchronous caller renders every arg nested.
+    /// dispatch loop): a `str` hook an arg's render reaches runs as a frame
+    /// ([`StrThen::Print`]), so a wait in it parks; a synchronous caller runs it nested.
     pub(super) fn do_print_sep(
         &mut self,
         argc: usize,
@@ -24,8 +42,8 @@ impl Vm {
         self.print_from(argc, custom, 0, String::new(), sep, end, flat, span)
     }
 
-    /// Render args `i..` of a `print` onto `line`, then write it. A hooked arg's frame keeps the
-    /// state below it: `[argc, i, line]`.
+    /// Render args `i..` of a `print` onto `line`, then write it. An arg whose render parks keeps
+    /// `[argc, i]` below its walk, and the walk keeps the line.
     #[allow(clippy::too_many_arguments)]
     fn print_from(
         &mut self,
@@ -39,20 +57,16 @@ impl Vm {
         span: Span,
     ) -> Result<(), RuntimeError> {
         let at = self.stack.len() - argc - if custom { 2 } else { 0 };
+        let then = flat.then_some(StrThen::Print { custom });
         for i in i..argc {
             if i > 0 {
                 line.push_str(sep);
             }
             let v = self.stack[at + i];
-            if flat && self.hook_of(v, Hook::Str) {
-                let h = self.heap.alloc(Obj::Str(line.into()));
-                self.push(Value::int(argc as i64));
-                self.push(Value::int(i as i64));
-                self.push(Value::obj(h));
-                self.push_hook_frame(Hook::Str, v, &[], RetAction::Print { custom }, span)?;
+            let state = [Value::int(argc as i64), Value::int(i as i64)];
+            if !self.str_walk(&mut line, v, false, 0, then, &state, span)? {
                 return Ok(());
             }
-            self.stringify_into(&mut line, v, span, 0)?;
         }
         self.stack.truncate(at);
         // ONE write (body + end joined): in stream mode that is ONE locked write, so a `print` is
@@ -66,16 +80,16 @@ impl Vm {
         Ok(())
     }
 
-    /// A `print` arg's `str` hook returned (its result on the stack top, over `[argc, i, line]`):
-    /// append it and render the rest.
-    pub(super) fn print_resume(&mut self, custom: bool, span: Span) -> Result<(), RuntimeError> {
-        let n = self.stack.len();
-        let mut line = self.val_str(self.stack[n - 2]).unwrap_or_default();
-        // The result stays rooted on the stack while it renders.
-        self.stringify_into(&mut line, self.stack[n - 1], span, 0)?;
-        let i = self.stack[n - 3].as_int() as usize;
-        let argc = self.stack[n - 4].as_int() as usize;
-        self.stack.truncate(n - 4);
+    /// A `print` arg's render that parked ended with `line` (`[argc, i]` on the stack top): render
+    /// the rest.
+    pub(super) fn print_resume(
+        &mut self,
+        custom: bool,
+        line: String,
+        span: Span,
+    ) -> Result<(), RuntimeError> {
+        let i = self.pop().as_int() as usize;
+        let argc = self.pop().as_int() as usize;
         let program = Arc::clone(&self.program);
         let own;
         let (sep, end) = if custom {
@@ -214,19 +228,12 @@ impl Vm {
         }))
     }
 
-    /// One-time `Iterable` → cursor conversion: a struct or enum with the `iter` hook becomes its
-    /// cursor by running `iter(self)`; EVERYTHING else passes through unchanged (so it is safe to
-    /// call on any value). Shared by `Op::IterableToCursor` (the `for` lowering) and
-    /// [`drain_iterable`](Self::drain_iterable) (`List()`/`Set()`/`Map()`/`.iter()`). `iter` wins
-    /// over `next`: a type with both hooks is iterated through `iter`. Pushes the cursor; `flat`
-    /// as for [`Vm::arith`].
-    pub(super) fn iterable_to_cursor(
-        &mut self,
-        v: Value,
-        flat: bool,
-        span: Span,
-    ) -> Result<(), RuntimeError> {
-        if !self.hook_op(flat, Hook::Iter, v, &[], RetAction::Push, span)? {
+    /// `Op::IterableToCursor` (the `for` lowering), the one-time `Iterable` → cursor conversion: a
+    /// struct or enum with the `iter` hook becomes its cursor by running `iter(self)` as a frame;
+    /// EVERYTHING else passes through unchanged (so it is safe to call on any value). `iter` wins
+    /// over `next`: a type with both hooks is iterated through `iter`. Pushes the cursor.
+    pub(super) fn iterable_to_cursor(&mut self, v: Value, span: Span) -> Result<(), RuntimeError> {
+        if !self.push_hook_frame(Hook::Iter, v, &[], RetAction::Push, span)? {
             self.push(v);
         }
         Ok(())
@@ -277,24 +284,16 @@ impl Vm {
         }
     }
 
-    /// Drain ANY for-iterable into a `Vec<Value>` of its elements — the runtime peer of the checker's
-    /// `iterable_elem` (the owner of "what `for x in X` yields"). A built-in collection reads its
-    /// [`builtin_items`](Self::builtin_items) row; a `Generator` is driven via `generator_next`
-    /// until `None`; a user struct with `next(self) -> Option[T]` re-enters the VM (`run_proto`) per
-    /// step until `None`. Both re-entrant paths run user code that can GC, so the growing accumulator
-    /// is built into a heap `Obj::List` ROOTED on the operand stack across every `.next()` (mirrors
-    /// `builtin_set`/`list_hof`/`struct_hash`). The source handle is rooted too. Returns the collected
-    /// elements (cloned out of the rooted list after the loop, GC-safe).
+    /// Drain a for-iterable that does not step into a `Vec<Value>` of its elements — the runtime
+    /// peer of the checker's `iterable_elem` (the owner of "what `for x in X` yields"): a cursor's
+    /// remaining items, or a built-in collection's [`builtin_items`](Self::builtin_items) row. The
+    /// dispatch loop drains every source that runs user code or waits (a generator, a channel, an
+    /// `iter` or `next` hook) on frames instead ([`Vm::drain_resume`]).
     pub(super) fn drain_iterable(
         &mut self,
         v: Value,
         span: Span,
     ) -> Result<Vec<Value>, RuntimeError> {
-        // A pure-`Iterable` struct (`iter`, no `next`) is converted ONCE to its cursor first — the same
-        // step the `for` lowering emits as `Op::IterableToCursor`. Without it `List(xs)`/`Set(xs)`/
-        // `Map(xs)` on an `Iterable[T]`-annotated param would type-check and then fault on that witness.
-        self.iterable_to_cursor(v, false, span)?;
-        let v = self.pop();
         // A cursor (`Obj::Iter`) is CONSUMED in place: clone its REMAINING items (`items[pos..]`),
         // then advance `pos` to the end so the same cursor yields nothing on a second drain — keeping
         // `List(it)`/`Set(it)`/`for` consistent with `.next()` (which also advances the shared cursor)
@@ -314,103 +313,9 @@ impl Vm {
         if let Some(items) = v.as_obj().and_then(|h| self.builtin_items(h)) {
             return Ok(items);
         }
-        // Re-entrant paths (generator / user struct iterator): run user `.next()` until `None`, rooting
-        // the source + a heap accumulator list on the operand stack across each call.
-        let Some(h) = v.as_obj() else {
-            return Err(self.err(format!("cannot iterate over {}", self.type_name(v)), span));
-        };
-        // Resolve the iteration step: a generator resumes; a struct or enum runs its `next` hook.
-        enum Step {
-            Generator,
-            NextHook,
-            Channel,
-        }
-        let step = match self.heap.get(h) {
-            Obj::Generator(_) => Step::Generator,
-            Obj::Struct { .. } | Obj::Enum { .. } if self.hook_of(v, Hook::Next) => Step::NextHook,
-            // A channel drains until it is closed and empty (Rust `rx.iter().collect()`).
-            Obj::Channel(_) => Step::Channel,
-            Obj::Str(_)
-            | Obj::Bytes(_)
-            | Obj::ByteArray(_)
-            | Obj::BigInt(_)
-            | Obj::FloatBox(_)
-            | Obj::Iter { .. }
-            | Obj::List(_)
-            | Obj::Tuple(_)
-            | Obj::Map(_)
-            | Obj::Set(_)
-            | Obj::Struct { .. }
-            | Obj::Enum { .. }
-            | Obj::Cell(_)
-            | Obj::Func { .. }
-            | Obj::Closure { .. }
-            | Obj::Module(_)
-            | Obj::Native { .. }
-            | Obj::Builtin(_)
-            | Obj::Cffi(_)
-            | Obj::Ptr(_)
-            | Obj::Shared(_)
-            | Obj::RwShared(_)
-            | Obj::Atomic(_)
-            | Obj::AtomicInt(_)
-            | Obj::Executor(_)
-            | Obj::Socket(_)
-            | Obj::Listener(_)
-            | Obj::Writer(_)
-            | Obj::Reader(_) => {
-                return Err(self.err(format!("cannot iterate over {}", self.type_name(v)), span));
-            }
-        };
-        // Root the source + the growing accumulator list across the re-entrant calls.
-        let acc = self.heap.alloc(Obj::List(RVec::new()));
-        self.push(v);
-        self.push(Value::obj(acc));
-        let result = (|| {
-            loop {
-                let res = match step {
-                    // One value per receive, through the same entry `recv` and `for v in ch` use:
-                    // under `guarded` an M:N fiber demotes (blocks in place) instead of parking,
-                    // so no `ip` rewind replays the surrounding `List(...)` call (DEC-181).
-                    Step::Channel => {
-                        let item = match self.guarded(|vm| vm.recv_step_or_demote(h, span))? {
-                            // `recv_step_or_demote` woke a sender for `Got`; a filled slot committed none.
-                            RecvStep::Got(v) | RecvStep::Filled(v) => v,
-                            RecvStep::ClosedEmpty => break,
-                            RecvStep::Parked => unreachable!("a re-entered recv never parks"),
-                        };
-                        let heap = self.heap.write(acc);
-                        let Obj::List(buf) = heap.get(acc) else {
-                            unreachable!()
-                        };
-                        buf.push(heap, item);
-                        continue;
-                    }
-                    Step::Generator => self.generator_next(h, span)?,
-                    Step::NextHook => self
-                        .guarded(|vm| vm.invoke_hook(Hook::Next, v, &[], span))?
-                        .unwrap_or(Value::nil()),
-                };
-                let Some(item) = self.next_item(res, span)? else {
-                    break;
-                };
-                let heap = self.heap.write(acc);
-                let Obj::List(buf) = heap.get(acc) else {
-                    unreachable!()
-                };
-                buf.push(heap, item);
-            }
-            Ok(())
-        })();
-        result?;
-        // Clone the collected elements out of the rooted list before unrooting.
-        let Obj::List(buf) = self.heap.get(acc) else {
-            unreachable!()
-        };
-        let out = buf.to_vec();
-        self.pop(); // unroot accumulator
-        self.pop(); // unroot source
-        Ok(out)
+        // Every source that steps (a generator, a channel, an `iter` or `next` hook) drains on frames
+        // instead ([`Vm::drain_resume`]); nothing else iterates.
+        Err(self.err(format!("cannot iterate over {}", self.type_name(v)), span))
     }
 
     /// The item a `next()` result carries: `Some(v)` → `v`, `None` → none, anything else faults.
@@ -437,19 +342,19 @@ impl Vm {
         }
     }
 
-    /// A `T.from_iter(it)` drain over a struct or enum `next` hook or a generator, on the dispatch
-    /// loop: each `next` is a frame ([`RetAction::Drain`], [`GenThen::Drain`]), so a wait in it
-    /// parks. `out` is the result of the
-    /// `next` that just returned; the source and the drained list sit on the stack top. At `None`
-    /// the static runs on the drained list.
+    /// A drain on the dispatch loop (`T.from_iter(it)`, a channel's `.iter()`) over a generator, a
+    /// channel, or a struct or enum `iter` or `next` hook: each step is a frame (a hook's, the
+    /// generator body's, or a step frame's receive: [`RetAction::Drain`], [`GenThen::Drain`]), so a
+    /// wait in it parks. `out` is the result of the step that just returned; the source and the
+    /// drained list sit on the stack top. At the source's end the list feeds `then`.
     pub(super) fn drain_resume(
         &mut self,
-        which: NativeStatic,
+        then: DrainThen,
         out: Option<Value>,
         span: Span,
     ) -> Result<(), RuntimeError> {
         let base = self.stack.len() - 2;
-        let r = self.drain_step(which, base, out, span);
+        let r = self.drain_step(then, base, out, span);
         if r.is_err() {
             self.stack.truncate(base);
         }
@@ -458,35 +363,133 @@ impl Vm {
 
     fn drain_step(
         &mut self,
-        which: NativeStatic,
+        then: DrainThen,
         base: usize,
         out: Option<Value>,
         span: Span,
     ) -> Result<(), RuntimeError> {
         let src = self.stack[base];
-        let acc = self.stack[base + 1];
-        if let Some(res) = out {
-            let Some(item) = self.next_item(res, span)? else {
-                self.stack.truncate(base);
-                self.push(acc);
-                return self.do_native_static(which, 1, span);
-            };
-            let h = acc.as_obj().expect("the drained list");
-            let heap = self.heap.write(h);
-            if let Obj::List(buf) = heap.get(h) {
-                buf.push(heap, item);
+        let kind = self.drain_source(src);
+        let Some(res) = out else {
+            return self.drain_next(then, base, kind, true, span);
+        };
+        // An `iter` hook's result is the cursor the drain reads from here (`iter` wins over
+        // `next`, as in `drain_iterable`); the checker makes it an `Iterator[T]`, which has no
+        // `iter` hook. Every other step's result is a `next()` result.
+        if kind == DrainSource::Hooked && self.hook_of(src, Hook::Iter) {
+            self.stack[base] = res;
+            let kind = self.drain_source(res);
+            return self.drain_next(then, base, kind, false, span);
+        }
+        let Some(item) = self.next_item(res, span)? else {
+            return self.drain_finish(then, base, span);
+        };
+        let h = self.stack[base + 1].as_obj().expect("the drained list");
+        let heap = self.heap.write(h);
+        if let Obj::List(buf) = heap.get(h) {
+            buf.push(heap, item);
+        }
+        self.drain_next(then, base, kind, false, span)
+    }
+
+    /// What a drain's source `v` steps by: its own generator body or channel receive, or (a
+    /// struct or enum) a hook, or nothing but its builtin items.
+    #[inline]
+    fn drain_source(&self, v: Value) -> DrainSource {
+        let obj = v.as_obj().map(|h| self.heap.get(h));
+        if matches!(obj, Some(Obj::Generator(_))) {
+            DrainSource::Generator
+        } else if matches!(obj, Some(Obj::Channel(_))) {
+            DrainSource::Channel
+        } else if matches!(obj, Some(Obj::Struct { .. } | Obj::Enum { .. })) {
+            DrainSource::Hooked
+        } else {
+            DrainSource::Items
+        }
+    }
+
+    /// Take the drain's next step from its source (of kind `kind`): a frame whose return runs
+    /// [`Vm::drain_step`]. `convert`: the source is the drain's own, so an `iter` hook runs first.
+    /// Always inlined: as a call it cost ~30 instructions per generator step (a 2M-item
+    /// `List.from_iter(gen)` drain, measured 2026-11-19).
+    #[inline(always)]
+    fn drain_next(
+        &mut self,
+        then: DrainThen,
+        base: usize,
+        kind: DrainSource,
+        convert: bool,
+        span: Span,
+    ) -> Result<(), RuntimeError> {
+        let src = self.stack[base];
+        let ret = RetAction::Drain(then);
+        if convert && kind == DrainSource::Hooked && self.hook_of(src, Hook::Iter) {
+            let pushed = self.push_hook_frame(Hook::Iter, src, &[], ret, span)?;
+            debug_assert!(pushed, "hook_of found the iter hook");
+            return Ok(());
+        }
+        match kind {
+            DrainSource::Generator => {
+                // The per-step cancel point: this loop's back-edge (each arm that steps).
+                self.guarded_checkpoint()?;
+                self.gen_resume(src.as_gcref(), GenThen::Drain(then), span)
+            }
+            DrainSource::Channel => {
+                self.guarded_checkpoint()?;
+                self.push(src);
+                self.push_step_frame(1, call::RECV_STEP, ret, span);
+                Ok(())
+            }
+            DrainSource::Hooked if self.hook_of(src, Hook::Next) => {
+                self.guarded_checkpoint()?;
+                let pushed = self.push_hook_frame(Hook::Next, src, &[], ret, span)?;
+                debug_assert!(pushed, "hook_of found the next hook");
+                Ok(())
+            }
+            // An `iter` hook's builtin cursor (or a value with no step): `drain_iterable` reads
+            // its items, or faults, without user code.
+            DrainSource::Hooked | DrainSource::Items => {
+                let items = self.drain_iterable(src, span)?;
+                let h = self.stack[base + 1].as_obj().expect("the drained list");
+                let heap = self.heap.write(h);
+                if let Obj::List(buf) = heap.get(h) {
+                    for item in items {
+                        buf.push(heap, item);
+                    }
+                }
+                self.drain_finish(then, base, span)
             }
         }
-        // The per-step cancel point: this loop's back-edge.
-        self.guarded_checkpoint()?;
-        if let Some(h) = src.as_obj()
-            && matches!(self.heap.get(h), Obj::Generator(_))
-        {
-            return self.gen_resume(h, GenThen::Drain(which), span);
+    }
+
+    /// The drain's source is spent: replace its slots with the drained list fed to `then`.
+    fn drain_finish(
+        &mut self,
+        then: DrainThen,
+        base: usize,
+        span: Span,
+    ) -> Result<(), RuntimeError> {
+        let acc = self.stack[base + 1];
+        match then {
+            DrainThen::Static(which) => {
+                self.stack.truncate(base);
+                self.push(acc);
+                self.do_native_static(which, 1, span)
+            }
+            DrainThen::Cursor => {
+                let Obj::List(buf) = self.heap.get(acc.as_gcref()) else {
+                    unreachable!("the drained list")
+                };
+                let items = buf.clone();
+                let cursor = self.heap.alloc(Obj::Iter {
+                    items,
+                    pos: RCell::new(0),
+                });
+                self.stack.truncate(base);
+                self.push(Value::obj(cursor));
+                Ok(())
+            }
         }
-        let pushed = self.push_hook_frame(Hook::Next, src, &[], RetAction::Drain(which), span)?;
-        debug_assert!(pushed, "a drain starts only on a value with a next hook");
-        Ok(())
     }
 
     /// Run a builtin type's static method (`List.from_iter(xs)`) on the `argc` args on the stack
@@ -528,14 +531,16 @@ impl Vm {
             | NativeStatic::IntFromBeBytes
             | NativeStatic::IntFromLeBytes => false,
         };
-        let generator =
-            matches!(arg.as_obj(), Some(h) if matches!(self.heap.get(h), Obj::Generator(_)));
-        if drains && (generator || self.hook_of(arg, Hook::Next) && !self.hook_of(arg, Hook::Iter))
-        {
+        let steps = matches!(
+            arg.as_obj().map(|h| self.heap.get(h)),
+            Some(Obj::Generator(_) | Obj::Channel(_))
+        ) || self.hook_of(arg, Hook::Iter)
+            || self.hook_of(arg, Hook::Next);
+        if drains && steps {
             let acc = self.heap.alloc(Obj::List(RVec::new()));
             self.push(arg);
             self.push(Value::obj(acc));
-            return self.drain_resume(which, None, span);
+            return self.drain_resume(DrainThen::Static(which), None, span);
         }
         let result = match which {
             NativeStatic::ListFromIter => {

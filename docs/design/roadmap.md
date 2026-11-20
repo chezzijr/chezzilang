@@ -133,6 +133,8 @@ counts, a measurement on `benches/run.chz`, and the delta recorded in `benchmark
 | call-site specialization for `Op::Call` | deferred, no gain measured: fib's residual is frame setup in `finish_frame` |
 | float-constant interning | deferred: no measured float regression on the int-heavy set |
 | frame pooling | rejected: frames already live in a capacity-reusing `Vec`; no per-call frame allocation |
+| shrink the `step` / `run_until` codegen | candidate: `fib`, `loop`, `primes` +1.0% to +1.2% instructions since plan `2026-11-18-every-wait-parks` with no feature on their path; `step`'s frame 0x328 -> 0x348 bytes ([`benchmarks.md`](../contributing/benchmarks.md#every-wait-parks-2026-11-20)) |
+| build-level code layout control (loop/function alignment flags, PGO) | candidate: on Broadwell the hot VM code flips between two speeds after unrelated edits (`list.chz` 2345M/2450M cycles, tracked by `idq.mite_uops`), so benches flip with it |
 
 ### Memory layout
 

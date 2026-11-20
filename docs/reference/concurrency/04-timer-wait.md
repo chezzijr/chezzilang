@@ -19,15 +19,9 @@ once). Delivery is handled at `recv` time, in the receiver's own engine, so a `t
 level can be `recv`'d inside a spawned task. A fiber receiver parks and a background job (on the
 netpoller timer thread) `send`s `true` at the deadline, accounted so it can't trip a false deadlock. A timer keeps the run
 awake only while a task waits on it, as in Go 1.23: after a `wait:` whose other arm won, the pending
-timer does not hide a later deadlock (`deadlock: every task is blocked` at once). A
-waiter that owns its OS thread — an `Executor` job, or the top-level `main` thread, **including inside
-a native callback** — does **not** park: it blocks with the timer as one more arm, so a sibling value
-that arrives first wins.
-
-**One shape still inline-sleeps.** A `wait:` reached in the INLINE body of an outermost `parallel:`
-builder has no worker loop under it to drive a park, so a live timer arm there sleeps to the deadline
-and takes it **without re-polling siblings** — a runnable sibling that could satisfy another arm is
-stranded until the timer fires. [`gaps.md`](../../contributing/gaps.md) **N10** records this.
+timer does not hide a later deadlock (`deadlock: every task is blocked` at once). Every waiter is a
+fiber (`main`, a task, an `Executor` job), so a live timer arm is one more bucket of its park, and a
+sibling value that arrives first wins.
 
 ---
 
@@ -97,11 +91,10 @@ while a_open or b_open:
 **Selection is deterministic SOURCE ORDER** (first ready arm wins, recv OR send), **not** Go's
 uniform-random `select` fairness. This is a deliberate divergence from Go: a `wait:` over
 already-ready arms gives the same answer on every run and at every worker count, which makes a
-`wait:`-using program goldenable. The one shape that is still schedule-sensitive is a live `timer` arm
-reached in an inline outermost-`parallel:` body (N10, above). All arm channel handles and send values
-are evaluated **once**, top to bottom, on entry (Go's rule). `else` runs only if **no** arm is ready —
-so a `wait` containing an unbounded or closed send-arm, or a closed recv-arm, never blocks (that arm
-is always ready).
+`wait:`-using program goldenable. All arm channel handles and send values are evaluated **once**,
+top to bottom, on entry (Go's rule). `else` runs only if **no** arm is ready — so a `wait`
+containing an unbounded or closed send-arm, or a closed recv-arm, never blocks (that arm is always
+ready).
 
 **Surface & grammar.** A compound statement (sibling to `match`/`parallel`):
 `wait : NEWLINE INDENT <arm>+ DEDENT`. An arm is one of:
@@ -180,18 +173,15 @@ is **not** exhaustive (it's a runtime race, not a type match); ≥1 recv or send
 
 | waiter | untimed `wait:` | `wait:` with a live timer arm |
 |---|---|---|
-| a spawned fiber | parks on every arm's channel | parks; the timer is one more bucket |
-| a fiber inside a callback that runs as a frame (`Shared.update` closure, list HOF, hook, sort comparator, generator, `defer` drain; since 2026-11-07) | parks on every arm's channel | parks; the timer is one more bucket |
-| a fiber inside a nested native callback (a hook reached from a map/set probe, a `json.decode` default, an FFI callback) | demotes and blocks in place | demotes; the deadline bounds the wait |
-| a thread that owns itself (`main`, an `Executor` job) | blocks in place | blocks in place, clamped to the deadline |
-| the inline body of an outermost `parallel:` builder | refuses (deadlock fault) | sleeps to the deadline, then takes the timer arm (N10) |
+| a fiber (`main`, a spawned task, an `Executor` job), inside any callback that runs as a frame too (a `Shared.update` closure, a list HOF, a hook or a nested `==`/`str`/`<` walk, a sort comparator, a generator, a `json.decode` default, a `defer` drain) | parks on every arm's channel | parks; the timer is one more bucket |
+| a fiber under a host frame (an FFI callback, a hook reached from a map/set probe) | demotes and blocks in place | demotes; the deadline bounds the wait |
 
 - A value that arrives before the deadline wins the wait; the deadline wins only if nothing else did.
-- A send-arm that cannot move its value inside a nested native callback demotes and blocks on its offer, as
-  Go blocks — like a plain full `send` there.
-- `main` inside a nested native callback blocks in place for any `wait:`. A wait in place stays
-  awake in the run's deadlock count, so a `wait:` there that nothing can satisfy hangs (a deliberate
-  difference from Go, see [06-blocking.md](06-blocking.md#blocking-context-table)).
+- A send-arm that cannot move its value under a host frame demotes and blocks on its offer, as Go
+  blocks — like a plain full `send` there.
+- A wait in place stays awake in the run's deadlock count, so a `wait:` under a host frame that
+  nothing can satisfy hangs (a deliberate difference from Go, see
+  [06-blocking.md](06-blocking.md#blocking-context-table)).
 
 Implementation notes (`Op::WaitPoll`, the multi-channel park, the timer arm):
 [`concurrency-runtime.md`](../../design/concurrency-runtime.md#wait-implementation).

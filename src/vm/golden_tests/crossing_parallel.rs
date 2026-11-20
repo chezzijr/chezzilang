@@ -1305,11 +1305,12 @@ const EXITS: [Exit; 8] = [
     Exit::Continue,
     Exit::Cancel,
 ];
-/// `HashHook` and `JsonDefault` make the `Caller` program's call from inside a native that calls
-/// back with `native_reentry == 1`: a struct `hash` hook run by a `Map` insert (`vm/hash.rs`
-/// `declared_hash`) and a field default run by `json.decode` (`vm/json_decode.rs`
-/// `run_decode_default`). There every drain runs on the Rust stack (`drains_on_frames() == false`)
-/// and every abort waits inline (parks are off under re-entry).
+/// `HashHook` makes the `Caller` program's call from inside a native that calls back with
+/// `native_reentry == 1`: a struct `hash` hook run by a `Map` insert (`vm/hash.rs`
+/// `declared_hash`). There every drain runs on the Rust stack (`drains_on_frames() == false`) and
+/// every abort waits inline (parks are off under re-entry). `JsonDefault` makes it from a field
+/// default that `json.decode` runs as a frame at its field (`vm/json_decode.rs`
+/// `json_default_resume`, plan 2026-11-18-every-wait-parks Task 4), with no host frame under it.
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Place {
     NoRecover,

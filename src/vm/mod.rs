@@ -15,13 +15,11 @@ mod map_data;
 mod module_data;
 mod module_table;
 mod poller;
-mod pool;
 mod quiesce;
 mod root_registry;
 mod rvec;
 use root_registry::{CtxBox, RootRegistry};
 use rvec::{AllocFailed, RCell, RVec};
-mod runner_cache;
 pub mod sched_seed;
 mod sysmon;
 mod timer;
@@ -351,7 +349,7 @@ const Q_GENERIC: u8 = 2;
 /// re-verified by `self_referential_stringable_hits_depth_limit`. Only virtual address space is
 /// reserved, so a bump is free until touched — but re-measure here on any `sizeof` growth.
 ///
-/// **It is reserved PER M:N POOL WORKER, not once** (`src/vm/pool.rs:45`, `src/vm/blocking_pool.rs:108`,
+/// **It is reserved PER M:N WORKER, not once** (`src/vm/blocking_pool.rs:108`,
 /// `src/vm/sched.rs:828`/`:1602`): 384 MiB × 12 workers is already 4.6 GiB of reservation on a
 /// 12-core box. That is why raising this number to buy front-end depth margin is the LAST resort and
 /// not the first — it is also the smaller of the two big stacks a front-end walk can land on
@@ -380,8 +378,7 @@ where
 
 /// Configured worker count for the M:N OS-thread engine. `0` = auto (size to
 /// [`std::thread::available_parallelism`]). Set once at startup from `--threads=N` /
-/// `CHEZZI_THREADS` (see `main::cmd_run`), BEFORE any `parallel:` join runs — the process-wide pool
-/// ([`pool`]) is a `OnceLock` created lazily on first use, so a later store would not resize it.
+/// `CHEZZI_THREADS` (see `main::cmd_run`), BEFORE the run starts its workers ([`worker_count`]).
 static WORKER_OVERRIDE: AtomicUsize = AtomicUsize::new(0);
 
 /// TICKET-126 — counts calls to [`SchedCore::cancelled_scope_awaiting_drain`], the O(scopes) idle-path
@@ -555,8 +552,7 @@ pub fn test_baseline_worker_count() -> usize {
 }
 
 /// The effective M:N worker count: the configured override, or `available_parallelism()` when unset
-/// (`0`). Always `>= 1`. Read by the pool size, the scheduler's `nworkers`, and the eager-nursery
-/// gate so all three agree.
+/// (`0`). Always `>= 1`. Read by the scheduler's `nworkers` and the runner budgets so they agree.
 pub fn worker_count() -> usize {
     #[cfg(test)]
     test_baseline_worker_count();
@@ -622,9 +618,9 @@ struct CallFrame {
     /// `LeaveDeferScope` drains `deferred` back down to the top marker, giving block-scoped defer:
     /// a block's defers run when that block exits, not when the whole frame does.
     defer_markers: Vec<usize>,
-    /// `nurseries.len()` at frame entry (mirrors [`Handler::nursery_len`]). A `?`/return that escapes
+    /// `eager_scheds.len()` at frame entry (mirrors [`Handler::nursery_len`]). A `?`/return that escapes
     /// a `parallel:` body in this frame jumps past the `JoinNursery` that would pop the nursery;
-    /// `do_return` truncates `nurseries` back to this length so the stale nursery (and its GC-rooted
+    /// `do_return` truncates `eager_scheds` back to this length so the stale nursery (and its GC-rooted
     /// pending-task args) is reclaimed instead of leaking to program exit.
     nursery_len: usize,
     /// M-C: this frame's proto opened an implicit nursery at body entry (it contains a bare `spawn`).
@@ -697,7 +693,7 @@ const _: fn() = || {
 };
 
 /// Experimental generators — the heap payload of an `Obj::Generator`. A one-shot coroutine driven
-/// synchronously by `.next()`: each call resumes [`Vm::generator_next`] until the next `Op::Yield`
+/// by `.next()`: each call resumes it ([`Vm::gen_resume`]) until the next `Op::Yield`
 /// (returns `Some(v)`) or the body ends (`None`, state → `Done`). Generators hold live VM frame
 /// state; a task reaches one by handle (M3.4), and a second driver faults `generator already
 /// running` (`yield` was never part of the removed interpreter's surface).
@@ -812,9 +808,7 @@ impl Deferred {
 /// handle (M3.4); the body runs at the `parallel:` dedent. A `spawn:` block is lowered to
 /// a zero-arg closure, so it rides the `Call` variant.
 /// The held values are GC roots while the task is pending (see [`Vm::collect`]).
-/// `Clone` is shallow (a `Value`/`GcRef` copy — both originals and clones stay rooted), used by
-/// `early_enlist_outer` to prepare workers from a copy so a non-callable task faults BEFORE the
-/// nursery is consumed (atomic enlist — charge #4).
+/// `Clone` is shallow (a `Value`/`GcRef` copy — both originals and clones stay rooted).
 #[derive(Clone)]
 enum PendingCall {
     /// `spawn f(args)` (or a `spawn:` block, lowered to a zero-arg closure) — invoke the callable.
@@ -838,20 +832,6 @@ impl PendingCall {
         std::iter::once(head)
             .chain(args.iter())
             .filter_map(|v| v.child_gcref())
-    }
-}
-
-/// A task queued on a nursery: the call, holding the parent's values by handle (M3.4). It reads
-/// the run's module globals live (M3.1), so nothing about the module view is pinned at the `spawn`.
-#[derive(Clone)]
-struct QueuedTask {
-    call: PendingCall,
-}
-
-impl QueuedTask {
-    /// The GcRefs this pending task keeps alive — see [`PendingCall::roots`].
-    fn roots(&self) -> impl Iterator<Item = GcRef> + '_ {
-        self.call.roots()
     }
 }
 
@@ -1053,33 +1033,22 @@ pub struct Vm {
     pub(super) task: deadlock::TaskPath,
     /// Test mode: collect before *every* instruction, to surface any missing GC root.
     gc_stress: bool,
-    /// Active `parallel:` nurseries (C4), innermost last. `EnterNursery` pushes; each `spawn`
-    /// registers a [`QueuedTask`] on the innermost list; `JoinNursery` drains it FIFO at the
-    /// dedent. Tasks are GC roots while pending. A `recover:` boundary truncates this stack back to
-    /// its install-time length on catch (see [`Handler::nursery_len`]), so a fault in the nursery
-    /// body or a task can't leave a stale entry.
-    nurseries: Vec<Vec<QueuedTask>>,
-    /// Cross-nursery flat scheduler (M:N) — parallel to [`Vm::nurseries`] (lockstep, swapped per-fiber):
-    /// `Some(scope_id)` if this nursery was EARLY-ENLISTED into the one global sched (its sibling tasks
-    /// already seeded as a scope so a *nested* nursery's owner can run them — the case-A cross-nursery
-    /// wake), else `None` (the normal lazy path: tasks run + reduce at this nursery's own `JoinNursery`).
-    mn_scopes: Vec<Option<usize>>,
-    /// TASK B — parallel to [`Vm::nurseries`] (same length, pushed/popped in lockstep): the value of
+    /// TASK B — parallel to [`Vm::eager_scheds`] (same length, pushed/popped in lockstep): the value of
     /// the current frame's `deferred.len()` captured when each nursery was entered (`EnterNursery`),
     /// i.e. the defer floor of that `parallel:` body (plus its defer-scope marker count). Every
     /// exit but fall-through (`return`, `?`, `break`/`continue`, a fault, a cancel) reads it in
     /// `Vm::leave_level` / `Vm::leave_level_now`: the body's defers (those at `deferred[floor..]`)
     /// run BEFORE the nursery is reclaimed, and only THEN the enclosing blocks' defers.
     nursery_defer_floors: Vec<LevelFloor>,
-    /// TICKET-048 — parallel to [`Vm::nurseries`] (same length, pushed and popped in lockstep): the
+    /// TICKET-048 — parallel to [`Vm::eager_scheds`] (same length, pushed and popped in lockstep): the
     /// source span of the construct that OPENED each nursery — the `parallel:` keyword, or the first
     /// statement of an implicit nursery's block. Read when building the `DEADLOCK_MSG` fault so its
     /// headline names a real `path:line:col` instead of `Span::RUNTIME`.
     nursery_spans: Vec<Span>,
-    /// Per-connection spawn — parallel to [`Vm::nurseries`] (lockstep): `Some` for an eager nursery
-    /// (entered under `--parallel` inside a fiber), `None` for a lazy/top-level one. A `spawn` whose
-    /// innermost nursery is eager injects its handler fiber straight into the scope's sched (runs
-    /// concurrently with the body) instead of queueing it for the join. See [`EagerScope`].
+    /// Active `parallel:` nurseries (C4), innermost last: `EnterNursery` pushes, `JoinNursery` and
+    /// an escape pop. Its length is the nursery depth that [`CallFrame::nursery_len`] and
+    /// [`Handler::nursery_len`] record. `Some` holds the nursery's scope on the fiber's sched; a
+    /// `spawn` injects its task fiber there, to run concurrently with the body. See [`EagerScope`].
     eager_scheds: Vec<Option<EagerScope>>,
     /// TICKET-103 — the scope id of the fiber this shell is running; set on every swap-in by
     /// `run_one_fiber`.
@@ -1095,8 +1064,8 @@ pub struct Vm {
     /// a static would let one run's join reach into another run's executors.
     exec_registry: ExecRegistry,
     /// gaps.md W7-56 — every `MnSched` alive in this run, so a wake with NO scheduler in scope can
-    /// still reach a fiber parked on one. An eager `Executor` job's `Vm` has `mn == None` AND
-    /// `mn_enlist_sched == None` (`spawn_worker` sets neither — only `spawn_shell` sets `mn`), so its
+    /// still reach a fiber parked on one. An eager `Executor` job's `Vm` had `mn == None`
+    /// (`spawn_worker` does not set it — only `spawn_shell` sets `mn`), so its
     /// `send`/`close` took the no-sched branch and notified only the channel condvar; a fiber parked
     /// in `SchedCore::parked` is reachable ONLY through that sched's `wake_bucket`, and idle workers
     /// `cv.wait` untimed. The measured symptom was a job's value sitting in the queue while the
@@ -1234,23 +1203,20 @@ pub struct Vm {
     /// a holder parked in its box closure keeps its identity and a sibling on the same worker has
     /// its own. From the process-wide counter ([`fresh_guard_token`]).
     pub guard_token: u64,
-    /// Structural depth already consumed by the ENCLOSING structural walks on the host stack, when a
-    /// user protocol hook (`eq` / `str`) re-entered the VM from inside one. Every FAULTING
-    /// [`MAX_STRUCTURAL_DEPTH`] guard tests `walk_base + depth`, so the budget is ONE shared allowance
-    /// across a chain of nested protocol-hook re-entries — CPython's model, and the only thing that
-    /// bounds the PRODUCT of hook-nesting depth × per-hook walk depth. Maintained by
-    /// [`Vm::guarded_walk`], which every `run_proto` dispatch with a live structural `depth` in scope
-    /// goes through.
+    /// Structural depth already consumed by the ENCLOSING structural walks, when a user protocol
+    /// hook (`eq` / `str`) runs from inside one. Every FAULTING [`MAX_STRUCTURAL_DEPTH`] guard tests
+    /// `walk_base + depth`, so the budget is ONE shared allowance across a chain of nested
+    /// protocol-hook calls — CPython's model, and the only thing that bounds the PRODUCT of
+    /// hook-nesting depth × per-hook walk depth. Raised by [`Vm::guarded_walk`] (a hook run nested on
+    /// the host stack) and by a parked `==` walk's or render's hook frame (`walk.rs`,
+    /// `display.rs`), which its return or its unwind ([`Vm::drop_ret`]) lowers again.
     ///
-    /// Per-`Vm`, not per-fiber, for the identical reason [`Vm::native_reentry`] is: a fiber cannot
-    /// park or yield while a native re-entry is on the host stack (every park/yield gate is
-    /// `native_reentry == 0`), so no other fiber can ever observe a non-zero value. Deliberately
-    /// absent from [`FiberCtx`], [`GenCtx`], [`Handler`] and [`Vm::swap_ctx`] — do not add it to any
-    /// of them.
+    /// Per-fiber: a hook frame parks with it raised, so it travels in [`FiberCtx`] ([`Vm::swap_ctx`]),
+    /// as Go keeps such state on the goroutine. Not in [`GenCtx`]: a `yield` runs in the generator
+    /// body frame, never under a hook frame, so the value at a `yield` is the one its resume found.
     ///
-    /// `recover:` needs no restoration. Unlike `call_depth` (restored from the snapshot because
-    /// frames are heap-allocated and skipped over), native walk frames unwind through Rust `?`, so
-    /// every [`Vm::guarded_walk`] on the path has already restored by the time the handler runs.
+    /// `recover:` needs no restoration: a guarded walk unwinds through Rust `?` and restores, and a
+    /// walk's hook frame restores in [`Vm::drop_ret`] as the unwind pops it.
     walk_base: usize,
     /// While `true`, [`Vm::values_equal_guarded`] does NOT dispatch a user `eq` — it compares
     /// structurally, all the way down. Set for exactly one window: `Atomic.cas`'s compare, which runs
@@ -1347,23 +1313,9 @@ pub struct Vm {
     unwound: bool,
     /// D2b — set on an M:N **worker shell** to the scheduler of the `parallel:` nursery it is draining.
     /// `Some` flips the `recv`/`send` arms onto the park/wake protocol ([`MnSched`]) instead of the
-    /// legacy condvar-block; `None` on the top-level VM, the inline outermost-`parallel:` builder VM
-    /// (see [`Vm::mn_enlist_sched`] below — there is no scheduler loop driving the inline body), and
-    /// an eager `Executor` job's `Vm` (gets neither `mn` nor `mn_enlist_sched` from `spawn_worker`).
-    /// Cloned onto each shell at enlistment ([`Vm::run_mn_nursery`]).
+    /// legacy condvar-block; `None` on the run's top-level `Vm`, which runs no code of its own
+    /// (`main` is fiber 1 on a shell, [`Vm::run_root`]), and on a bare test `Vm`.
     mn: Option<Arc<MnSched>>,
-    /// Cross-nursery flat scheduler (M:N) — count of OUTER nurseries early-enlisted into the global
-    /// sched by a nested builder but not yet reduced at their own `JoinNursery`. While > 0 the
-    /// [`Vm::mn_enlist_sched`] is held alive (the enlisted scopes' slots live in it); the last
-    /// enlisted-scope join clears it. Lives on the inline builder's VM (stable across the body).
-    mn_enlisted: usize,
-    /// Cross-nursery flat scheduler (M:N) — the global sched the INLINE builder early-enlisted OUTER
-    /// nurseries into. Held SEPARATELY from [`Vm::mn`] because the inline VM's body must run with
-    /// `self.mn == None` (so its `run_until` does NOT take the worker-only D3 budget-yield / recv-park
-    /// paths — there is no scheduler loop driving the inline body, so a yield/park would just stall it).
-    /// The owner loops run on worker SHELLS (whose `mn` is set); only the deferred enlisted-scope joins
-    /// (`join_enlisted_scope`/`abort_enlisted_scope`) read this. Cleared when `mn_enlisted` hits 0.
-    mn_enlist_sched: Option<Arc<MnSched>>,
     /// D3 — reduction budget of the fiber currently swapped in: the number of ops it may still
     /// dispatch before it must yield its worker (BEAM-style preemption). Reset to [`CONTEXT_REDS`]
     /// on every schedule-in ([`Vm::run_one_fiber`]) and decremented at the `run_until` loop-top
@@ -1385,8 +1337,13 @@ pub struct Vm {
     /// currently OPEN, innermost last (CPython's `Py_ReprEnter`). An object met again while open is a
     /// back edge and renders as `[...]` / `{...}` / `Set(...)` / `...`. An in-progress STACK, not a
     /// visited set, so a shared but acyclic child (`[x, x]`) still prints in full. Every push is
-    /// popped on both the `Ok` and `Err` path. Deliberately absent from `FiberCtx` and `GenCtx`:
-    /// a render never parks (a `str` hook runs under `guarded_walk`), so no other fiber can observe it.
+    /// popped on both the `Ok` and `Err` path, and by a render's hook frame's unwind
+    /// ([`Vm::drop_ret`]).
+    ///
+    /// Per-fiber: a render's `str` hook frame parks with its containers open (`display.rs`), so it
+    /// travels in [`FiberCtx`] ([`Vm::swap_ctx`]), as [`Vm::walk_base`] does. Not in [`GenCtx`]: a
+    /// `yield` runs in the generator body frame, never under a render's hook frame, so the stack
+    /// at a `yield` is the one its resume found.
     repr_active: Vec<GcRef>,
     /// D5 owe #3 (Path C) — this M:N worker shell's worker id (its `locals[wid]` slot), set at the top
     /// of [`Vm::mn_worker_loop`]. Read by [`Vm::demote_recv_block`] so a demoted worker's raw
@@ -1408,9 +1365,6 @@ pub struct Vm {
     /// The replacement worker this worker armed for the watcher of long C calls (`sysmon`): the
     /// watcher starts it in place of [`Vm::demote_once`] when it retakes a call's permit.
     extern_spare: Option<sysmon::Armed>,
-    /// TICKET-205 — this `Vm` cannot leave its OS thread at a slice end (an Executor job, a gated
-    /// nursery body), so it counts reductions and hands its runner slot over in place.
-    slice_in_place: bool,
     /// TICKET-230 — the run's main thread holds one runner permit from `Vm::run` until the root
     /// `Vm` drops.
     run_permit: Option<width::RunPermit>,
@@ -1478,8 +1432,11 @@ use list_hof::{CmpMethod, HofKind, SortKind};
 use shared_methods::BoxCall;
 mod method_call;
 mod ret_action;
+mod walk;
 use crate::lexer::strip_num_underscores_radix;
+use display::StrThen;
 use ret_action::{Cmp, GenThen, RetAction};
+use walk::{EqThen, Scan};
 mod blocking;
 mod builtins;
 mod channel;

@@ -3,17 +3,15 @@
 //! standing differential, over the engine's scheduling knob `CHEZZI_THREADS`).
 //!
 //! **Lives in `tests/`, driving the built binary — not `test_runner::run_tests` in-process.**
-//! `vm::pool` is ONE process-wide `OnceLock`, sized to `vm::worker_count()` exactly once, lazily, on
-//! first use, for the life of the process (`src/vm/pool.rs`) — nothing can resize it afterward. Under
-//! `cargo test --lib`, many tests run concurrently against that ONE shared pool; forcing a count from
-//! inside a single test either does nothing (another test already created the pool at a different
-//! size) or, if it happens to run first, permanently pins the WHOLE test binary's pool to that count
-//! for the rest of the run. Measured (task-5b brief): whole-process `CHEZZI_THREADS=2 cargo test`
+//! `vm::worker_count()` is ONE process-wide setting. Under `cargo test --lib`, many tests run
+//! concurrently against it; forcing a count from inside a single test changes it for every test
+//! running beside it. (When this gate was written the count also sized a process-wide `OnceLock`
+//! thread pool, since deleted, which could not be resized at all.) Measured (task-5b brief): whole-process `CHEZZI_THREADS=2 cargo test`
 //! under `RUST_TEST_THREADS=4` starved 4 concurrently-running tests contending for 2 pool workers (8
 //! failures/hangs — exactly the tests then annotated "needs ≥2 free pool threads", pool risk G3,
 //! `docs/contributing/gaps.md` W7-12r; TICKET-052 closed that residual, and those annotations are retired).
 //! `RUST_TEST_THREADS=1` took >54 minutes without finishing. A subprocess
-//! gets its own process, so its own freshly-sized pool — same reason `executor_reentrant_shutdown.rs`
+//! gets its own process, so its own worker count — same reason `executor_reentrant_shutdown.rs`
 //! / `executor_results_not_retained.rs` already run the built binary instead of calling in-process.
 //!
 //! **This differential is over the ~550 Chezzi behavioural tests in `tests/chz`, not the ~4150 Rust
@@ -25,11 +23,11 @@
 //! `cmd_test` never called `vm::set_worker_count`, so a `CHEZZI_THREADS=2 chezzi test` differential
 //! was a silent no-op (both runs used the same auto-sized pool). `test_runner.rs`'s
 //! `over_memory_trips_on_an_all_native_task_body` test already documented this exact gap ("the env
-//! var is read by `main::cmd_run`, not by `run_tests_capped`"). `main::apply_env_worker_count` closes
-//! it for `test` too — `chezzi_test_cli_honors_chezzi_threads_via_the_worker_count` below is
-//! the black-box proof that it actually reaches the pool through the CLI `test` path, not merely
-//! `worker_count()` in the lib test binary (which `vm::tests::chezzi_threads_env_reaches_worker_count`
-//! already covers separately).
+//! var is read by `main::cmd_run`, not by `run_tests_capped`"). `main::apply_env_worker_count`
+//! closes it for `test` too — `chezzi_test_cli_honors_chezzi_threads_via_the_worker_count` below is
+//! the black-box proof that it actually reaches the scheduler through the CLI `test` path, not
+//! merely `worker_count()` in the lib test binary (which
+//! `vm::tests::chezzi_threads_env_reaches_worker_count` already covers separately).
 
 use std::path::Path;
 use std::process::Command;
@@ -159,10 +157,11 @@ fn assert_chz_dir_at_two_worker_counts(dir: &str) {
     );
 }
 
-/// The causal proof that `CHEZZI_THREADS` reaches the pool through the `chezzi test` and `chezzi run`
-/// CLI paths (not merely `vm::worker_count()` in the lib test binary). The probe is the run's worker
-/// count, which sizes the pool and every scheduler, printed by `CHEZZI_SCHED_STATS=1` as
-/// `[sched-stats] workers=N demotes=M`: a dropped env read prints the default (all-cores) count at both settings.
+/// The causal proof that `CHEZZI_THREADS` reaches the scheduler through the `chezzi test` and
+/// `chezzi run` CLI paths (not merely `vm::worker_count()` in the lib test binary). The probe is
+/// the run's worker count, which sizes the run's scheduler and the runner budget, printed by
+/// `CHEZZI_SCHED_STATS=1` as `[sched-stats] workers=N demotes=M`: a dropped env read prints the
+/// default (all-cores) count at both settings.
 ///
 /// Until 2026-11-06 this test compared child CPU time with wall time, which failed whenever the box
 /// was busy (the two jobs could not get two cores). Before TICKET-205 it proved the knob by
@@ -266,9 +265,11 @@ fn threads_one_serializes_cpu_bound_parallel_tasks() {
 /// W15-2 (TICKET-168) — `threads_one_serializes_cpu_bound_parallel_tasks` above puts ALL the CPU
 /// work inside spawned tasks, so it never exercises the shape where the top-level `parallel:` BODY
 /// itself burns CPU on the main thread while a spawned sibling burns CPU on the `chezzi-eager`
-/// drainer. `activate_eager_nursery` (`src/vm/sched.rs`) starts that drainer unconditionally; nothing
-/// gates the two against each other at a budget of 1. Measured on the debug binary: 1.85-1.95 s user
-/// over ~1.10 s wall (1.85-1.95 cores), well past `MAX_CORES_AT_ONE_WORKER`.
+/// drainer. `activate_eager_nursery` (`src/vm/sched.rs`) started that drainer unconditionally;
+/// nothing gated the two against each other at a budget of 1. Measured on the debug binary:
+/// 1.85-1.95 s user over ~1.10 s wall (1.85-1.95 cores), well past `MAX_CORES_AT_ONE_WORKER`. (The
+/// drainer and `activate_eager_nursery` are deleted: every nursery is a scope of the run's one
+/// sched.)
 #[cfg(unix)]
 #[test]
 fn threads_one_serializes_a_cpu_bound_top_level_body_alongside_a_spawn() {
@@ -808,21 +809,22 @@ fn threads_one_serializes_cpu_bound_callback_tasks() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// T1-fix — the same W8-8 defect on the NESTED eager-nursery arm: `fn work(): parallel: ...` **called
-/// (not spawned)** from a top-level `parallel:` body, so `work()`'s `parallel:` runs synchronously on
-/// `main` while the outer scope's body is still open — `activate_eager_nursery`'s
-/// `self.mn.is_none() && an outer eager scope is open` branch (`src/vm/sched.rs:764`), which returns
-/// `EagerScope { drainer: None, .. }` and relies entirely on the OUTER scope's `chezzi-eager` drainer.
-/// (A `spawn: work()` does NOT reach this branch: the spawned fiber runs on a worker shell whose
-/// `self.mn` is already `Some`, which takes the private-sched general path — already correctly gated.)
-/// `join_eager_nursery`'s `drainer.is_none()` arm ran an unconditional
+/// T1-fix — the same W8-8 defect on the NESTED eager-nursery arm: `fn work(): parallel: ...`
+/// **called (not spawned)** from a top-level `parallel:` body, so `work()`'s `parallel:` runs
+/// synchronously on `main` while the outer scope's body is still open — `activate_eager_nursery`'s
+/// `self.mn.is_none() && an outer eager scope is open` branch (`src/vm/sched.rs:764`), which
+/// returned `EagerScope { drainer: None, .. }` and relied entirely on the OUTER scope's
+/// `chezzi-eager` drainer. (A `spawn: work()` did not reach this branch: the spawned fiber ran on a
+/// worker shell whose `self.mn` was already `Some`, which took the private-sched general path —
+/// already correctly gated.) `join_eager_nursery`'s `drainer.is_none()` arm ran an unconditional
 /// `shell.mn_worker_loop(&sched, 0, sid)` alongside the outer drainer — a second CPU runner at a
 /// budget of one. Same construction and the same `cpu <= wall * MAX_CORES_AT_ONE_WORKER` check as
-/// `threads_one_serializes_cpu_bound_parallel_tasks`, but nested: 16 spawns of `burn(75000)`. Measured
-/// under load average 28.9 on a 12-core box, four runs each: fixed 0.687-0.855 cores, pre-fix-reverted
-/// 1.131-1.697 cores. 16 spawns, not 8: at 8 one reverted run in eleven read 0.755 cores, inside the
-/// healthy band, because the nested arm's second runner is the inline joiner, which covers less of the
-/// run than the flat arm's pool helpers do.
+/// `threads_one_serializes_cpu_bound_parallel_tasks`, but nested: 16 spawns of `burn(75000)`.
+/// Measured under load average 28.9 on a 12-core box, four runs each: fixed 0.687-0.855 cores,
+/// pre-fix-reverted 1.131-1.697 cores. 16 spawns, not 8: at 8 one reverted run in eleven read 0.755
+/// cores, inside the healthy band, because the nested arm's second runner is the inline joiner,
+/// which covers less of the run than the flat arm's pool helpers do. (The functions named here are
+/// deleted: every nursery is a scope of the run's one sched, and main is fiber 1.)
 #[cfg(unix)]
 #[test]
 fn threads_one_serializes_nested_eager_parallel_tasks() {
@@ -883,12 +885,12 @@ fn threads_one_serializes_nested_eager_parallel_tasks() {
 }
 
 /// W8-8 residual (TICKET-118, W13-7) — a CPU-bound nursery INSIDE an `Executor` job's `parallel:`
-/// must not gain the joiner's pool slot as a second runner. `MnSched::joiner_step` gates the yield
-/// on `running == 0 && runnable == 0`; if that term were dropped, the marked joiner would yield
-/// while the job's own nursery is still burning CPU on the raw `chezzi-eager` drainer, handing the
-/// replacement worker the queued sibling `burn` job to run beside it. Measured on the debug binary
-/// (prototype, 2026-09-16): gated `real=2.902-2.951 user=2.897-2.951` (1.00 cores); with the
-/// running/runnable term replaced by `false`, `real=1.509-1.615 user=2.945-3.016` (1.86-1.95 cores).
+/// must not gain a second runner at `--threads=1`: the job's nursery and the queued sibling `burn`
+/// job share the run's one worker. The bug this pins was a joiner handing its pool slot to a
+/// replacement thread that ran the sibling job beside the nursery (the pool and its joiner yield
+/// are deleted now). Measured on the debug binary (prototype, 2026-09-16): serialized
+/// `real=2.902-2.951 user=2.897-2.951` (1.00 cores); with the bug, `real=1.509-1.615
+/// user=2.945-3.016` (1.86-1.95 cores).
 #[cfg(unix)]
 #[test]
 fn threads_one_serializes_a_cpu_bound_nursery_inside_an_executor_job() {
@@ -938,9 +940,8 @@ fn threads_one_serializes_a_cpu_bound_nursery_inside_an_executor_job() {
             cpu <= wall.mul_f64(MAX_CORES_AT_ONE_WORKER),
             "--threads=1 must serialize a CPU-bound nursery inside an ex.submit job too (run {run}): \
              cpu={cpu:?} wall={wall:?} (cpu must be <= wall * {MAX_CORES_AT_ONE_WORKER}). A second \
-             runner means the job's joiner handed its pool slot to a replacement that ran the queued \
-             `burn` job beside the `chezzi-eager` drainer (TICKET-118, the idle term in \
-             `MnSched::joiner_step`)."
+             runner means a thread beside the run's one worker ran the queued `burn` job while the \
+             job's nursery burned (TICKET-118)."
         );
     }
 
@@ -981,14 +982,15 @@ fn cancel_c5_gate_at_eight_workers() {
 /// TICKET-073(a) — a `parallel:` reached from inside another `parallel:` **body** (called, not
 /// spawned — same shape as `threads_one_serializes_nested_eager_parallel_tasks` above) must SCALE
 /// with `--threads` the way the identical call does at top level. `activate_eager_nursery`'s nested
-/// arm (`src/vm/sched.rs`, `self.mn.is_none() && an outer eager scope is open`) returns
-/// `EagerScope { drainer: None, .. }`, and `join_eager_nursery`'s `drainer.is_none()` arm never farms
-/// the bounded pool (only the outermost arm calls `farm_outermost_eager_helpers`) — so the nested
-/// scope is served by the outer scope's ONE `chezzi-eager` drainer plus (at N>=2) the inline joiner:
-/// two runners, always, regardless of `--threads`. 16 spawns of `burn(75000)` at
-/// `CHEZZI_THREADS=8`: a flat (non-nested) version of this exact workload measures close to 8 cores;
-/// this asserts the nested version reaches at least `MIN_CORES_AT_EIGHT_WORKERS_NESTED`, which is
-/// comfortably below 8 but above the ~2.0 the bug caps it at.
+/// arm (`src/vm/sched.rs`, `self.mn.is_none() && an outer eager scope is open`) returned
+/// `EagerScope { drainer: None, .. }`, and `join_eager_nursery`'s `drainer.is_none()` arm never
+/// farmed the bounded pool (only the outermost arm called `farm_outermost_eager_helpers`) — so the
+/// nested scope was served by the outer scope's ONE `chezzi-eager` drainer plus (at N>=2) the
+/// inline joiner: two runners, always, regardless of `--threads`. (Those functions and the pool are
+/// deleted.) 16 spawns of `burn(75000)` at `CHEZZI_THREADS=8`: a flat (non-nested) version of this
+/// exact workload measures close to 8 cores; this asserts the nested version reaches at least
+/// `MIN_CORES_AT_EIGHT_WORKERS_NESTED`, which is comfortably below 8 but above the ~2.0 the bug
+/// caps it at.
 #[cfg(unix)]
 const MIN_CORES_AT_EIGHT_WORKERS_NESTED: f64 = 3.5;
 
@@ -1055,14 +1057,15 @@ fn threads_eight_scales_nested_eager_parallel_tasks_in_body() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// TICKET-073(b) — a `parallel:` nested inside a SPAWNED task (not called from a body) must keep live
-/// OS threads bounded at `N + (joining threads)` per `src/vm/pool.rs:8`'s invariant, at every
+/// TICKET-073(b) — a `parallel:` nested inside a SPAWNED task (not called from a body) must keep
+/// live OS threads bounded at `N + (joining threads)` (a nursery adds no thread), at every
 /// `--threads` setting, not just `=1`. A spawned task runs on a worker shell whose `self.mn` is
-/// already `Some`, so `activate_eager_nursery` takes the general (non-shared) path and builds a
-/// brand-new private `MnSched` PLUS a dedicated `chezzi-eager` drainer thread for every nested
-/// nursery — unbounded under a binary-tree fan-out. A depth-7 tree (128 sleeping leaves) is spawned
-/// under `CHEZZI_THREADS=2`, and `/proc/<pid>/task` is polled while the process is alive; a healthy
-/// binary stays near `N + few`, the bug reaches ~130.
+/// already `Some`, so the old `activate_eager_nursery` took the general (non-shared) path and built
+/// a brand-new private `MnSched` PLUS a dedicated `chezzi-eager` drainer thread for every nested
+/// nursery — unbounded under a binary-tree fan-out (deleted: every nursery is now a scope of the
+/// run's one sched). A depth-7 tree (128 sleeping leaves) is spawned under `CHEZZI_THREADS=2`, and
+/// `/proc/<pid>/task` is polled while the process is alive; a healthy binary stays near `N + few`,
+/// the bug reaches ~130.
 #[cfg(target_os = "linux")]
 #[test]
 fn threads_stay_bounded_for_a_nursery_nested_in_a_spawned_task() {
@@ -1113,7 +1116,7 @@ fn threads_stay_bounded_for_a_nursery_nested_in_a_spawned_task() {
     const MAX_HEALTHY_THREADS: usize = 20;
     assert!(
         max_threads <= MAX_HEALTHY_THREADS,
-        "live OS threads must stay bounded at N + (joining threads) per src/vm/pool.rs:8, \
+        "live OS threads must stay bounded at N + (joining threads) (a nursery adds no thread), \
          regardless of parallel: nesting depth (TICKET-073b): observed max_threads={max_threads} \
          at CHEZZI_THREADS=2, expected <= {MAX_HEALTHY_THREADS}"
     );

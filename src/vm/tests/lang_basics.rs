@@ -429,7 +429,7 @@ fn top_level_try_err_is_unhandled_error() {
 #[test]
 fn top_level_try_err_renders_a_one_tuple_with_trailing_comma() {
     // display_guarded (the error-message renderer) must carry the same trailing-comma rule as
-    // stringify_obj_into (the str()/print path) — TICKET-069.
+    // str_close (the str()/print render) — TICKET-069.
     assert_eq!(run_err(r#"x := (!(1,))?"#), "unhandled error: (1,)");
 }
 
