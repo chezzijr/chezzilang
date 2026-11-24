@@ -639,6 +639,36 @@ pub(super) struct WaitPark {
     pub(super) claimed: AtomicBool,
 }
 
+/// A fiber's `time.sleep_ms`, filed in `SchedCore.parked` under its own key ([`SleepPark::key`])
+/// by [`arm_timer_sleep`], with ONE timer armed at the sooner of its deadline and the run's
+/// `--timeout`. Two parties race to end it: that timer, and a cancel or `--timeout` drain
+/// ([`MnSched::drain_parked`]). Each claims it under the core lock: the CAS on `claimed`, the
+/// removal from `parked` and the take of `fiber` happen in one hold, so a filed entry is never
+/// claimed and a fiber is requeued once. The winner settles the sleep with no lock held
+/// ([`settle_sleep`]). The fiber never counts asleep in the run's awake count: its timer will
+/// wake it, so the sleep can never be read as a deadlock.
+pub(super) struct SleepPark {
+    /// The sleeping fiber, taken once by the claim's winner.
+    pub(super) fiber: Mutex<Option<Fiber>>,
+    /// The sleep, read with no lock by every party: the winner re-files it with a new token if
+    /// a drain woke it with no halt to deliver.
+    pub(super) sleep: Arc<TimerSleep>,
+    pub(super) span: Span,
+    /// The sched it is filed with; weak, so the filed entry is no cycle.
+    pub(super) sched: std::sync::Weak<MnSched>,
+    /// Claim-once gate: false while filed, true from the winning claim on.
+    pub(super) claimed: AtomicBool,
+    /// Its timer, stopped by the claim's winner ([`settle_sleep`]).
+    pub(super) timer: Arc<super::timer::TimerStop>,
+}
+
+impl SleepPark {
+    /// Its `parked` bucket key: its own address, unique while it is filed.
+    pub(super) fn key(self: &Arc<Self>) -> usize {
+        Arc::as_ptr(self) as usize
+    }
+}
+
 /// Which parked entries a bucket wake may claim. `All` wakes every entry (close, trip, a buffered
 /// push). `Settled` (TICKET-185) requeues only a parked party whose `Pending` left QUEUED; every
 /// other entry stays parked. Requeuing an uncommitted party re-runs its op, finds nothing, and
@@ -657,8 +687,8 @@ pub(super) fn entry_settled(e: &ParkedEntry) -> bool {
             f.pending.as_ref().is_some_and(|op| !op.p.is_queued())
         }
         ParkedEntry::Wait(wp) => wp.p.as_ref().is_some_and(|p| !p.is_queued()),
-        // Woken only by a release's or a join's `WakeKind::All` wake.
-        ParkedEntry::Guard(_) | ParkedEntry::ExecJoin(..) => false,
+        // Woken only by a release's or a join's `WakeKind::All` wake; a sleep by no bucket wake.
+        ParkedEntry::Guard(_) | ParkedEntry::ExecJoin(..) | ParkedEntry::Sleep(_) => false,
     }
 }
 
@@ -688,6 +718,9 @@ pub(super) enum ParkedEntry {
     /// `MnSched::park_exec_join`; the joined sched wakes it when its join is over
     /// ([`SchedCore::task_done`]).
     ExecJoin(Fiber, std::sync::Weak<MnSched>, usize),
+    /// A fiber in a `time.sleep_ms`, alone in its own bucket ([`SleepPark`]). Its timer or a
+    /// cancel or `--timeout` drain claims it; no bucket wake does.
+    Sleep(Arc<SleepPark>),
 }
 
 pub(super) struct MnSched {
@@ -816,7 +849,7 @@ pub(super) struct JoinScope {
     /// This scope's cancel token (the SAME `Arc` cloned onto fibers running in this scope; distinct
     /// per nursery so an inner fault cancels ONLY its scope, never an outer sibling — the structured-
     /// concurrency invariant). Read by `park`/`park_wait`'s gap re-check and the running fiber's
-    /// back-edge (via the shell's re-pointed `self.cancel`) and `cancel_drain(scope_id)`.
+    /// back-edge (via the shell's re-pointed `self.cancel`) and `drain_family(scope_id)`.
     pub(super) cancel: Arc<AtomicBool>,
     /// The cancel tokens of every ENCLOSING scope, outermost first (empty for the outermost nursery).
     /// Structured concurrency: cancelling a scope cancels its DESCENDANT scopes. A nested nursery keeps
@@ -839,8 +872,7 @@ pub(super) struct JoinScope {
 /// TICKET-199 — THE issuer and resolver of scope ids on one sched. Ids are monotonic and never
 /// reissued: `open` hands out the next id, and a retired id reads as absent (`get` is `None`, and
 /// `SchedCore::scope_family` of it is empty). A worker may hold a scope id after dropping the core
-/// lock that proved it live (`mn_worker_loop` after `finish`, the drain scan in `take_runnable`,
-/// `cancel_all`); under the old `id = len()` plus pop rule that id went out of bounds or named the
+/// lock that proved it live (`mn_worker_loop` after `finish`, `cancel_all`); under the old `id = len()` plus pop rule that id went out of bounds or named the
 /// NEXT nursery, whose fibers were then drained. Only a reader that holds a live fiber of the scope,
 /// or its owner before retire, may index (`table[id]`); every other reader goes through `get`.
 /// There is deliberately no `len()`: an id is not a position.
@@ -983,8 +1015,9 @@ pub(super) enum JobEvent {
 /// TICKET-219 — what the caller of [`SchedCore::job_event`] does next: enqueue `start` under the
 /// sched lock, then wake the readers of `sealed` after it drops the lock
 /// ([`MnSched::wake_sealed`]). `sealed` holds the handle channels the transition itself sealed
-/// with their cancel value ([`SchedCore::settle_job`], TICKET-232). `cut_flag` is the flag of a
-/// running job `CancelOne` tripped: the caller drains the fibers that flag wakes.
+/// with their cancel value ([`SchedCore::settle_job`], TICKET-232). `cut_flag` is the flag of the
+/// running job `CancelOne` found: the caller trips it and drains what it wakes (the cancel entry,
+/// `mnsched_verdict::cancel`).
 #[derive(Default)]
 pub(super) struct JobStep {
     pub(super) start: Vec<Fiber>,
@@ -1020,9 +1053,6 @@ pub(super) struct SchedCore {
     /// sub-range (reduce/take operate per-scope on that sub-slice — see `drain_scopes`).
     pub(super) slots: Vec<Option<TaskOutcome>>,
     pub(super) running: usize, // fibers currently swapped into a worker (executing)
-    /// TICKET-126 (W13-24) — the `CANCEL_GEN` value at which this sched's last drain scan found no
-    /// cancelled scope owing a drain. Written only by [`SchedCore::drain_scan_due`].
-    pub(super) drain_scan_gen: u64,
     pub(super) parked_n: usize, // total fibers across every `parked` bucket
     /// TICKET-103 — owners parked at the `JoinNursery` of a fiber-owned nursery (`Disp::JoinPark`),
     /// as `(origin scope id, fiber)`. In neither `running` nor `parked_n`. Woken by
@@ -1047,8 +1077,10 @@ pub(super) struct SchedCore {
     /// left to resume: a cut fiber unwinds and can requeue itself.
     pub(super) verdict_cut: bool,
     /// TICKET-181 — the registry of blocked-in-place waiters of this sched, keyed by a token
-    /// ([`crate::vm::block::Waiter`]). `fiber` entries are demoted fibers: while one is registered,
-    /// the verdict's `end_asleep` keeps the sched's workers ([`MnSched::any_fiber_waiter`]).
+    /// ([`crate::vm::block::Waiter`]). `fiber` entries are waiter-accounted demoted fibers: while
+    /// one is registered, the verdict's `end_asleep` keeps the sched's workers
+    /// ([`MnSched::any_fiber_waiter`]). An entry's wake is kicked by every cancel and the run's
+    /// verdict cut ([`MnSched::wake_demoted`]).
     /// Registered/un-registered under core lock A; a demoted wait's
     /// entry is removed in the same lock hold as the pop that ends it (DEC-176).
     pub(super) waiters: std::collections::HashMap<u64, crate::vm::block::Waiter>,
@@ -1217,9 +1249,9 @@ pub(super) struct OffloadReq {
     pub(super) timer: Option<TimerSleep>,
 }
 
-/// W7-16 — everything the timer thread needs to keep an offloaded `sleep_ms` a CANCELLATION and
-/// `--timeout` checkpoint for its whole duration. Snapshotted at the call site (in `invoke_native`),
-/// because the timer job runs with no `Vm` and no scheduler lock of its own.
+/// W7-16 — everything a party that ends a parked `sleep_ms` ([`SleepPark`]) needs to keep it a
+/// CANCELLATION and `--timeout` checkpoint for its whole duration. Snapshotted at the call site (in
+/// `invoke_native`), because its timer job and a canceller's drain run with no `Vm` of the fiber.
 pub(super) struct TimerSleep {
     /// When the sleep is over.
     pub(super) deadline: std::time::Instant,

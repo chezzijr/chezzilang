@@ -29,14 +29,6 @@ pub(super) enum SpawnHead {
     Receiver(ProtoId),
 }
 
-/// TICKET-132 — trip a fiber-owned family's cancel and drain its parked/socket-parked fibers.
-/// Idempotent: a re-run after a park finds nothing left to trip or drain. Shared by
-/// `Vm::park_abort_origin` and `Vm::abort_fiber_owned_nursery`.
-pub(super) fn cancel_fiber_owned_family(scope: &EagerScope) {
-    scope.sched.trip_scope_cancel(scope.scope);
-    scope.sched.drain_family(scope.scope);
-}
-
 /// TICKET-205 — THE spawn of a raw worker thread of `sched` (the drainer, an eager helper, the
 /// replacement of a demoted worker).
 pub(super) fn spawn_worker_thread(
@@ -133,39 +125,5 @@ impl Drop for GatedReg {
                 .retain(|(s, _)| !Arc::ptr_eq(s, &self.me));
         }
         width::cancel(&self.me);
-    }
-}
-
-/// A cancel of `flag` (`Executor.cancel()`, `Task.cancel()`) drains the parked fibers under it
-/// on every live sched of the run, before the canceller goes on: a nested Executor a job created
-/// holds its jobs on a sched of its own, and an idle worker's later scan is a wake the run's
-/// awake count cannot see, so the canceller could park first and read every task asleep.
-pub(super) fn drain_live_scheds(sched_registry: &crate::vm::SchedRegistry, flag: &Arc<AtomicBool>) {
-    let live: Vec<_> = {
-        let g = sched_registry.lock().unwrap_or_else(|e| e.into_inner());
-        g.iter().filter_map(|w| w.upgrade()).collect()
-    };
-    for s in live {
-        s.drain_job(flag);
-    }
-}
-
-/// TICKET-118 (W13-8), extracted from `spawn_into`'s completion closure — poke every live
-/// sched of `sched_registry` so an idle worker re-evaluates whatever it is waiting on. The lock is
-/// taken and dropped rather than a bare `notify_all`, and that is what makes it reliable: a worker
-/// that read the stale state inside its predicate did so under this same core lock, so acquiring it
-/// here happens-after that read completes — the worker is either already on the condvar (and gets
-/// the notify) or has not yet taken the lock (and will read the new state). A bare notify could land
-/// in the gap and be lost. Also called by `cancel`: a cancel store is a wake source too, and
-/// without this poke a worker deciding under its own core lock could read the flag on both sides of
-/// the trip and park untimed (TICKET-118 plan-validation, 2026-09-15 10:59Z).
-pub(super) fn poke_live_scheds(sched_registry: &crate::vm::SchedRegistry) {
-    let mut g = sched_registry.lock().unwrap_or_else(|e| e.into_inner());
-    let live: Vec<_> = g.iter().filter_map(|w| w.upgrade()).collect();
-    g.retain(|w| w.strong_count() > 0);
-    drop(g);
-    for s in live {
-        drop(s.lock());
-        s.notify_waiters();
     }
 }

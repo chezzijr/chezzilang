@@ -23,9 +23,9 @@
 //! and faults cleanly — never lost, never an `inflight` leak.
 //!
 //! **Cancel/fault draining (D6b).** A poller-parked fiber lives in this service's registry, *not* in
-//! the scheduler's `parked` buckets — so B3.4's `cancel_drain` (which walks `parked`) does not reach
-//! it. [`drain_family`] closes that gap: every cancel site (a sibling fault, `os.exit`, `cancel`)
-//! calls [`super::MnSched::drain_family`], which runs it beside `cancel_drain` and re-injects every
+//! the scheduler's `parked` buckets — so B3.4's parked-set drain (which walks `parked`) does not
+//! reach it. [`drain_where`] closes that gap: every cancel (a sibling fault, `os.exit`, `cancel`)
+//! goes through `mnsched_verdict::cancel`, whose drain runs it beside the parked half and re-injects every
 //! fiber of the cancelled family parked on its sockets (TICKET-200). The
 //! re-injected fiber resumes and hits the cancel check at [`super::Vm::run_until`]'s loop-top BEFORE
 //! its rewound socket op re-runs, so it unwinds as `cancelled` and the fault propagates — the
@@ -72,12 +72,30 @@ struct Parked {
 /// fiber + scheduler `Arc` by move, exactly like a [`Parked`]; the poll thread runs it when due.
 pub type TimerJob = Box<dyn FnOnce() + Send + 'static>;
 
+/// A timer that a party other than its job can stop (Go's `Timer.Stop`): a sleep a cancel ended.
+/// Both flags are written under the timers lock only.
+#[derive(Default)]
+pub struct TimerStop {
+    /// Stopped: its job never runs.
+    stopped: AtomicBool,
+    /// Its entry is in the heap.
+    queued: AtomicBool,
+}
+
+impl TimerStop {
+    fn is_stopped(&self) -> bool {
+        self.stopped.load(Ordering::Relaxed)
+    }
+}
+
 /// One scheduled `sleep_ms` timer. Ordered by `(deadline, seq)` only — the `seq` tie-breaker keeps the
 /// order total without requiring `TimerJob: Ord` (the job is never compared).
 struct TimerEntry {
     deadline: Instant,
     seq: u64,
     job: TimerJob,
+    /// Set for a timer that can be stopped ([`stop_timer`]).
+    stop: Option<Arc<TimerStop>>,
 }
 impl PartialEq for TimerEntry {
     fn eq(&self, other: &Self) -> bool {
@@ -100,9 +118,68 @@ impl Ord for TimerEntry {
 
 /// The pending-timer min-heap (stored as `Reverse<TimerEntry>` so the max-heap yields the *earliest*
 /// deadline on `peek`/`pop`) plus a monotonic tie-breaker counter.
+#[derive(Default)]
 struct Timers {
     heap: BinaryHeap<Reverse<TimerEntry>>,
     next_seq: u64,
+    /// Stopped entries still in the heap. Go's rule (`runtime/time.go`): once they pass a quarter
+    /// of the heap, [`Timers::stop`] removes them all, so the heap stays within 4/3 of its live
+    /// timers and the removal costs O(1) per stop, amortized.
+    zombies: usize,
+}
+
+impl Timers {
+    fn push(&mut self, deadline: Instant, job: TimerJob, stop: Option<Arc<TimerStop>>) {
+        if let Some(s) = &stop {
+            if s.is_stopped() {
+                return;
+            }
+            s.queued.store(true, Ordering::Relaxed);
+        }
+        let seq = self.next_seq;
+        self.next_seq += 1;
+        self.heap.push(Reverse(TimerEntry {
+            deadline,
+            seq,
+            job,
+            stop,
+        }));
+    }
+
+    /// The next job due by `now`; a stopped entry is dropped on the way.
+    fn pop_due(&mut self, now: Instant) -> Option<TimerJob> {
+        while self.heap.peek().is_some_and(|Reverse(e)| e.deadline <= now) {
+            let Reverse(e) = self.heap.pop()?;
+            if let Some(s) = &e.stop {
+                s.queued.store(false, Ordering::Relaxed);
+                if s.is_stopped() {
+                    self.zombies -= 1;
+                    continue;
+                }
+            }
+            return Some(e.job);
+        }
+        None
+    }
+
+    /// Stop `s`. Returns the entries it removed, for the caller to drop with no lock held: a job
+    /// can own the last handle of a sched.
+    fn stop(&mut self, s: &TimerStop) -> Vec<TimerEntry> {
+        if s.stopped.swap(true, Ordering::Relaxed) || !s.queued.load(Ordering::Relaxed) {
+            return Vec::new();
+        }
+        self.zombies += 1;
+        if self.zombies <= self.heap.len() / 4 {
+            return Vec::new();
+        }
+        self.zombies = 0;
+        let (dead, live): (Vec<_>, Vec<_>) = std::mem::take(&mut self.heap)
+            .into_vec()
+            .into_iter()
+            .partition(|Reverse(e)| e.stop.as_ref().is_some_and(|s| s.is_stopped()));
+        self.heap = live.into();
+        dead.into_iter().map(|Reverse(e)| e).collect()
+    }
 }
 
 /// The poller + its registry + the timer heap, shared (by `Arc`) between the registering worker threads
@@ -135,9 +212,9 @@ static SERVICE: OnceLock<NetPoller> = OnceLock::new();
 /// ancestor's (DEC-118, TICKET-200: a sibling faulted, or an `Executor`'s `cancel` fired, while
 /// this fiber was on its way to park), OR iff `closed` (W15-1: the owning `SocketCore`/`ListenerCore` was `close()`d while
 /// this op was on its way to park) is already set. The caller must re-inject it so it resumes and
-/// unwinds or re-faults on the closed handle, rather than parking on a poller that [`drain_family`] may
+/// unwinds or re-faults on the closed handle, rather than parking on a poller that [`drain_where`] may
 /// have already swept or arming an fd `close` is about to drop. `None` on a normal park. The cancel +
-/// closed reads + the insert happen under the registry lock that `drain_family` also holds, so park and
+/// closed reads + the insert happen under the registry lock that `drain_where` also holds, so park and
 /// drain/close are serialized: the fiber is either registered-then-drained or rejected.
 #[allow(clippy::too_many_arguments)] // the park identity + the scope cancel + the W15-1 closed flag + the D6c deadline
 #[must_use]
@@ -166,7 +243,7 @@ pub fn deregister(key: usize) -> bool {
 }
 
 /// D6b — the netpoller half of the cancel drain: re-inject every fiber of `sched` parked on a socket
-/// that a cancel of scope family `family` wakes ([`Fiber::woken_by`]), disarming each fd. A
+/// that `wakes` selects (for a scope family, [`Fiber::woken_by`]), disarming each fd. A
 /// re-injected fiber resumes, hits the cancel check at [`super::Vm::run_until`]'s loop-top (BEFORE
 /// its rewound socket op re-runs), and unwinds as `cancelled` — so the fault propagates and the
 /// nursery joins instead of hanging on a poller-parked peer. A no-op if the family has nothing
@@ -174,29 +251,14 @@ pub fn deregister(key: usize) -> bool {
 ///
 /// Family-scoped, not sched-wide (§2c1): a nested eager nursery is a SCOPE on the enclosing scope's
 /// sched, so a sched-wide sweep would yank the OUTER scope's socket-parked fibers off the poller too.
-/// Called only by [`super::MnSched::drain_family`], which drains the `parked` half beside it
+/// Called only by [`super::MnSched::drain_where`], which drains the `parked` half beside it
 /// (TICKET-200: a socket-parked fiber is counted `inflight`, not `parked`, so a drain of one half
-/// strands it).
-pub fn drain_family(sched: &MnSched, family: &[usize]) {
-    drain_where(sched, &|f: &Fiber| f.woken_by(family));
-}
-
-/// TICKET-289 — [`drain_family`] for any matcher: the netpoller half of
-/// [`super::MnSched::drain_job`] (`Task.cancel()`).
+/// strands it). TICKET-289 — `wakes` is any matcher: a family's ([`Fiber::woken_by`]) or the
+/// fibers under an Executor job's flag (`Task.cancel()`).
 pub fn drain_where(sched: &MnSched, wakes: &dyn Fn(&Fiber) -> bool) {
     SERVICE
         .get_or_init(NetPoller::new)
         .drain_where(sched, wakes);
-}
-
-/// TICKET-200 — is any fiber of `sched` that a cancel of `family` wakes still parked on the poller,
-/// i.e. still owed its [`drain_family`]? The registry half of the drain predicate
-/// (`SchedCore::scope_has_undrained_park`). Takes only the registry lock, a leaf: the caller may hold
-/// core lock A.
-pub fn any_parked(sched: &MnSched, family: &[usize]) -> bool {
-    SERVICE
-        .get_or_init(NetPoller::new)
-        .any_parked(sched, family)
 }
 
 /// D6b — schedule `job` to run on (or just after) `deadline`, on the netpoller's single poll thread
@@ -207,7 +269,21 @@ pub fn any_parked(sched: &MnSched, family: &[usize]) -> bool {
 pub fn submit_timer(deadline: Instant, job: TimerJob) {
     SERVICE
         .get_or_init(NetPoller::new)
-        .submit_timer(deadline, job);
+        .submit_timer(deadline, job, None);
+}
+
+/// [`submit_timer`] for a timer [`stop_timer`] can stop.
+pub fn submit_stoppable_timer(deadline: Instant, job: TimerJob, stop: Arc<TimerStop>) {
+    SERVICE
+        .get_or_init(NetPoller::new)
+        .submit_timer(deadline, job, Some(stop));
+}
+
+/// Stop a timer [`submit_stoppable_timer`] armed: its job never runs, and its entry leaves the heap
+/// (see [`Timers::zombies`]). A no-op once its job ran.
+pub fn stop_timer(stop: &TimerStop) {
+    let removed = SERVICE.get_or_init(NetPoller::new).lock_timers().stop(stop);
+    drop(removed);
 }
 
 impl NetPoller {
@@ -215,10 +291,7 @@ impl NetPoller {
         let inner = Arc::new(Inner {
             poller: Poller::new().expect("failed to create the netpoller"),
             registry: Mutex::new(HashMap::new()),
-            timers: Mutex::new(Timers {
-                heap: BinaryHeap::new(),
-                next_seq: 0,
-            }),
+            timers: Mutex::new(Timers::default()),
         });
         let t = Arc::clone(&inner);
         // The poll thread only locks the registry + calls `complete_offload` (which re-enqueues a
@@ -243,7 +316,7 @@ impl NetPoller {
         closed: Arc<AtomicBool>,
         deadline: Option<Instant>,
     ) -> Option<Fiber> {
-        // The whole op runs under the registry lock so that registration is atomic w.r.t. `drain_family`
+        // The whole op runs under the registry lock so that registration is atomic w.r.t. `drain_where`
         // / the fire path / `deregister` (all reg-locked): the cancel check + the insert + the fd `add`
         // never interleave with a sweep that would observe a half-armed entry or delete an fd this is
         // about to arm. Filing the entry before arming also keeps the poll thread from ever seeing an
@@ -253,11 +326,11 @@ impl NetPoller {
         // fiber passed the `run_until` loop-top cancel check but before it reached here. `cancel` is the
         // PARKING FIBER'S SCOPE cancel (handed in by `poll_park_offload`) — reading `sched.cancel` here
         // would only see the OUTERMOST nursery's flag and let a fiber of a cancelled INNER scope park on
-        // an already-swept poller. Read it under the SAME lock `drain_family` sweeps under, so the two are
+        // an already-swept poller. Read it under the SAME lock `drain_where` sweeps under, so the two are
         // serialized — hand the fiber back to unwind rather than park it on a poller a past sweep drained.
         // TICKET-188: a tripped flag of a nursery this fiber OWNS (a child faulted) hands it back too.
         // TICKET-200: so does an ANCESTOR's flag (`ScopeCancel::tripped`, an `Executor`'s
-        // `cancel`), or the drain scan that recorded this trip's `CANCEL_GEN` misses this park.
+        // `cancel`), or a cancel whose drain already passed this registry misses this park.
         if fiber.cancel_wakes(cancel.tripped()) || closed.load(Ordering::Acquire) {
             return Some(fiber);
         }
@@ -329,16 +402,10 @@ impl NetPoller {
         }
     }
 
-    /// TICKET-200 — the one match [`Self::drain_family`] and [`Self::any_parked`] share: parked on
-    /// `sched` (same scheduler instance) and woken by a cancel of `family`.
+    /// TICKET-200 — the match of [`Self::drain_where`]: parked on `sched` (same scheduler instance)
+    /// and selected by `wakes`.
     fn wakes(p: &Parked, sched: &MnSched, wakes: &dyn Fn(&Fiber) -> bool) -> bool {
         std::ptr::eq(Arc::as_ptr(&p.sched), sched) && wakes(&p.fiber)
-    }
-
-    fn any_parked(&self, sched: &MnSched, family: &[usize]) -> bool {
-        self.lock_registry()
-            .values()
-            .any(|p| Self::wakes(p, sched, &|f: &Fiber| f.woken_by(family)))
     }
 
     fn drain_where(&self, sched: &MnSched, wakes: &dyn Fn(&Fiber) -> bool) {
@@ -380,13 +447,8 @@ impl NetPoller {
         }
     }
 
-    fn submit_timer(&self, deadline: Instant, job: TimerJob) {
-        {
-            let mut t = self.lock_timers();
-            let seq = t.next_seq;
-            t.next_seq += 1;
-            t.heap.push(Reverse(TimerEntry { deadline, seq, job }));
-        }
+    fn submit_timer(&self, deadline: Instant, job: TimerJob, stop: Option<Arc<TimerStop>>) {
+        self.lock_timers().push(deadline, job, stop);
         // Wake the poll thread so it re-evaluates the nearest deadline: this new entry may be sooner
         // than the timeout it is currently sleeping until (and `notify` wakes the *current or
         // following* `wait`, so there is no lost-wakeup window between timeout-compute and `wait`).
@@ -462,7 +524,7 @@ fn poll_loop(inner: &Inner) {
 /// removed the entry first — readiness wins because the events loop runs before this), disarm each fd
 /// (delete-before-drop; the fd is still open — its fiber hasn't resumed to close it), THEN re-inject
 /// with the lock released (`complete_offload` takes the sched lock — keep the registry lock leaf-level,
-/// matching `drain_family`). The marker is set on the detached fiber's `ctx` (swapped into the live `Vm`
+/// matching `drain_where`). The marker is set on the detached fiber's `ctx` (swapped into the live `Vm`
 /// on its next schedule-in) — the poll thread never runs VM bytecode, only mutates this flag.
 fn fire_due_socket_timeouts(inner: &Inner) {
     let now = Instant::now();
@@ -528,13 +590,11 @@ fn next_timeout(inner: &Inner) -> Option<Duration> {
 fn fire_due_timers(inner: &Inner) {
     let now = Instant::now();
     loop {
-        let job = {
-            let mut t = inner.timers.lock().unwrap_or_else(|e| e.into_inner());
-            match t.heap.peek() {
-                Some(Reverse(e)) if e.deadline <= now => t.heap.pop().map(|Reverse(e)| e.job),
-                _ => None,
-            }
-        };
+        let job = inner
+            .timers
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .pop_due(now);
         match job {
             Some(job) => {
                 let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(job));
@@ -670,8 +730,8 @@ mod tests {
     }
 
     /// N4 (liveness) — the netpoller park is gated on the PARKING FIBER'S SCOPE cancel, not the
-    /// outermost nursery's. A fiber whose INNER scope was cancelled (a sibling faulted, so `cancel_drain`
-    /// and `drain_family` already swept) must be handed back so it resumes and unwinds its `defer`s; if it
+    /// outermost nursery's. A fiber whose INNER scope was cancelled (a sibling faulted, so the cancel's
+    /// drain already swept) must be handed back so it resumes and unwinds its `defer`s; if it
     /// were parked on the already-swept poller instead it would be stranded and its scope would never
     /// reach `done == total`. `register` used to read the sched-level (outermost) flag, which is
     /// `false` here, so the park went through.
@@ -983,13 +1043,21 @@ mod tests {
         drop(server);
     }
 
-    /// D6b — `drain_family` (the cancel/fault hook): every fiber of the family parked on `target`'s
+    /// D6b — `drain_where` (the cancel/fault hook): every fiber of the family parked on `target`'s
     /// sockets is re-injected (so it resumes, observes the nursery cancel flag at `run_until`'s
-    /// loop-top, and unwinds) and its fd disarmed; a fiber parked on a *different* sched is untouched,
-    /// and `any_parked` reads the same match (TICKET-200). This is the
-    /// fix for the documented hang — a faulting sibling can now abort an `accept`/`read`-parked peer.
+    /// loop-top, and unwinds) and its fd disarmed; a fiber parked on a *different* sched is untouched.
+    /// This is the fix for the documented hang — a faulting sibling can now abort an
+    /// `accept`/`read`-parked peer.
     #[test]
     fn drain_family_reinjects_matching_and_disarms() {
+        // The registry read of this test: a park of `sched` that a cancel of `family` wakes.
+        fn any_parked(sched: &MnSched, family: &[usize]) -> bool {
+            SERVICE
+                .get_or_init(NetPoller::new)
+                .lock_registry()
+                .values()
+                .any(|p| NetPoller::wakes(p, sched, &|f: &Fiber| f.woken_by(family)))
+        }
         let (mut client_a1, server_a1) = loopback_pair();
         let (_client_a2, server_a2) = loopback_pair();
         let (_client_b, server_b) = loopback_pair();
@@ -1054,7 +1122,7 @@ mod tests {
             !any_parked(&sched_a, &[1]),
             "no fiber of family 1 is parked"
         );
-        drain_family(&sched_a, &[0]);
+        drain_where(&sched_a, &|f: &Fiber| f.woken_by(&[0]));
         assert!(!any_parked(&sched_a, &[0]), "the drain emptied family 0");
         assert!(
             any_parked(&sched_b, &[0]),
@@ -1226,6 +1294,49 @@ mod tests {
 
     // ----- D6b timer fold: the former `timer.rs` thread's behavioral tests, now exercising the
     // merged poll loop (`submit_timer` + `fire_due_timers` on the single netpoller thread). -----
+
+    /// A stopped timer never runs, and stopped entries leave the heap once they pass a quarter
+    /// of it. A timer stopped before its push is never queued.
+    #[test]
+    fn stopped_timers_leave_the_heap() {
+        let mut t = Timers::default();
+        let far = Instant::now() + Duration::from_secs(3600);
+        let stops: Vec<Arc<TimerStop>> = (0..100).map(|_| Arc::default()).collect();
+        for s in &stops {
+            t.push(far, Box::new(|| {}), Some(Arc::clone(s)));
+        }
+        for s in &stops[..25] {
+            assert!(t.stop(s).is_empty());
+        }
+        assert_eq!(t.heap.len(), 100, "25 stopped of 100 is not past a quarter");
+        assert_eq!(t.stop(&stops[25]).len(), 26);
+        assert_eq!(t.heap.len(), 74);
+        assert!(t.stop(&stops[25]).is_empty(), "a second stop is a no-op");
+        let early: Arc<TimerStop> = Arc::default();
+        assert!(t.stop(&early).is_empty());
+        t.push(far, Box::new(|| {}), Some(early));
+        assert_eq!(t.heap.len(), 74, "a stopped timer is never queued");
+
+        let ran = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let now = Instant::now();
+        let due: Arc<TimerStop> = Arc::default();
+        for s in [Some(Arc::clone(&due)), None] {
+            let ran = Arc::clone(&ran);
+            t.push(
+                now,
+                Box::new(move || {
+                    ran.fetch_add(1, Ordering::Relaxed);
+                }),
+                s,
+            );
+        }
+        assert!(t.stop(&due).is_empty());
+        while let Some(job) = t.pop_due(now) {
+            job();
+        }
+        assert_eq!(ran.load(Ordering::Relaxed), 1, "the stopped due timer ran");
+        assert_eq!((t.heap.len(), t.zombies), (74, 0));
+    }
 
     /// A submitted timer fires on (or just after) its deadline — not early, not never.
     #[test]

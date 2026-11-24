@@ -44,15 +44,22 @@ impl Got {
 
 /// Runs `src` at `threads` workers.
 fn run(src: &str, threads: &str) -> Got {
+    run_with(src, threads, "main.chz", &["run"], &[])
+}
+
+/// Runs `src`, written to `file` in a fresh directory that is the child's working directory, as
+/// `chezzi <args> <file>` at `threads` workers, with `envs` set.
+fn run_with(src: &str, threads: &str, file: &str, args: &[&str], envs: &[(&str, &str)]) -> Got {
     static NEXT: AtomicUsize = AtomicUsize::new(0);
     let n = NEXT.fetch_add(1, Ordering::Relaxed);
     let dir = std::env::temp_dir().join(format!("chz-t232-{}-{n}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("temp dir");
-    let path = dir.join("main.chz");
-    std::fs::write(&path, src).expect("write program");
+    std::fs::write(dir.join(file), src).expect("write program");
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_chezzi"));
-    cmd.arg("run")
-        .arg(&path)
+    cmd.args(args)
+        .arg(file)
+        .current_dir(&dir)
+        .envs(envs.iter().copied())
         .env("CHEZZI_THREADS", threads)
         .env_remove("CHEZZI_SCHED_SEED")
         .stdin(Stdio::null())
@@ -397,4 +404,48 @@ fn executor_stop_grid() {
         }
     });
     judge(misses.into_inner().unwrap());
+}
+
+/// A job parked in `recv()` inside a NESTED Executor's job, under an outer Executor join that
+/// `chezzi test --timeout` cuts: the test times out, and no `defer` of the nested job prints (a
+/// `--timeout` cuts a `defer`). The join's cancel and the run deadline's drain both reach the
+/// nested job. A sibling job on a 5 s timer keeps the run from being a deadlock. Golden from the
+/// base binary (`615881a3`), the same at T=1, 2 and the default.
+#[test]
+fn outer_join_timeout_cuts_a_nested_executor_job() {
+    const SRC: &str = r#"import std.time
+import Executor from std.concurrency
+
+never := Channel[int](0)
+
+fn park():
+    _ := never.recv()
+
+fn inner():
+    defer: print("inner defer")
+    ex2 := Executor()
+    _ := ex2.submit(fn(): park())
+    ex2.shutdown()
+    print("after inner join")
+
+test fn waits():
+    ex := Executor()
+    _ := ex.submit(fn(): inner())
+    _ := ex.submit(fn(): time.timer(5000).recv())
+    ex.shutdown()
+    print("after outer join")
+"#;
+    const GOLDEN: &str = "TIMED-OUT waits (main_test.chz) test exceeded --timeout (200ms)\n\n\
+                          1 test(s): 0 passed, 0 failed, 0 errored, 1 timed out\n";
+    let mut misses = Vec::new();
+    for t in ["1", "2", "0"] {
+        let g = run_with(SRC, t, "main_test.chz", &["test", "--timeout=200"], &[]);
+        if g.code != Some(1) || g.out != GOLDEN || !g.err.is_empty() {
+            misses.push(format!(
+                "T={t}: want code=Some(1), stdout {GOLDEN:?}, no stderr\n{}",
+                g.show()
+            ));
+        }
+    }
+    judge(misses);
 }

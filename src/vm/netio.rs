@@ -55,7 +55,10 @@ pub(super) fn deadline_gap_wake(
     scope_cancel: &Option<Arc<AtomicBool>>,
 ) {
     if let Some(c) = scope_cancel {
-        crate::vm::trip_cancel_flag(c);
+        super::mnsched_verdict::cancel(
+            &sched.sched_registry,
+            super::mnsched_verdict::CancelTarget::Flag(Some(c)),
+        );
     }
     sched.close_wake(key, core);
 }
@@ -177,7 +180,7 @@ impl Vm {
         let mut reg = self.wait_permit(WaitSpec::Guard);
         let staged = loop {
             let left = until.saturating_duration_since(std::time::Instant::now());
-            match self.guard_free_then_take(&reg, &mut ticket, None, left, span) {
+            match self.guard_free_then_take(&reg, &mut ticket, None, Some(left), None, span) {
                 Err(halt) => break Some(Err(halt)),
                 Ok(Some(g)) => break Some(Ok(g)),
                 Ok(None) if left.is_zero() => break None,
@@ -236,16 +239,23 @@ impl Vm {
     /// TICKET-200 — a wait that ends because the guard came free reads the halts
     /// ([`Vm::block_halts`]) before it takes the guard, because the free may be the halt's own cut
     /// of the holder (an `os.exit` or a cancel unwinding the holder's `update`).
+    ///
+    /// `budget` `None` waits without end; `woken` (a [`super::block::Wake`] and the count read
+    /// before the caller's halts) also ends the wait, `Ok(None)`, at a kick.
     fn guard_free_then_take(
         &mut self,
         reg: &WaitReg,
         ticket: &mut core::WaitTicket,
         taking: Option<&std::sync::atomic::AtomicBool>,
-        budget: std::time::Duration,
+        budget: Option<std::time::Duration>,
+        woken: Option<(&super::block::Wake, u64)>,
         span: Span,
     ) -> Result<Option<core::UpdateGuard>, RuntimeError> {
         let me = self.guard_token;
-        if !self.wait_door(&[], |_| core::await_update_guard_free(ticket, Some(budget))) {
+        let kicked = || woken.is_some_and(|(w, seen)| w.kicked(seen));
+        if !self.wait_door(&[], |_| {
+            core::await_update_guard_free_or(ticket, budget, kicked)
+        }) {
             return Ok(None);
         }
         self.block_halts(span)?;
@@ -279,10 +289,11 @@ impl Vm {
     /// TICKET-063 — the unbounded half of [`Vm::take_update_guard`], reached once the 5 ms bounded
     /// acquire has given up. Registers the wait as a waiter (never `inflight` — a guard wait has
     /// no promised external progress; see `SchedCore::waiters`' doc), registers this thread as a
-    /// blocked party so the process-wide verdict can see it, and polls
-    /// [`Vm::block_halts`] every [`super::DEMOTE_POLL_BACKOFF`] so `--timeout`, cancel and
-    /// `os.exit` reach a guard waiter exactly like every other blocking-in-place site. The counters
-    /// are un-accounted via `guard_wait_exit` on every exit path (no `?` before that call).
+    /// blocked party so the process-wide verdict can see it, and reads [`Vm::block_halts`] before
+    /// each wait: a cancel, `os.exit` or the verdict cut kicks the wait ([`super::block::Wake`]),
+    /// and `--timeout` ends it at the run's deadline, exactly like every other blocking-in-place
+    /// site. The counters are un-accounted via `guard_wait_exit` on every exit path (no `?` before
+    /// that call).
     fn guard_wait_block<'a>(
         &mut self,
         reg: &mut WaitReg,
@@ -298,23 +309,11 @@ impl Vm {
             admitted: ticket.admission(),
         };
         let taking = Arc::clone(&owned.taking);
-        self.guard_wait_enter(reg, owned, what, span)?;
+        let wake = super::block::Wake::new(super::block::WakeOn::Guard);
+        self.guard_wait_enter(reg, owned, Arc::clone(&wake), what, span)?;
         let out = loop {
-            // TICKET-193 — permit BEFORE guard. Wait for the guard to come free holding no permit,
-            // take the permit, then take the guard without waiting. Taking the guard first parks
-            // its OWNER behind permit holders that wait in place for that same guard, so every
-            // handoff cost one GUARD_DEMOTE_BUDGET (T=2: 7172 timeouts, 18.9 s).
-            match self.guard_free_then_take(
-                reg,
-                ticket,
-                Some(&taking),
-                super::DEMOTE_POLL_BACKOFF,
-                span,
-            ) {
-                Ok(Some(g)) => break Ok(g),
-                Err(e) => break Err(e),
-                Ok(None) => {}
-            }
+            // Read before the halts, so a kick after it ends the wait below (`Wake`).
+            let seen = wake.seen();
             if let Err(e) = self.block_halts(span) {
                 break Err(e);
             }
@@ -326,6 +325,26 @@ impl Vm {
                     // above), as on the process-wide verdict: a guard wait is not a channel wait.
                     break Err(self.cut_fault(&sched, span));
                 }
+            }
+            // TICKET-193 — permit BEFORE guard. Wait for the guard to come free holding no permit,
+            // take the permit, then take the guard without waiting. Taking the guard first parks
+            // its OWNER behind permit holders that wait in place for that same guard, so every
+            // handoff cost one GUARD_DEMOTE_BUDGET (T=2: 7172 timeouts, 18.9 s). The wait ends
+            // at a free, a kick or the run's deadline.
+            let budget = self
+                .deadline
+                .map(|d| d.saturating_duration_since(std::time::Instant::now()));
+            match self.guard_free_then_take(
+                reg,
+                ticket,
+                Some(&taking),
+                budget,
+                Some((&*wake, seen)),
+                span,
+            ) {
+                Ok(Some(g)) => break Ok(g),
+                Err(e) => break Err(e),
+                Ok(None) => {}
             }
         };
         self.guard_wait_exit(reg);

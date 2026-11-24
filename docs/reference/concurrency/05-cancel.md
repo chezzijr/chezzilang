@@ -156,9 +156,10 @@ native is ENTRY-only:
 
 | wait | checkpoint | a cancel arriving *during* it |
 |---|---|---|
-| `time.sleep_ms(ms)`, `time.timer(ms).recv()`, a `wait:` timer arm | **continuous** (~5 ms) | ends the wait |
-| `ch.recv()`, `ch.send()` on a full channel, `wait:`, a socket op | continuous | ends the wait |
+| `time.sleep_ms(ms)`, `time.timer(ms).recv()`, a `wait:` timer arm | **continuous** | ends the wait at once |
+| `ch.recv()`, `ch.send()` on a full channel, `wait:`, a socket op | continuous | ends the wait at once (a socket op under a host frame: within 5 ms) |
 | `fs.*`, `request*`, `process*`, `io.*` file I/O | **entry only** | observed after the syscall returns |
+| a `stdin` read, a C call | none while it runs | observed after it returns |
 
 A timer deadline is ours to cut short; a `read(2)` already in the kernel is not. The split holds in a
 `parallel:` nursery, in an `Executor` job and on the top-level `main` thread, so `cancel()` and
@@ -181,10 +182,11 @@ Resource caps, measured:
 - **`--max-heap` caps the whole run.** Every task of a test allocates into one heap, and each
   collection, on any thread, measures that heap's live bytes. Three tasks that each hold 4.2 MB
   are OVER-MEMORY together under a 10 MB cap, though each one alone is under it.
-- **`--max-heap` cuts a sleeper at once, except an `Executor` job when the test fn itself trips the
-  cap.** The program below ran on a release build with `chezzi test --max-heap=8000000 --filter
-  <test fn>`, 3 runs per cell. Each cell gives the wall time of the whole process. Every run
-  ended OVER-MEMORY.
+- **`--max-heap` cuts a sleeper at once, wherever the cap trips.** The program below ran on a release
+  build with `chezzi test --max-heap=8000000 --filter <test fn>`, 3 runs per cell (2026-11-24). Each
+  cell gives the wall time of the whole process. Every run ended OVER-MEMORY. A job whose output
+  passes the cap ends the run the same way: every other job is cut at its wait, a sleeping one and
+  one waiting under a host frame too.
 - **`--max-heap` counts an `Executor` job's captured payload while the job is queued or runs.** The
   payload is objects of the run's one heap. A test whose unfinished jobs together exceed the cap
   trips, sleeping jobs included (`three_hundred_jobs_capture_a_megabyte_each`: peak RSS 20.6-21.0 MB
@@ -192,17 +194,16 @@ Resource caps, measured:
 
 | Test fn | `CHEZZI_THREADS=1` | `=2` | default |
 |---|---|---|---|
-| `a_job_grows_the_test_fn_sleeps` | 0.11-0.12 s | 0.11 s | 0.10-0.11 s |
-| `a_child_grows_a_sibling_sleeps` | 0.11 s | 0.11-0.12 s | 0.11 s |
-| `a_job_grows_another_job_sleeps` | 0.11-0.12 s | 0.10-0.11 s | 0.10-0.11 s |
-| `the_body_grows_a_child_sleeps` | 0.11 s | 0.11 s | 0.09-0.11 s |
-| `the_test_fn_grows_forever_a_job_sleeps` | 0.11 s (the job never starts) | 5.02-5.03 s | 5.02 s |
-| `the_test_fn_appends_400_lists_a_job_sleeps` | 5.11-5.12 s | 5.01-5.02 s | 5.01-5.02 s |
-| `three_hundred_jobs_capture_a_megabyte_each` | 2.02-2.03 s | 2.02 s | 2.02 s |
+| `a_job_grows_the_test_fn_sleeps` | 0.11-0.12 s | 0.11 s | 0.11-0.12 s |
+| `a_child_grows_a_sibling_sleeps` | 0.09-0.11 s | 0.09-0.12 s | 0.09-0.11 s |
+| `a_job_grows_another_job_sleeps` | 0.10-0.12 s | 0.09-0.10 s | 0.09-0.11 s |
+| `the_body_grows_a_child_sleeps` | 0.10-0.12 s | 0.11 s | 0.10-0.12 s |
+| `the_test_fn_grows_forever_a_job_sleeps` | 0.10 s | 0.09-0.11 s | 0.10-0.12 s |
+| `the_test_fn_appends_400_lists_a_job_sleeps` | 0.16-0.20 s | 0.20 s | 0.17-0.21 s |
+| `three_hundred_jobs_capture_a_megabyte_each` | 0.02 s | 0.02 s | 0.02-0.03 s |
 
-When the test fn trips the cap, a job that sleeps 5000 ms (or 2000 ms) sleeps out before the
-abort lands. At T=1, `grow()` never parks, so the job never starts and the run ends at once;
-the 400-list loop ends, `shutdown` lets the job run, and the job sleeps out.
+No cell waits for a sleep: the test fn's own over-memory abort halts the run too, so it cuts a
+job's 5000 ms (or 2000 ms) sleep at once.
 
 ```chezzi
 import Executor from std.concurrency
@@ -388,7 +389,8 @@ picks the report:
 3. the run's own cause (`--timeout`, `--max-heap`, an own fault, a deadlock).
 
 Go's first panic ends the process, so the earlier job fault is reported with the job's frames; an own
-fault that happened first stays the report. A job fault replacing a deadlock stays fatal, so
+fault that happened first stays the report. One `--max-heap` abort is one report: a job that ends
+with a copy of the run's abort reports nothing more, so `chezzi test` prints one OVER-MEMORY row. A job fault replacing a deadlock stays fatal, so
 `recover:` cannot catch it. This applies only to an executor no `shutdown()` has started on: a
 deadlock inside that executor's own join stays the deadlock. A job cut by the run's own
 `--timeout` is that cause, not an earlier fault. A child's or a job's fault prints the faulting

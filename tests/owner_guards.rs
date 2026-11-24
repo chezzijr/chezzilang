@@ -660,3 +660,62 @@ fn a_host_frame_is_counted_in_one_place() {
         bad.join("\n")
     );
 }
+
+/// Plan 2026-11-21-cancel-is-a-wake Task 2: every cancel (a child fault, an owner's abort,
+/// `Executor.cancel()`, its join `--timeout`, `Task.cancel()`, `os.exit`, the `--timeout` gap
+/// wake) goes through one entry, `cancel` in `vm/mnsched_verdict.rs`. It trips the flag, drains
+/// the fibers the flag covers on its own sched and then on every live sched, and pokes the idle
+/// workers. So the trip (`trip_cancel_flag`) and the drain halves are called only in that file,
+/// and the registry-wide copies are gone. `vm/poller.rs` holds the netpoller half's own body.
+#[test]
+fn every_cancel_goes_through_one_entry() {
+    const OWNER: &str = "vm/mnsched_verdict.rs";
+    const HALVES: &[(&str, &[&str])] = &[
+        ("trip_cancel_flag", &[OWNER]),
+        ("cancel_all", &[OWNER]),
+        ("drain_family", &[OWNER]),
+        ("drain_job", &[OWNER]),
+        ("drain_where", &[OWNER, "vm/poller.rs"]),
+        ("cancel_drain_where", &[OWNER]),
+        ("drain_parked", &[OWNER]),
+    ];
+    const GONE: &[&str] = &[
+        "drain_live_scheds",
+        "poke_live_scheds",
+        "cancel_fiber_owned_family",
+        "trip_scope_cancel",
+        "cancel_drain",
+    ];
+    let src = Path::new("src");
+    let mut bad = Vec::new();
+    for path in rust_files(src) {
+        let rel = path.strip_prefix(src).unwrap();
+        let file = rel.to_string_lossy().replace('\\', "/");
+        let code = production_code(&fs::read_to_string(&path).unwrap(), false);
+        for (n, line) in code.lines().enumerate() {
+            let at = format!("src/{file}:{}", n + 1);
+            for w in idents(line).filter(|w| GONE.contains(w)) {
+                bad.push(format!("{at}: names `{w}`"));
+            }
+            if is_test_file(rel) {
+                continue;
+            }
+            for (name, owners) in HALVES {
+                let call = format!("{name}(");
+                let calls = line.match_indices(&call).any(|(i, _)| {
+                    let before = line[..i].trim_end();
+                    let ident_char = |c: char| c.is_ascii_alphanumeric() || c == '_';
+                    !line[..i].ends_with(ident_char) && !before.ends_with("fn")
+                });
+                if calls && !owners.contains(&file.as_str()) {
+                    bad.push(format!("{at}: calls `{name}`"));
+                }
+            }
+        }
+    }
+    assert!(
+        bad.is_empty(),
+        "a cancel trips and wakes through `cancel` in src/{OWNER} alone:\n{}",
+        bad.join("\n")
+    );
+}

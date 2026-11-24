@@ -35,71 +35,6 @@ impl SchedCore {
         }
     }
 
-    /// TICKET-118 (W13-8) — the first scope (if any) whose own flag or an ancestor's is tripped
-    /// and still owing a `cancel_drain` to some parked fiber. Its one caller is
-    /// [`SchedCore::drain_scan_due`], on `MnSched::take_runnable`'s idle path.
-    ///
-    /// TICKET-289 — a COMPLETE scope counts too. Its owner is a parked fiber of another scope (a job
-    /// in a full `send`, behind a nursery whose only child just faulted), and that child's `finish`
-    /// completes the scope before its `drain_family` runs. The bound is the undrained park, not
-    /// `done < total`: with the fiber requeued, `scope_has_undrained_park` is false.
-    fn cancelled_scope_awaiting_drain(&self, me: &MnSched) -> Option<usize> {
-        #[cfg(test)]
-        CANCEL_SCAN_CALLS.fetch_add(1, Ordering::Relaxed);
-        self.scopes
-            .iter()
-            .find(|&(sid, _)| {
-                self.scope_cancel_tripped(sid) && self.scope_has_undrained_park(me, sid)
-            })
-            .map(|(sid, _)| sid)
-    }
-
-    /// TICKET-126 (W13-24) — the drain scan, skipped while no cancel flag was tripped since this sched's
-    /// last scan found nothing. Skipping is sound because a cancelled scope cannot gain a parked fiber
-    /// after its trip (`park`/`park_send`/`park_wait` re-check the flags under this lock and requeue,
-    /// DEC-118). The generation is recorded only on `None`: a found scope is re-scanned until its drain
-    /// empties it. Before this gate the scan ran on every idle pass of every worker (W13-24).
-    ///
-    /// The load is `Acquire`, against the `Release` bump in [`trip_cancel_flag`]. That pair is what
-    /// orders a flag store before this scan, so seeing a newer generation means seeing the flag. The
-    /// flag loads in `scope_cancel_tripped` stay `Relaxed`: this one acquire orders them all.
-    pub(super) fn drain_scan_due(&mut self, me: &MnSched) -> Option<usize> {
-        let cancel_gen = CANCEL_GEN.load(Ordering::Acquire);
-        if self.drain_scan_gen == cancel_gen {
-            return None;
-        }
-        let found = self.cancelled_scope_awaiting_drain(me);
-        if found.is_none() {
-            self.drain_scan_gen = cancel_gen;
-        }
-        found
-    }
-
-    /// Is any fiber of scope `sid` still sitting in `parked`, or parked on `me`'s sockets in the
-    /// poller registry, i.e. still owed its `drain_family`? Scans the same structures `drain_family`
-    /// empties, in the same way (a `Recv` entry's scope by reference; a `Wait` token's PEEKED under its
-    /// fiber lock without claiming; a poll-parked fiber by `poller::any_parked`, TICKET-200) — so no
-    /// new state to keep in sync (a counter would have to be set/cleared at every trip + drain seam;
-    /// a missed clear re-creates the hang). The registry read takes the registry lock under this core
-    /// lock A; the registry is a leaf.
-    fn scope_has_undrained_park(&self, me: &MnSched, sid: usize) -> bool {
-        if poller::any_parked(me, &self.scope_family(sid)) {
-            return true;
-        }
-        self.parked.values().flatten().any(|e| match e {
-            ParkedEntry::Recv(f) => f.woken_by(&[sid]),
-            ParkedEntry::Send(f) | ParkedEntry::Guard(f) | ParkedEntry::ExecJoin(f, ..) => {
-                f.woken_by(&[sid])
-            }
-            ParkedEntry::Wait(wp) => wp
-                .fiber
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .as_ref()
-                .is_some_and(|f| f.woken_by(&[sid])),
-        })
-    }
-
     /// Cross-nursery flat scheduler — some scope has unfinished tasks (the `done < total` half of the
     /// global deadlock predicate).
     pub(super) fn any_scope_incomplete(&self) -> bool {
@@ -200,7 +135,7 @@ pub(super) enum Take {
 impl MnSched {
     /// Build the ONE global sched the outermost owner shares with every nested nursery. Seeds scope 0
     /// for the outermost nursery's `total` tasks + its `cancel` (which lives on `scopes[0]` like every
-    /// other scope's — there is no sched-level cancel; `park`/`park_wait`/`cancel_drain`/`poll_park_offload`
+    /// other scope's — there is no sched-level cancel; `park`/`park_wait`/`drain_family`/`poll_park_offload`
     /// all use the PER-FIBER scope cancel).
     pub(super) fn new(
         total: usize,
@@ -221,7 +156,6 @@ impl MnSched {
                 parked: std::collections::HashMap::new(),
                 slots: (0..total).map(|_| None).collect(),
                 running: 0,
-                drain_scan_gen: 0,
                 parked_n: 0,
                 join_parked: Vec::new(),
                 exec_joiners: Vec::new(),
@@ -490,6 +424,22 @@ impl MnSched {
         }
     }
 
+    /// Kick every demoted wait filed on this sched (each [`crate::vm::block::Waiter`]'s
+    /// [`crate::vm::block::Wake`]): each re-reads its halts and its cut. THE wake of a demoted
+    /// wait for a change its predicate does not read: the one [`super::mnsched_verdict::cancel`]
+    /// (every source) and the run's verdict cut. The caller holds no sched core lock.
+    pub(super) fn wake_demoted(&self) {
+        let wakes: Vec<Arc<crate::vm::block::Wake>> = self
+            .lock()
+            .waiters
+            .values()
+            .filter_map(|w| w.wake.clone())
+            .collect();
+        for w in wakes {
+            w.kick();
+        }
+    }
+
     pub(super) fn notify_waiters(&self) {
         self.reserve_gated_idle();
         self.cv.notify_all();
@@ -610,10 +560,10 @@ impl MnSched {
     }
 
     /// TICKET-289 — `Task.cancel()`: cancel the one job whose Task channel is `ch`
-    /// ([`JobEvent::CancelOne`]). A held job is dropped and its Task settles; a running job gets
-    /// its own flag tripped, which it returns: the caller drains the fibers that flag wakes on
-    /// every sched of the run ([`super::sched::drain_live_scheds`]), with no lock held. A job that
-    /// already ended is a no-op.
+    /// ([`JobEvent::CancelOne`]). A held job is dropped and its Task settles; a running job's own
+    /// flag is returned: the caller's cancel (`mnsched_verdict::cancel`) trips it and drains the
+    /// fibers it wakes on every sched of the run, with no lock held. A job that already ended is a
+    /// no-op.
     pub(super) fn cancel_job(&self, ch: &Arc<ChannelCore>) -> Option<Arc<AtomicBool>> {
         let mut c = self.lock();
         let step = c.job_event(JobEvent::CancelOne(Arc::clone(ch)), self.quiesce.run_halt());
@@ -795,17 +745,19 @@ impl MnSched {
         (out, err, exits)
     }
 
-    /// One tick of an `Executor` join: wait on the sched's condvar while more than `slack` tasks
-    /// are undone, for at most `tick`.
-    pub(super) fn join_tick(&self, slack: usize, tick: std::time::Duration) {
+    /// One sleep of a demoted `Executor` join: wait on the sched's condvar while more than `slack`
+    /// tasks are undone, until `until` (the run's deadline) or a kick of `wake` since `seen`.
+    pub(super) fn join_tick(
+        &self,
+        slack: usize,
+        until: Option<std::time::Instant>,
+        wake: &crate::vm::block::Wake,
+        seen: u64,
+    ) {
         let c = self.lock();
-        if !c.join_over(slack) {
-            drop(
-                self.cv
-                    .wait_timeout(c, tick)
-                    .unwrap_or_else(|e| e.into_inner()),
-            );
-        }
+        drop(crate::vm::block::sleep_until(&self.cv, c, until, |c| {
+            !c.join_over(slack) && !wake.kicked(seen)
+        }));
     }
 
     /// Per-connection spawn — `scope_id`'s eager body reached `JoinNursery`: no more injections. Clear
@@ -877,73 +829,140 @@ pub(super) fn run_offload(
     func(&mut host)
 }
 
-/// W7-16 — wait out an offloaded `sleep_ms` in `DEMOTE_POLL_BACKOFF` chunks, re-arming itself on the
-/// timer thread, so a cancel or a `--timeout` reaches the sleeping fiber INSIDE the sleep instead of
-/// after it. Pre-fix this was one `submit_at(deadline, …)`: a nursery task sleeping 3 s ran the full
-/// 3 s through a sibling's fault at 50 ms and then printed its post-sleep line (measured 3005 ms; the
-/// existing cancellation checkpoint only ever covered the *entry* checkpoint, where the fault precedes the call).
+/// W7-16 — a fiber's offloaded `sleep_ms` parks with ONE timer, so a cancel or a `--timeout`
+/// reaches it INSIDE the sleep instead of after it, and nothing polls. Pre-W7-16 a nursery task
+/// sleeping 3 s ran the full 3 s through a sibling's fault at 50 ms and then printed its post-sleep
+/// line (measured 3005 ms); W7-16 then re-armed the timer every `DEMOTE_POLL_BACKOFF` to read the
+/// halts (2000 sleepers: ~2 s of CPU).
 ///
-/// **Why re-arm rather than park where `cancel_drain` can reach it.** `cancel_drain` walks `c.parked`
-/// only, and filing this fiber there needs a claim-once token against the timer firing plus
-/// `parked_n`/`runnable`/`inflight` all kept consistent — and a parked fiber that no channel can ever
-/// feed is exactly the false-deadlock shape W7-12/W7-15 came from. It also requeues with
-/// `resume_native == None`, so the resumed fiber would push nothing where the suspended `Call` expects
-/// a value. Re-arming keeps the fiber under a SINGLE owner (the timer heap) at all times, so there is
-/// no claim race at all.
+/// It files the fiber as a [`ParkedEntry::Sleep`] where a cancel or `--timeout` drain finds it
+/// (the [`MnSched::drain_parked`] matchers select it like any parked fiber), re-reads the halts,
+/// then arms its timer at `min(deadline, run deadline)`. Filing before the read closes the gap: a
+/// trip whose drain ran before the filing is seen by the read, any later drain finds the entry.
+/// Whichever party claims it ([`SleepPark`]) requeues it through [`settle_sleep`] with the sleep's
+/// result in `resume_native`, so the suspended `Call` gets its value.
 ///
-/// **Counters are untouched by design.** `running -= 1` / `inflight += 1` happened once in
-/// [`MnSched::offload`]; `complete_offload` runs exactly once, on whichever branch below resumes the
-/// fiber. A re-arm does neither, so `inflight > 0` keeps vetoing the deadlock predicate for the whole
-/// sleep — the property that makes this preferable to a park.
-///
-/// Each re-arm targets `min(deadline, now + backoff)` computed from the ABSOLUTE deadline, so tick
-/// jitter cannot accumulate and the final wake still lands on `deadline`.
-///
-/// ponytail: 200 re-arms/s per sleeping fiber, each a `timers` mutex + a poller notify. Thousands of
-/// concurrent sleepers would load the single timer/poll thread; upgrade path is a per-scope
-/// pending-sleep registry that `cancel_drain` fires directly. (`fire_due_timers` drops the timers lock
-/// before running a job, so re-arming from inside a job is safe.)
-pub(super) fn arm_timer_sleep(sched: Arc<MnSched>, mut fiber: Fiber, t: TimerSleep, span: Span) {
-    let now = std::time::Instant::now();
-    // W7-57 — `run_deadline` is evaluated BEFORE `cancel`, and the order is deliberate: a run-wide
-    // `os.exit` now trips every scope's cancel (`MnSched::cancel_all`), so an exit racing an already-
-    // expired `--timeout` would otherwise be reported as `cancelled` and the harness would lose its
-    // `timed_out` marker. `--timeout` is the outer, absolute halt and must outrank. Nothing in-tree
-    // pinned the previous order.
-    let halt = if t.run_deadline.is_some_and(|rd| now >= rd) {
-        Some(super::exec::timed_out_err(t.timeout_ms, span))
-    } else if fiber.honours_cancel() && t.wake.halt().is_some() {
-        // TICKET-188 — a cancel, or a child fault of a nursery this fiber owns. Not inside a
-        // `defer`: a cleanup's sleep runs its full length (`Fiber::honours_cancel`). `cancelled` is only
-        // the resume marker: the resume re-derives the halt through `Vm::take_halt`. A tripped flag
-        // with no recorded fault yet (the child is between its trip and `finish`) re-arms below.
-        Some(RuntimeError {
-            message: "cancelled".to_string(),
-            span,
-            is_assert: false,
-            is_over_memory: false,
-            is_timed_out: false,
-            is_panic: false,
-        })
-    } else {
-        None
-    };
-    if let Some(err) = halt {
-        fiber.resume_native = Some(Err(err));
-        sched.complete_offload(fiber);
+/// **Counters.** `running -= 1` / `inflight += 1` happened once in [`MnSched::offload`];
+/// `complete_offload` runs once, in `settle_sleep`. While filed it is in `parked_n`, which the
+/// drains' early-outs read, but never asleep in the awake count: its timer will wake it, so a
+/// sleep cannot read as a deadlock (the W7-12/W7-15 false-deadlock shape).
+pub(super) fn arm_timer_sleep(sched: Arc<MnSched>, fiber: Fiber, t: Arc<TimerSleep>, span: Span) {
+    let honours = fiber.honours_cancel();
+    let sp = Arc::new(SleepPark {
+        fiber: Mutex::new(Some(fiber)),
+        sleep: t,
+        span,
+        sched: Arc::downgrade(&sched),
+        claimed: AtomicBool::new(false),
+        timer: Arc::default(),
+    });
+    {
+        let mut c = sched.lock();
+        c.parked
+            .entry(sp.key())
+            .or_default()
+            .push(ParkedEntry::Sleep(Arc::clone(&sp)));
+        c.parked_n += 1;
+    }
+    if let Some(err) = sleep_halt(honours, &sp.sleep, span) {
+        // Already halted: end it now, unless a drain claimed it first (then that drain settles it).
+        if let Some(fiber) = sched.claim_sleep(&sp) {
+            fiber_resume(&sched, fiber, Err(err));
+        }
         return;
     }
-    if now >= t.deadline {
-        fiber.resume_native = Some(Ok(crate::native::NativeRet::Nil));
-        sched.complete_offload(fiber);
-        return;
-    }
-    let mut next = t.deadline.min(now + DEMOTE_POLL_BACKOFF);
-    if let Some(rd) = t.run_deadline {
-        next = next.min(rd);
-    }
-    timer::submit_at(
-        next,
-        Box::new(move || arm_timer_sleep(sched, fiber, t, span)),
+    let t = &sp.sleep;
+    let due = t.run_deadline.map_or(t.deadline, |rd| t.deadline.min(rd));
+    let stop = Arc::clone(&sp.timer);
+    timer::submit_stoppable_at(
+        due,
+        // The job holds the sched weakly: a stopped entry waits in the heap for its removal
+        // ([`timer::stop`]), and it must not keep a finished sched alive until then.
+        Box::new(move || {
+            if let Some(sched) = sp.sched.upgrade()
+                && let Some(fiber) = sched.claim_sleep(&sp)
+            {
+                settle_sleep(&sched, fiber, &sp);
+            }
+        }),
+        stop,
     );
+}
+
+/// The halt that ends a sleep now, in this order. W7-57 — `run_deadline` BEFORE `cancel`: a
+/// run-wide `os.exit` trips every scope's cancel (`cancel(CancelTarget::All)`), so an exit racing
+/// an already-expired `--timeout` would otherwise be reported as `cancelled` and the harness would
+/// lose its `timed_out` marker. `--timeout` is the outer, absolute halt and must outrank.
+/// TICKET-188 — a cancel, or a child fault of a nursery this fiber owns; not inside a `defer`
+/// (`honours`, [`Fiber::honours_cancel`]): a cleanup's sleep runs its full length. `cancelled` is
+/// only the resume marker: the resume re-derives the halt through `Vm::take_halt`. A tripped flag
+/// with no recorded fault yet is no halt.
+fn sleep_halt(honours: bool, t: &TimerSleep, span: Span) -> Option<RuntimeError> {
+    if t.run_deadline
+        .is_some_and(|rd| std::time::Instant::now() >= rd)
+    {
+        return Some(super::exec::timed_out_err(t.timeout_ms, span));
+    }
+    (honours && t.wake.halt().is_some()).then(|| RuntimeError {
+        message: "cancelled".to_string(),
+        span,
+        is_assert: false,
+        is_over_memory: false,
+        is_timed_out: false,
+        is_panic: false,
+    })
+}
+
+/// The claim's winner ends the sleep `sp` it took `fiber` from: with its halt, at its deadline
+/// with `Nil`, or, woken by a drain with neither due (a flag of a nursery it owns tripped with no
+/// fault), files it again with a new token and timer. It stops the old timer first, so a drain's
+/// win leaves no live entry in the timer heap. Holds no lock.
+pub(super) fn settle_sleep(sched: &Arc<MnSched>, fiber: Fiber, sp: &SleepPark) {
+    // A drain won the claim: the timer is dead. A no-op when the timer won.
+    timer::stop(&sp.timer);
+    if let Some(err) = sleep_halt(fiber.honours_cancel(), &sp.sleep, sp.span) {
+        fiber_resume(sched, fiber, Err(err));
+    } else if std::time::Instant::now() >= sp.sleep.deadline {
+        fiber_resume(sched, fiber, Ok(crate::native::NativeRet::Nil));
+    } else {
+        arm_timer_sleep(Arc::clone(sched), fiber, Arc::clone(&sp.sleep), sp.span);
+    }
+}
+
+/// Requeue a fiber whose offloaded native ended with `result`.
+fn fiber_resume(
+    sched: &MnSched,
+    mut fiber: Fiber,
+    result: Result<crate::native::NativeRet, RuntimeError>,
+) {
+    fiber.resume_native = Some(result);
+    sched.complete_offload(fiber);
+}
+
+impl MnSched {
+    /// Claim the filed sleep `sp` for the caller (its timer, or its own halt re-read): in one core
+    /// lock hold, win the CAS, take the entry out of `parked` and the fiber out of `sp`. `None`
+    /// when a drain claimed it first.
+    fn claim_sleep(&self, sp: &Arc<SleepPark>) -> Option<Fiber> {
+        let mut c = self.lock();
+        if sp
+            .claimed
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            debug_assert!(
+                !c.parked.contains_key(&sp.key()),
+                "a claimed sleep is still filed"
+            );
+            return None;
+        }
+        let filed = c.parked.remove(&sp.key());
+        debug_assert!(
+            matches!(filed.as_deref(), Some([ParkedEntry::Sleep(e)]) if Arc::ptr_eq(e, sp)),
+            "an unclaimed sleep is filed alone under its key"
+        );
+        c.parked_n -= 1;
+        let fiber = sp.fiber.lock().unwrap_or_else(|e| e.into_inner()).take();
+        Some(fiber.expect("SleepPark fiber claimed twice"))
+    }
 }

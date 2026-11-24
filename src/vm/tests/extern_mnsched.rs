@@ -448,13 +448,13 @@ fn mnsched_park_requeues_when_an_ancestor_cancel_is_tripped() {
     assert_eq!(c.global.len(), 1);
 }
 
-/// TICKET-118 (W13-8) — `take_runnable`'s drain trigger must requeue a park whose ancestor's cancel
-/// tripped AFTER the fiber parked (not just before, as the park-gap guard above covers), so a
-/// `cancel` racing a job's nursery `recv` still ends it instead of getting judged deadlocked.
+/// TICKET-118 (W13-8) — the cancel must requeue a park whose ancestor's flag it trips AFTER the
+/// fiber parked (not just before, as the park-gap guard above covers), so a `cancel` racing a job's
+/// nursery `recv` still ends it instead of getting judged deadlocked.
 #[test]
-fn mnsched_take_runnable_drains_a_park_whose_ancestor_cancel_tripped_after_it_parked() {
+fn a_cancel_drains_a_park_whose_ancestor_tripped_after_it_parked() {
     let cancel = Arc::new(AtomicBool::new(false));
-    let sched = mk_sched_with(1, Arc::clone(&cancel));
+    let sched = Arc::new(mk_sched_with(1, Arc::clone(&cancel)));
     let ancestor = Arc::new(AtomicBool::new(false));
     sched.lock().scopes[0].ancestors.push(Arc::clone(&ancestor));
     let core = empty_core();
@@ -466,25 +466,29 @@ fn mnsched_take_runnable_drains_a_park_whose_ancestor_cancel_tripped_after_it_pa
         1,
         "fiber parks while the ancestor is not yet cancelled"
     );
-    crate::vm::trip_cancel_flag(&ancestor);
+    let registry: crate::vm::SchedRegistry = Arc::new(Mutex::new(vec![Arc::downgrade(&sched)]));
+    crate::vm::mnsched_verdict::cancel(
+        &registry,
+        crate::vm::mnsched_verdict::CancelTarget::Flag(Some(&ancestor)),
+    );
+    assert_eq!(
+        sched.lock().parked_n,
+        0,
+        "the cancel must requeue the park before anything judges a deadlock"
+    );
     assert!(matches!(
         sched.take_runnable_unattached(0, 1, 0),
         Take::Run(..)
     ));
-    assert_eq!(
-        sched.lock().parked_n,
-        0,
-        "drain trigger must requeue the park before judging deadlock"
-    );
 }
 
-/// TICKET-118 (W13-8) — `poke_live_scheds` must take each live sched's core lock before it notifies,
+/// TICKET-118 (W13-8) — a cancel's poke must take each live sched's core lock before it notifies,
 /// not just call `notify_all` bare: a `cv.notify_all()` with no lock held can race a worker about to
 /// wait and be lost, which is exactly the lost-wakeup shape `cancel`'s cancel store needs
 /// closed. Proven by observing the poke's completion (a channel send AFTER it returns) stay blocked
 /// while this test holds the sched's core lock, then unblock the instant the lock is released.
 #[test]
-fn poke_live_scheds_takes_each_sched_core_lock_before_notifying() {
+fn cancel_poke_takes_each_sched_core_lock_before_notifying() {
     let sched = Arc::new(mk_sched(1));
     let registry: Vec<std::sync::Weak<MnSched>> = vec![Arc::downgrade(&sched)];
     let registry: crate::vm::SchedRegistry = Arc::new(Mutex::new(registry));
@@ -493,18 +497,22 @@ fn poke_live_scheds_takes_each_sched_core_lock_before_notifying() {
     let (tx, rx) = std::sync::mpsc::channel();
     let poke_registry = Arc::clone(&registry);
     let handle = std::thread::spawn(move || {
-        crate::vm::sched::poke_live_scheds(&poke_registry);
+        // No flag: the poke alone (a `Task.cancel()` of a job that already ended).
+        crate::vm::mnsched_verdict::cancel(
+            &poke_registry,
+            crate::vm::mnsched_verdict::CancelTarget::Flag(None),
+        );
         tx.send(()).unwrap();
     });
     assert!(
         rx.recv_timeout(std::time::Duration::from_millis(100))
             .is_err(),
-        "poke_live_scheds must block on the held core lock before it can notify"
+        "the poke must block on the held core lock before it can notify"
     );
     drop(guard);
     assert!(
         rx.recv_timeout(std::time::Duration::from_secs(10)).is_ok(),
-        "poke_live_scheds must complete once the core lock is released"
+        "the poke must complete once the core lock is released"
     );
     handle.join().unwrap();
 }
@@ -542,7 +550,7 @@ fn park_in_scope(s: &MnSched, task_index: usize, scope_id: usize) -> Arc<Channel
 /// TICKET-103 — a continuation scope shares its nursery's cancel token, so draining the origin
 /// must requeue the continuation's parked fibers too, and leave every other scope's parked.
 #[test]
-fn cancel_drain_requeues_every_scope_sharing_the_cancel_token() {
+fn scope_cancel_requeues_every_scope_sharing_the_cancel_token() {
     let s = mk_sched(1);
     let shared = Arc::new(AtomicBool::new(false));
     let s1 = s.register_scope(1, Arc::clone(&shared), Vec::new());
@@ -553,7 +561,10 @@ fn cancel_drain_requeues_every_scope_sharing_the_cancel_token() {
         park_in_scope(&s, 2, s2),
     ];
     let before = s.runnable.load(Ordering::Relaxed);
-    s.cancel_drain(s1);
+    crate::vm::mnsched_verdict::cancel(
+        &s.sched_registry,
+        crate::vm::mnsched_verdict::CancelTarget::Scope(&s, s1),
+    );
     assert_eq!(s.lock().parked_n, 1, "only scope 0's fiber stays parked");
     assert_eq!(s.runnable.load(Ordering::Relaxed), before + 2);
 }
@@ -726,14 +737,17 @@ fn finish_wakes_the_join_parked_owner_of_the_completed_family() {
 // cancelled scope in `tests/callback_park_grid.rs`
 // `stuck_cleanup_is_the_deadlock_on_every_former_verdict_path`.
 
-/// TICKET-103 — a cancel drain requeues channel-parked fibers of the family only; a join-parked
+/// TICKET-103 — a scope cancel requeues channel-parked fibers of the family only; a join-parked
 /// owner stays filed until its children finish.
 #[test]
-fn cancel_drain_leaves_a_join_parked_owner_filed() {
+fn scope_cancel_leaves_a_join_parked_owner_filed() {
     let s = mk_sched(1);
     let s1 = park_join_owner(&s);
     let _ch = park_join_child(&s, s1);
-    s.cancel_drain(0);
+    crate::vm::mnsched_verdict::cancel(
+        &s.sched_registry,
+        crate::vm::mnsched_verdict::CancelTarget::Scope(&s, 0),
+    );
     let c = s.lock();
     assert_eq!(c.join_parked.len(), 1);
     assert_eq!(c.parked_n, 1);
@@ -786,10 +800,10 @@ fn mnsched_finish_writes_slot_and_terminates_at_total() {
     ));
 }
 
-/// D2b/U5 (mechanics half): `cancel_drain` moves every parked fiber back onto the run queue so a
+/// D2b/U5 (mechanics half): a scope cancel moves every parked fiber back onto the run queue so a
 /// worker resumes it and it observes the cancel flag on its next dispatch back-edge.
 #[test]
-fn mnsched_cancel_drain_requeues_parked() {
+fn mnsched_scope_cancel_requeues_parked() {
     let sched = mk_sched(2);
     let c1 = empty_core();
     let c2 = empty_core();
@@ -798,7 +812,10 @@ fn mnsched_cancel_drain_requeues_parked() {
     let b = take_run(&sched);
     sched.park(core_key(&c1), Arc::clone(&c1), a);
     sched.park(core_key(&c2), Arc::clone(&c2), b);
-    sched.cancel_drain(0);
+    crate::vm::mnsched_verdict::cancel(
+        &sched.sched_registry,
+        crate::vm::mnsched_verdict::CancelTarget::Scope(&sched, 0),
+    );
     let c = sched.lock();
     assert_eq!(c.parked_n, 0);
     assert_eq!(c.global.len(), 2);

@@ -387,6 +387,56 @@ legacy-decoder uops (`idq.mite_uops`, 439M against 658M) track it. So gate a cha
 `instructions:u`, not on cycles or wall time. The levers (shrink `step`/`run_until`, layout
 control) are in [`roadmap.md §4`](../design/roadmap.md#4-optimizations-open-levers).
 
+### A cancel is a wake (2026-11-23)
+
+Plan `2026-11-21-cancel-is-a-wake`: every cancel goes through one `cancel`, a fiber's `sleep_ms`
+parks with one timer, and no wait polls for a cancel except a demoted socket. Release, 28-core box,
+base `615881a3` built in its own target dir. Program: a `parallel:` of 2000
+`spawn: time.sleep_ms(2000)`. n=5, median CPU (user + sys) and wall; `ticks` from
+`CHEZZI_SCHED_STATS=1`.
+
+| workers | base CPU, wall | now CPU, wall | now `ticks` |
+|---|---|---|---|
+| 1 | 0.60 s, 2.03 s | 0.09 s, 2.04 s | 0 |
+| 2 | 0.67 s, 2.03 s | 0.12 s, 2.04 s | 0 |
+| default (28) | 2.12 s, 2.18 s | 2.41 s, 2.26 s | 0 |
+
+Go 1.27 `time.Sleep`, same shape (2026-11-21, 3 runs): 2.01 s wall, 0.01-0.02 s CPU.
+
+**The limit at the default worker count.** The 2000 simultaneous wakes still cost ~2.4 s of CPU,
+because `complete_offload` -> `notify_waiters` wakes every idle worker per wake. The 0.2 s goal is
+not met at the default count. Waking one worker per ready task (Go's `wakep`) is the next plan.
+
+**Cancelled sleeps.** A loop that submits a job sleeping 1 h, cancels it and shuts the Executor
+down, at `CHEZZI_THREADS=1`, n=3, median CPU and peak RSS (2026-11-24). Control: the same loop
+with a `recv` in place of the sleep.
+
+| iterations | base CPU, RSS | now CPU, RSS | control now RSS |
+|---|---|---|---|
+| 4000 | 0.81 s, 15.1 MB | 0.20 s, 15.1 MB | 15.1 MB |
+| 16000 | over 40 s wall (killed) | 0.76 s, 19.5 MB | 19.2 MB |
+| 32000 | over 40 s wall (killed) | 1.49 s, 28.6 MB | 27.3 MB |
+
+Base notices each cancel at its next 5 ms re-arm, so 16000 iterations take over 80 s of wall time.
+Before the timer stop, a stopped sleep's timer kept its sched alive until its deadline: 7.8 s of
+CPU at 4000 iterations, and 68 MB at 32000.
+
+**Idle workers.** A listed idle worker keeps its 5 ms `idle_cv` timeout (TICKET-205: it waits for a
+permit ticket, not for a cancel; base has it too), and `ticks` does not count it. Whole-process
+voluntary context switches of one task in `sleep_ms(1000)`, n=5 median, startup and teardown
+included:
+
+| workers | base | now |
+|---|---|---|
+| 1 | 401 | 205 |
+| 2 | 405 | 209 |
+| default | 471 | 278 |
+
+`benches/sched/*` at T=4, `ab_pair.py`, n=5 against base: no SLOW row (`body_and_spawn` 0.99x,
+`guard_contend` 1.00x). The two highest medians, resampled at n=21: `deep_nurseries` 1.04x and
+`send_one_channel` 1.06x. Their base spread is over 40% of the median, so this run cannot tell them
+from noise.
+
 ### Method calls through one method table (2026-11-15)
 
 Plan `2026-11-15-error-origin-vm-method-ids`: a method call carries a `MethodId`, and one dense

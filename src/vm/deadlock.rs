@@ -378,6 +378,8 @@ impl super::MnSched {
         c.end_asleep(fibers, &self.deadlock_err, verdict);
         drop(c);
         self.notify_waiters();
+        // A thread blocked in place reads the cut ([`super::Vm::in_place_cut`]) at its wake.
+        self.wake_demoted();
     }
 }
 

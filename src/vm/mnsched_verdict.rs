@@ -13,7 +13,12 @@ impl MnSched {
         scope_id: usize,
         outcome: TaskOutcome,
     ) -> (bool, bool) {
-        self.finish_with(task_index, scope_id, outcome, None)
+        let ended = self.finish_with(task_index, scope_id, outcome, None);
+        // No party here runs `halt_run`, so no report may wait for one.
+        if ended.1 {
+            self.quiesce.end_job_halt();
+        }
+        ended
     }
 
     /// Record a finished fiber's outcome in its FLAT slot, bump its SCOPE's done, drop it from
@@ -22,18 +27,19 @@ impl MnSched {
     /// owner stop returns each owner the instant its OWN scope completes. The per-scope `done` drives
     /// that owner stop; the global all-done drives helper/sentinel termination.
     /// Returns whether the stored outcome ABORTS its scope (a `Fault`/`Exit`), so the caller runs the
-    /// `cancel_drain` its parked siblings need. It is computed here, not by the caller, because the
+    /// [`cancel`] its parked siblings need. It is computed here, not by the caller, because the
     /// W7-26r backlog verdict below can turn a `Done` into a hard-halt `Fault` — a caller-side
     /// `matches!` on the outcome it handed in would miss that and leave the scope's parked fibers
-    /// with nobody to wake them. Also returns whether it published a job fault
-    /// ([`MnSched::publish_job_fault`]), so the caller runs [`Vm::halt_run`].
+    /// with nobody to wake them. Also returns whether it published a run-halting fault
+    /// ([`MnSched::publish_job_fault`], for the task's own abort or the scope's first backlog
+    /// verdict), so the caller runs [`Vm::halt_run`].
     /// TICKET-297 — `trip` is the cancel flag the fiber ran under (`Vm::cancel`: its scope's flag,
     /// or an Executor job's own). An aborting outcome ([`TaskOutcome::aborts`]) trips it HERE, in
     /// the core-lock hold that stores the slot: THE one trip of a task's aborting end. A party that
     /// reads the tripped flag and then asks [`MnSched::scope_fault`] (`block::halt_of`) waits for
     /// this lock, so it finds the fault. A trip before the lock let an owner parked at an inner join
     /// read the flag with an empty slot, take no halt, and run the line after its join. Under the
-    /// lock the trip also reaches the deadlock verdict (`trip_scope_cancel`).
+    /// lock the trip also reaches the deadlock verdict (as [`cancel`]'s scope trip).
     pub(super) fn finish_with(
         &self,
         task_index: usize,
@@ -63,21 +69,25 @@ impl MnSched {
         // `Heap`, so `live_bytes` never counted them either: this is the accounting AND the
         // observation. Cheap: the summary is O(1) (buffered output capacities; a task keeps no
         // return value, W7-27) and the whole block is skipped when no cap is set.
-        let outcome = if self.mem_cap != 0 {
+        let (outcome, first_over) = if self.mem_cap != 0 {
             let s = &mut c.scopes[scope_id];
             s.bytes += super::core::outcome_summary(&outcome);
             let (outcome, over) = super::core::halt_over_backlog(outcome, s.bytes, self.mem_cap);
+            // The scope's bytes stay over the cap, so every later end converts too. Only the first
+            // halts the run: a second publish would report the same abort as a second fault.
+            let first_over = over && !s.cancel.load(Ordering::Relaxed);
             if over {
-                // Under the core lock, exactly as `trip_scope_cancel` requires — the release
+                // Under the core lock, exactly as [`cancel`]'s scope trip — the release
                 // publishes the flag to every worker that later takes the lock. Only THIS
                 // scope: an inner nursery's backlog must not cancel an outer sibling (structured
                 // concurrency); the fault propagates outward through the join instead.
                 crate::vm::trip_cancel_flag(&s.cancel);
             }
-            outcome
+            (outcome, first_over)
         } else {
-            outcome
+            (outcome, false)
         };
+        let job_fault = job_fault || (first_over && self.publish_job_fault(&c, scope_id, &outcome));
         let aborts = outcome.aborts() && !cut_end;
         // A job the deadlock verdict ended: the verdict cut the sched (it latched `terminate`, or a
         // demoted fiber is left to settle), so a released held job would never run and its `None`
@@ -149,9 +159,10 @@ impl MnSched {
         (aborts, job_fault)
     }
 
-    /// TICKET-270 — THE publisher of the job ends that halt the run: an `Executor` job's
-    /// `--max-heap` abort (TICKET-289). Such an end is never a Task outcome, so the run halts and
-    /// the Task seals nothing ([`JobSeal::Nothing`]). Every other job end stays in its Task: an
+    /// TICKET-270 — THE publisher of the task ends that halt the run: an `Executor` job's
+    /// `--max-heap` abort (TICKET-289) or the root task's. A job's is never a Task outcome, so the
+    /// run halts and the Task seals nothing ([`JobSeal::Nothing`]). The root's halts the run so a
+    /// job blocked in place on the driver thread stops waiting. Every other job end stays in its Task: an
     /// ordinary fault, a deadlock verdict and a `--timeout` cut (each party reads the deadline)
     /// publish nothing. It stores the cell under `finish`'s core-lock hold, before the slot: a
     /// joiner that reads the halt takes this lock to read finished output
@@ -162,10 +173,10 @@ impl MnSched {
     fn publish_job_fault(&self, c: &SchedCore, scope_id: usize, outcome: &TaskOutcome) -> bool {
         match outcome {
             TaskOutcome::Fault { err, trace, .. }
-                if c.is_job_scope(scope_id) && err.is_over_memory =>
+                if (c.is_job_scope(scope_id) || (c.root && scope_id == 0))
+                    && err.is_over_memory =>
             {
-                self.quiesce.request_job_fault(err.clone(), trace.clone());
-                true
+                self.quiesce.request_job_fault(err.clone(), trace.clone())
             }
             TaskOutcome::Fault { .. }
             | TaskOutcome::Exit { .. }
@@ -176,25 +187,13 @@ impl MnSched {
         }
     }
 
-    /// N4 — trip scope `scope_id`'s cancel **under the core lock**. Two reasons the lock is not
-    /// optional: (1) the mutex release PUBLISHES the flag to every worker that later takes the lock
-    /// (a bare `Relaxed` store outside it has no synchronizes-with edge, so a lock-holder could
-    /// legally still read `false`); (2) it lets the abort seams trip the cancel BEFORE they clear
-    /// `body_open`, with no gap between the two. Idempotent (the fault path trips its flag in
-    /// [`MnSched::finish_with`], under `finish`'s own lock hold).
-    pub(super) fn trip_scope_cancel(&self, scope_id: usize) {
-        let c = self.lock();
-        crate::vm::trip_cancel_flag(&c.scopes[scope_id].cancel);
-    }
-
-    /// gaps.md W7-57 — the run-wide `os.exit` analogue of the intra-nursery abort teardown
-    /// (`mn_worker_loop`'s `if aborts { drain_family }`): trip **every** scope's cancel and
-    /// drain every parked fiber, so a nursery that is not the exiting party's own still dies now instead
-    /// of at its natural end. Called for each live sched by [`Vm::halt_all_scheds`].
+    /// [`cancel`]'s `All` on this sched (gaps.md W7-57, the run-wide `os.exit` analogue of the
+    /// intra-nursery abort teardown): trip **every** scope's cancel and drain every parked fiber,
+    /// so a nursery that is not the exiting party's own still dies now instead of at its natural end.
     ///
-    /// **The cancel stores go under the core lock** — the release edge [`trip_scope_cancel`] documents.
-    /// A bare `Relaxed` store outside it has no synchronizes-with edge, so a worker already holding
-    /// the lock could legally still read `false`.
+    /// **The cancel stores go under the core lock** — the release edge [`cancel`]'s scope trip
+    /// documents. A bare `Relaxed` store outside it has no synchronizes-with edge, so a worker
+    /// already holding the lock could legally still read `false`.
     ///
     /// The lock is DROPPED before `drain_family`, which takes it itself (its poller half keeps the
     /// registry leaf-level and calls `complete_offload`, which locks this core).
@@ -203,7 +202,7 @@ impl MnSched {
     /// after the exit was published, whose fibers are covered by `jump_checked`'s back-edge exit rung
     /// and by every blocking wait's `run_exit_err` — this drain is a promptness lever, not the only one.
     /// A snapshotted id retired before its drain reads as absent (TICKET-199), so its drain is a no-op.
-    pub(super) fn cancel_all(self: &Arc<Self>) {
+    fn cancel_all(&self) {
         let ids = {
             let c = self.lock();
             for s in c.scopes.values() {
@@ -218,23 +217,25 @@ impl MnSched {
     }
 
     /// TICKET-200 — THE cancel drain: after scope `scope_id`'s cancel (or an ancestor's) is tripped,
-    /// requeue every fiber of its family that is parked, in both halves: `cancel_drain` (the `parked`
-    /// buckets) and `poller::drain_family` (the netpoller registry). A socket-parked fiber is counted
-    /// `inflight`, not `parked`, so a drain of one half strands it — the `cancel` hang of a
-    /// job's nursery fiber parked in `accept`/`read`/`write`/`connect`. Every cancel site calls this;
-    /// never call either half on its own. A retired id has an empty family (TICKET-199, DEC-199), so
-    /// both halves are no-ops.
-    pub(super) fn drain_family(&self, scope_id: usize) {
+    /// requeue every fiber of its family that is parked, in both halves ([`MnSched::drain_where`]).
+    /// A socket-parked fiber is counted `inflight`, not `parked`, so a drain of one half strands it
+    /// — the `cancel` hang of a job's nursery fiber parked in `accept`/`read`/`write`/`connect`.
+    /// A retired id has an empty family (TICKET-199, DEC-199), so both halves are no-ops.
+    ///
+    /// B3.4 — scope-scoped: an inner fault must drain ONLY its own scope's parked fibers, never drag
+    /// an OUTER sibling out of its legitimate park (structured concurrency). TICKET-103 — "its own
+    /// scope" is its FAMILY (`SchedCore::scope_family`): a nursery's continuation scopes share its
+    /// one cancel token, so a faulting child must requeue a parked sibling in a continuation too.
+    fn drain_family(&self, scope_id: usize) {
         let family = self.lock().scope_family(scope_id);
-        self.cancel_drain(scope_id);
-        poller::drain_family(self, &family);
+        self.drain_where(|f| f.woken_by(&family));
     }
 
-    /// TICKET-289 — the cancel drain of one Executor job whose flag is `flag` (`Task.cancel()`):
-    /// requeue the job's own parked fiber and the fibers of every scope under it, in both halves.
+    /// TICKET-289 — the cancel drain of the fibers under `flag` on this sched: a fiber of the
+    /// Executor job whose flag it is (`Task.cancel()`), and the fibers of every scope under it.
     /// The scope ids are read once, under the lock: a scope registered after the trip starts with
     /// the flag already tripped and unwinds on its own.
-    pub(super) fn drain_job(&self, flag: &Arc<AtomicBool>) {
+    fn drain_job(&self, flag: &Arc<AtomicBool>) {
         let under: Vec<usize> = {
             let c = self.lock();
             c.scopes
@@ -260,28 +261,9 @@ impl MnSched {
         poller::drain_where(self, &wakes);
     }
 
-    /// B3.4 — after a scope's cancel is tripped, move every parked fiber **belonging to that scope**
-    /// back onto the global queue so a worker resumes it and it observes the cancel flag (at the recv
-    /// re-check / a dispatch back-edge) and unwinds. Cross-nursery flat scheduler: with one global
-    /// parked set shared across scopes, this MUST be scope-scoped — an inner fault must drain ONLY its
-    /// own scope's parked fibers, never drag an OUTER sibling out of its legitimate park (that would
-    /// break structured concurrency). Parked entries whose fiber is in a different scope are kept parked
-    /// (re-filed into their buckets). A `Recv` entry's scope is read by reference; a `Wait` token's is
-    /// PEEKED under its fiber lock before claiming (so a non-matching wait fiber is left intact).
-    ///
-    /// (An `os.exit` reaches every scope by calling this in a loop — [`MnSched::cancel_all`] — rather
-    /// than by relaxing the scope-scoping here, which the structured-concurrency invariant forbids.)
-    ///
-    /// TICKET-103 — "that scope" is its FAMILY (`SchedCore::scope_family`): a nursery's continuation
-    /// scopes share its one cancel token, so a faulting child must requeue a parked sibling in a
-    /// continuation too, or `any_cancelled_scope_awaiting_drain` vetoes forever. Every other scope
-    /// owns a distinct Arc, so the result is unchanged for them.
-    pub(super) fn cancel_drain(&self, scope_id: usize) {
-        let family = self.lock().scope_family(scope_id);
-        self.cancel_drain_where(&|f: &Fiber| f.woken_by(&family));
-    }
-
-    /// [`MnSched::cancel_drain`] for any matcher ([`MnSched::drain_job`]).
+    /// The `parked` half of [`MnSched::drain_where`]: move every parked fiber `wakes` selects back
+    /// onto the global queue so a worker resumes it and it observes the cancel (at the recv
+    /// re-check / a dispatch back-edge) and unwinds. Entries of other fibers are re-filed.
     fn cancel_drain_where(&self, wakes: &dyn Fn(&Fiber) -> bool) {
         let c = self.lock();
         if c.parked_n == 0 {
@@ -330,7 +312,9 @@ impl MnSched {
     }
 
     /// The one parked-set drain: requeue every parked fiber `wake` selects, in every bucket shape.
-    /// Returns how many it requeued.
+    /// A selected sleep ([`SleepPark`]) is claimed under `c` and settled after `c` is released
+    /// ([`settle_sleep`] reads the halts, which take other scheds' locks). Returns how many it
+    /// requeued.
     fn drain_parked(
         &self,
         mut c: std::sync::MutexGuard<'_, SchedCore>,
@@ -338,6 +322,7 @@ impl MnSched {
     ) -> usize {
         let buckets: Vec<(usize, Vec<ParkedEntry>)> = c.parked.drain().collect();
         let mut drained = 0usize;
+        let mut slept: Vec<(Fiber, Arc<SleepPark>)> = Vec::new();
         // A fiber requeued while the run's deadlock verdict is latched (a cut owner's abort
         // cancelled its scope) is one of the verdict's blocked tasks: it is parked at a wait that
         // nothing can satisfy, so it joins the run's listing here, as the verdict found it.
@@ -436,17 +421,53 @@ impl MnSched {
                         f.state = FiberState::Ready;
                         c.global.push_back(f);
                     }
+                    ParkedEntry::Sleep(sp) => {
+                        // Not a verdict's task (a sleeper is awake), so never listed. The claim
+                        // and the removal share this hold: a filed sleep is unclaimed.
+                        debug_assert!(
+                            !sp.claimed.load(Ordering::Acquire),
+                            "a filed sleep is claimed"
+                        );
+                        let f = {
+                            let mut g = sp.fiber.lock().unwrap_or_else(|e| e.into_inner());
+                            if g.as_ref().is_some_and(&wake)
+                                && sp
+                                    .claimed
+                                    .compare_exchange(
+                                        false,
+                                        true,
+                                        Ordering::AcqRel,
+                                        Ordering::Acquire,
+                                    )
+                                    .is_ok()
+                            {
+                                g.take()
+                            } else {
+                                None
+                            }
+                        };
+                        match f {
+                            Some(f) => slept.push((f, sp)),
+                            None => keep.push(ParkedEntry::Sleep(sp)),
+                        }
+                    }
                 }
             }
             if !keep.is_empty() {
                 c.parked.insert(key, keep);
             }
         }
-        c.parked_n -= drained;
+        c.parked_n -= drained + slept.len();
         c.awake.woken(drained);
         self.runnable.fetch_add(drained, Ordering::Relaxed); // parked → ready
         self.notify_waiters();
-        drained
+        drop(c);
+        let woke = drained + slept.len();
+        for (f, sp) in slept {
+            let sched = sp.sched.upgrade().expect("a filed sleep's sched is alive");
+            settle_sleep(&sched, f, &sp);
+        }
+        woke
     }
 
     /// Drain the per-task outcome slots after the nursery terminates (joining thread, post-loop).
@@ -543,10 +564,25 @@ impl MnSched {
     /// Cross-nursery flat scheduler — block until ONE scope's slots are all filled (`done == total` for
     /// that scope). The inline owner returns from `mn_worker_loop` the instant its scope completes, so
     /// this is a non-blocking re-check in the common case; it parks only if a demoted replacement is
-    /// still settling this scope's last fiber. Poison-tolerant.
-    pub(super) fn wait_for_scope(&self, scope_id: usize) {
+    /// still settling this scope's last fiber. Poison-tolerant. Returns `false` when a run halt
+    /// ended the wait first ([`RunHalt::ends_join`]): `halt_run` publishes the halt, then takes
+    /// this lock and notifies `cv`, so the read below cannot miss it.
+    pub(super) fn wait_for_scope(&self, scope_id: usize) -> bool {
         let mut c = self.lock();
         while c.scopes[scope_id].done < c.scopes[scope_id].total {
+            if self.quiesce.run_halt().ends_join() {
+                return false;
+            }
+            c = self.cv.wait(c).unwrap_or_else(|e| e.into_inner());
+        }
+        true
+    }
+
+    /// Block until every scope of `scope_id`'s family is done. Unlike [`MnSched::wait_for_scope`],
+    /// a run halt does not end it: the caller started a runner that settles the family.
+    pub(super) fn wait_for_family(&self, scope_id: usize) {
+        let mut c = self.lock();
+        while !c.family_done(scope_id) {
             c = self.cv.wait(c).unwrap_or_else(|e| e.into_inner());
         }
     }
@@ -589,12 +625,12 @@ impl MnSched {
             timer,
         } = req;
         if let Some(t) = timer {
-            // D5 owe #2 — a `sleep_ms`: park the fiber on the timer thread (no pool thread, no work),
-            // waking it at the deadline. `sleep_ms` returns nothing, so the fiber resumes with
-            // `Ok(Nil)` and the native is never run (there is nothing to compute). Same
-            // inflight→runnable + `notify` accounting as the pool path (`complete_offload`), so the
-            // deadlock predicate stays sound: the sleeping fiber is `inflight` and WILL come back.
-            arm_timer_sleep(sched, fiber, t, span);
+            // D5 owe #2 — a `sleep_ms`: park the fiber with one timer (no pool thread, no work),
+            // waking it at the deadline or at a cancel. `sleep_ms` returns nothing, so the fiber
+            // resumes with `Ok(Nil)` and the native is never run (there is nothing to compute). Same
+            // inflight→runnable + `notify` accounting as the pool path (`complete_offload`); the
+            // sleeping fiber stays awake in the run's count: it WILL come back.
+            arm_timer_sleep(sched, fiber, Arc::new(t), span);
             return;
         }
         blocking_pool::submit(Box::new(move || {
@@ -681,4 +717,80 @@ impl MnSched {
         drop(c);
         self.notify_waiters();
     }
+}
+
+/// What a [`cancel`] covers.
+pub(super) enum CancelTarget<'a> {
+    /// Scope `.1` of sched `.0` and its family: a child fault, an owner's abort of the nursery it
+    /// owns, an Executor's `cancel()` and its join `--timeout` (scope 0 of the Executor's sched).
+    Scope(&'a MnSched, usize),
+    /// A flag that is no scope's own: an Executor job's (`Task.cancel()`), an Executor's before it
+    /// has a sched, the `--timeout` gap wake's `Vm::cancel`. `None` trips nothing (a held job was
+    /// dropped, or the job had ended): the poke alone.
+    Flag(Option<&'a Arc<AtomicBool>>),
+    /// Every scope of every live sched: `os.exit` and a job fault ([`Vm::halt_run`]).
+    All,
+}
+
+/// THE cancel: every source trips and wakes here, in this order. 1. Trip the flag
+/// ([`crate::vm::trip_cancel_flag`]); a scope's under its sched's core lock, whose release
+/// publishes it to every worker that later takes the lock, and which lets an abort seam trip
+/// before it clears `body_open` (N4). 2. Drain the target's parked and socket-parked fibers on its
+/// own sched. 3. Drain the fibers under the flag on every live sched of `registry`: a nested
+/// Executor a task or job created holds its jobs on a sched of its own (it inherits the flag as an
+/// ancestor). This drain is their only wake, and it runs before the canceller can park and read
+/// every task asleep. 4. Poke every live sched (TICKET-118,
+/// W13-8): take its core lock and drop it, then notify. A worker that read the stale state did so
+/// under that lock, so it is either on the condvar already (and gets the notify) or reads the new
+/// state; a bare notify could land in the gap and be lost. Its demoted waits are kicked
+/// ([`MnSched::wake_demoted`]): a thread blocked in place sleeps on a condvar of its own wait.
+/// The caller holds no sched core lock.
+pub(super) fn cancel(registry: &crate::vm::SchedRegistry, target: CancelTarget<'_>) {
+    let flag = match target {
+        CancelTarget::Scope(sched, scope_id) => {
+            let flag = {
+                let c = sched.lock();
+                // A retired id reads as absent (TICKET-199): nothing to trip or drain.
+                let flag = c.scopes.get(scope_id).map(|s| Arc::clone(&s.cancel));
+                if let Some(f) = &flag {
+                    crate::vm::trip_cancel_flag(f);
+                }
+                flag
+            };
+            sched.drain_family(scope_id);
+            flag
+        }
+        CancelTarget::Flag(flag) => {
+            if let Some(f) = flag {
+                crate::vm::trip_cancel_flag(f);
+            }
+            flag.cloned()
+        }
+        CancelTarget::All => {
+            for s in live_scheds(registry) {
+                s.cancel_all();
+            }
+            None
+        }
+    };
+    let live = live_scheds(registry);
+    if let Some(flag) = &flag {
+        for s in &live {
+            s.drain_job(flag);
+        }
+    }
+    for s in live {
+        drop(s.lock());
+        s.notify_waiters();
+        s.wake_demoted();
+    }
+}
+
+/// The live scheds of `registry`, pruning the dead. The registry lock is dropped before the caller
+/// touches a sched: lock order stays `sched_registry → SchedCore`.
+fn live_scheds(registry: &crate::vm::SchedRegistry) -> Vec<Arc<MnSched>> {
+    let mut g = registry.lock().unwrap_or_else(|e| e.into_inner());
+    let live = g.iter().filter_map(|w| w.upgrade()).collect();
+    g.retain(|w| w.strong_count() > 0);
+    live
 }

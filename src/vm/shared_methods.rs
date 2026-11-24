@@ -748,15 +748,21 @@ impl Vm {
                 // own wait. A RUNNING job with no cancellation point still runs to completion;
                 // a held job never started, so it never starts (CPython
                 // `shutdown(cancel_futures=True)`).
-                crate::vm::trip_cancel_flag(&core.cancel);
-                if let Some(sched) = core.sched() {
-                    sched.drop_held();
-                    sched.drain_family(0);
+                // The cancel also drains the scopes under the flag (a job's nested nursery, a
+                // job's own Executor) and pokes every sched. Scope 0's flag is `core.cancel`.
+                match core.sched() {
+                    Some(sched) => {
+                        super::mnsched_verdict::cancel(
+                            &self.sched_registry,
+                            super::mnsched_verdict::CancelTarget::Scope(&sched, 0),
+                        );
+                        sched.drop_held();
+                    }
+                    None => super::mnsched_verdict::cancel(
+                        &self.sched_registry,
+                        super::mnsched_verdict::CancelTarget::Flag(Some(&core.cancel)),
+                    ),
                 }
-                // The scopes under the flag (a job's nested nursery, a job's own Executor) too.
-                crate::vm::sched::drain_live_scheds(&self.sched_registry, &core.cancel);
-                // TICKET-118 (W13-8) — a cancel is a wake source too.
-                crate::vm::sched::poke_live_scheds(&self.sched_registry);
                 // TICKET-289 — no join: `cancel()` returns at once, and `shutdown()` (or the run
                 // end) waits for the cut jobs. A job's fault stays in its Task.
                 Ok(Value::nil())
@@ -780,14 +786,17 @@ impl Vm {
     /// TICKET-289 — `Task.cancel()` (`std.concurrency._cancel_job`): cancel the one job of
     /// Executor `h` whose Task channel is `ch`. A job that already ended is a no-op.
     pub(super) fn cancel_task_job(&self, h: GcRef, ch: &Arc<ChannelCore>) {
-        if let Some(sched) = self.executor_core(h).sched()
-            && let Some(flag) = sched.cancel_job(ch)
-        {
-            // The scopes under the job's flag on every other sched (an Executor the job made).
-            crate::vm::sched::drain_live_scheds(&self.sched_registry, &flag);
-        }
-        // A cancel is a wake source too (TICKET-118, W13-8).
-        crate::vm::sched::poke_live_scheds(&self.sched_registry);
+        // A running job hands back its flag: the cancel trips it and drains the fibers under it on
+        // every sched (an Executor the job made). With no flag (a held job dropped, or the job
+        // ended) it still pokes: a cancel is a wake source too (TICKET-118, W13-8).
+        let flag = self
+            .executor_core(h)
+            .sched()
+            .and_then(|sched| sched.cancel_job(ch));
+        super::mnsched_verdict::cancel(
+            &self.sched_registry,
+            super::mnsched_verdict::CancelTarget::Flag(flag.as_ref()),
+        );
     }
 
     /// TICKET-289 — a submit the Executor refuses (shut down, or its creating job was cancelled)

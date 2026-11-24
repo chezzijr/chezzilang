@@ -24,6 +24,15 @@ pub(crate) const FINISH_DRAIN_WINDOW_ENV: &str = "CHEZZI_TEST_FINISH_DRAIN_WINDO
 #[cfg(test)]
 pub(crate) const PRE_FINISH_WINDOW_ENV: &str = "CHEZZI_TEST_PRE_FINISH_WINDOW";
 
+/// Test-only: arms the same 300 ms hold once per run, in the driver between `seed` (main is
+/// runnable on the other workers) and its hand-off of main's count ([`Vm::run_root`]).
+#[cfg(test)]
+pub(crate) const ROOT_HANDOFF_WINDOW_ENV: &str = "CHEZZI_TEST_ROOT_HANDOFF_WINDOW";
+/// Test-only key of [`Vm::window_hook`]: hold a job fault's publisher between its `finish` (the
+/// fault is in its cell) and its `halt_run`.
+#[cfg(test)]
+pub(crate) const JOB_HALT_WINDOW_ENV: &str = "CHEZZI_TEST_JOB_HALT_WINDOW";
+
 impl Vm {
     /// TICKET-141 (W14-14) — give this thread's width permit back. A no-op unless it holds one.
     pub(super) fn width_release(&mut self) {
@@ -47,10 +56,15 @@ impl Vm {
     /// TICKET-205 — list this gated thread as an in-place waiter of `cores` for as long as the
     /// guard lives, so the waker (`ChannelCore::wake_all`) queues it for the permit in the waker's
     /// own order. Called while the permit is held: the list order is the order the waits began.
-    pub(super) fn gated_register(&self, cores: &[&Arc<ChannelCore>]) -> GatedReg {
+    /// The wait sleeps on `cores[0]`'s condvar, so a wake of any other core kicks `wake`.
+    pub(super) fn gated_register(
+        &self,
+        cores: &[&Arc<ChannelCore>],
+        wake: &Arc<super::block::Wake>,
+    ) -> GatedReg {
         let me = width::my_slot();
         for (i, c) in cores.iter().enumerate() {
-            let sleeps_on = (i > 0).then(|| Arc::clone(cores[0]));
+            let sleeps_on = (i > 0).then(|| Arc::clone(wake));
             c.gated
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
@@ -176,6 +190,7 @@ impl Vm {
         &mut self,
         reg: &mut WaitReg,
         key: core::GuardWait,
+        wake: Arc<super::block::Wake>,
         what: &str,
         span: Span,
     ) -> Result<(), RuntimeError> {
@@ -184,6 +199,7 @@ impl Vm {
             reg,
             WaitSpec::Guard,
             Some(Blocked::at(wait, span)),
+            wake,
             what,
             span,
         )
@@ -224,6 +240,18 @@ impl Vm {
         if self.owns_nested_sched(sched) {
             return self.demote_once(sched);
         }
+        self.start_repl_runner(sched, cancel, wid)
+    }
+
+    /// Start one SENTINEL runner thread on `sched` in slot `wid`, for a joiner that may not run
+    /// fibers on its own stack. It is not a visit, so it runs until `sched` terminates or, on an
+    /// Executor's sched, until every scope is done. `false` iff the OS refused the thread.
+    pub(super) fn start_repl_runner(
+        &self,
+        sched: &Arc<MnSched>,
+        cancel: &Arc<AtomicBool>,
+        wid: usize,
+    ) -> bool {
         let shell = self.spawn_shell(sched, cancel);
         spawn_worker_thread(shell, sched, "chezzi-mn-repl", wid, SENTINEL_SCOPE).is_ok()
     }
@@ -256,9 +284,7 @@ impl Vm {
     /// watcher of long C calls starts it (`sysmon`), on a thread that has no `Vm`.
     /// A visit's thread is a host worker, so its replacement is one too ([`Vm::visit_guest`]).
     pub(super) fn spare(&self, sched: &Arc<MnSched>, wid: usize) -> Spare {
-        if let Some(host) = &self.guest_of
-            && let Some(cancel) = host.scope_cancel(0)
-        {
+        if let Some((host, cancel)) = self.spare_host() {
             return Spare {
                 shell: self.spawn_shell(host, &cancel),
                 sched: Arc::clone(host),
@@ -274,6 +300,13 @@ impl Vm {
             sched: Arc::clone(sched),
             wid,
         }
+    }
+
+    /// The host sched [`Vm::spare`] puts this worker's replacement on, with its root cancel flag:
+    /// `Some` on a visit. Such a replacement is a host worker, so it leaves when the host ends.
+    pub(super) fn spare_host(&self) -> Option<(&Arc<MnSched>, Arc<AtomicBool>)> {
+        let host = self.guest_of.as_ref()?;
+        Some((host, host.scope_cancel(0)?))
     }
 
     /// A root worker with nothing of its own to run takes the runnable jobs of the Executor sched
@@ -328,7 +361,7 @@ impl Vm {
     /// (it returns at the first fiber boundary after that scope's family completes, even with other
     /// work runnable — scope-scoped owner stop, TICKET-287), or [`SENTINEL_SCOPE`] for a spawned
     /// runner thread (which never self-stops, only on global terminate). The fiber it runs may
-    /// belong to ANY scope (the queue is global): `finish`/`cancel_drain` use the FIBER's
+    /// belong to ANY scope (the queue is global): `finish` and the `cancel` after it use the FIBER's
     /// `scope_id`, while `take_runnable`'s stop check uses `owner_scope`.
     ///
     /// TICKET-230 — the loop releases the permit before it returns, so a caller that held one (main
@@ -530,18 +563,21 @@ impl Vm {
                     if outcome.aborts() {
                         self.window_hook(PRE_FINISH_WINDOW_ENV);
                     }
-                    // A task whose end can drain its family (below) holds a token task of the
-                    // run's count across that drain, so its own end never reads as every task
-                    // asleep before the cancel wakes its parked siblings.
+                    // A task whose end can drain its family (below), or halt the run (a job's or
+                    // the root's `--max-heap` end), holds a token task of the run's count across
+                    // that wake, so its own end never reads as every task asleep before it.
                     let hold =
-                        fiber.job_cancel.is_none() && (outcome.aborts() || sched.mem_cap != 0);
+                        sched.mem_cap != 0 || (fiber.job_cancel.is_none() && outcome.aborts());
                     if hold {
                         sched.quiesce.awake.task_started(1);
                     }
                     let (aborts, job_fault) =
                         sched.finish_with(task_index, scope_id, outcome, self.cancel.as_deref());
                     if job_fault {
+                        #[cfg(test)]
+                        self.window_hook(JOB_HALT_WINDOW_ENV);
                         self.halt_run();
+                        self.quiesce.end_job_halt();
                     }
                     // TICKET-270 — this fiber called `os.exit`: its slot now holds its output, so a
                     // flush waiting in `take_finished_streams` may read it.
@@ -549,24 +585,23 @@ impl Vm {
                         self.quiesce.end_exit_origin();
                     }
                     // A fault/exit tripped the FIBER's SCOPE cancel (in `finish_with`, via the
-                    // re-pointed `self.cancel`); requeue THAT scope's parked siblings so they observe it
-                    // and unwind (running ones see it at a back-edge). `drain_family(scope_id)` reaches
-                    // the channel-parked and the netpoller-parked fibers of this scope's family ONLY
-                    // (never outer siblings — structured concurrency), so a net server sharing a
-                    // nursery with a faulting sibling unwinds instead of hanging (D6b — the
-                    // production-ready gate).
+                    // re-pointed `self.cancel`, which is that scope's flag here); the cancel requeues
+                    // THAT scope family's parked siblings so they observe it and unwind (running ones
+                    // see it at a back-edge), channel- and netpoller-parked alike (never outer
+                    // siblings — structured concurrency), so a net server sharing a nursery with a
+                    // faulting sibling unwinds instead of hanging (D6b — the production-ready gate).
+                    // Then the scopes under the flag on every sched (a sibling's nested nursery, an
+                    // Executor a sibling made), in the token's hold, so the count cannot read every
+                    // task asleep before they are woken.
                     // TICKET-289 — a job's end has no sibling to wake: it tripped its own flag, and
                     // only its own nursery's fibers read that.
                     if aborts && fiber.job_cancel.is_none() {
                         #[cfg(test)]
                         self.window_hook(FINISH_DRAIN_WINDOW_ENV);
-                        sched.drain_family(scope_id);
-                        // The scopes under the tripped flag (a nested nursery of a sibling) too, in
-                        // the token's hold: an idle worker's later scan is a wake the count cannot
-                        // see (`SchedCore::drain_scan_due`).
-                        if let Some(flag) = &self.cancel {
-                            sched.drain_job(flag);
-                        }
+                        super::mnsched_verdict::cancel(
+                            &self.sched_registry,
+                            super::mnsched_verdict::CancelTarget::Scope(sched, scope_id),
+                        );
                     }
                     if hold && sched.quiesce.awake.task_ended() {
                         sched.on_deadlock();
@@ -901,7 +936,7 @@ impl Vm {
     /// D2b — a worker-VM PANIC (a VM `unwrap`/index bug, a panicking native/FFI callback) became this
     /// fiber's outcome. It is a `Fault`, so [`MnSched::finish_with`] trips the fiber's cancel for it
     /// as for any fault — and it MUST: `mn_worker_loop` treats a `Fault` as an abort and calls
-    /// `cancel_drain`, but a requeued sibling with `cancel == false` just re-runs `recv` and PARKS
+    /// `cancel`, but a requeued sibling with `cancel == false` just re-runs `recv` and PARKS
     /// AGAIN; the run's deadlock verdict then ends those siblings without a `defer` drain — their
     /// `defer`s never run, hidden behind the panic-fault (`reduce_task_slots` ranks Fault >
     /// Deadlocked).
@@ -920,11 +955,13 @@ impl Vm {
 
     /// TICKET-289 — test-only: hold a window of a task's end for 300 ms, so a party judged inside it
     /// is deterministically reachable. [`FINISH_DRAIN_WINDOW_ENV`]: between a nursery child's
-    /// `finish` (its fault is in its slot) and the `drain_family` that follows.
-    /// [`PRE_FINISH_WINDOW_ENV`]: before the `finish`. No-op unless `key` is armed in this run's own
+    /// `finish` (its fault is in its slot) and the `cancel` that follows.
+    /// [`PRE_FINISH_WINDOW_ENV`]: before the `finish`. [`ROOT_HANDOFF_WINDOW_ENV`]: before the
+    /// driver's hand-off of main's count. [`JOB_HALT_WINDOW_ENV`]: before a job fault's
+    /// `halt_run`. No-op unless `key` is armed in this run's own
     /// `HostConfig.env`.
     #[cfg(test)]
-    fn window_hook(&mut self, key: &str) {
+    pub(super) fn window_hook(&mut self, key: &str) {
         let armed = self
             .host
             .env
@@ -1305,26 +1342,17 @@ impl Vm {
 
     /// gaps.md W7-57 — a run-wide `os.exit` must tear every live nursery down NOW, exactly as an
     /// intra-nursery fault/exit already does for its OWN scope (`mn_worker_loop`'s `if aborts { … }`).
-    /// Without it the exit is observed only by the POLLING waits, so a party that is spinning, parked on
-    /// a `recv`, or asleep outlives it — Go's `os.Exit` kills all three within a few ms.
+    /// Without it a party that is spinning, parked on a `recv`, or asleep outlives the exit — Go's
+    /// `os.Exit` kills all three within a few ms.
     ///
-    /// The registry walk is [`Vm::wake_on_send`]'s, verbatim: upgrade the `Weak`s, prune the dead, DROP
-    /// the registry lock, then touch each sched. Lock order stays `sched_registry → SchedCore`, and
-    /// `request_exit` runs from an `Inline` native with no sched core lock held.
+    /// The cancel's `All` trips every scope of every live sched (lock order stays
+    /// `sched_registry → SchedCore`); `request_exit` runs from an `Inline` native with no sched core
+    /// lock held.
     pub(super) fn halt_all_scheds(&self) {
-        let mut g = self
-            .sched_registry
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        if g.is_empty() {
-            return;
-        }
-        let live: Vec<_> = g.iter().filter_map(|w| w.upgrade()).collect();
-        g.retain(|w| w.strong_count() > 0);
-        drop(g);
-        for s in live {
-            s.cancel_all();
-        }
+        super::mnsched_verdict::cancel(
+            &self.sched_registry,
+            super::mnsched_verdict::CancelTarget::All,
+        );
     }
 
     /// W7-57 — the teardown half of a run end, after its cell is stored: latch the hint, then halt

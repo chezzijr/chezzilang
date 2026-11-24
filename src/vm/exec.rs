@@ -18,7 +18,7 @@ pub(super) fn plain_err(message: String, span: Span) -> RuntimeError {
 
 /// TICKET-286 — the one `--timeout` hard halt: its text and its `timed_out` marker. The Vm rungs
 /// ([`Vm::deadline_halt`], the back-edge sample, the socket resume) and the sched-side offloaded
-/// sleep (`arm_timer_sleep`) build it here.
+/// sleep (`sleep_halt`) build it here.
 pub(super) fn timed_out_err(timeout_ms: u64, span: Span) -> RuntimeError {
     plain_err(format!("test exceeded --timeout ({timeout_ms}ms)"), span).timed_out()
 }
@@ -846,9 +846,15 @@ impl Vm {
             }
         }
         sched.seed(vec![Fiber::root(ctx)]);
+        #[cfg(test)]
+        self.window_hook(super::worker_loop::ROOT_HANDOFF_WINDOW_ENV);
         // Main is one task of the run's count: this thread hands its count to fiber 1, which
         // hands it back at its end ([`MnSched::finish_with`]). The seed counted the fiber awake.
-        self.quiesce.awake.task_ended();
+        // The other workers may run fiber 1 and its tasks to their waits before this -1: then it
+        // is the write that takes the count to 0, so it runs the verdict.
+        if self.quiesce.awake.task_ended() {
+            sched.on_deadlock();
+        }
         let mut shell = self.spawn_shell(&sched, &cancel);
         // This thread is worker 0 under the gate like any worker: its loop takes the permit for
         // each fiber and gives it back at a wait. Kept across the scope wait, it would hold the
@@ -1265,7 +1271,10 @@ impl Vm {
     /// ([`Vm::report`]); `finish_run` still drains on the latched verdict.
     pub fn rank_end(&mut self, r: Result<(), RuntimeError>) -> Result<(), RuntimeError> {
         // The ONLY taker of the job-fault cell, and it reports what it takes — for an `Ok` run
-        // too: a job can fault while a passing run reads no halt.
+        // too: a job can fault while a passing run reads no halt. Its teardown ends first: one
+        // that lands later would cancel the reap that follows this report.
+        let quiesce = Arc::clone(&self.quiesce);
+        self.wait_door(&[], |_| quiesce.await_job_halt());
         let job = self.quiesce.take_job_fault();
         if self.pending_exit.is_some() {
             return r;

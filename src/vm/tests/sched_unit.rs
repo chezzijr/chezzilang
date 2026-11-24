@@ -275,7 +275,7 @@ fn mn_register_scope_appends_and_offsets_slots() {
 }
 
 /// TICKET-199 (H1) — a retired scope id is never reissued and reads as absent. A worker that still
-/// holds it after dropping the core lock (`mn_worker_loop`'s `cancel_drain` after `finish`) must
+/// holds it after dropping the core lock (`mn_worker_loop`'s cancel after `finish`) must
 /// neither panic nor drain the NEXT nursery's parked fibers. Under the old `id = len()` plus
 /// pop rule, the second registration reissued `a`.
 #[test]
@@ -295,7 +295,10 @@ fn retired_scope_id_is_never_reissued_and_reads_as_absent() {
         c.parked.insert(1, vec![ParkedEntry::Recv(f)]);
         c.parked_n = 1;
     }
-    sched.cancel_drain(a);
+    crate::vm::mnsched_verdict::cancel(
+        &sched.sched_registry,
+        crate::vm::mnsched_verdict::CancelTarget::Scope(&sched, a),
+    );
     let c = sched.lock();
     assert_eq!(
         c.parked_n, 1,

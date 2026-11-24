@@ -442,7 +442,7 @@ exA.shutdown()
 /// `ThreadPoolExecutor` gives, and it is what this pins.
 ///
 /// Run through the FILE helpers, not `run_capture`, for one reason: the producer has to be slower
-/// than the verdict's own debounce (2 × `DEMOTE_POLL_BACKOFF`) or the send lands first and the program
+/// than the consumer reaching its wait, or the send lands first and the program
 /// would pass even with the bug present — verified by mutation. That needs a real `timer`, and
 /// `std.time` only resolves through a module graph.
 #[test]
@@ -1038,10 +1038,8 @@ print(\"done\")
 /// first — 4 parties, `live == 4`, every `Join` unsatisfiable, rc=124 at 15 s. The sibling shapes
 /// (`two_executors_deadlocking_each_other_fault`) fault in milliseconds only because SOME party in
 /// them happens to be channel-blocked and therefore polls; the fault was an accident of the shape.
-/// The join now polls at the same `DEMOTE_POLL_BACKOFF` cadence every other blocking-in-place site
-/// pays, and asks — but ONLY when every registered party is a `Join`, since any other kind of party
-/// has a judge of its own whose fault names the real blocking SITE (which is why
-/// `two_executors_deadlocking_each_other_fault` still reports `recv on an empty channel`, unchanged).
+/// The join now counts as asleep in the run's one awake count, so the last task to block runs the
+/// deadlock check.
 ///
 /// **The ring is STRUCTURAL and the OUTCOME is deterministic, and those are two different problems.**
 /// Two earlier cuts of this test were races and both are recorded, because the second failure is the
@@ -1869,9 +1867,9 @@ ex.shutdown()
 /// |---|---|---|
 /// | `cancel()` at 50 ms, job waiting on `timer(3000)` | `timer` printed, exit @ **3007 ms** | nothing printed, exit @ **57 ms** |
 ///
-/// Measured on release binaries built in separate target dirs. The block-in-place path re-checks
-/// `block_halts` (cancel included) once per tick, so the cancel now lands within one
-/// `DEMOTE_POLL_BACKOFF` instead of one timer deadline — and the arm body never runs.
+/// Measured on release binaries built in separate target dirs. The cancel kicks the block-in-place
+/// wait ([`block::Wake`]), which re-reads `block_halts`, so the cancel lands at once instead of at
+/// the timer deadline, and the arm body never runs.
 #[test]
 fn a_timer_armed_eager_wait_is_cancellable_by_cancel() {
     let src = "
@@ -1912,7 +1910,7 @@ print(\"main done\")
 /// W7-16 — a nursery task **already inside** a `sleep_ms` must die when a sibling faults, not at its
 /// own deadline. With the fault ORDERED AFTER the sleep begins, the *entry* checkpoint at
 /// `invoke_native` (`blocking_native_is_an_entry_cancellation_checkpoint`) does not fire; the
-/// sleep itself must be woken by the cancel.
+/// cancel's drain must claim the parked sleep (`ParkedEntry::Sleep`) from its timer and end it.
 ///
 /// | | before | after |
 /// |---|---|---|

@@ -9,7 +9,7 @@ impl MnSched {
     /// BUT close the park gap first. Between `recv`'s empty-check and this call (a swap-out apart) a
     /// sibling `send` may have enqueued a message (+ run [`MnSched::send_wake`], which found no parked
     /// fiber) or a sibling may have tripped cancel; either would strand this fiber forever. So, holding
-    /// the core lock (the SAME lock `send_wake`/`cancel_drain` take), re-check the channel queue and
+    /// the core lock (the SAME lock `send_wake`/`drain_parked` take), re-check the channel queue and
     /// the cancel flag: if a message arrived or cancel is set, requeue the fiber as `Ready` (it will
     /// re-run `recv` and pop, or unwind on the cancel back-edge) instead of parking. Lock order is
     /// core-OUTER, channel-`q`-INNER everywhere (`send_wake` matches), so there is no ABBA cycle.
@@ -360,7 +360,7 @@ impl MnSched {
     /// §6d M:N multi-channel `wait` park — the N-key generalization of [`MnSched::park`]. The running
     /// fiber blocked on a `wait` whose every arm channel was empty/live; `arms` is `(key, core)` for
     /// each arm (captured by the worker loop while the fiber heap was live, exactly like
-    /// `Disp::Park`). Holding the core lock (the SAME lock `send_wake`/`close_wake`/`cancel_drain`
+    /// `Disp::Park`). Holding the core lock (the SAME lock `send_wake`/`close_wake`/`drain_parked`
     /// take), close the park gap for ALL N arms first: if ANY arm became ready, or cancel was tripped
     /// between the `WaitPoll` empty-poll and here, requeue the fiber `Ready` (it re-runs `WaitPoll`,
     /// which settles and re-polls source order) instead of parking — else strand-forever. Otherwise
@@ -506,7 +506,7 @@ impl MnSched {
     /// so an idle Chezzi worker is never recruited mid-slice the way an idle Go P can be. That is
     /// sound here because a preemption does not create work — it re-queues work that already had a
     /// runner — and because the ways a fiber becomes runnable for the FIRST time all notify (`inject`,
-    /// `wake_bucket` at all four callers, the park/send/wait gap requeues, `cancel_drain`,
+    /// `wake_bucket` at all four callers, the park/send/wait gap requeues, `drain_parked`,
     /// `complete_offload`, and the batch-grab surplus push above). Exactly one other site increments
     /// `runnable` without notifying — `register_scope_seeded`, which seeds a nested nursery's fibers on
     /// a LIVE sched — and its one engine caller matters, because this enumeration is the whole
@@ -652,6 +652,8 @@ impl MnSched {
                     f.state = FiberState::Ready;
                     c.global.push_back(f);
                 }
+                // Filed under its own key, which no channel, box or sched shares: never woken here.
+                ParkedEntry::Sleep(sp) => keep.push(ParkedEntry::Sleep(sp)),
                 ParkedEntry::Wait(wp) => {
                     // CAS the wake-once gate: only the winner takes the fiber + sweeps.
                     if wp
@@ -781,8 +783,8 @@ impl MnSched {
         // D5 owe #3 (Path C) — also wake any worker thread DEMOTED on this channel (blocked in place
         // on `core.cv` after a `recv` inside a native callback). Snapshot-parked fibers are requeued
         // above + woken via `self.cv`; a demoted thread instead waits on the channel's OWN condvar, so
-        // it must be notified here. Without this it would only re-check on its bounded poll timeout
-        // (added latency, not a hang). No-op when no thread is demoted on this channel.
+        // it must be notified here. Without this it would sleep on: a demoted wait has no timed
+        // re-check, so the miss is a hang. No-op when no thread is demoted on this channel.
         core.wake_all();
     }
 

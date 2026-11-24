@@ -115,7 +115,10 @@ ready `recv` completes after a cancel. Grid: `tests/executor_stop_grid.rs`.
   `ThreadPoolExecutor`, Java's `ExecutorService`, Go's `errgroup`, none of which abort siblings by
   default). A non-terminating sibling therefore still blocks `shutdown()`.
 - **A hard abort is never a Task outcome.** A `--max-heap` abort ends the run, and a `--timeout` cut
-  leaves the Task unsettled; `os.exit` and a deadlock are run halts as well. A job that re-enters
+  leaves the Task unsettled; `os.exit` and a deadlock are run halts as well. At an `os.exit` or a
+  `--max-heap` abort, a nursery join that still waits for its children stops waiting, as in Go:
+  nothing runs after the halt. A `defer` still runs whole under a `--max-heap` abort, so a join
+  inside it runs its cancelled children itself and completes. A job that re-enters
   its own `Shared`/`RwShared` guard or closes a lock cycle blocks there for good; once every task is
   blocked the run ends with the deadlock report, however main joins it (`t.get()`, `recover:` around
   it, `shutdown()`).

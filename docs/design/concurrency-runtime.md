@@ -44,7 +44,7 @@ is reported at once. The wait ends at the task's resume or with its fiber.
 **The order rule.** A wake adds its +1 inside the lock hold that publishes it, before the waker can
 park or end, as Go's `goready` puts the woken G on a run queue before the M goes idle. A wake that
 published first and counted after would let the waker's own -1 reach 0 with a live task in a queue:
-a false fatal deadlock. A task that ends with wakes still to make (`drain_family` after a fault, a
+a false fatal deadlock. A task that ends with wakes still to make (the cancel's drain after a fault, a
 timer channel's send) holds a token task across them, so its end is not the -1 that reaches 0.
 
 **The check.** The -1 that takes `awake` to 0 with `alive > 0` (from `asleep` or `task_ended`, a
@@ -184,7 +184,7 @@ the poll→park window is seen by the re-check (a closed arm is READY), so it is
 closed+empty recv arm, which the re-check called **DEAD**; requeueing on one dead arm among live ones
 spun, so a dead arm was never READY, and an all-dead re-check requeued into the all-closed fault. The W7-13r(a) rule "`closed` is not a recv arm's wake condition" and the
 DEC-176 rule "judge an all-closed `wait:` as a whole" served that skip. D2 makes a closed arm a taken
-arm, so `closed` is a ready condition on every wake predicate (park re-check, demote poll, eager
+arm, so `closed` is a ready condition on every wake predicate (park re-check, demoted wait, eager
 in-place wait), the re-run poll settles on it (no spin), and the fault is gone.
 
 **Send-arm under a host frame (TICKET-185).** A send-arm that cannot move its value under a host
@@ -200,7 +200,7 @@ OS worker and strand a sibling `send` that lands mid-window (`docs/contributing/
 `WaitPark` claimed-CAS sweep then picks **exactly one** of {a sibling `send`/`close` on any arm, the
 timer's own deadline `send_wake`} — a value arriving before the deadline wins the wait (the value is
 **not** stranded), the deadline wins only if nothing else did. Under a host frame the demote path
-threads the deadline into its bounded poll (channel scan first, so a real send still beats the
+threads the deadline into its sleep (channel scan first, so a real send still beats the
 timer).
 - *Non-blocking* (`else` present) and the *poll* step reuse the existing `try_recv` path (a timer arm's
   `try_recv` is already deadline-aware) — straightforward in the VM. **(Done.)**
@@ -221,19 +221,70 @@ timer).
   (The READY / DEAD / LIVE re-check from before D2 is in the superseded note under
   **Implementation notes**.) The
   first waker (in
-  `send_wake`/`close_wake`/`cancel_drain`/`flag_deadlock`) CASes `claimed`, `take()`s the fiber, and
+  `wake_bucket`/`drain_parked`/`SchedCore::take_asleep`) CASes `claimed`, `take()`s the fiber, and
   removes its token from every other bucket by `Arc::ptr_eq` — all under the one lock, serialized with
   `park_wait`'s gap re-check (lost-wakeup-safe). Routed via `Disp::WaitPark(Vec<(key, core)>)` captured
   while the fiber heap is live (mirrors `Disp::Park`). The single-channel `recv` park stays the **1-key
   `ParkedEntry::Recv` special case** (alloc-free, provably unchanged — regression test
   `vm_wait_single_arm_recv_park_unchanged_under_parallel`).
-- *Under a host frame* (`native_reentry > 0`, the Reentered context): snapshot-park is impossible —
-  mirror `demote_recv_block` with a **multi-channel demote-poll** (`demote_wait_block`: register the
-  wait as one `Waiter` in `SchedCore::waiters`, poll all N queues source-order under the core lock on
-  a bounded `DEMOTE_POLL_BACKOFF`). **Limitation (sound, lower-throughput):** there are N channel
-  condvars and no single one to block on, so the demote loop polls on a backoff timer rather than
-  waiting on a targeted condvar — same shape as a timer wait there. The snapshot-park is the path of
-  every other wait; the demote is reached only from an FFI callback or a map/set probe hook.
+- *Under a host frame* (`native_reentry > 0`, the Reentered context): snapshot-park is impossible, so
+  `demote_wait_block` registers the wait as one `Waiter` in `SchedCore::waiters` and blocks in place.
+  It sleeps on arm 0's condvar. A `send` or `close` on any other arm kicks it (`gated_register` files
+  its `Wake` on each of those arms, `ChannelCore::wake_all` kicks it), so no arm is polled. At each
+  wake it re-reads all N queues in source order under the core lock. The sleep ends at the sooner of
+  the timer arm's deadline and the run's. The snapshot-park is the path of every other wait; the
+  demote is reached only from an FFI callback or a map/set probe hook.
+
+## A cancel is a wake
+
+Every cancel goes through one function, `cancel(registry, CancelTarget)`
+(`vm/mnsched_verdict.rs`): a child fault, an owner's abort of its nursery, `Executor.cancel()` and
+its join `--timeout`, `Task.cancel()`, `os.exit`, a job's run-ending fault and the `--timeout` gap
+wake. `CancelTarget` is `Scope(sched, id)`, `Flag(Option<&flag>)` or `All`. In order, it:
+
+1. trips the flag (`trip_cancel_flag`, a `Relaxed` store). A park re-checks the flag under the core
+   lock that the drain takes after the store, so a park either reads the flag or the drain finds it;
+2. drains the target's parked and netpoller-parked fibers on its own sched;
+3. drains the fibers under the flag on every live sched (a nested Executor keeps its jobs on a sched
+   of its own);
+4. pokes every live sched and kicks its demoted waits (`MnSched::wake_demoted`).
+
+The run's `--timeout` is not a scope trip: `deadline_drain` wakes the parked fibers whose deadline
+passed. A `defer` is never cut by a cancel (`Fiber::honours_cancel`); `os.exit`, `--timeout` and
+`--max-heap` still cut it.
+
+| wait | what a cancel does |
+|---|---|
+| a parked `recv`, `send`, `wait:`, guard or join | the drain requeues the fiber; it re-runs its op and reads the halt |
+| a socket on the netpoller | the drain re-injects the fiber |
+| `time.sleep_ms` in a fiber | parked as `ParkedEntry::Sleep(Arc<SleepPark>)` with one timer at the sooner of its deadline and the run's; the timer and the drain race on a claim-once flag; the halt order is `sleep_halt`. A sleeping fiber counts awake |
+| a demoted `recv`, `send`, `wait:`, sleep, guard or `Executor` join | its `Waiter` holds a wake handle (`block::Wake`), and `wake_demoted` kicks it |
+| a nursery join under a host frame | runs the worker loop in place; the poke wakes it |
+| a demoted socket | seen within 5 ms: no condvar can wake a `poll(2)` |
+| a C call, a `stdin` read | read after the call returns |
+
+No wait polls for a cancel, except that demoted socket. Three timed waits are left, and `ticks=<n>`
+in `CHEZZI_SCHED_STATS=1` counts only the first:
+
+- a demoted socket's 5 ms `poll(2)` cap;
+- a demoted guard's 50 ms `looks_free` re-check (`vm/core.rs`), which waits for a VALUE, the guard
+  coming free; a cancel kicks it;
+- a listed idle worker's 5 ms `idle_cv` timeout (`vm/mnsched_take.rs`, TICKET-205), which waits for a
+  permit ticket, not for a cancel.
+
+**A sleep a cancel ended stops its timer.** The party that wins a sleep's claim stops its timer
+(`timer::stop`; `TimerStop` in `vm/poller.rs`, as Go's `Timer.Stop`), and the timer job holds its
+sched weakly. Stopped entries leave the timer heap once they pass a quarter of it (Go 1.27's rule,
+`runtime/time.go`), so the heap stays within 4/3 of its live timers. A timed `recv`, a `wait:`
+timer arm and the deadline wake still keep their entry until their deadline.
+
+**A job fault halts the run once.** The first job end that publishes a `--max-heap` fault
+(`QuiesceState::request_job_fault`, the cell `JobFaultCell` in `vm/quiesce.rs`) runs `halt_run`; a
+later end that carries a copy of the fault publishes and halts nothing. `Vm::rank_end` waits for that
+teardown, in the GC door, before it takes the report: a teardown that landed after the report
+cancelled the reap that followed it, and the same abort was reported twice. `RunHalt::Fault` stays in
+force after the report until the next test's reset, so a join that wakes late still stops
+(`RunHalt::ends_join`).
 
 ## One runner budget
 
@@ -315,7 +366,8 @@ until the loop ended (`os.exit` from a second executor's job landed after 23 s; 
   (`tests/shared_update_contention.rs` one-box source at T=1: 225 ms against 29 ms).
 - **A listed idle worker never sleeps untimed**: a waker can reserve a ticket for a listed worker
   just before its sleep, and a ticket nobody takes holds a permit back. Its sleep is bounded by
-  one `DEMOTE_POLL_BACKOFF` tick. A worker is listed only when fewer than two permits are free
+  one `DEMOTE_POLL_BACKOFF` tick: it waits for a permit ticket, not for a cancel, and `ticks` does
+  not count it. A worker is listed only when fewer than two permits are free
   besides its own (`width::tight()`, TICKET-230; always true at `--threads=1`). An unlisted worker
   can receive no ticket, so it sleeps untimed on `idle_cv`.
 - **Cost.** A hand-over has no CPU cost of its own, but a serialized `--threads=1` run of two CPU
@@ -354,7 +406,8 @@ too (see above); the body has no gate of its own. Full tables: `docs/contributin
 registers, and `Vm::wait_begin` takes them; `Vm::wait_end` drops them before it takes the permit
 back (an in-place channel tick, after it, before its next pop). A wait that ends by itself (`will_return`: a deadline or an external completion) counts
 nothing, and a demoted one is `inflight`. A demoted wait that does not end by itself registers a
-waiter in the ONE registry `SchedCore::waiters`. A parked fiber counts through its park (`parked_n`,
+waiter in the ONE registry `SchedCore::waiters`. An `inflight` demoted wait with a `block::Wake`
+files a `Waiter` too, only to carry it (`fiber: false`). A parked fiber counts through its park (`parked_n`,
 `join_parked`, a timer's `inflight`), not through the table. None of these decides a deadlock: the
 run's awake count does ([The deadlock check](#the-deadlock-check)). A guard wait is never
 `inflight` (DEC-063). An Executor join parks since TICKET-208 (a job is a fiber). A new blocking

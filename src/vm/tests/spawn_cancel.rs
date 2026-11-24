@@ -178,7 +178,7 @@ fn parallel_cpu_sibling_aborts_on_sibling_fault() {
 ///
 /// The token closes ONLY the defer-REGISTRATION race — it does NOT make this test race-free (an
 /// earlier version of this comment wrongly claimed "no timing race"). The surviving race was
-/// scheduler-side and AFTER the fault: the cancel trip and its `cancel_drain` sit two core-lock
+/// scheduler-side and AFTER the fault: the cancel trip and its drain sit two core-lock
 /// acquisitions apart, and an idle worker's deadlock check landing in that gap used to reap the
 /// still-parked consumer as `Deadlocked`, dropping it WITHOUT a `defer` drain — so this printed
 /// `0` roughly 35/200 runs under CPU contention. This test is the REGRESSION guard for that race
@@ -225,7 +225,7 @@ fn parallel_spinning_sibling_does_not_hang_the_nursery_under_cancel() {
 /// DEADLOCK dropped the parked `task` fiber without a `defer` drain — its `defer` never ran,
 /// invisibly. That builder is gone (plan 2026-11-18-every-wait-parks Task 6: `main` is a fiber,
 /// so both nurseries are fiber-owned scopes); the abort trips the cancel FIRST
-/// (`MnSched::trip_scope_cancel`, under the core lock).
+/// (`mnsched_verdict::cancel`, under the core lock).
 ///
 /// `gate` (the nested nursery's task) consumes the token `task` sends only AFTER registering its
 /// `defer`, so the inner join — and therefore the escape — happens-after the defer is registered.
@@ -247,7 +247,7 @@ fn parallel_defer_runs_when_enlisted_nursery_escapes() {
 
 /// N4 (panic-fault seam): a worker-VM PANIC (a VM bug, a panicking native/FFI callback) becomes a task
 /// `Fault` via `run_one_fiber`'s `catch_unwind` fallback. Without a trip of its scope cancel the scope
-/// aborts with `cancel == false`: `cancel_drain` requeues the parked siblings, they re-run `recv`,
+/// aborts with `cancel == false`: the cancel's drain requeues the parked siblings, they re-run `recv`,
 /// `park`'s gap re-check sees no cancel and PARKS THEM AGAIN, and the run's deadlock verdict ends
 /// them without a `defer` drain — their `defer`s silently skipped, hidden behind the panic-fault
 /// (`reduce_task_slots` ranks Fault > Deadlocked). `MnSched::finish_with` is the one trip of a task's

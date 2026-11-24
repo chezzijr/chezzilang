@@ -25,9 +25,6 @@ open-row ledger is [`gaps.md`](../contributing/gaps.md). User-facing rules:
 - **`cancel.current()`.** A running task cannot read its own cancel token to poll it. The owner decided it
   (2026-10-22) and left it to a separate ticket; `t.cancel()` and `ex.cancel()` cut a job at its next wait or
   loop back-edge without it.
-- **Multi-channel `wait:` under a host frame polls on a backoff.** The demoted waiter (in an FFI
-  callback or a map/set probe hook) has N channel condvars and no single one to block on, so it
-  polls on `DEMOTE_POLL_BACKOFF` instead of a targeted wake. Sound, lower throughput.
 - **Seeded replay is exact only where that is free.** A nursery join in place, a `Shared` guard wait,
   an `Executor` join and job start, and a `recv` or `wait:` inside a native callback replay at a
   measured rate (`gaps.md` W15-10). A fix ships only if unseeded runs pay nothing for it.

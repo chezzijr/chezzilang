@@ -52,6 +52,28 @@ a C call blocks in place. A guard wait and `Executor.shutdown()` park too, and a
 preempted: every op of `tests/blocking_context_grid.rs` (two contexts, `Park` and `Reentered`) but
 `stdin` runs with `demotes=0`. Grid: `tests/callback_park_grid.rs`.
 
+A cancel is a wake (2026-11-23, plan `2026-11-21-cancel-is-a-wake`). Every source (a child fault,
+an owner's abort, `Executor.cancel()`, `Task.cancel()`, `os.exit`, a join's `--timeout`) goes through
+one `cancel(registry, CancelTarget)` (`src/vm/mnsched_verdict.rs`): trip, drain the target, drain
+under the flag on every live sched, poke every sched and kick its demoted waits. `time.sleep_ms` in
+a fiber parks with one timer. No wait polls for a cancel, except a demoted socket. Three timed waits
+are left: that socket's 5 ms `poll(2)`, a demoted guard's 50 ms `looks_free` re-check (for a value)
+and a listed idle worker's 5 ms `idle_cv` timeout (TICKET-205, for a permit ticket; `ticks` does not
+count it: one task in `sleep_ms(1000)` takes 205, 209 and 278 voluntary context switches at T=1, 2
+and the default). A C call and a `stdin` read see a cancel after they return. Two bugs fixed: a
+sibling fault now cuts a nested Executor's job that inherits the scope flag (was `deadlock: every
+task is blocked`, exit 1; now `defer ran`, `!boom`, exit 0), and `run_root`'s hand-off runs the
+deadlock verdict it makes (the `task_ended()` result dropped since `9c0f8f68` could hang). Fixed
+after review: a job's `--max-heap` backlog cuts every other job of the Executor at once (all 15 wait
+kinds of `tests/cancel_wake_grid.rs` print `OVER-MEMORY ... test exceeded --max-heap`, exit 1; base
+printed a false `deadlock` or hung in 9 of them at T=1 or 2); an `os.exit` or a `--max-heap` abort
+ends a nursery join that still waits (Go: nothing runs after the halt; it hung); one abort prints one
+OVER-MEMORY row (base printed a second `(executor job)` row in 29 of 150 runs at 4 workers); a
+cancelled sleep stops its timer, which no longer keeps its sched alive until the deadline.
+**Limit:** 2000 tasks sleeping 2 s cost 0.09 s of CPU at T=1 and 0.12 s at T=2, but ~2.4 s at the
+default count (28 workers): each of the 2000 wakes (`complete_offload` -> `notify_waiters`) wakes
+every idle worker. The 0.2 s goal is not met at the default count; that wake storm is the next plan.
+
 The checker has a non-fatal warning channel (`Severity::Warning`, `"severity"` in `--errors=json`,
 `DiagnosticSeverity::WARNING` in the LSP). It has five rules:
 
@@ -81,8 +103,9 @@ workspace crates, the blocking-point table (`block::wait_steps`), the boundary-b
 first: the per-scope, per-sched and family judges, the lock-cycle and re-entry checks and the
 `is_deadlock` error field are gone), and phase 1, every wait parks (2026-11-20: the nested
 walks, native callees, drains, json defaults and hard-halt drains as frames; the block table down
-to two contexts; the builder nursery, `pool.rs` and `runner_cache.rs` deleted). Next in that model:
-phase 2 (cancel as a wake) and phase 4 (`Executor` in `std`), each with its own plan.
+to two contexts; the builder nursery, `pool.rs` and `runner_cache.rs` deleted), and phase 2, a
+cancel is a wake (2026-11-23). Next in that model: the wake storm (one ready task wakes one worker),
+then phase 4 (`Executor` in `std`), each with its own plan.
 
 ## What is next
 

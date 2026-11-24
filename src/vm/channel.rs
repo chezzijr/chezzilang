@@ -144,8 +144,8 @@ impl Vm {
                 // re-checks its readiness predicate under, and that is what makes the wake reliable.
                 // `close()` has always set `closed` under this lock; `trip()` used a bare atomic, so a
                 // waiter could evaluate "not tripped" while holding `q` and be notified before it had
-                // atomically released `q` and enqueued on `cv` — a lost wakeup costing a full
-                // `DEMOTE_POLL_BACKOFF`, the exact shape W7-13 fixed for values and closes. Holding
+                // atomically released `q` and enqueued on `cv` — a lost wakeup and a hung demoted
+                // wait, the exact shape W7-13 fixed for values and closes. Holding
                 // `q` across the store makes the two orderings the only possibilities: the waiter sees
                 // the latch in its predicate, or it is already on the condvar when `notify_all` runs.
                 // The guard is dropped before the wake fan-out below, which takes the sched lock —

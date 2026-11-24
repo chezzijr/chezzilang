@@ -381,32 +381,12 @@ where
 /// `CHEZZI_THREADS` (see `main::cmd_run`), BEFORE the run starts its workers ([`worker_count`]).
 static WORKER_OVERRIDE: AtomicUsize = AtomicUsize::new(0);
 
-/// TICKET-126 — counts calls to [`SchedCore::cancelled_scope_awaiting_drain`], the O(scopes) idle-path
-/// scan TICKET-118 added. Test-only instrumentation for the behavioural proxy that pins the cancel-
-/// generation guard: with the guard, a program that never cancels must not re-run this per idle pass.
-#[cfg(test)]
-static CANCEL_SCAN_CALLS: AtomicUsize = AtomicUsize::new(0);
-
-/// TICKET-126 (W13-24) — bumped once by every cancel-flag trip ([`trip_cancel_flag`]). Process-wide
-/// on purpose: an ancestor flag (an `Executor`'s `cancel`) is shared by scheds the storing site
-/// cannot name. Starts at 1 so a fresh sched (`drain_scan_gen == 0`) always scans once.
-static CANCEL_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
-
-/// TICKET-126 (W13-24) — the ONLY way production code sets a scope-cancel or ancestor-cancel flag.
-/// Store FIRST, then bump, and bump with `Release` against the `Acquire` load in
-/// [`SchedCore::drain_scan_due`]. That release/acquire pair on `CANCEL_GEN` is the ONLY thing that
-/// makes the flag store visible to a scanner which sees the new generation: `Relaxed` on both sides
-/// establishes no happens-before. There is no mutex to fall back on — `Executor.cancel()`
-/// (`src/vm/shared_methods.rs`) stores an ancestor flag under NO core lock, while
-/// `SchedCore::scope_cancel_tripped` reads that same shared flag under the core lock. Under
-/// `Relaxed`/`Relaxed` this interleaving is reachable: the trip stores the flag and bumps the
-/// generation; `drain_scan_due` loads the new generation, scans, reads the flag as still `false`,
-/// returns `None` and RECORDS the new generation; only the NEXT trip re-arms the scan, so the fiber
-/// parked under the cancelled ancestor is never drained and `take_runnable` faults it as a deadlock —
-/// W13-8, the regression TICKET-118 fixed.
+/// The ONLY way production code sets a scope-cancel or ancestor-cancel flag, called only by the one
+/// cancel entry's file (`mnsched_verdict.rs`). `Relaxed` is enough: a fiber re-checks the flag under
+/// its sched's core lock before it parks, and the cancel's drain takes that same lock after this
+/// store. So a park either reads the flag, or is filed before the drain and found by it (W13-8).
 pub(crate) fn trip_cancel_flag(flag: &AtomicBool) {
     flag.store(true, Ordering::Relaxed);
-    CANCEL_GEN.fetch_add(1, Ordering::Release);
 }
 
 /// TICKET-200 — THE answer to "is this scope cancelled": its own flag or any ancestor's (an
@@ -578,6 +558,21 @@ static DEMOTES: AtomicUsize = AtomicUsize::new(0);
 /// How many workers this process has demoted so far (see [`DEMOTES`]).
 pub fn demote_count() -> usize {
     DEMOTES.load(Ordering::Relaxed)
+}
+
+/// Every 5 ms re-arm or poll wakeup a wait took to notice a halt: a capped timed wait that
+/// expired with its op not done ([`note_tick`]). An op's own deadline wake is not one.
+/// `CHEZZI_SCHED_STATS=1` prints it as `ticks=<n>`.
+static TICKS: AtomicUsize = AtomicUsize::new(0);
+
+/// Count one poll wakeup (see [`TICKS`]).
+pub(crate) fn note_tick() {
+    TICKS.fetch_add(1, Ordering::Relaxed);
+}
+
+/// How many poll wakeups this process took so far (see [`TICKS`]).
+pub fn tick_count() -> usize {
+    TICKS.load(Ordering::Relaxed)
 }
 
 /// Every deadlock verdict of this process: its awake count dropped to 0 with tasks alive
@@ -1405,10 +1400,9 @@ const MAX_SOCKET_READ: usize = 16 * 1024 * 1024;
 /// `recover:` can swallow.
 const CONNECT_BLOCK_TIMEOUT_SECS: u64 = 10;
 
-/// D5 owe #3 (Path C) — how long a demoted worker thread waits on the channel condvar between
-/// re-checks (queue / cancel / terminate). A `send` notifies the condvar so the common case wakes
-/// immediately; this bounded poll only backstops a lost wakeup (≤ this much added latency, never a
-/// hang) and bounds how fast a demoted thread observes `terminate`/`cancel` (a sibling fault/deadlock).
+/// The 5 ms cap of two timed sleeps: a demoted socket wait's `poll(2)` (`Vm::demote_block_socket`),
+/// which no condvar can wake, and a listed idle worker's `idle_cv` wait (TICKET-205: it waits for a
+/// permit ticket, not a cancel). Every other demoted wait sleeps until a wake (`block::Wake`).
 const DEMOTE_POLL_BACKOFF: std::time::Duration = std::time::Duration::from_millis(5);
 
 /// TICKET-213 — how long an Executor's runner thread waits for a next job before it leaves. It

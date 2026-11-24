@@ -249,12 +249,18 @@ impl BoxLock {
     /// is woken on its sched.
     fn wake(&self) {
         if self.sleepers.load(Ordering::SeqCst) > 0 {
-            let (mtx, cv) = guard_registry();
-            drop(mtx.lock().unwrap_or_else(|e| e.into_inner()));
-            cv.notify_all();
+            notify_guard_waiters();
         }
         self.wake_parked();
     }
+}
+
+/// Wake every thread waiting for a box to come free ([`await_update_guard_free`]), under the
+/// registry lock so the wake cannot land between a waiter's check and its sleep.
+pub(super) fn notify_guard_waiters() {
+    let (mtx, cv) = guard_registry();
+    drop(mtx.lock().unwrap_or_else(|e| e.into_inner()));
+    cv.notify_all();
 }
 
 /// TICKET-016 (W8-3) — the process-global guard registry, read only on the slow path (a contended
@@ -529,6 +535,16 @@ pub fn try_update_guard(key: GuardKey<'_>, me: u64) -> Option<UpdateGuard> {
 /// waits here holding no width permit, then takes the permit, then the guard (permit before
 /// guard; DEC-141). The waiter's [`WaitTicket`] stays live across the gap, so no new reader gets in.
 pub fn await_update_guard_free(ticket: &WaitTicket, budget: Option<Duration>) -> bool {
+    await_update_guard_free_or(ticket, budget, || false)
+}
+
+/// [`await_update_guard_free`] that also ends, `false`, once `stop` holds: a demoted wait's kick
+/// ([`super::block::Wake`]), read under the registry lock its kick notifies under.
+pub(super) fn await_update_guard_free_or(
+    ticket: &WaitTicket,
+    budget: Option<Duration>,
+    stop: impl Fn() -> bool,
+) -> bool {
     let key = GuardKey {
         lock: &ticket.lock,
         mode: ticket.mode,
@@ -540,6 +556,9 @@ pub fn await_update_guard_free(ticket: &WaitTicket, budget: Option<Duration>) ->
     let out = loop {
         if ticket.is_admitted() || key.lock.looks_free(key.mode) {
             break true;
+        }
+        if stop() {
+            break false;
         }
         let left = match deadline {
             None => Duration::from_millis(50),
@@ -610,7 +629,7 @@ pub fn acquire_update_guard_within<'a>(
 /// frame can't snapshot-park, so the worker thread DEMOTES — it blocks in place on
 /// `cv` and resumes when a sibling `send` `notify_all`s it (`MnSched::send_wake` + the non-mn
 /// `send`). The wait loop re-checks the queue / cancel / terminate on every wake
-/// (spurious-wakeup-safe; bounded poll).
+/// (spurious-wakeup-safe); a cancel or the verdict cut kicks it (`block::Wake`).
 #[derive(Debug, Default)]
 pub struct ChannelCore {
     pub q: Mutex<ChanState>,
@@ -655,9 +674,9 @@ pub struct ChannelCore {
     pub(super) gated: Mutex<Vec<GatedWaiter>>,
 }
 
-/// TICKET-205 — one gated in-place waiter of a channel: its permit slot, and the channel whose
-/// condvar it sleeps on when that is not this one (a `wait:` sleeps on its first arm).
-pub(super) type GatedWaiter = (Arc<super::width::Slot>, Option<Arc<ChannelCore>>);
+/// TICKET-205 — one gated in-place waiter of a channel: its permit slot, and the wake of a wait
+/// that sleeps on another channel's condvar (a `wait:` sleeps on its first arm).
+pub(super) type GatedWaiter = (Arc<super::width::Slot>, Option<Arc<super::block::Wake>>);
 
 /// The locked interior of a [`ChannelCore`]: the message FIFO plus a `closed` flag. Folding `closed`
 /// into the *same* mutex as the queue is deliberate — every park decision ([`super::Vm::park`],
@@ -769,12 +788,18 @@ pub enum RecvReady {
 impl ChannelCore {
     /// TICKET-205 — THE wake of every thread waiting in place on this channel: the waker queues each
     /// gated waiter for the runner permit before it notifies, so the hand-over order is the waker's.
+    /// A `wait:` that sleeps on another arm's condvar is kicked ([`super::block::Wake::kick`]),
+    /// after the list lock is released: its predicate does not read this channel.
     pub(super) fn wake_all(&self) {
-        for (s, sleeps_on) in self.gated.lock().unwrap_or_else(|e| e.into_inner()).iter() {
-            super::width::reserve(s);
-            if let Some(other) = sleeps_on {
-                other.cv.notify_all();
+        let elsewhere: Vec<Arc<super::block::Wake>> = {
+            let g = self.gated.lock().unwrap_or_else(|e| e.into_inner());
+            for (s, _) in g.iter() {
+                super::width::reserve(s);
             }
+            g.iter().filter_map(|(_, w)| w.clone()).collect()
+        };
+        for w in elsewhere {
+            w.kick();
         }
         self.cv.notify_all();
     }

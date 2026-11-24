@@ -15,3 +15,10 @@ pub type Job = poller::TimerJob;
 pub fn submit_at(deadline: Instant, job: Job) {
     poller::submit_timer(deadline, job);
 }
+
+pub use poller::{TimerStop, stop_timer as stop};
+
+/// [`submit_at`] for a timer [`stop`] can stop.
+pub fn submit_stoppable_at(deadline: Instant, job: Job, stop: std::sync::Arc<TimerStop>) {
+    poller::submit_stoppable_timer(deadline, job, stop);
+}

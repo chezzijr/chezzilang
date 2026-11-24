@@ -3,11 +3,23 @@
 //! Split out of `src/vm/sched.rs`. `super::*` is the parent module.
 
 use super::frames::{Caught, Unwind};
+use super::mnsched_verdict::{CancelTarget, cancel};
 use super::sched::SpawnHead;
 use super::sched::SpawnTarget;
-use super::sched::cancel_fiber_owned_family;
 use super::sched::spawn_worker_thread;
 use super::*;
+
+/// Test-only: the halted joins that ran their family's fibers on their own stack although the
+/// joiner had handed its runner slot over ([`Vm::joiner_hands_over`]). Must stay 0.
+#[cfg(test)]
+pub(crate) static INLINE_AFTER_HANDOVER: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+/// Test-only: the halted joins that waited for their replacement or a new runner to settle the
+/// family instead ([`Vm::wait_family`]).
+#[cfg(test)]
+pub(crate) static HANDOVER_WAITS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
 
 /// TICKET-299: where an open `parallel:` level starts in its frame, captured at `Op::EnterNursery`:
 /// the frame's `defer` count (the level's body `defer`s sit above it) and its defer-scope marker
@@ -421,7 +433,10 @@ impl Vm {
             let Some(Some(scope)) = self.eager_scheds.get(i) else {
                 return None;
             };
-            cancel_fiber_owned_family(scope);
+            cancel(
+                &self.sched_registry,
+                CancelTarget::Scope(&scope.sched, scope.scope),
+            );
             if !scope.sched.lock().family_done(scope.scope) {
                 return Some(scope.scope);
             }
@@ -709,24 +724,66 @@ impl Vm {
     /// native frame, the rule `park_recv`'s caller follows), so it waits here in place.
     fn join_fiber_owned_nursery(&mut self, scope: EagerScope) -> Result<(), RuntimeError> {
         let sids = scope.sids();
-        if !scope.sched.lock().family_done(scope.scope) {
-            let wid = self.wid;
-            let mut shell = self.joiner_shell(&scope.sched, &scope.cancel, wid);
-            // M1.5 — the join waits detached; an inline loop attaches its own token.
-            self.wait_door(&[], |_| {
-                for &sid in &sids {
-                    if let Some(shell) = shell.as_mut() {
-                        shell.mn_worker_loop(&scope.sched, wid, sid);
-                    }
-                    scope.sched.wait_for_scope(sid);
-                }
-            });
+        if !self.wait_family(&scope, &sids) {
+            return self.run_exit_err(Span::RUNTIME).map_or(Ok(()), Err);
         }
         let r = self.reduce_task_slots(scope.sched.drain_scopes(&sids));
         for &s in sids.iter().rev() {
             scope.sched.retire_scope(s);
         }
         r
+    }
+
+    /// The inline wait of a nursery join or abort for its family `sids`. `false`: a run halt ended
+    /// it ([`RunHalt::ends_join`]). The caller then leaves the scope open: a queued child still
+    /// names it, and the run's end reads the finished children's output from its slots.
+    ///
+    /// A job fault is not due inside a `defer`, which runs whole, and the run's workers may have
+    /// left. So the family's cancelled fibers run to the end and the join completes: on this
+    /// thread, or, when this joiner handed its slot over ([`Vm::joiner_hands_over`]), on its
+    /// replacement or one new runner.
+    fn wait_family(&mut self, scope: &EagerScope, sids: &[usize]) -> bool {
+        if scope.sched.lock().family_done(scope.scope) {
+            return true;
+        }
+        let wid = self.wid;
+        let mut shell = self.joiner_shell(&scope.sched, &scope.cancel, wid);
+        // M1.5 — the join waits detached; an inline loop attaches its own token.
+        let done = self.wait_door(&[], |_| {
+            sids.iter().all(|&sid| {
+                if let Some(shell) = shell.as_mut() {
+                    shell.mn_worker_loop(&scope.sched, wid, sid);
+                }
+                scope.sched.wait_for_scope(sid)
+            })
+        });
+        if done || self.run_halt_due() {
+            return done;
+        }
+        // A joiner that handed its slot over must not run fibers on its stack (a buried frame). Its
+        // replacement settles the family, as a halt sets no `terminate`. A host worker
+        // ([`Vm::spare_host`]) leaves when the host ends, so then one new runner does. If the OS
+        // refuses that thread, the loop below runs inline.
+        if self.joiner_hands_over() {
+            let host_spare = self.owns_nested_sched(&scope.sched) && self.spare_host().is_some();
+            if !host_spare || self.start_repl_runner(&scope.sched, &scope.cancel, wid) {
+                #[cfg(test)]
+                HANDOVER_WAITS.fetch_add(1, Ordering::Relaxed);
+                self.wait_door(&[], |_| scope.sched.wait_for_family(scope.scope));
+                return true;
+            }
+        }
+        #[cfg(test)]
+        if self.joiner_hands_over() {
+            INLINE_AFTER_HANDOVER.fetch_add(1, Ordering::Relaxed);
+        }
+        let mut shell = self.spawn_shell(&scope.sched, &scope.cancel);
+        self.wait_door(&[], |_| {
+            for &sid in sids {
+                shell.mn_worker_loop(&scope.sched, wid, sid);
+            }
+        });
+        scope.sched.lock().family_done(scope.scope)
     }
 
     /// TICKET-103/TICKET-132 — reclaim a nursery whose body ESCAPED early (`?`/`return`/`break`/
@@ -737,19 +794,12 @@ impl Vm {
     /// unwind parks through [`FaultPark`](super::frames::FaultPark) (TICKET-287). The body's escape error is what propagates, so a task fault here is swallowed.
     fn abort_fiber_owned_nursery(&mut self, scope: EagerScope) -> Option<RuntimeError> {
         let sids = scope.sids();
-        cancel_fiber_owned_family(&scope);
-        if !scope.sched.lock().family_done(scope.scope) {
-            let wid = self.wid;
-            let mut shell = self.joiner_shell(&scope.sched, &scope.cancel, wid);
-            // M1.5 — the join waits detached; an inline loop attaches its own token.
-            self.wait_door(&[], |_| {
-                for &sid in &sids {
-                    if let Some(shell) = shell.as_mut() {
-                        shell.mn_worker_loop(&scope.sched, wid, sid);
-                    }
-                    scope.sched.wait_for_scope(sid);
-                }
-            });
+        cancel(
+            &self.sched_registry,
+            CancelTarget::Scope(&scope.sched, scope.scope),
+        );
+        if !self.wait_family(&scope, &sids) {
+            return None;
         }
         let r = self.escape_child_fault(scope.sched.drain_scopes(&sids));
         for &s in sids.iter().rev() {

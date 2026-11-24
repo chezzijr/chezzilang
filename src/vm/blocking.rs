@@ -116,7 +116,7 @@ impl Vm {
         // Checked HERE because a blocked job never reaches `jump_checked`'s loop back-edge, which is
         // where every other path observes the deadline. Without it `chezzi test --timeout` could not
         // kill a job blocked forever on a channel — exactly the hang eager execution makes easier to
-        // write. No `back_edge_tick` throttle: this runs once per `DEMOTE_POLL_BACKOFF`, not per op.
+        // write. No `back_edge_tick` throttle: this runs once per wake of the wait, not per op.
         // `cancel`'s cooperative stop (D4), an enclosing scope's cancel and (TICKET-188) a child
         // fault of a nursery this party owns arrive first; then W7-47, the run-wide halt (an
         // `os.exit` or a job fault from another party). BELOW cancel, so a party that already holds

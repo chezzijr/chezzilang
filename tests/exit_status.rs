@@ -483,7 +483,7 @@ print("after nursery")
 //   spinning top-level `main`                rc=124, hangs         (n/a — Go has no top-level split)
 //   in-callback `sleep_ms` (`native_reentry > 0`)  rc=3 at 3012 ms  rc=3, ~53 ms
 //
-// The fix runs the intra-nursery abort teardown (`cancel_drain` + `drain_sched`) run-WIDE from
+// The fix runs the intra-nursery abort teardown (`mnsched_verdict::cancel`) run-WIDE from
 // `request_exit`, plus an exit rung at the two CPU-side checkpoints no blocking wait covers: the loop
 // back-edge (sampled 1/1024) and `guarded`'s native-HOF per-element re-entry.
 //
@@ -587,9 +587,8 @@ print("after nursery")
     );
 }
 
-/// W7-57 (c) — a nursery task inside `time.sleep_ms(3000)`. The sleep is already CHUNKED at
-/// `DEMOTE_POLL_BACKOFF` by W7-16 (`arm_timer_sleep` re-arms and re-reads `t.cancel` each tick), so no
-/// new chunking is needed — the fix is only that `cancel_all` now TRIPS the flag that loop reads.
+/// W7-57 (c) — a nursery task inside `time.sleep_ms(3000)`. The sleep is a parked entry
+/// (`ParkedEntry::Sleep`), so `os.exit`'s `cancel(All)` trips its flag and its drain ends the sleep.
 #[test]
 fn eager_job_os_exit_kills_a_sleeping_nursery_task() {
     let t = TmpDir::new();

@@ -1,6 +1,6 @@
 //! TICKET-199 (family S1): scheduler scope identity and fairness.
 //! H1: a fiber-owned nursery's scope id is popped/reused while a worker still holds it
-//! (`cancel_drain` after the owner joined) -> index out of bounds / wrong nursery drained.
+//! (`drain_family` after the owner joined) -> index out of bounds / wrong nursery drained.
 //! H2: at `CHEZZI_THREADS=1` a cap-0 ping-pong keeps refilling `runnext`, so the ring never runs.
 
 use std::process::{Command, Stdio};

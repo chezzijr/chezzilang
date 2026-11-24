@@ -1,8 +1,20 @@
 //! VM: demoting a blocked fiber in place: recv, send, `wait`, timers and sockets.
 //! Split out of `src/vm/sched.rs`. `super::*` is the parent module.
 
+use super::block::{self, WakeOn};
 use super::deadlock::Wait;
 use super::*;
+
+/// Would a receive on `core` settle now, for the party `p` that waits on it: a value to take (a
+/// buffered value or another party's live offer), a seal, a `trip()` latch or a close. What a
+/// demoted wait sleeps on its condvar until (the settle itself re-reads the channel).
+fn recv_may_settle(
+    core: &ChannelCore,
+    g: &crate::vm::core::ChanState,
+    p: &Arc<crate::vm::core::Pending>,
+) -> bool {
+    g.closed || g.recv_ready_for(Some(p)) || core.done_latch.load(Ordering::Relaxed)
+}
 
 impl Vm {
     /// D5 owe #3 (Path C) — a blocking `recv` reached inside a native callback (the host-stack loop
@@ -40,7 +52,8 @@ impl Vm {
                 .expect("demote_recv_block called with no active M:N scheduler (self.mn is None)"),
         );
         let core = self.channel_core(h);
-        let _gated = self.gated_register(&[&core]);
+        let wake = block::Wake::new(WakeOn::Chan(Arc::clone(&core)));
+        let _gated = self.gated_register(&[&core], &wake);
         // TICKET-185 — a rendezvous receiver publishes its SLOT before it registers (H3: a sender that
         // looks for a receiver while this one is registering must find the slot). Published only when
         // no value is waiting, in the same hold; the loop below takes a waiting value itself.
@@ -64,9 +77,10 @@ impl Vm {
         // 1. Account running → a registered waiter AND register the channel (#1 fix), under core lock A.
         //    A task waiting in place stays counted awake (`quiesce::Awake`), so the run's deadlock
         //    verdict never fires while it waits.
-        let mut reg = match self.wait_begin(
+        let mut reg = match self.wait_begin_woken(
             WaitSpec::Recv,
             Some(Blocked::named(Wait::Recv, span)),
+            Some(Arc::clone(&wake)),
             "recv",
             span,
         ) {
@@ -83,9 +97,13 @@ impl Vm {
         //    ATOMIC under core lock A (A-then-q — the order `send_wake` uses → no ABBA), so the deadlock
         //    checker never observes an emptied-but-still-counted/registered demoted fiber (the #1
         //    window). A filled slot, then the QUEUE, are checked FIRST so a genuinely-sent value always
-        //    wins over a spuriously-set `terminate`. Each exit path un-accounts under A; lost condvar
-        //    wakeups are bounded by `DEMOTE_POLL_BACKOFF` (≤ latency, never a hang).
+        //    wins over a spuriously-set `terminate`. Each exit path un-accounts under A. The wait
+        //    sleeps until a value, a close, a kick (`Wake`: a cancel or the verdict cut) or the
+        //    run's deadline (or a timer channel's own); never a poll.
+        let until = block::sooner(self.deadline, core.timer);
         let exit = loop {
+            // Read before the halts, so a kick after it ends the sleep below (`Wake`).
+            let seen = wake.seen();
             // TICKET-188 — read before core lock A: a child fault's `scope_fault` takes that lock.
             let halt = self.halt_requested();
             // --- settle under core lock A: a delivered value wins over cancel / terminate / deadlock ---
@@ -143,9 +161,12 @@ impl Vm {
                         // collector reads a value a sender puts in the slot through it.
                         self.wait_tick(&mut reg, &[h], |_| {
                             let q = core.q.lock().unwrap_or_else(|e| e.into_inner());
-                            let _ = core.cv.wait_timeout_while(q, DEMOTE_POLL_BACKOFF, |g| {
-                                p.is_queued() && !g.recv_ready_for(Some(&p)) && !width::reserved()
-                            });
+                            drop(block::sleep_until(&core.cv, q, until, |g| {
+                                p.is_queued()
+                                    && !recv_may_settle(&core, g, &p)
+                                    && !width::reserved()
+                                    && !wake.kicked(seen)
+                            }));
                         });
                         continue;
                     }
@@ -194,14 +215,19 @@ impl Vm {
                 .as_ref()
                 .expect("demote_send_block called with no active M:N scheduler (self.mn is None)"),
         );
-        let _gated = self.gated_register(&[core]);
-        let mut reg = self.wait_begin(
+        let wake = block::Wake::new(WakeOn::Chan(Arc::clone(core)));
+        let _gated = self.gated_register(&[core], &wake);
+        let mut reg = self.wait_begin_woken(
             WaitSpec::Send,
             Some(Blocked::named(Wait::send(core.cap), span)),
+            Some(Arc::clone(&wake)),
             "send",
             span,
         )?;
+        let until = self.deadline;
         let out = loop {
+            // Read before the halts, so a kick after it ends the sleep below (`Wake`).
+            let seen = wake.seen();
             // TICKET-188 — read before core lock A: a child fault's `scope_fault` takes that lock.
             let halt = self.halt_requested();
             {
@@ -225,12 +251,13 @@ impl Vm {
                     break Err(self.cut_fault(&sched, span));
                 }
             }
-            // M3.2 — `h` is pinned: the collector reads this send's offer through it.
+            // M3.2 — `h` is pinned: the collector reads this send's offer through it. The wait
+            // sleeps until the offer settles, a kick or the run's deadline.
             self.wait_tick(&mut reg, &[h], |_| {
                 let q = core.q.lock().unwrap_or_else(|e| e.into_inner());
-                let _ = core.cv.wait_timeout_while(q, DEMOTE_POLL_BACKOFF, |_| {
-                    p.is_queued() && !width::reserved()
-                });
+                drop(block::sleep_until(&core.cv, q, until, |_| {
+                    p.is_queued() && !width::reserved() && !wake.kicked(seen)
+                }));
             });
         };
         self.wait_end(reg, &[h]);
@@ -274,9 +301,11 @@ impl Vm {
                 .as_ref()
                 .expect("demote_wait_block called with no active M:N scheduler (self.mn is None)"),
         );
+        // The wait sleeps on arm 0's condvar: a wake of any other arm kicks it.
+        let wake = block::Wake::new(WakeOn::Chan(Arc::clone(&arms[0].0)));
         let _gated = {
             let refs: Vec<&Arc<ChannelCore>> = arms.iter().map(|(c, _)| c).collect();
-            self.gated_register(&refs)
+            self.gated_register(&refs, &wake)
         };
         // A timed `wait:` returns at its deadline whatever anyone does: the table accounts it
         // `inflight`, an untimed one a waiter on its arms (`block::wait_steps`).
@@ -286,11 +315,13 @@ impl Vm {
             has_send,
         };
         let on = Blocked::named(Wait::select(has_send), span);
-        let mut reg = self.wait_begin(spec, Some(on), "wait", span)?;
-        let recv_ready = |core: &Arc<ChannelCore>, g: &crate::vm::core::ChanState| {
-            g.closed || g.recv_ready_for(Some(p)) || core.done_latch.load(Ordering::Relaxed)
-        };
+        let mut reg =
+            self.wait_begin_woken(spec, Some(on), Some(Arc::clone(&wake)), "wait", span)?;
+        // The timer arm's deadline, or the run's, whichever comes first.
+        let until = block::sooner(timer.map(|(_, d)| d), self.deadline);
         let out = loop {
+            // Read before the arms and the halts, so a kick after it ends the sleep below (`Wake`).
+            let seen = wake.seen();
             // TICKET-188 — read before core lock A: a child fault's `scope_fault` takes that lock.
             let halt = self.halt_requested();
             {
@@ -301,7 +332,7 @@ impl Vm {
                         continue;
                     }
                     let g = core.q.lock().unwrap_or_else(|e| e.into_inner());
-                    ready |= recv_ready(core, &g);
+                    ready |= recv_may_settle(core, &g, p);
                 }
                 // WAIT-1 (demote path) — a live timer arm is ready once `now >= deadline`; the
                 // re-poll scans the channel arms first, so a real `send` still beats the timer.
@@ -322,26 +353,21 @@ impl Vm {
                     break Err(self.cut_fault(&sched, span));
                 }
             }
-            // No single condvar to wait on (N arms, N condvars) → bounded backoff poll. Sleep on the
-            // FIRST arm's condvar with a timeout so a `send`/`close` to arm 0 wakes promptly, and any
-            // other arm is observed within `DEMOTE_POLL_BACKOFF` (the documented lower-throughput path).
+            // N arms, N condvars: sleep on the FIRST arm's condvar. A `send`/`close` to arm 0
+            // notifies it; one to any other arm kicks this wait (`ChannelCore::wake_all`), as a
+            // cancel or the verdict cut does. The timer arm's deadline or the run's ends the sleep.
             // M3.2 — the arm handles stay on the operand stack of `op_wait_poll` across the door, so
             // the collector reads each arm's offers and slots through them.
             let (first, is_send0) = &arms[0];
             self.wait_tick(&mut reg, &[], |_| {
                 let q = first.q.lock().unwrap_or_else(|e| e.into_inner());
-                // Clamp the backoff to the timer deadline so the loop re-polls and fires the timer arm
-                // by its deadline (saturating, so a deadline that already passed yields ~zero wait).
-                let backoff = match timer {
-                    Some((_, d)) => DEMOTE_POLL_BACKOFF
-                        .min(d.saturating_duration_since(std::time::Instant::now())),
-                    None => DEMOTE_POLL_BACKOFF,
-                };
                 // Arm 0 is ready on what the loop above SETTLES on: `p` settled, or (recv arm) a value
                 // to take, a `trip()` latch or a close (the re-poll takes a closed arm, so no spin).
-                let _ = first.cv.wait_timeout_while(q, backoff, |g| {
-                    !(!p.is_queued() || (!is_send0 && recv_ready(first, g))) && !width::reserved()
-                });
+                drop(block::sleep_until(&first.cv, q, until, |g| {
+                    !(!p.is_queued() || (!is_send0 && recv_may_settle(first, g, p)))
+                        && !width::reserved()
+                        && !wake.kicked(seen)
+                }));
             });
         };
         self.wait_end(reg, &[]);
@@ -353,11 +379,11 @@ impl Vm {
     /// (the callback's `for`-loop state lives on the un-snapshottable Rust host stack), so without this
     /// the sleep runs INLINE and pins the worker for `ms`. Instead DEMOTE like a recv-in-callback: spin a
     /// replacement worker + sleep in place + resume, freeing the worker for `ms` (Go's `handoffp`).
-    /// Accounted as `inflight` (NOT a registered waiter): a sleeper returns unconditionally, like an
+    /// Accounted as `inflight` (its `Waiter` only carries the wake): a sleeper returns unconditionally, like an
     /// offloaded blocking native, and it stays counted awake, so no deadlock verdict fires while it
-    /// sleeps. A demoted waiter fiber is the opposite (it returns only via a sibling `send`). Returns `Ok(Nil)` (`sleep_ms` yields nothing). Residual: the
-    /// `thread::sleep` is uninterruptible, so a cancel during the sleep is observed only after it returns
-    /// (no worse than the inline pin it replaces — the worker is now freed).
+    /// sleeps. A demoted waiter fiber is the opposite (it returns only via a sibling `send`). Returns `Ok(Nil)` (`sleep_ms` yields nothing). The
+    /// sleep waits on a condvar of its own until its deadline or the run's: a cancel, an `os.exit`
+    /// or the verdict cut kicks it ([`block::Wake`]), so it ends at once and reads the halt.
     pub(super) fn demote_block_until(
         &mut self,
         deadline: std::time::Instant,
@@ -365,15 +391,13 @@ impl Vm {
         what: &str,
         span: Span,
     ) -> Result<Value, RuntimeError> {
-        let reg = self.wait_begin(spec, None, what, span)?;
+        let own = Arc::new((std::sync::Mutex::new(()), std::sync::Condvar::new()));
+        let wake = block::Wake::new(WakeOn::Own(Arc::clone(&own)));
+        let reg = self.wait_begin_woken(spec, None, Some(Arc::clone(&wake)), what, span)?;
+        let until = block::sooner(Some(deadline), self.deadline);
         loop {
-            let now = std::time::Instant::now();
-            if now >= deadline {
-                break;
-            }
-            self.wait_door(&[], |_| {
-                std::thread::sleep(DEMOTE_POLL_BACKOFF.min(deadline - now))
-            });
+            // Read before the halts, so a kick after it ends the sleep below (`Wake`).
+            let seen = wake.seen();
             // The one predicate for a run-wide halt (`run_halt_due`): it answers `false` wherever
             // `run_exit_err` below will not fire, so the sleep is never cut short for nothing.
             let read = self.halt_requested();
@@ -381,14 +405,20 @@ impl Vm {
                 self.wait_end(reg, &[]);
                 return Err(e);
             }
+            if std::time::Instant::now() >= deadline {
+                break;
+            }
+            self.wait_door(&[], |_| {
+                let g = own.0.lock().unwrap_or_else(|e| e.into_inner());
+                drop(block::sleep_until(&own.1, g, until, |_| !wake.kicked(seen)));
+            });
         }
         // Un-account inflight → running (the fiber's next dispatch does `running -= 1`, which would
         // underflow without this restore).
         self.wait_end(reg, &[]);
         // The halts a blocked party observes ([`Vm::block_halts`]), read once after the sleep: a
         // cancel or child fault aborts the native callback loop, so no further elements sleep; a
-        // run-wide `os.exit` (W7-47) since W7-57 also aborts the sleep itself within one
-        // `DEMOTE_POLL_BACKOFF` (measured 3012 ms → 63 ms).
+        // run-wide `os.exit` (W7-47) aborts the sleep itself at its kick.
         self.block_halts(span)?;
         Ok(Value::nil())
     }
@@ -479,6 +509,7 @@ impl Vm {
                     // deadlock predicate), so a peer that never sends hung the program with no fault and
                     // no `Err("timeout")`. Cap the kernel wait by the remaining budget so the deadline is
                     // observed within it, not one full backoff late.
+                    let mut capped = true;
                     let left = match deadline {
                         None => DEMOTE_POLL_BACKOFF,
                         Some(dl) => {
@@ -493,10 +524,15 @@ impl Vm {
                                     None => self.sock_err("timeout"),
                                 });
                             }
+                            capped = left > DEMOTE_POLL_BACKOFF;
                             left.min(DEMOTE_POLL_BACKOFF)
                         }
                     };
+                    let began = std::time::Instant::now();
                     self.wait_door(&[], |_| wait_fd_ready(fd, interest, left));
+                    if capped && began.elapsed() >= DEMOTE_POLL_BACKOFF {
+                        super::note_tick();
+                    }
                 }
             }
         };

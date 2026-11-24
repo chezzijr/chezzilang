@@ -324,7 +324,7 @@ fn sleep_synchronised_tests() -> BTreeSet<String> {
 /// rejected it (the walk returns 68). Obtain it by compiling once with an empty array and copying
 /// the "sleeps but is not listed" list `no_new_rust_test_sleeps_to_order_two_events` reports,
 /// verbatim, the same way `stack_trace_reports_call_chain`'s golden was obtained.
-const SLEEP_SYNCHRONISED_TESTS: [&str; 118] = [
+const SLEEP_SYNCHRONISED_TESTS: [&str; 122] = [
     // `tests/timer_wait_count.rs`. Its `time.sleep_ms(50)` is inside the fixture .chz program's
     // SOURCE STRING: the sender waits so the `wait:` parks with its timer arm armed before the recv
     // arm wins (the shape under test is a timer left armed with no waiter). The Rust test orders
@@ -539,6 +539,24 @@ const SLEEP_SYNCHRONISED_TESTS: [&str; 118] = [
     // under test (a timer sleep before the stuck wait). The assertions hold the deadlock report.
     "a_stuck_defer_after_a_fault_is_the_deadlock_across_a_yield",
     "stuck_cleanup_is_the_deadlock_on_every_former_verdict_path",
+    // `tests/cancel_wake_grid.rs`. Its `time.sleep_ms(2000)` is inside the fixture .chz program's
+    // SOURCE STRING: the 2000 sleeps are the wait under test (`ticks=0`). It orders no two events
+    // in the Rust test's own control flow.
+    "two_thousand_sleepers_wake_on_their_timer_without_a_poll",
+    // Plan 2026-11-21 Task 7c, `src/vm/tests/sched_wake.rs`. Its `time.sleep_ms` calls are inside the
+    // fixture .chz program's SOURCE STRING: the 15 s sleep is the job the abort cuts, and the
+    // `defer`'s 900 ms keeps the per-test reap running past the `CHEZZI_TEST_JOB_HALT_WINDOW` hold
+    // (300 ms), so the late teardown lands inside the reap. The fixed code passes in either order.
+    "a_job_fault_whose_halt_lands_after_the_report_is_reported_once",
+    // Plan 2026-11-21 Task 8, `src/vm/tests/sched_wake.rs`. The 1 h `time.sleep_ms` is inside the
+    // fixture's SOURCE STRING: it is the cancelled sleep under test. The Rust 10 ms sleep is a bounded
+    // poll (3 s) for the run's worker threads to drop their sched handles; it orders no two events.
+    "a_cancelled_sleep_does_not_keep_its_sched_alive",
+    // Plan 2026-11-21 Task 9, `src/vm/tests/sched_wake.rs`. The 300 ms `time.sleep_ms` is in a
+    // `defer` inside the fixture's SOURCE STRING: it keeps the cancelled child running while the
+    // halted join reads the halt, so the join reaches its handover wait. The fixed code passes in
+    // either order.
+    "a_halted_defer_join_never_runs_children_on_a_handed_over_stack",
 ];
 
 #[test]

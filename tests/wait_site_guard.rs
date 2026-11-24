@@ -147,6 +147,18 @@ const ALLOWED: &[(&str, &str, &str, &str)] = &[
         "waits for an update guard; each call is in a door",
     ),
     (
+        "core.rs",
+        "await_update_guard_free_or",
+        "await_update_guard_free_or(",
+        "waits for an update guard or a demoted wait's kick; each call is in a door",
+    ),
+    (
+        "block.rs",
+        "sleep_until",
+        "sleep_until(",
+        "a demoted wait's sleep; each call is in a door",
+    ),
+    (
         "sched_types.rs",
         "wait_fd_ready",
         "wait_fd_ready(",
@@ -175,6 +187,12 @@ const ALLOWED: &[(&str, &str, &str, &str)] = &[
         "await_exit_origins",
         ".await_exit_origins(",
         "waits for exit output in flight; its caller is a row",
+    ),
+    (
+        "quiesce.rs",
+        "await_job_halt",
+        ".await_job_halt(",
+        "waits for a job fault's teardown; its one call is in a door",
     ),
     (
         "mnsched.rs",

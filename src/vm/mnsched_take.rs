@@ -290,21 +290,6 @@ impl MnSched {
                 self.notify_waiters();
                 return Take::Stop;
             }
-            // TICKET-118 (W13-8) — drain a cancelled family's parked fibers before this worker
-            // sleeps, so a `cancel` that trips an ANCESTOR flag a parked fiber's own re-check can't
-            // see (`SchedCore::scope_cancel_tripped`, only read by `park`/`park_send`/`park_wait`)
-            // still requeues that fiber. `cancel_drain` moves the family's parks to `global`; each
-            // requeued fiber re-checks the same flags at its recv/send/`wait:` checkpoint and
-            // unwinds; a fiber parked in a `defer` does not honour the cancel
-            // ([`Fiber::honours_cancel`]), so it is not requeued for it; a park landing after the
-            // trip is caught by step 8's own re-check, not this scan.
-            // TICKET-126 — gated by `CANCEL_GEN` (see `SchedCore::drain_scan_due`); the generation
-            // read is this pass's one cancel read.
-            if let Some(sid) = c.drain_scan_due(self) {
-                drop(c);
-                self.drain_family(sid);
-                continue;
-            }
             // D4e — runnable-gated park (replaces the D4c bounded `wait_timeout` poll). `runnable`
             // counts every fiber queued in the global queue OR any worker local (batch-grab and steal
             // move fibers between queues net-zero, so a fiber sitting in a local stays counted), PLUS

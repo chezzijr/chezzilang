@@ -11,8 +11,9 @@ use super::gc_door::Detached;
 use super::{GcRef, sysmon, width};
 use super::{MnSched, RuntimeError, SchedCore, Span, TraceFrame, Vm};
 use crate::native::Kind;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard};
+use std::time::Instant;
 
 /// Where the running code sits, as far as blocking is concerned. Derived by [`Vm::block_ctx`].
 /// Every party that runs code is a fiber on a worker shell (`main` is fiber 1, an `Executor` job a
@@ -406,14 +407,12 @@ impl WakeSet {
 /// run-wide exit is pending (DEC-096: `Exit > Fault`), the innermost owned nursery whose flag is
 /// tripped AND whose family recorded a `Fault`. A flag is only a wake hint. A fault trips it under
 /// the core lock with its slot (`MnSched::finish_with`), but other trips record no fault. Each
-/// production caller of `trip_cancel_flag`:
+/// production caller of `trip_cancel_flag` (all in `mnsched_verdict.rs`):
 /// - a child's `Exit` end (`finish_with`);
-/// - the run-wide exit (`MnSched::cancel_all`, from `halt_all_scheds`);
-/// - the abort seams (`trip_scope_cancel` from the eager-nursery abort and
-///   `sched::cancel_fiber_owned_family`);
-/// - a `--timeout` gap wake (`netio::deadline_gap_wake`);
-/// - an Executor job cut (`SchedCore::cancel_one`), an Executor join that timed out
-///   (`worker_vm.rs`) and `Executor.cancel()` (`shared_methods.rs`).
+/// - the one `cancel`, for every other source: the run-wide exit (`All`, from `halt_all_scheds`),
+///   an owner's abort of its nursery, an Executor join that timed out (`worker_vm.rs`),
+///   `Executor.cancel()` and `Task.cancel()` (`shared_methods.rs`) and a `--timeout` gap wake
+///   (`netio::deadline_gap_wake`).
 ///
 /// The `--max-heap` backlog trip in `finish_with` turns the outcome into a `Fault`. So a tripped
 /// flag with no recorded fault is not a halt.
@@ -444,31 +443,136 @@ pub(super) fn halt_of<'a>(
     })
 }
 
-/// One blocked-in-place waiter in `SchedCore::waiters`: while a demoted fiber waits there, a
-/// verdict that ends the sched keeps its workers until the waiter settles
-/// ([`SchedCore::end_asleep`]).
+/// One blocked-in-place waiter in `SchedCore::waiters`, filed by [`Vm::block_enter`] for the
+/// length of a demoted wait: a waiter-accounted fiber, or an `inflight` one that files a [`Wake`].
 pub(super) struct Waiter {
-    /// a demoted fiber, not a blocked body
+    /// a waiter-accounted demoted fiber: while one is filed, a verdict that ends the sched keeps
+    /// its workers until it settles ([`SchedCore::end_asleep`]); an `inflight` wait is not one
     pub(super) fiber: bool,
+    /// the wait's wake, kicked by every cancel and the run's verdict cut
+    /// ([`MnSched::wake_demoted`])
+    pub(super) wake: Option<Arc<Wake>>,
+}
+
+/// A demoted wait's wake handle, filed with its [`Waiter`] for the length of the wait
+/// ([`Vm::wait_begin_woken`]). A waker whose change the wait's own predicate does not read (a
+/// [`super::mnsched_verdict::cancel`], the run's verdict cut, a value on a `wait:` arm the wait
+/// does not sleep on) calls [`Wake::kick`]: it bumps `kicks`, then notifies the condvar the wait
+/// sleeps on while holding that condvar's mutex. The wait reads [`Wake::seen`] before it reads its
+/// halts and sleeps only while [`Wake::kicked`] is false, so a kick cannot land between its last
+/// check and its sleep: no demoted wait polls to notice a halt. A kick is only a wake; the wait
+/// re-reads its own halts, so one that covers nothing costs a spurious wake.
+pub(super) struct Wake {
+    kicks: AtomicU64,
+    on: WakeOn,
+}
+
+/// The condvar a demoted wait sleeps on, by the mutex it waits under.
+pub(super) enum WakeOn {
+    /// a channel's `q` and `cv`: a recv, a send, the first arm of a `wait:`
+    Chan(Arc<super::ChannelCore>),
+    /// the guard registry's: an update-guard wait ([`super::core::notify_guard_waiters`])
+    Guard,
+    /// a sched's core lock and `cv`: an Executor join ([`MnSched::join_tick`])
+    Sched(Arc<MnSched>),
+    /// the wait's own: a sleep
+    Own(Arc<(Mutex<()>, Condvar)>),
+}
+
+impl std::fmt::Debug for Wake {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Wake")
+            .field("kicks", &self.kicks)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Wake {
+    /// A wake for a wait that sleeps on `on`'s condvar.
+    pub(super) fn new(on: WakeOn) -> Arc<Wake> {
+        Arc::new(Wake {
+            kicks: AtomicU64::new(0),
+            on,
+        })
+    }
+
+    /// Every kick so far; read before the wait's halts.
+    pub(super) fn seen(&self) -> u64 {
+        self.kicks.load(Ordering::Acquire)
+    }
+
+    /// Was the wait kicked since it read `seen`?
+    pub(super) fn kicked(&self, seen: u64) -> bool {
+        self.seen() != seen
+    }
+
+    /// Wake the wait: bump the count, then notify under the condvar's mutex. The caller holds no
+    /// sched core lock.
+    pub(super) fn kick(&self) {
+        self.kicks.fetch_add(1, Ordering::AcqRel);
+        match &self.on {
+            WakeOn::Chan(c) => {
+                drop(c.q.lock().unwrap_or_else(|e| e.into_inner()));
+                c.cv.notify_all();
+            }
+            WakeOn::Guard => super::core::notify_guard_waiters(),
+            WakeOn::Sched(s) => {
+                drop(s.lock());
+                s.cv.notify_all();
+            }
+            WakeOn::Own(own) => {
+                drop(own.0.lock().unwrap_or_else(|e| e.into_inner()));
+                own.1.notify_all();
+            }
+        }
+    }
+}
+
+/// The sooner of two deadlines (`None`: no deadline).
+pub(super) fn sooner(a: Option<Instant>, b: Option<Instant>) -> Option<Instant> {
+    match (a, b) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (a, b) => a.or(b),
+    }
+}
+
+/// THE sleep of a demoted wait: on `cv` while `pending` holds, until `until` (`None`: no end). A
+/// wait ends at its own deadline or the run's, or at a wake; never at a poll.
+pub(super) fn sleep_until<'a, T>(
+    cv: &Condvar,
+    g: MutexGuard<'a, T>,
+    until: Option<Instant>,
+    pending: impl FnMut(&mut T) -> bool,
+) -> MutexGuard<'a, T> {
+    match until {
+        None => cv.wait_while(g, pending).unwrap_or_else(|e| e.into_inner()),
+        Some(d) => {
+            cv.wait_timeout_while(g, d.saturating_duration_since(Instant::now()), pending)
+                .unwrap_or_else(|e| e.into_inner())
+                .0
+        }
+    }
 }
 
 /// A demote bracket entered by [`Vm::block_enter`]: how the wait is accounted while this worker
 /// is off `running`. Ended by [`DemoteReg::release`] (a waiter-registered wait, in the same lock
 /// hold as the pop or settle that ends it — DEC-176) or [`Vm::block_exit`] (an `inflight` wait).
 struct DemoteReg {
-    /// the `SchedCore::waiters` token, or `None` for an `inflight` wait
+    /// the `SchedCore::waiters` token: a waiter-accounted wait, or one that filed a [`Wake`]
     tok: Option<u64>,
+    /// the wait is accounted `inflight`
+    inflight: bool,
 }
 
 impl DemoteReg {
     /// End the bracket under core lock A: back onto `running`, and un-account the wait.
     fn release(self, sched: &MnSched, c: &mut SchedCore) {
         c.running += 1;
-        match self.tok {
-            Some(tok) => c.unregister_waiter(tok),
-            None => {
-                sched.leave_inflight();
-            }
+        if let Some(tok) = self.tok {
+            c.unregister_waiter(tok);
+        }
+        if self.inflight {
+            sched.leave_inflight();
         }
     }
 }
@@ -517,32 +621,41 @@ impl Vm {
     }
 
     /// THE demote bracket: take this worker off `running` and account the wait — `inflight`, or
-    /// a [`Waiter`]. Spawns this thread's replacement worker once. With no M:N scheduler
-    /// (`mn == None`) it accounts nothing.
+    /// a [`Waiter`]. A `wake` is filed with the wait's [`Waiter`] (an `inflight` wait files one
+    /// for it alone). Spawns this thread's replacement worker once. With no M:N scheduler
+    /// (`mn == None`) it accounts and files nothing: the wait ends at its own deadline or the
+    /// run's.
     fn block_enter(
         &mut self,
         account: Account,
+        wake: Option<Arc<Wake>>,
         what: &str,
         span: Span,
     ) -> Result<DemoteReg, RuntimeError> {
+        let inflight = account == Account::Inflight;
         let Some(sched) = self.mn.as_ref().map(Arc::clone) else {
-            return Ok(DemoteReg { tok: None });
+            return Ok(DemoteReg {
+                tok: None,
+                inflight,
+            });
         };
         let reg = {
             let mut c = sched.lock();
             c.leave_running();
-            let tok = match account {
-                Account::Waiter => Some(c.register_waiter(Waiter { fiber: true })),
-                Account::Inflight => {
-                    sched.inflight.fetch_add(1, Ordering::Relaxed);
-                    None
-                }
-            };
+            if inflight {
+                sched.inflight.fetch_add(1, Ordering::Relaxed);
+            }
+            let tok = (!inflight || wake.is_some()).then(|| {
+                c.register_waiter(Waiter {
+                    fiber: !inflight,
+                    wake,
+                })
+            });
             drop(c);
             // An idle puller in an untimed `take_runnable` wait re-evaluates the verdict now that
             // this fiber left `running`; without it a genuine all-blocked quiesce hangs.
             sched.notify_waiters();
-            DemoteReg { tok }
+            DemoteReg { tok, inflight }
         };
         if !self.demote_once(&sched) {
             reg.release(&sched, &mut sched.lock());
@@ -562,7 +675,7 @@ impl Vm {
     /// nothing to undo, exactly as before (DEC-052).
     fn block_exit(&mut self, reg: DemoteReg) {
         debug_assert!(
-            reg.tok.is_none(),
+            reg.inflight,
             "a waiter-registered wait releases under its own pop"
         );
         if let Some(sched) = self.mn.as_ref().map(Arc::clone) {
@@ -575,12 +688,13 @@ impl Vm {
         &mut self,
         steps: WaitSteps,
         on: Option<Blocked>,
+        wake: Option<Arc<Wake>>,
         what: &str,
         span: Span,
     ) -> Result<Option<DemoteReg>, RuntimeError> {
         self.wait_site = on.as_ref().and_then(|b| b.listed);
         let demote = match steps.hand {
-            Handover::Demote(account) => Some(self.block_enter(account, what, span)?),
+            Handover::Demote(account) => Some(self.block_enter(account, wake, what, span)?),
             Handover::Keep | Handover::Joiner => None,
         };
         Ok(demote)
@@ -598,8 +712,21 @@ impl Vm {
         what: &str,
         span: Span,
     ) -> Result<WaitReg, RuntimeError> {
+        self.wait_begin_woken(spec, on, None, what, span)
+    }
+
+    /// [`Vm::wait_begin`] for a demoted wait that sleeps until a [`Wake`]: its demote files `wake`
+    /// with the wait's [`Waiter`].
+    pub(super) fn wait_begin_woken(
+        &mut self,
+        spec: WaitSpec,
+        on: Option<Blocked>,
+        wake: Option<Arc<Wake>>,
+        what: &str,
+        span: Span,
+    ) -> Result<WaitReg, RuntimeError> {
         let steps = wait_steps(Some(spec), self.block_ctx());
-        let demote = self.wait_enter(steps, on, what, span)?;
+        let demote = self.wait_enter(steps, on, wake, what, span)?;
         let (released, watched) = self.permit_take(steps.permit);
         Ok(WaitReg {
             demote,
@@ -689,11 +816,12 @@ impl Vm {
         reg: &mut WaitReg,
         spec: WaitSpec,
         on: Option<Blocked>,
+        wake: Arc<Wake>,
         what: &str,
         span: Span,
     ) -> Result<(), RuntimeError> {
         let steps = wait_steps(Some(spec), self.block_ctx());
-        reg.demote = self.wait_enter(steps, on, what, span)?;
+        reg.demote = self.wait_enter(steps, on, Some(wake), what, span)?;
         Ok(())
     }
 

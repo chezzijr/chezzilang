@@ -2036,3 +2036,298 @@ fn witness_member_cross_module_runs() {
         "VM output (a wrong identity key faults, a wrong witness builds the other type)"
     );
 }
+
+/// A run whose tasks all park before the driver hands main's count to fiber 1 still ends as a
+/// deadlock: the hand-off's -1 is the write that takes the count to 0, so it runs the verdict
+/// (`Vm::run_root`). The program is `tests/deadlock_verdict_stress.rs`'s; the hook holds the driver
+/// between `seed` and the hand-off for 300 ms, while the run's other workers run main and its child
+/// to their waits. Pre-fix the run hung (1 in ~6000 release runs at T=0, without the hook).
+#[test]
+fn a_hand_off_that_ends_the_count_runs_the_verdict() {
+    const SRC: &str = "import Shared from std.concurrency
+
+fn hold(x: int, ready: Channel[int], c: Channel[int]) -> int:
+    ready.send(1)
+    got_c := c.recv() else: panic(\"c closed\")
+    return x + got_c
+
+fn main():
+    s := Shared(0)
+    c := Channel[int](0)
+    ready := Channel[int](1)
+    parallel:
+        spawn: s.update(fn(x: int) -> int: hold(x, ready, c))
+        _ := ready.recv()
+        s.update(fn(x: int) -> int: x + 1)
+        print(\"AFTER\")
+main()
+";
+    // The literal equals `worker_loop::ROOT_HANDOFF_WINDOW_ENV`; the hook removes it when it arms.
+    const KEY: &str = "CHEZZI_TEST_ROOT_HANDOFF_WINDOW";
+    let entry = write_temp_chz("root_handoff_window", SRC);
+    let cfg = crate::native::HostConfig::default();
+    cfg.env
+        .lock()
+        .unwrap()
+        .insert(KEY.to_string(), "1".to_string());
+    let env = std::sync::Arc::clone(&cfg.env);
+    let run_entry = entry.clone();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(run_file_with(&run_entry, cfg));
+    });
+    let result = rx.recv_timeout(std::time::Duration::from_secs(30));
+    let _ = std::fs::remove_file(&entry);
+    assert!(
+        !env.lock().unwrap().contains_key(KEY),
+        "the hook never armed"
+    );
+    let (out, _err, res, _code) = result.expect("the run hung: the hand-off's verdict never ran");
+    let msg = format!("{res:?}");
+    assert!(
+        !out.contains("AFTER") && msg.contains("deadlock: every task is blocked"),
+        "out={out:?} res={msg}"
+    );
+}
+
+/// One `--max-heap` abort is one report. The publisher's `halt_run` lands after the driver took
+/// the fault for the report and started the per-test reap: it must not cut that reap, or the
+/// Executor stays unreduced and the file's last reap reports the same abort as a second row.
+#[test]
+fn a_job_fault_whose_halt_lands_after_the_report_is_reported_once() {
+    const SRC: &str = "import std.time
+import Executor from std.concurrency
+
+line := \"x\".repeat(50000)
+
+fn slow():
+    defer: time.sleep_ms(900)
+    time.sleep_ms(15000)
+
+fn big():
+    print(line)
+
+test fn over():
+    ex := Executor()
+    _ := ex.submit(slow)
+    for _i in 0..600:
+        _ := ex.submit(big)
+    ex.shutdown()
+";
+    // The literal equals `worker_loop::JOB_HALT_WINDOW_ENV`; the hook removes it when it arms.
+    const KEY: &str = "CHEZZI_TEST_JOB_HALT_WINDOW";
+    let entry = write_temp_chz("job_halt_window", SRC);
+    let run_entry = entry.clone();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let ran = on_vm_stack(move || {
+            let program = std::sync::Arc::new(
+                crate::compiler::compile_entry_file(&run_entry, None).expect("compiles"),
+            );
+            let mut vm = Vm::for_program(std::sync::Arc::clone(&program));
+            vm.host
+                .env
+                .lock()
+                .unwrap()
+                .insert(KEY.to_string(), "1".to_string());
+            vm.set_max_heap(8_000_000);
+            vm.init_for_tests().expect("init");
+            let mark = vm.exec_registry_mark();
+            let test = vm.invoke_test(program.tests[0].1);
+            let test = vm.rank_end(test).map_err(|e| e.message);
+            let _ = vm.reap_executors_since(mark);
+            let armed = !vm.host.env.lock().unwrap().contains_key(KEY);
+            let end = vm.reap_after_tests().map_err(|e| e.message);
+            (test, end, armed)
+        });
+        let _ = tx.send(ran);
+    });
+    let result = rx.recv_timeout(std::time::Duration::from_secs(30));
+    let _ = std::fs::remove_file(&entry);
+    let (test, end, armed) = result.expect("the run hung");
+    assert!(armed, "the hook never armed");
+    assert!(
+        test.as_ref().is_err_and(|m| m.contains("--max-heap")),
+        "the test reports the abort: {test:?}"
+    );
+    assert_eq!(end, Ok(()), "the file's last reap reported the abort again");
+}
+
+/// A task's `defer` joins a `parallel:` inside a `hash` hook (a `Reentered` joiner, which hands
+/// its runner slot over) when a job's output passes `--max-heap`. The halted join must wait for a
+/// runner and never run the family's fibers on its own stack. Two shapes: the task is an Executor
+/// job (its replacement is a host worker, which leaves at the halt, so a new runner starts) and a
+/// child on the root sched (its replacement stays).
+#[test]
+fn a_halted_defer_join_never_runs_children_on_a_handed_over_stack() {
+    if crate::vm::rerun_in_child(
+        module_path!(),
+        "a_halted_defer_join_never_runs_children_on_a_handed_over_stack",
+    ) {
+        return;
+    }
+    struct Workers(#[allow(dead_code)] std::sync::MutexGuard<'static, ()>);
+    impl Drop for Workers {
+        fn drop(&mut self) {
+            crate::vm::set_worker_count(crate::vm::test_baseline_worker_count());
+        }
+    }
+    let _workers = Workers(
+        crate::vm::TEST_WORKER_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()),
+    );
+    // `park`'s `defer` sleep keeps the cancelled child running while the join reads the halt, so
+    // the join always reaches its handover wait. The fixed code passes in either order.
+    const HEAD: &str = "import std.time
+import Executor from std.concurrency
+
+ready := Channel[int](1)
+never := Channel[int](0)
+line := \"x\".repeat(50000)
+
+fn park():
+    defer: time.sleep_ms(300)
+    ready.send(1)
+    _ := never.recv()
+
+struct H:
+    n: int
+    fn eq(self, other: H) -> bool: return self.n == other.n
+    fn hash(self) -> int:
+        parallel:
+            spawn park()
+        return self.n
+
+fn waiter():
+    defer:
+        m := {H(1): 2}
+        print(m.len())
+
+";
+    const JOB: &str = "test fn waits():
+    ex := Executor()
+    _ := ex.submit(fn(): waiter())
+    _ := ready.recv()
+    for _i in 0..600:
+        _ := ex.submit(fn(): print(line))
+    ex.shutdown()
+";
+    const ROOT: &str = "test fn waits():
+    ex := Executor()
+    parallel:
+        spawn waiter()
+        _ := ready.recv()
+        for _i in 0..600:
+            _ := ex.submit(fn(): print(line))
+        ex.shutdown()
+";
+    use crate::vm::nursery::{HANDOVER_WAITS, INLINE_AFTER_HANDOVER};
+    let mut red = Vec::new();
+    for (shape, body) in [("job", JOB), ("root", ROOT)] {
+        for t in [1usize, 2, crate::vm::test_baseline_worker_count()] {
+            crate::vm::set_worker_count(t);
+            let inline_before = INLINE_AFTER_HANDOVER.load(Ordering::Relaxed);
+            let waits_before = HANDOVER_WAITS.load(Ordering::Relaxed);
+            let entry = write_temp_chz(
+                &format!("defer_join_handover_{shape}_{t}"),
+                &format!("{HEAD}{body}"),
+            );
+            let run_entry = entry.clone();
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let ran = on_vm_stack(move || {
+                    let program = std::sync::Arc::new(
+                        crate::compiler::compile_entry_file(&run_entry, None).expect("compiles"),
+                    );
+                    let mut vm = Vm::for_program(std::sync::Arc::clone(&program));
+                    vm.set_max_heap(8_000_000);
+                    vm.init_for_tests().expect("init");
+                    let mark = vm.exec_registry_mark();
+                    let test = vm.invoke_test(program.tests[0].1);
+                    let test = vm.rank_end(test).map_err(|e| e.message);
+                    let _ = vm.reap_executors_since(mark);
+                    let _ = vm.reap_after_tests();
+                    test
+                });
+                let _ = tx.send(ran);
+            });
+            let result = rx.recv_timeout(std::time::Duration::from_secs(30));
+            let _ = std::fs::remove_file(&entry);
+            let cell = format!("{shape}/T={t}");
+            match result {
+                Err(_) => red.push(format!("{cell}: no end in 30 s")),
+                Ok(test) if !test.as_ref().is_err_and(|m| m.contains("--max-heap")) => {
+                    red.push(format!("{cell}: not an over-memory report: {test:?}"))
+                }
+                Ok(_) => {}
+            }
+            let inline = INLINE_AFTER_HANDOVER.load(Ordering::Relaxed) - inline_before;
+            if inline > 0 {
+                red.push(format!(
+                    "{cell}: {inline} inline run(s) on a handed-over stack"
+                ));
+            }
+            if HANDOVER_WAITS.load(Ordering::Relaxed) == waits_before {
+                red.push(format!(
+                    "{cell}: the halted join never reached the handover wait"
+                ));
+            }
+        }
+    }
+    assert!(red.is_empty(), "{}", red.join("\n"));
+}
+
+/// A cancelled sleep's timer stays in the heap until its original deadline. It must not own the
+/// sched until then, or every Executor that cancelled a long sleep stays in the live registry
+/// and each later cancel walks them all.
+#[test]
+fn a_cancelled_sleep_does_not_keep_its_sched_alive() {
+    const SRC: &str = "import std.time
+import Executor from std.concurrency
+
+fn nap(ready: Channel[int]):
+    ready.send(1)
+    time.sleep_ms(3600000)
+
+ready := Channel[int](1)
+ex := Executor()
+t := ex.submit(fn(): nap(ready))
+_ := ready.recv()
+t.cancel()
+ex.shutdown()
+";
+    let entry = write_temp_chz("cancelled_sleep_sched", SRC);
+    let run_entry = entry.clone();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let live = on_vm_stack(move || {
+            let program = std::sync::Arc::new(
+                crate::compiler::compile_entry_file(&run_entry, None).expect("compiles"),
+            );
+            let mut vm = Vm::for_program(program);
+            vm.init_for_tests().expect("runs");
+            vm.reap_after_tests().expect("drains");
+            let registry = std::sync::Arc::clone(&vm.sched_registry);
+            let count = || {
+                let scheds = registry.lock().unwrap();
+                (
+                    scheds.len(),
+                    scheds.iter().filter(|w| w.strong_count() > 0).count(),
+                )
+            };
+            // A worker can hold its sched for a moment after the run.
+            let until = std::time::Instant::now() + std::time::Duration::from_secs(3);
+            while count().1 > 0 && std::time::Instant::now() < until {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            count()
+        });
+        let _ = tx.send(live);
+    });
+    let result = rx.recv_timeout(std::time::Duration::from_secs(30));
+    let _ = std::fs::remove_file(&entry);
+    let (total, live) = result.expect("the run hung");
+    assert!(total >= 2, "the run registered its scheds: {total}");
+    assert_eq!(live, 0, "a sched outlived its run, of {total}");
+}

@@ -184,7 +184,9 @@ pub(super) struct QuiesceState {
     run_halt_hint: AtomicBool,
     /// TICKET-208 — the `--max-heap` abort of an `Executor` job: the second cause of a run-wide
     /// halt, beside `exit`. Read through the one funnel `Vm::run_exit_err`, taken by `Vm::rank_end`.
-    job_fault: Mutex<Option<(super::RuntimeError, Vec<super::TraceFrame>)>>,
+    job_fault: Mutex<JobFaultCell>,
+    /// Wakes [`Self::take_job_fault`] when the publisher's teardown is over.
+    job_fault_cv: std::sync::Condvar,
     /// TICKET-223 — the deadlock verdict, the third cause of a run-wide halt. Latched once by
     /// [`Self::decide`] under the party lock; read through `Vm::run_exit_err`; its report is taken
     /// by `Vm::rank_end`. Reset only by [`Self::clear_exit`].
@@ -203,6 +205,20 @@ pub(super) struct QuiesceState {
     /// Test-only.
     #[cfg(test)]
     pub(super) width_probe: Arc<super::width::WidthProbe>,
+}
+
+/// One job fault's state. One abort is one publish, one teardown and one report, however many
+/// jobs end carrying a copy of it.
+#[derive(Default)]
+struct JobFaultCell {
+    /// The fault, until `Vm::rank_end` takes it for the report.
+    fault: Option<(super::RuntimeError, Vec<super::TraceFrame>)>,
+    /// The run is halted by a job fault. Outlives the report: tasks still unwind after it, and a
+    /// join reads this to stop waiting ([`RunHalt::ends_join`]). Reset by `clear_exit`.
+    raised: bool,
+    /// The publisher has not finished `Vm::halt_run`. The report waits for it: a teardown that
+    /// lands later would cancel the reap that follows the report.
+    halting: bool,
 }
 
 /// TICKET-219 — the kind of run-wide halt in force ([`QuiesceState::run_halt`]).
@@ -228,6 +244,16 @@ impl RunHalt {
     /// `Vm::run_halt_due` and `Vm::has_next_deferred` read it.
     pub(super) fn cuts_cleanup(self) -> bool {
         matches!(self, RunHalt::Exit | RunHalt::Deadlock)
+    }
+
+    /// Does this halt end a nursery join's wait for its children? As in Go, nothing waits for a
+    /// task once the run is over: its workers leave, so a queued child may never run. A deadlock
+    /// verdict is not one: it ends the join's children itself, and they settle.
+    pub(super) fn ends_join(self) -> bool {
+        match self {
+            RunHalt::Fault | RunHalt::Exit => true,
+            RunHalt::Running | RunHalt::Deadlock => false,
+        }
     }
 }
 
@@ -322,29 +348,45 @@ impl QuiesceState {
             .unwrap_or_else(|e| e.into_inner())
             .decided = false;
         // The hint covers a pending job fault too, and this reset never clears that.
-        self.run_halt_hint
-            .store(self.has_job_fault(), Ordering::Release);
+        let mut g = self.job_fault.lock().unwrap_or_else(|e| e.into_inner());
+        g.raised = g.fault.is_some();
+        self.run_halt_hint.store(g.raised, Ordering::Release);
     }
 
     /// TICKET-208 — publish an `Executor` job's `--max-heap` abort: it ends the whole run. First
-    /// writer wins (Go: the first panic is the report). The caller then runs `Vm::halt_run`, which
-    /// latches the hint ([`Self::mark_run_halt`]) and halts every sched, the order `request_exit` uses.
+    /// writer wins (Go: the first panic is the report). `true` for that writer only: it then runs
+    /// `Vm::halt_run`, which latches the hint ([`Self::mark_run_halt`]) and halts every sched, the
+    /// order `request_exit` uses, and calls [`Self::end_job_halt`]. A later job that ends with a
+    /// copy of the fault is the same abort, so it publishes nothing and halts nothing.
     pub(super) fn request_job_fault(
         &self,
         err: super::RuntimeError,
         trace: Vec<super::TraceFrame>,
-    ) {
+    ) -> bool {
         #[cfg(test)]
         let hold = err.message.contains(RUN_END_WINDOW_MARK);
         let mut g = self.job_fault.lock().unwrap_or_else(|e| e.into_inner());
-        #[cfg(test)]
-        let hold = hold && g.is_none();
-        g.get_or_insert((err, trace));
+        if g.raised {
+            return false;
+        }
+        g.raised = true;
+        g.halting = true;
+        g.fault = Some((err, trace));
         drop(g);
         #[cfg(test)]
         if hold {
             hold_run_end_window();
         }
+        true
+    }
+
+    /// The publisher of a job fault finished its teardown: the report may be taken.
+    pub(super) fn end_job_halt(&self) {
+        self.job_fault
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .halting = false;
+        self.job_fault_cv.notify_all();
     }
 
     /// The pending job fault, if any.
@@ -352,6 +394,7 @@ impl QuiesceState {
         self.job_fault
             .lock()
             .unwrap_or_else(|e| e.into_inner())
+            .fault
             .clone()
     }
 
@@ -370,7 +413,12 @@ impl QuiesceState {
             .decided
         {
             RunHalt::Deadlock
-        } else if self.has_job_fault() {
+        } else if self
+            .job_fault
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .raised
+        {
             RunHalt::Fault
         } else {
             RunHalt::Running
@@ -408,7 +456,17 @@ impl QuiesceState {
         self.job_fault
             .lock()
             .unwrap_or_else(|e| e.into_inner())
+            .fault
             .is_some()
+    }
+
+    /// Wait until a job fault's publisher finished its teardown. Bounded: `Vm::halt_run` waits for
+    /// no task. `Vm::rank_end` calls it in the GC door, before it takes the report.
+    pub(super) fn await_job_halt(&self) {
+        let mut g = self.job_fault.lock().unwrap_or_else(|e| e.into_inner());
+        while g.halting {
+            g = self.job_fault_cv.wait(g).unwrap_or_else(|e| e.into_inner());
+        }
     }
 
     /// Take the job fault out of its cell. ONE caller, `Vm::rank_end`, which reports what it
@@ -417,6 +475,7 @@ impl QuiesceState {
         self.job_fault
             .lock()
             .unwrap_or_else(|e| e.into_inner())
+            .fault
             .take()
     }
 

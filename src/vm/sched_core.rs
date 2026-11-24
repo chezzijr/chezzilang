@@ -10,9 +10,13 @@ impl SchedCore {
     /// (a job a fiber joins) wakes no fiber the verdict ends.
     pub(super) fn take_asleep(&mut self) -> Vec<Fiber> {
         let mut out = Vec::new();
-        for (_, v) in self.parked.drain() {
+        let mut sleeps = Vec::new();
+        for (key, v) in self.parked.drain() {
             for entry in v {
                 match entry {
+                    // A sleeper is awake (its timer wakes it): no task of the verdict. It stays
+                    // filed for its timer.
+                    ParkedEntry::Sleep(sp) => sleeps.push((key, ParkedEntry::Sleep(sp))),
                     ParkedEntry::Recv(f)
                     | ParkedEntry::Send(f)
                     | ParkedEntry::Guard(f)
@@ -35,7 +39,10 @@ impl SchedCore {
         for (_, f) in std::mem::take(&mut self.join_parked) {
             out.push(f);
         }
-        self.parked_n = 0;
+        self.parked_n = sleeps.len();
+        for (key, e) in sleeps {
+            self.parked.entry(key).or_default().push(e);
+        }
         self.awake.woken(out.len());
         out
     }
@@ -242,9 +249,11 @@ impl SchedCore {
     }
 
     /// TICKET-289 — `Task.cancel()`: the job whose Task channel is `ch`. A held job never starts:
-    /// it is dropped, and its Task settles with the cancel value. A running job gets its own flag
-    /// tripped here, under this lock, and the caller drains what that flag wakes
-    /// ([`JobStep::cut_flag`]). A job that already ended has no record, so nothing happens.
+    /// it is dropped, and its Task settles with the cancel value. A running job's own flag goes
+    /// back in [`JobStep::cut_flag`]: the caller's cancel trips it, then drains what it wakes. The
+    /// trip is after this lock hold: a park re-checks the flag under the core lock, and the drain
+    /// takes that lock after the trip, so a fiber that parked first is drained and one that parks
+    /// after reads the flag. A job that already ended has no record, so nothing happens.
     fn cancel_one(&mut self, ch: &Arc<ChannelCore>, halt: RunHalt, step: &mut JobStep) {
         let Some(idx) = self
             .job_settle
@@ -261,9 +270,7 @@ impl SchedCore {
             }
             return;
         }
-        let flag = Arc::clone(&self.job_settle[&idx].flag);
-        crate::vm::trip_cancel_flag(&flag);
-        step.cut_flag = Some(flag);
+        step.cut_flag = Some(Arc::clone(&self.job_settle[&idx].flag));
     }
 
     /// TICKET-232 — THE writer of a Task's non-body outcome: forget job `task_index`'s settle
@@ -289,7 +296,7 @@ impl SchedCore {
     /// TICKET-103 — every scope sharing `scope_id`'s cancel token: a nursery's origin scope plus its
     /// continuation scopes (`MnSched::inject_or_extend`). Every other scope owns a distinct Arc, so
     /// its family is itself. TICKET-199 — a retired `scope_id` has an EMPTY family: a worker that
-    /// still holds the id after dropping the lock (`cancel_drain` after `finish`) touches nothing.
+    /// still holds the id after dropping the lock (`drain_family` after `finish`) touches nothing.
     pub(super) fn scope_family(&self, scope_id: usize) -> Vec<usize> {
         let Some(origin) = self.scopes.get(scope_id) else {
             return Vec::new();

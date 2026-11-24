@@ -1,7 +1,6 @@
 //! VM: worker VMs, Executor joins and the worker home (a worker shares the run's module objects).
 //! Split out of `src/vm/sched.rs`. `super::*` is the parent module.
 
-use super::sched::poke_live_scheds;
 use super::*;
 
 impl Vm {
@@ -178,13 +177,20 @@ impl Vm {
                 return Err(Self::park_sentinel(span));
             }
         } else {
-            let mut reg = self.wait_begin(
+            // The join sleeps on the joined sched's condvar: its jobs' ends notify it, and a
+            // cancel or the verdict cut kicks it (`Wake`); the run's deadline ends it.
+            let wake = super::block::Wake::new(super::block::WakeOn::Sched(Arc::clone(&sched)));
+            let mut reg = self.wait_begin_woken(
                 WaitSpec::Join,
                 Some(Blocked::named(super::deadlock::Wait::ExecutorJoin, span)),
+                Some(Arc::clone(&wake)),
                 "an Executor join",
                 span,
             )?;
+            let until = self.deadline;
             let leave = loop {
+                // Read before the halts, so a kick after it ends the sleep below.
+                let seen = wake.seen();
                 if sched.lock().join_over(slack) {
                     break None;
                 }
@@ -196,7 +202,7 @@ impl Vm {
                 {
                     break Some(self.cut_fault(&m, span));
                 }
-                self.wait_door(&[], |_| sched.join_tick(slack, DEMOTE_POLL_BACKOFF));
+                self.wait_door(&[], |_| sched.join_tick(slack, until, &wake, seen));
             };
             if let Some(m) = self.mn.clone() {
                 reg.release(&m, &mut m.lock());
@@ -257,9 +263,12 @@ impl Vm {
         };
         let flush = self.join_leave_flushes(&e);
         if e.is_timed_out {
-            crate::vm::trip_cancel_flag(&core.cancel);
-            sched.drain_family(0);
-            poke_live_scheds(&self.sched_registry);
+            // Scope 0's flag is `core.cancel`; the cancel also drains the scopes under it on
+            // every sched (a job's own Executor).
+            super::mnsched_verdict::cancel(
+                &self.sched_registry,
+                super::mnsched_verdict::CancelTarget::Scope(&sched, 0),
+            );
         }
         if flush {
             // TICKET-284 — test-only: a job takes the joined Executor's output after the run-end pass
