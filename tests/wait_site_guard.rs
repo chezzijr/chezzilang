@@ -172,6 +172,12 @@ const ALLOWED: &[(&str, &str, &str, &str)] = &[
     ),
     (
         "mnsched_verdict.rs",
+        "wait_for_family",
+        ".wait_for_family(",
+        "a halted nursery join's wait; each call is in a door",
+    ),
+    (
+        "mnsched_verdict.rs",
         "wait_for_completion",
         ".wait_for_completion(",
         "a nursery join's wait; each call is in a door",
